@@ -1,5 +1,5 @@
 # WinRemote MCP - One-line installer
-# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/main/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/master/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 $Port = 8090

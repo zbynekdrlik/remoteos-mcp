@@ -18,7 +18,7 @@ No more SSH quoting hell or headless session limitations.
 On the Windows machine, open PowerShell **as Administrator** and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/master/install.ps1 | iex
 ```
 
 That's it. The script will:
@@ -68,7 +68,7 @@ Claude Code only loads MCP servers from the current project's `.mcp.json`, so di
 ## Uninstall
 
 ```powershell
-irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/main/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/master/uninstall.ps1 | iex
 ```
 
 ## Security
