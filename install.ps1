@@ -48,19 +48,16 @@ if (-not $python) {
 
 # --- Install winremote-mcp ---
 Write-Host "  [2/6] Installing winremote-mcp..." -ForegroundColor White
-try {
-    $pipOutput = & $python -m pip install --upgrade winremote-mcp 2>&1
-    # Verify it installed regardless of pip warnings
-    $pipShow = & $python -m pip show winremote-mcp 2>&1 | Out-String
-    if ($pipShow -match "Version: (.+)") {
-        Write-Host "        Installed v$($Matches[1].Trim())" -ForegroundColor Green
-    } else {
-        Write-Host "        [X] pip install failed. Output:" -ForegroundColor Red
-        Write-Host "        $pipOutput" -ForegroundColor Red
-        return
-    }
-} catch {
-    Write-Host "        [X] pip install failed: $_" -ForegroundColor Red
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $python -m pip install --upgrade winremote-mcp 2>&1 | Out-Null
+$pipShow = & $python -m pip show winremote-mcp 2>&1 | Out-String
+$ErrorActionPreference = $prevEAP
+if ($pipShow -match "Version: (.+)") {
+    Write-Host "        Installed v$($Matches[1].Trim())" -ForegroundColor Green
+} else {
+    Write-Host "        [X] pip install failed" -ForegroundColor Red
+    Write-Host "        Try manually: $python -m pip install winremote-mcp" -ForegroundColor Yellow
     return
 }
 
