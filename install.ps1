@@ -91,7 +91,7 @@ echo  WinRemote MCP Server
 echo  Port: $Port
 echo  Press Ctrl+C to stop
 echo.
-"$pythonPath" -m winremote --transport streamable-http --host 0.0.0.0 --port $Port --auth-key "$AuthKey"
+"$pythonPath" -m winremote --transport streamable-http --enable-all --host 0.0.0.0 --port $Port --auth-key "$AuthKey"
 if %errorlevel% neq 0 (
     echo.
     echo  [ERROR] Server failed to start. Check Python and winremote-mcp installation.
