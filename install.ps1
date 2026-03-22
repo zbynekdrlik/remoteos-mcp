@@ -82,21 +82,20 @@ if (-not $pythonPath) { $pythonPath = $python }
     host     = "0.0.0.0"
 } | ConvertTo-Json | Set-Content "$ConfigDir\config.json"
 
-# Start batch script
+# Start batch script (with auto-restart loop)
 @"
 @echo off
 title WinRemote MCP (port $Port)
 echo.
 echo  WinRemote MCP Server
 echo  Port: $Port
-echo  Press Ctrl+C to stop
 echo.
+:loop
+echo  [%date% %time%] Starting server...
 "$pythonPath" -m winremote --transport streamable-http --enable-all --host 0.0.0.0 --port $Port --auth-key "$AuthKey"
-if %errorlevel% neq 0 (
-    echo.
-    echo  [ERROR] Server failed to start. Check Python and winremote-mcp installation.
-    pause
-)
+echo  [%date% %time%] Server exited (code %errorlevel%). Restarting in 10 seconds...
+timeout /t 10 /nobreak >nul
+goto loop
 "@ | Set-Content "$ConfigDir\start-winremote.bat"
 
 Write-Host "        Config: $ConfigDir\config.json" -ForegroundColor Gray
@@ -106,11 +105,13 @@ Write-Host "        Start:  $ConfigDir\start-winremote.bat" -ForegroundColor Gra
 Write-Host "  [5/6] Setting up auto-start..." -ForegroundColor White
 try {
     $taskAction = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$ConfigDir\start-winremote.bat`""
-    $taskTrigger = New-ScheduledTaskTrigger -AtLogon
+    # Trigger at logon + every 5 minutes (task won't start a second instance if already running)
+    $triggerLogon = New-ScheduledTaskTrigger -AtLogon
+    $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
     $taskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest -LogonType Interactive
-    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    Register-ScheduledTask -TaskName "WinRemoteMCP" -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
-    Write-Host "        Task 'WinRemoteMCP' registered (starts at logon)" -ForegroundColor Green
+    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName "WinRemoteMCP" -Action $taskAction -Trigger @($triggerLogon, $triggerRepeat) -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+    Write-Host "        Task 'WinRemoteMCP' registered (at logon + every 5 min)" -ForegroundColor Green
 } catch {
     Write-Host "        [!] Could not create scheduled task (need admin)" -ForegroundColor Yellow
     Write-Host "        You can start manually: $ConfigDir\start-winremote.bat" -ForegroundColor Yellow
