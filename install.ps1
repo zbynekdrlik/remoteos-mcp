@@ -46,18 +46,18 @@ if (-not $python) {
     }
 }
 
-# --- Install winremote-mcp from fork ---
-Write-Host "  [2/6] Installing winremote-mcp (fork)..." -ForegroundColor White
+# --- Install winremote-mcp ---
+Write-Host "  [2/6] Installing winremote-mcp..." -ForegroundColor White
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-& $python -m pip install --upgrade "https://github.com/zbynekdrlik/winremote-mcp/archive/master.zip" 2>&1 | Out-Null
+& $python -m pip install --upgrade "https://github.com/zbynekdrlik/winremote-setup/archive/master.zip" 2>&1 | Out-Null
 $pipShow = & $python -m pip show winremote-mcp 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
 if ($pipShow -match "Version: (.+)") {
     Write-Host "        Installed v$($Matches[1].Trim())" -ForegroundColor Green
 } else {
     Write-Host "        [X] pip install failed" -ForegroundColor Red
-    Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/winremote-mcp/archive/master.zip" -ForegroundColor Yellow
+    Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/winremote-setup/archive/master.zip" -ForegroundColor Yellow
     return
 }
 
