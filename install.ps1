@@ -92,11 +92,24 @@ echo  Port: $Port
 echo.
 :loop
 echo  [%date% %time%] Starting server...
-"$pythonPath" -m winremote --transport streamable-http --enable-all --host 0.0.0.0 --port $Port --auth-key "$AuthKey"
+"$pythonPath" "$ConfigDir\start-winremote.py" --transport streamable-http --enable-all --host 0.0.0.0 --port $Port --auth-key "$AuthKey"
 echo  [%date% %time%] Server exited (code %errorlevel%). Restarting in 10 seconds...
 timeout /t 10 /nobreak >nul
 goto loop
 "@ | Set-Content "$ConfigDir\start-winremote.bat"
+
+# Wrapper script that patches Snapshot defaults for Claude-friendly image sizes
+@"
+import winremote.desktop as _desktop
+
+_orig_take_screenshot = _desktop.take_screenshot
+def _patched_take_screenshot(quality: int = 40, max_width: int = 1280, monitor: int = 0) -> str:
+    return _orig_take_screenshot(quality=quality, max_width=max_width, monitor=monitor)
+_desktop.take_screenshot = _patched_take_screenshot
+
+from winremote.__main__ import cli
+cli()
+"@ | Set-Content "$ConfigDir\start-winremote.py"
 
 Write-Host "        Config: $ConfigDir\config.json" -ForegroundColor Gray
 Write-Host "        Start:  $ConfigDir\start-winremote.bat" -ForegroundColor Gray
