@@ -158,8 +158,18 @@ $localIP = (Get-NetIPAddress -AddressFamily IPv4 |
 if (-not $localIP) { $localIP = "WINDOWS_IP" }
 $hostName = $env:COMPUTERNAME.ToLower()
 
-# --- Start server now (hidden) ---
+# --- Stop old server processes ---
 Write-Host ""
+Write-Host "  Stopping old server..." -ForegroundColor Cyan
+Get-Process -Name "python*" -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.CommandLine -match "winremote" } catch { $false }
+} | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process -Name "cmd" -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.MainWindowTitle -match "WinRemote" } catch { $false }
+} | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+
+# --- Start server now (hidden) ---
 Write-Host "  Starting server..." -ForegroundColor Cyan
 Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-winremote.vbs`""
 Start-Sleep -Seconds 2
