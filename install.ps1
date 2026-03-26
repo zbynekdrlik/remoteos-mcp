@@ -96,7 +96,7 @@ if (-not $pythonPath) { $pythonPath = $python }
     host     = "0.0.0.0"
 } | ConvertTo-Json | Set-Content "$ConfigDir\config.json"
 
-# Start batch script (with auto-restart loop)
+# Start batch script (with auto-restart loop and crash guard)
 @"
 @echo off
 title WinRemote MCP (port $Port)
@@ -104,12 +104,43 @@ echo.
 echo  WinRemote MCP Server
 echo  Port: $Port
 echo.
+set FAILURES=0
 :loop
+REM Check if port is already in use (another instance running)
+netstat -ano | findstr "0.0.0.0:$Port.*LISTENING" >nul 2>&1
+if %errorlevel%==0 (
+    echo  [%date% %time%] Port $Port already in use. Exiting to avoid duplicates.
+    exit /b 0
+)
 echo  [%date% %time%] Starting server...
+set START_TIME=%time%
 "$pythonPath" -m winremote --transport streamable-http --enable-all --host 0.0.0.0 --port $Port --auth-key "$AuthKey"
-echo  [%date% %time%] Server exited (code %errorlevel%). Restarting in 10 seconds...
+set EXIT_CODE=%errorlevel%
+echo  [%date% %time%] Server exited (code %EXIT_CODE%).
+REM Crash guard: if server ran less than 30 seconds, count as rapid failure
+call :elapsed_check
+if %RAPID%==1 (
+    set /a FAILURES+=1
+    echo  [%date% %time%] Rapid failure %FAILURES%/5.
+) else (
+    set FAILURES=0
+)
+if %FAILURES% geq 5 (
+    echo  [%date% %time%] Too many rapid failures. Stopping restart loop.
+    echo  [%date% %time%] Check logs and restart manually or wait for scheduled task.
+    exit /b 1
+)
+echo  [%date% %time%] Restarting in 10 seconds...
 timeout /t 10 /nobreak >nul
 goto loop
+
+:elapsed_check
+REM Simple check: if start hour:minute matches current, it was rapid
+set RAPID=0
+set CUR_MIN=%time:~3,2%
+set START_MIN=%START_TIME:~3,2%
+if "%CUR_MIN%"=="%START_MIN%" set RAPID=1
+goto :eof
 "@ | Set-Content "$ConfigDir\start-winremote.bat"
 
 # VBS launcher to run batch file hidden (no CMD window)
