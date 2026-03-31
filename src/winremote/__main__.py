@@ -532,7 +532,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             except Exception:
                 pass
             return f"Command timed out after {timeout}s"
-        output = stdout
+        output = stdout or ""
         if stderr:
             output += f"\n[STDERR] {stderr}"
         if proc.returncode != 0:
