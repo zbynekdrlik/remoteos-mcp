@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -116,6 +117,37 @@ Write-Output $result.Text
             pass
 
 
+def ocr_macos_shortcuts(
+    left: int | None = None,
+    top: int | None = None,
+    right: int | None = None,
+    bottom: int | None = None,
+) -> str:
+    """Use macOS Shortcuts for basic text recognition."""
+    bbox = None
+    if all(v is not None for v in (left, top, right, bottom)):
+        bbox = (left, top, right, bottom)
+    img = ImageGrab.grab(bbox=bbox)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        img.save(tmp, format="PNG")
+        tmp_path = tmp.name
+    try:
+        result = subprocess.run(
+            [
+                "osascript", "-e",
+                f'do shell script "shortcuts run \\"Extract Text from Image\\" <<< \\"{tmp_path}\\""',
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        return "macOS OCR: No text extracted (Shortcuts OCR not available)"
+    except Exception as e:
+        return f"macOS OCR error: {e}"
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 def run_ocr(
     left: int | None = None,
     top: int | None = None,
@@ -123,7 +155,7 @@ def run_ocr(
     bottom: int | None = None,
     lang: str = "eng",
 ) -> str:
-    """Run OCR, trying pytesseract first, then Windows built-in."""
+    """Run OCR, trying pytesseract first, then platform-specific fallback."""
     errors = []
     # Try pytesseract first
     try:
@@ -133,15 +165,23 @@ def run_ocr(
     except Exception as e:
         errors.append(f"pytesseract error: {e}")
 
-    # Fallback to Windows built-in OCR
-    try:
-        result = ocr_windows_builtin(left, top, right, bottom)
-        if result and "error" not in result.lower()[:20]:
-            return result
-        if result:
-            errors.append(f"Windows OCR: {result}")
-    except Exception as e:
-        errors.append(f"Windows OCR error: {e}")
+    # macOS fallback
+    if sys.platform == "darwin":
+        try:
+            return ocr_macos_shortcuts(left, top, right, bottom)
+        except Exception as e:
+            errors.append(f"macOS OCR: {e}")
 
-    # Both failed
+    # Fallback to Windows built-in OCR
+    if sys.platform == "win32":
+        try:
+            result = ocr_windows_builtin(left, top, right, bottom)
+            if result and "error" not in result.lower()[:20]:
+                return result
+            if result:
+                errors.append(f"Windows OCR: {result}")
+        except Exception as e:
+            errors.append(f"Windows OCR error: {e}")
+
+    # All failed
     return "OCR failed. Errors:\n" + "\n".join(errors)

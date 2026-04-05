@@ -25,8 +25,9 @@ except ImportError:
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 
-from remoteos import __version__, desktop, network, ocr, process_mgr, recording, registry, services
+from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
+from remoteos.platform import get_desktop, get_services, get_system, is_macos, is_windows
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.taskmanager import manager as task_manager
 from remoteos.tiers import ALL_TOOLS, get_tier_names, parse_tool_csv, resolve_enabled_tools
@@ -68,9 +69,9 @@ def _tobool(v: bool | str) -> bool:
 
 
 def _check_win32(tool_name: str = "This tool") -> str | None:
-    """Return an error string if pywin32 is unavailable, else None."""
-    if not desktop.HAS_WIN32:
-        return f"Error: pywin32 not installed — {tool_name} requires it. Run `pip install pywin32` on the Windows host."
+    """Return an error string if platform-specific desktop deps are unavailable."""
+    if is_windows() and not desktop.HAS_WIN32:
+        return f"Error: pywin32 not installed — {tool_name} requires it."
     return None
 
 
@@ -79,6 +80,8 @@ def _ensure_session_connected() -> str | None:
 
     Returns None on success, error string on failure.
     """
+    if not is_windows():
+        return None
     try:
         # Query current sessions
         result = subprocess.run(
@@ -179,7 +182,7 @@ def Snapshot(
         # Screenshot (auto-reconnect session if grab fails)
         if use_vision:
             try:
-                b64 = desktop.take_screenshot(quality=quality, max_width=max_width, monitor=monitor)
+                b64 = get_desktop().take_screenshot(quality=quality, max_width=max_width, monitor=monitor)
             except Exception as screenshot_error:
                 # Check if a disconnected session is the cause
                 reconnect_result = _ensure_session_connected()
@@ -188,19 +191,21 @@ def Snapshot(
                     return [f"Snapshot error: {screenshot_error}"]
                 # Session was disconnected and reconnected, retry
                 try:
-                    b64 = desktop.take_screenshot(quality=quality, max_width=max_width, monitor=monitor)
+                    b64 = get_desktop().take_screenshot(quality=quality, max_width=max_width, monitor=monitor)
                 except Exception as retry_error:
                     return [f"Snapshot error (after session reconnect): {retry_error}"]
             parts.append(ImageContent(type="image", data=b64, mimeType="image/jpeg"))
 
         # Window list
-        windows = desktop.enumerate_windows()
-        win_lines = [f"**System Language:** {desktop._get_system_language()}", "", "**Windows:**"]
+        windows = get_desktop().enumerate_windows()
+        _desktop = get_desktop()
+        sys_lang = _desktop._get_system_language() if hasattr(_desktop, "_get_system_language") else "N/A"
+        win_lines = [f"**System Language:** {sys_lang}", "", "**Windows:**"]
         for w in windows:
             win_lines.append(f"  [{w.handle}] {w.title} ({w.width}x{w.height} at {w.rect[0]},{w.rect[1]})")
 
         # Interactive elements from foreground window
-        elements = desktop.get_interactive_elements()
+        elements = get_desktop().get_interactive_elements()
         if elements:
             win_lines.append("")
             win_lines.append("**Interactive Elements (foreground window):**")
@@ -422,7 +427,7 @@ def FocusWindow(title: str = "", handle: int = 0) -> str:
     if err:
         return err
     try:
-        return desktop.focus_window(title=title or None, handle=handle or None)
+        return get_desktop().focus_window(title=title or None, handle=handle or None)
     except Exception as e:
         return f"FocusWindow error: {e}"
 
@@ -437,7 +442,7 @@ def FocusWindow(title: str = "", handle: int = 0) -> str:
 def MinimizeAll() -> str:
     """Minimize all windows (Win+D — show desktop)."""
     try:
-        return desktop.minimize_all()
+        return get_desktop().minimize_all()
     except Exception as e:
         return f"MinimizeAll error: {e}"
 
@@ -469,19 +474,19 @@ def App(
     """
     try:
         if action == "launch":
-            return desktop.launch_app(name, args)
+            return get_desktop().launch_app(name, args)
         elif action == "switch":
             err = _check_win32("App(switch)")
             if err:
                 return err
-            return desktop.focus_window(title=name or None, handle=handle or None)
+            return get_desktop().focus_window(title=name or None, handle=handle or None)
         elif action == "resize":
             err = _check_win32("App(resize)")
             if err:
                 return err
             if not handle:
                 return "resize requires a window handle"
-            return desktop.resize_window(handle, width, height)
+            return get_desktop().resize_window(handle, width, height)
         return f"Unknown action: {action}"
     except Exception as e:
         return f"App error: {e}"
@@ -498,34 +503,47 @@ def App(
     )
 )
 def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
-    """Execute a PowerShell command.
+    """Execute a shell command (PowerShell on Windows, zsh on macOS).
 
     Args:
-        command: PowerShell command to execute.
+        command: Command to execute.
         timeout: Timeout in seconds (default 30).
         cwd: Working directory. If provided, the command runs inside that directory.
     """
     try:
-        if cwd:
-            command = f"cd {cwd}; {command}"
+        if is_windows():
+            if cwd:
+                command = f"cd {cwd}; {command}"
+            shell_cmd = ["powershell", "-NoProfile", "-Command", command]
+        else:
+            if cwd:
+                command = f"cd {cwd} && {command}"
+            shell_cmd = ["/bin/zsh", "-c", command]
+
         proc = subprocess.Popen(
-            ["powershell", "-NoProfile", "-Command", command],
+            shell_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            start_new_session=not is_windows(),
         )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            # Kill entire process tree, not just the parent
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    capture_output=True,
-                    timeout=5,
-                )
-            except Exception:
-                pass
+            if is_windows():
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True, timeout=5,
+                    )
+                except Exception:
+                    pass
+            else:
+                import signal
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except Exception:
+                    pass
             proc.kill()
             try:
                 proc.communicate(timeout=5)
@@ -550,12 +568,12 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     )
 )
 def GetClipboard() -> str:
-    """Read the Windows clipboard text content."""
+    """Read the clipboard text content."""
     err = _check_win32("GetClipboard")
     if err:
         return err
     try:
-        return desktop.get_clipboard()
+        return get_desktop().get_clipboard()
     except Exception as e:
         return f"GetClipboard error: {e}"
 
@@ -568,7 +586,7 @@ def GetClipboard() -> str:
     )
 )
 def SetClipboard(text: str) -> str:
-    """Set the Windows clipboard text content.
+    """Set the clipboard text content.
 
     Args:
         text: Text to place on clipboard.
@@ -577,7 +595,7 @@ def SetClipboard(text: str) -> str:
     if err:
         return err
     try:
-        return desktop.set_clipboard(text)
+        return get_desktop().set_clipboard(text)
     except Exception as e:
         return f"SetClipboard error: {e}"
 
@@ -647,6 +665,8 @@ def _ensure_session_connected(force: bool = False) -> str | None:
 
     Returns None on success or if already connected, error string on failure.
     """
+    if not is_windows():
+        return None
     try:
         result = subprocess.run(["query", "session"], capture_output=True, text=True, timeout=10)
         if result.returncode != 0:
@@ -735,14 +755,14 @@ def ReconnectSession(force: bool = False) -> list:
     )
 )
 def Notification(title: str = "remoteos-mcp", message: str = "") -> str:
-    """Show a Windows toast notification.
+    """Show a desktop notification.
 
     Args:
         title: Notification title.
         message: Notification body text.
     """
     try:
-        return desktop.show_notification(title, message)
+        return get_desktop().show_notification(title, message)
     except Exception as e:
         return f"Notification error: {e}"
 
@@ -755,9 +775,9 @@ def Notification(title: str = "remoteos-mcp", message: str = "") -> str:
     )
 )
 def LockScreen() -> str:
-    """Lock the Windows workstation."""
+    """Lock the workstation."""
     try:
-        return desktop.lock_screen()
+        return get_desktop().lock_screen()
     except Exception as e:
         return f"LockScreen error: {e}"
 
@@ -1007,14 +1027,14 @@ def FileUpload(path: str, data_base64: str) -> str:
     )
 )
 def RegRead(key: str, value_name: str) -> str:
-    """Read a Windows registry value.
+    """Read system preferences (Windows registry / macOS defaults).
 
     Args:
         key: Registry key path, e.g. "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion".
         value_name: Name of the value to read.
     """
     try:
-        return registry.reg_read(key, value_name)
+        return get_system().reg_read(key, value_name)
     except Exception as e:
         return f"RegRead error: {e}"
 
@@ -1027,7 +1047,7 @@ def RegRead(key: str, value_name: str) -> str:
     )
 )
 def RegWrite(key: str, value_name: str, data: str, reg_type: str = "REG_SZ") -> str:
-    """Write a Windows registry value.
+    """Write system preferences (Windows registry / macOS defaults).
 
     Args:
         key: Registry key path, e.g. "HKCU\\SOFTWARE\\MyApp".
@@ -1036,7 +1056,7 @@ def RegWrite(key: str, value_name: str, data: str, reg_type: str = "REG_SZ") -> 
         reg_type: Registry type: REG_SZ, REG_EXPAND_SZ, REG_DWORD, REG_QWORD, REG_BINARY, REG_MULTI_SZ.
     """
     try:
-        return registry.reg_write(key, value_name, data, reg_type)
+        return get_system().reg_write(key, value_name, data, reg_type)
     except Exception as e:
         return f"RegWrite error: {e}"
 
@@ -1052,13 +1072,13 @@ def RegWrite(key: str, value_name: str, data: str, reg_type: str = "REG_SZ") -> 
     )
 )
 def ServiceList(filter: str = "") -> str:
-    """List Windows services.
+    """List system services.
 
     Args:
         filter: Filter by service name or display name (substring match).
     """
     try:
-        return services.service_list(filter)
+        return get_services().service_list(filter)
     except Exception as e:
         return f"ServiceList error: {e}"
 
@@ -1071,13 +1091,13 @@ def ServiceList(filter: str = "") -> str:
     )
 )
 def ServiceStart(name: str) -> str:
-    """Start a Windows service.
+    """Start a system service.
 
     Args:
         name: Service name.
     """
     try:
-        return services.service_start(name)
+        return get_services().service_start(name)
     except Exception as e:
         return f"ServiceStart error: {e}"
 
@@ -1090,13 +1110,13 @@ def ServiceStart(name: str) -> str:
     )
 )
 def ServiceStop(name: str) -> str:
-    """Stop a Windows service.
+    """Stop a system service.
 
     Args:
         name: Service name.
     """
     try:
-        return services.service_stop(name)
+        return get_services().service_stop(name)
     except Exception as e:
         return f"ServiceStop error: {e}"
 
@@ -1112,13 +1132,13 @@ def ServiceStop(name: str) -> str:
     )
 )
 def TaskList(filter: str = "") -> str:
-    """List Windows scheduled tasks.
+    """List scheduled tasks.
 
     Args:
         filter: Filter by task name (substring match).
     """
     try:
-        return services.task_list(filter)
+        return get_services().task_list(filter)
     except Exception as e:
         return f"TaskList error: {e}"
 
@@ -1131,7 +1151,7 @@ def TaskList(filter: str = "") -> str:
     )
 )
 def TaskCreate(name: str, command: str, schedule: str) -> str:
-    """Create a Windows scheduled task.
+    """Create a scheduled task.
 
     Args:
         name: Task name.
@@ -1139,7 +1159,7 @@ def TaskCreate(name: str, command: str, schedule: str) -> str:
         schedule: Schedule type (ONCE, DAILY, WEEKLY, MONTHLY, ONSTART, ONLOGON, ONIDLE).
     """
     try:
-        return services.task_create(name, command, schedule)
+        return get_services().task_create(name, command, schedule)
     except Exception as e:
         return f"TaskCreate error: {e}"
 
@@ -1152,13 +1172,13 @@ def TaskCreate(name: str, command: str, schedule: str) -> str:
     )
 )
 def TaskDelete(name: str) -> str:
-    """Delete a Windows scheduled task.
+    """Delete a scheduled task.
 
     Args:
         name: Task name.
     """
     try:
-        return services.task_delete(name)
+        return get_services().task_delete(name)
     except Exception as e:
         return f"TaskDelete error: {e}"
 
@@ -1238,7 +1258,7 @@ def NetConnections(filter: str = "", limit: int = 50) -> str:
     )
 )
 def EventLog(log_name: str = "System", count: int = 20, level: str = "") -> str:
-    """Read Windows Event Log entries.
+    """Read system event log entries.
 
     Args:
         log_name: Log name (System, Application, Security, etc.).
@@ -1246,7 +1266,7 @@ def EventLog(log_name: str = "System", count: int = 20, level: str = "") -> str:
         level: Filter by level: critical, error, warning, information, verbose.
     """
     try:
-        return services.event_log(log_name, count, level)
+        return get_services().event_log(log_name, count, level)
     except Exception as e:
         return f"EventLog error: {e}"
 
@@ -1270,7 +1290,7 @@ def OCR(
 ) -> str:
     """Extract text from screen using OCR. Captures a region or the full screen.
 
-    Uses pytesseract if available, falls back to Windows built-in OCR engine.
+    Uses pytesseract if available, falls back to platform-specific OCR engine.
 
     Args:
         left: Left edge of region (0 = full screen).
@@ -1390,7 +1410,7 @@ def AnnotatedSnapshot(
             img = img.resize((max_width, int(img.height * ratio)))
 
         # Get interactive elements
-        elements = desktop.get_interactive_elements()
+        elements = get_desktop().get_interactive_elements()
         if not elements:
             # Return screenshot with no annotations
             buf = io.BytesIO()
@@ -1574,6 +1594,9 @@ def _wrap_all_tools():
 
 
 _wrap_all_tools()
+
+if is_macos():
+    _remove_tool("ReconnectSession")
 
 
 def _param_explicit(ctx: click.Context, name: str) -> bool:
