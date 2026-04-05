@@ -111,8 +111,11 @@ if (-not $python) {
 
 # --- Install remoteos-mcp ---
 Write-Host "  [2/6] Installing remoteos-mcp..." -ForegroundColor White
-# Uninstall old winremote-mcp if present
+# Uninstall old winremote-mcp if present (pip warnings must not abort)
+$prevEAP2 = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 $oldPkg = & $python -m pip show winremote-mcp 2>&1 | Out-String
+$ErrorActionPreference = $prevEAP2
 if ($oldPkg -match "Version:") {
     Write-Host "        Removing old winremote-mcp..." -ForegroundColor Yellow
     & $python -m pip uninstall winremote-mcp -y 2>&1 | Out-Null
