@@ -111,11 +111,11 @@ if (-not $python) {
 
 # --- Install remoteos-mcp ---
 Write-Host "  [2/6] Installing remoteos-mcp..." -ForegroundColor White
-# Uninstall old winremote-mcp if present (pip warnings must not abort)
-$prevEAP2 = $ErrorActionPreference
+# pip warnings on stderr must not abort the script
+$prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
+# Uninstall old winremote-mcp if present
 $oldPkg = & $python -m pip show winremote-mcp 2>&1 | Out-String
-$ErrorActionPreference = $prevEAP2
 if ($oldPkg -match "Version:") {
     Write-Host "        Removing old winremote-mcp..." -ForegroundColor Yellow
     & $python -m pip uninstall winremote-mcp -y 2>&1 | Out-Null
@@ -128,8 +128,6 @@ if (Test-Path $oldConfigDir) {
 }
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
-$prevEAP = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
 & $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/master.zip" 2>&1 | Out-Null
 $pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
