@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # RemoteOS MCP - Uninstaller for macOS
-# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/uninstall.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/uninstall.sh | bash
 set -euo pipefail
 
 PLIST_LABEL="com.remoteos-mcp"

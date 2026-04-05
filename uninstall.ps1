@@ -1,5 +1,5 @@
 # RemoteOS MCP - Uninstaller
-# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/uninstall.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/uninstall.ps1 | iex
 
 $ErrorActionPreference = "SilentlyContinue"
 $ConfigDir = "$env:USERPROFILE\.remoteos-mcp"
