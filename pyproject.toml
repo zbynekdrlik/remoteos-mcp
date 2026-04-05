@@ -3,17 +3,18 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "winremote-mcp"
-version = "0.5.0.dev2"
-description = "Windows Remote MCP Server - control Windows desktops via MCP protocol"
+name = "remoteos-mcp"
+version = "0.6.0.dev1"
+description = "Remote OS MCP Server - control Windows and macOS desktops via MCP protocol"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-authors = [{ name = "winremote contributors" }]
-keywords = ["mcp", "windows", "remote", "automation", "desktop"]
+authors = [{ name = "remoteos contributors" }]
+keywords = ["mcp", "remote", "automation", "desktop", "windows", "macos"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Topic :: Desktop Environment",
 ]
@@ -22,6 +23,7 @@ dependencies = [
     "pyautogui>=0.9.54",
     "psutil>=5.9.0",
     "pywin32>=306; sys_platform == 'win32'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
     "Pillow>=10.0.0",
     "click>=8.0.0",
     "python-dotenv>=1.0.0",
@@ -32,7 +34,7 @@ dependencies = [
 ]
 
 [project.scripts]
-winremote-mcp = "winremote.__main__:cli"
+remoteos-mcp = "remoteos.__main__:cli"
 
 [project.optional-dependencies]
 ocr = ["pytesseract>=0.3.10"]
@@ -57,4 +59,4 @@ pythonpath = ["src"]
 addopts = "-v --tb=short"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/winremote"]
+packages = ["src/remoteos"]

@@ -1,11 +1,11 @@
-# WinRemote Setup
+# RemoteOS Setup
 
 ## Installing / Upgrading on Windows machines
 
-The ONLY correct way to install or upgrade winremote-mcp on a Windows machine is via the one-liner:
+The ONLY correct way to install or upgrade remoteos-mcp on a Windows machine is via the one-liner:
 
 ```powershell
-irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/master/install.ps1 | iex
+irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/install.ps1 | iex
 ```
 
 Run this via SSH or MCP Shell. It handles everything:
@@ -18,12 +18,18 @@ Run this via SSH or MCP Shell. It handles everything:
 
 DO NOT run ad-hoc `pip install` commands to upgrade. Always use the installer.
 
+## Installing / Upgrading on macOS machines
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/install.sh | bash
+```
+
 ## Repository structure
 
-This repo contains both the installer scripts and the winremote-mcp Python package source:
+This repo contains both the installer scripts and the remoteos-mcp Python package source:
 
-- `install.ps1` / `uninstall.ps1` — installer scripts
-- `src/winremote/` — the Python package (forked from dddabtc/winremote-mcp, MIT license)
+- `install.ps1` / `uninstall.ps1` — Windows installer scripts
+- `src/remoteos/` — the Python package (forked from dddabtc/winremote-mcp, MIT license)
 - `pyproject.toml` — package metadata
 
 After pushing changes, run the installer on each target machine to deploy.

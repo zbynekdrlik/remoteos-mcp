@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-logger = logging.getLogger("winremote.taskmanager")
+logger = logging.getLogger("remoteos.taskmanager")
 
 
 class TaskStatus(str, Enum):

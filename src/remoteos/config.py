@@ -1,4 +1,4 @@
-"""Configuration loading and merge utilities for winremote-mcp."""
+"""Configuration loading and merge utilities for remoteos-mcp."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class ToolsConfig:
 
 
 @dataclass
-class WinRemoteConfig:
+class RemoteOSConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
@@ -49,11 +49,11 @@ def discover_config_path(explicit_path: str | None) -> Path | None:
         path = Path(explicit_path).expanduser()
         return path
 
-    cwd_path = Path.cwd() / "winremote.toml"
+    cwd_path = Path.cwd() / "remoteos.toml"
     if cwd_path.exists():
         return cwd_path
 
-    user_path = Path("~/.config/winremote/winremote.toml").expanduser()
+    user_path = Path("~/.config/remoteos/remoteos.toml").expanduser()
     if user_path.exists():
         return user_path
     return None
@@ -67,9 +67,9 @@ def _list_of_strings(raw: object, key: str) -> list[str]:
     return raw
 
 
-def load_config(path: Path | None) -> WinRemoteConfig:
+def load_config(path: Path | None) -> RemoteOSConfig:
     """Load and validate TOML config file. Returns defaults when path is None."""
-    cfg = WinRemoteConfig()
+    cfg = RemoteOSConfig()
     if path is None:
         return cfg
 
