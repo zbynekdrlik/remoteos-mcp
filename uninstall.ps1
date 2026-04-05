@@ -1,32 +1,32 @@
-# WinRemote MCP - Uninstaller
-# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/master/uninstall.ps1 | iex
+# RemoteOS MCP - Uninstaller
+# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/uninstall.ps1 | iex
 
 $ErrorActionPreference = "SilentlyContinue"
-$ConfigDir = "$env:USERPROFILE\.winremote-mcp"
+$ConfigDir = "$env:USERPROFILE\.remoteos-mcp"
 
 Write-Host ""
-Write-Host "  WinRemote MCP Uninstaller" -ForegroundColor Cyan
+Write-Host "  RemoteOS MCP Uninstaller" -ForegroundColor Cyan
 Write-Host ""
 
 # Stop running server
 Write-Host "  [1/4] Stopping server..." -ForegroundColor White
 Get-Process -Name "python*" | Where-Object {
-    $_.CommandLine -match "winremote"
+    $_.CommandLine -match "remoteos"
 } | Stop-Process -Force -ErrorAction SilentlyContinue
 # Also stop any wscript hosting the VBS launcher
 Get-Process -Name "wscript*" | Where-Object {
-    $_.CommandLine -match "winremote"
+    $_.CommandLine -match "remoteos"
 } | Stop-Process -Force -ErrorAction SilentlyContinue
 Write-Host "        Done" -ForegroundColor Green
 
 # Remove scheduled task
 Write-Host "  [2/4] Removing scheduled task..." -ForegroundColor White
-Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName "RemoteOSMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Write-Host "        Done" -ForegroundColor Green
 
 # Remove firewall rule
 Write-Host "  [3/4] Removing firewall rule..." -ForegroundColor White
-Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "RemoteOS MCP" -ErrorAction SilentlyContinue
 Write-Host "        Done" -ForegroundColor Green
 
 # Remove config
@@ -36,10 +36,17 @@ if (Test-Path $ConfigDir) {
 }
 Write-Host "        Done" -ForegroundColor Green
 
+# Also clean up legacy winremote-mcp if present
+Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
+$oldDir = "$env:USERPROFILE\.winremote-mcp"
+if (Test-Path $oldDir) { Remove-Item -Recurse -Force $oldDir }
+
 # Uninstall pip package
 Write-Host ""
-$uninstallPip = Read-Host "  Also uninstall winremote-mcp pip package? (y/N)"
+$uninstallPip = Read-Host "  Also uninstall remoteos-mcp pip package? (y/N)"
 if ($uninstallPip -eq "y") {
+    python -m pip uninstall remoteos-mcp -y 2>&1 | Out-Null
     python -m pip uninstall winremote-mcp -y 2>&1 | Out-Null
     Write-Host "  Package removed" -ForegroundColor Green
 }

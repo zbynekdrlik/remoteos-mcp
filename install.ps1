@@ -1,11 +1,11 @@
-# WinRemote MCP - One-line installer
-# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/master/install.ps1 | iex
+# RemoteOS MCP - One-line installer
+# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 $Port = 8090
 
 Write-Host ""
-Write-Host "  WinRemote MCP Installer" -ForegroundColor Cyan
+Write-Host "  RemoteOS MCP Installer" -ForegroundColor Cyan
 Write-Host "  Remote Windows control for Claude Code" -ForegroundColor Gray
 Write-Host ""
 
@@ -32,7 +32,7 @@ if (-not $desktopUser) { $desktopUser = $env:USERNAME }
 
 $desktopProfile = "C:\Users\$desktopUser"
 if (-not (Test-Path $desktopProfile)) { $desktopProfile = $env:USERPROFILE }
-$ConfigDir = "$desktopProfile\.winremote-mcp"
+$ConfigDir = "$desktopProfile\.remoteos-mcp"
 
 Write-Host "  Target user: $desktopUser ($desktopProfile)" -ForegroundColor Gray
 Write-Host ""
@@ -109,18 +109,32 @@ if (-not $python) {
     }
 }
 
-# --- Install winremote-mcp ---
-Write-Host "  [2/6] Installing winremote-mcp..." -ForegroundColor White
+# --- Install remoteos-mcp ---
+Write-Host "  [2/6] Installing remoteos-mcp..." -ForegroundColor White
+# Uninstall old winremote-mcp if present
+$oldPkg = & $python -m pip show winremote-mcp 2>&1 | Out-String
+if ($oldPkg -match "Version:") {
+    Write-Host "        Removing old winremote-mcp..." -ForegroundColor Yellow
+    & $python -m pip uninstall winremote-mcp -y 2>&1 | Out-Null
+}
+# Clean up old config and scheduled task
+$oldConfigDir = "$desktopProfile\.winremote-mcp"
+if (Test-Path $oldConfigDir) {
+    Remove-Item -Recurse -Force $oldConfigDir -ErrorAction SilentlyContinue
+    Write-Host "        Cleaned up old .winremote-mcp config" -ForegroundColor Gray
+}
+Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-& $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/winremote-setup/archive/master.zip" 2>&1 | Out-Null
-$pipShow = & $python -m pip show winremote-mcp 2>&1 | Out-String
+& $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-setup/archive/master.zip" 2>&1 | Out-Null
+$pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
 if ($pipShow -match "Version: (.+)") {
     Write-Host "        Installed v$($Matches[1].Trim())" -ForegroundColor Green
 } else {
     Write-Host "        [X] pip install failed" -ForegroundColor Red
-    Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/winremote-setup/archive/master.zip" -ForegroundColor Yellow
+    Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-setup/archive/master.zip" -ForegroundColor Yellow
     return
 }
 
@@ -162,9 +176,9 @@ if (-not $pythonPath) { $pythonPath = $python }
 # Start batch script (with auto-restart loop and crash guard)
 @"
 @echo off
-title WinRemote MCP (port $Port)
+title RemoteOS MCP (port $Port)
 echo.
-echo  WinRemote MCP Server
+echo  RemoteOS MCP Server
 echo  Port: $Port
 echo.
 set FAILURES=0
@@ -177,7 +191,7 @@ if %errorlevel%==0 (
 )
 echo  [%date% %time%] Starting server...
 set START_TIME=%time%
-"$pythonPath" -m winremote --transport streamable-http --enable-all --host 0.0.0.0 --port $Port --auth-key "$AuthKey"
+"$pythonPath" -m remoteos --transport streamable-http --enable-all --host 0.0.0.0 --port $Port --auth-key "$AuthKey"
 set EXIT_CODE=%errorlevel%
 echo  [%date% %time%] Server exited (code %EXIT_CODE%).
 REM Crash guard: if server ran less than 30 seconds, count as rapid failure
@@ -204,31 +218,31 @@ set CUR_MIN=%time:~3,2%
 set START_MIN=%START_TIME:~3,2%
 if "%CUR_MIN%"=="%START_MIN%" set RAPID=1
 goto :eof
-"@ | Set-Content "$ConfigDir\start-winremote.bat"
+"@ | Set-Content "$ConfigDir\start-remoteos.bat"
 
 # VBS launcher to run batch file hidden (no CMD window)
 @"
 Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run """" & CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName) & "\start-winremote.bat""", 0, False
-"@ | Set-Content "$ConfigDir\start-winremote.vbs"
+WshShell.Run """" & CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.ScriptFullName) & "\start-remoteos.bat""", 0, False
+"@ | Set-Content "$ConfigDir\start-remoteos.vbs"
 
 Write-Host "        Config: $ConfigDir\config.json" -ForegroundColor Gray
-Write-Host "        Start:  $ConfigDir\start-winremote.vbs (hidden)" -ForegroundColor Gray
+Write-Host "        Start:  $ConfigDir\start-remoteos.vbs (hidden)" -ForegroundColor Gray
 
 # --- Auto-start scheduled task ---
 Write-Host "  [5/6] Setting up auto-start..." -ForegroundColor White
 try {
-    $taskAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$ConfigDir\start-winremote.vbs`""
+    $taskAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$ConfigDir\start-remoteos.vbs`""
     # Trigger at logon + every 5 minutes (task won't start a second instance if already running)
     $triggerLogon = New-ScheduledTaskTrigger -AtLogon
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
     $taskPrincipal = New-ScheduledTaskPrincipal -UserId $desktopUser -RunLevel Highest -LogonType Interactive
     $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-    Register-ScheduledTask -TaskName "WinRemoteMCP" -Action $taskAction -Trigger @($triggerLogon, $triggerRepeat) -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
-    Write-Host "        Task 'WinRemoteMCP' registered for $desktopUser (at logon + every 5 min)" -ForegroundColor Green
+    Register-ScheduledTask -TaskName "RemoteOSMCP" -Action $taskAction -Trigger @($triggerLogon, $triggerRepeat) -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
+    Write-Host "        Task 'RemoteOSMCP' registered for $desktopUser (at logon + every 5 min)" -ForegroundColor Green
 } catch {
     Write-Host "        [!] Could not create scheduled task (need admin)" -ForegroundColor Yellow
-    Write-Host "        You can start manually: $ConfigDir\start-winremote.vbs" -ForegroundColor Yellow
+    Write-Host "        You can start manually: $ConfigDir\start-remoteos.vbs" -ForegroundColor Yellow
 }
 
 # --- Firewall + Network profile ---
@@ -239,8 +253,8 @@ try {
         $_.NetworkCategory -eq "Public"
     } | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
     # Remove old rule if exists
-    Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
-    New-NetFirewallRule -DisplayName "WinRemote MCP" -Direction Inbound -LocalPort $Port -Protocol TCP -Action Allow -Profile Private,Domain | Out-Null
+    Remove-NetFirewallRule -DisplayName "RemoteOS MCP" -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName "RemoteOS MCP" -Direction Inbound -LocalPort $Port -Protocol TCP -Action Allow -Profile Private,Domain | Out-Null
     Write-Host "        Firewall rule added (port $Port, private/domain networks)" -ForegroundColor Green
 } catch {
     Write-Host "        [!] Could not add firewall rule (need admin)" -ForegroundColor Yellow
@@ -261,9 +275,9 @@ Write-Host ""
 Write-Host "  Stopping old server..." -ForegroundColor Cyan
 # Kill by window title (catches python/cmd with the batch title, avoids killing unrelated python)
 Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.MainWindowTitle -match "WinRemote"
+    $_.MainWindowTitle -match "RemoteOS|WinRemote"
 } | Stop-Process -Force -ErrorAction SilentlyContinue
-# Kill winremote python by port (only the one on our port, not other pythons)
+# Kill server python by port (only the one on our port, not other pythons)
 $portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
     ($_.ToString().Trim() -split "\s+")[-1]
 }) | Select-Object -First 1
@@ -273,7 +287,7 @@ if ($portPid) {
 Start-Sleep -Seconds 2
 
 # --- Clean up old config from other users (if installer was run under wrong user before) ---
-$currentUserConfig = "$env:USERPROFILE\.winremote-mcp"
+$currentUserConfig = "$env:USERPROFILE\.remoteos-mcp"
 if ($currentUserConfig -ne $ConfigDir -and (Test-Path $currentUserConfig)) {
     Remove-Item -Recurse -Force $currentUserConfig -ErrorAction SilentlyContinue
     Write-Host "  Cleaned up old config from $env:USERNAME" -ForegroundColor Gray
@@ -281,7 +295,7 @@ if ($currentUserConfig -ne $ConfigDir -and (Test-Path $currentUserConfig)) {
 
 # --- Start server now (hidden) ---
 Write-Host "  Starting server..." -ForegroundColor Cyan
-Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-winremote.vbs`""
+Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-remoteos.vbs`""
 Start-Sleep -Seconds 5
 
 # Test if it's running
@@ -320,5 +334,5 @@ Write-Host ""
 Write-Host "  Then restart Claude Code." -ForegroundColor Gray
 Write-Host ""
 Write-Host "  To uninstall later:" -ForegroundColor Gray
-Write-Host "  irm https://raw.githubusercontent.com/zbynekdrlik/winremote-setup/master/uninstall.ps1 | iex" -ForegroundColor Gray
+Write-Host "  irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/uninstall.ps1 | iex" -ForegroundColor Gray
 Write-Host ""
