@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # RemoteOS MCP - One-line installer for macOS
-# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.sh | bash
 set -euo pipefail
 
 PORT=8090
@@ -50,7 +50,7 @@ fi
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
 "$PYTHON" -m pip install --no-cache-dir --break-system-packages \
-    "git+https://github.com/zbynekdrlik/remoteos-setup.git" 2>&1 | tail -1 || true
+    "git+https://github.com/zbynekdrlik/remoteos-mcp.git" 2>&1 | tail -1 || true
 
 # Verify installation
 PKG_VER=$("$PYTHON" -m pip show remoteos-mcp 2>/dev/null | grep "^Version:" | awk '{print $2}' || true)
@@ -58,7 +58,7 @@ if [[ -n "$PKG_VER" ]]; then
     echo "        Installed v${PKG_VER}"
 else
     echo "        [X] pip install failed"
-    echo "        Try manually: $PYTHON -m pip install git+https://github.com/zbynekdrlik/remoteos-setup.git"
+    echo "        Try manually: $PYTHON -m pip install git+https://github.com/zbynekdrlik/remoteos-mcp.git"
     exit 1
 fi
 
@@ -160,5 +160,5 @@ echo ""
 echo "  Then restart Claude Code."
 echo ""
 echo "  To uninstall later:"
-echo "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/uninstall.sh | bash"
+echo "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/uninstall.sh | bash"
 echo ""

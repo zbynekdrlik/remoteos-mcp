@@ -5,7 +5,7 @@
 The ONLY correct way to install or upgrade remoteos-mcp on a Windows machine is via the one-liner:
 
 ```powershell
-irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/install.ps1 | iex
+irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.ps1 | iex
 ```
 
 Run this via SSH or MCP Shell. It handles everything:
@@ -21,7 +21,7 @@ DO NOT run ad-hoc `pip install` commands to upgrade. Always use the installer.
 ## Installing / Upgrading on macOS machines
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-setup/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.sh | bash
 ```
 
 ## Repository structure
