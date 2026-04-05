@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import socket
 import subprocess
+import sys
 
 
 def ping(host: str, count: int = 4) -> str:
     """Ping a host."""
     try:
+        flag = "-n" if sys.platform == "win32" else "-c"
         result = subprocess.run(
-            ["ping", "-n", str(count), host],
+            ["ping", flag, str(count), host],
             capture_output=True,
             text=True,
             timeout=count * 5 + 10,

@@ -35,7 +35,7 @@ def service_list(filter_str: str = "") -> str:
         if filter_str:
             lines = raw.splitlines()
             header = lines[:1]
-            filtered = [l for l in lines[1:] if filter_str.lower() in l.lower()]
+            filtered = [line for line in lines[1:] if filter_str.lower() in line.lower()]
             return "\n".join(header + filtered) if filtered else f"No services matching '{filter_str}'"
         return raw
     except Exception as e:
