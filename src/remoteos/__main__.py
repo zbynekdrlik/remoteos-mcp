@@ -1,4 +1,4 @@
-"""winremote-mcp — CLI entry point and MCP tool definitions."""
+"""remoteos-mcp — CLI entry point and MCP tool definitions."""
 
 from __future__ import annotations
 
@@ -25,11 +25,11 @@ except ImportError:
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 
-from winremote import __version__, desktop, network, ocr, process_mgr, recording, registry, services
-from winremote.config import discover_config_path, load_config
-from winremote.security import IPAllowlistMiddleware, parse_ip_allowlist
-from winremote.taskmanager import manager as task_manager
-from winremote.tiers import ALL_TOOLS, get_tier_names, parse_tool_csv, resolve_enabled_tools
+from remoteos import __version__, desktop, network, ocr, process_mgr, recording, registry, services
+from remoteos.config import discover_config_path, load_config
+from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
+from remoteos.taskmanager import manager as task_manager
+from remoteos.tiers import ALL_TOOLS, get_tier_names, parse_tool_csv, resolve_enabled_tools
 
 load_dotenv()
 
@@ -37,11 +37,11 @@ pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.05
 
 mcp = FastMCP(
-    "winremote-mcp",
+    "remoteos-mcp",
     instructions=(
-        "Windows Remote MCP Server. Provides desktop control, window management, "
+        "Remote OS MCP Server. Provides desktop control, window management, "
         "shell execution, file operations, network tools, registry, services, "
-        "and system management tools for a Windows machine."
+        "and system management tools for Windows and macOS machines."
     ),
 )
 
@@ -734,7 +734,7 @@ def ReconnectSession(force: bool = False) -> list:
         openWorldHint=False,
     )
 )
-def Notification(title: str = "winremote-mcp", message: str = "") -> str:
+def Notification(title: str = "remoteos-mcp", message: str = "") -> str:
     """Show a Windows toast notification.
 
     Args:
@@ -780,7 +780,7 @@ def Scrape(url: str) -> str:
 
         from markdownify import markdownify
 
-        req = urllib.request.Request(url, headers={"User-Agent": "winremote-mcp/0.3"})
+        req = urllib.request.Request(url, headers={"User-Agent": "remoteos-mcp/0.3"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             html = resp.read().decode("utf-8", errors="replace")
         md = markdownify(html, heading_style="ATX", strip=["script", "style"])
@@ -1603,8 +1603,8 @@ def _apply_tool_filter(enabled_tools: set[str]) -> None:
 @click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1; use 0.0.0.0 for remote access)")
 @click.option("--port", default=8090, type=int)
 @click.option("--reload", is_flag=True, default=False, help="Enable hot reload (streamable-http only)")
-@click.option("--auth-key", default=None, envvar="WINREMOTE_AUTH_KEY", help="API key for authentication")
-@click.option("--config", default=None, help="Path to winremote.toml config file")
+@click.option("--auth-key", default=None, envvar="REMOTEOS_AUTH_KEY", help="API key for authentication")
+@click.option("--config", default=None, help="Path to remoteos.toml config file")
 @click.option(
     "--enable-all",
     is_flag=True,
@@ -1618,8 +1618,8 @@ def _apply_tool_filter(enabled_tools: set[str]) -> None:
 @click.option("--ip-allowlist", default="", help="Comma-separated IPs/CIDRs allowed to access HTTP transport")
 @click.option("--ssl-certfile", default=None, help="Path to SSL certificate file for HTTPS")
 @click.option("--ssl-keyfile", default=None, help="Path to SSL private key file for HTTPS")
-@click.option("--oauth-client-id", default=None, envvar="WINREMOTE_OAUTH_CLIENT_ID", help="OAuth client ID whitelist")
-@click.option("--oauth-client-secret", default=None, envvar="WINREMOTE_OAUTH_CLIENT_SECRET", help="OAuth client secret")
+@click.option("--oauth-client-id", default=None, envvar="REMOTEOS_OAUTH_CLIENT_ID", help="OAuth client ID whitelist")
+@click.option("--oauth-client-secret", default=None, envvar="REMOTEOS_OAUTH_CLIENT_SECRET", help="OAuth client secret")
 @click.pass_context
 def cli(
     ctx,
@@ -1640,7 +1640,7 @@ def cli(
     oauth_client_id: str | None,
     oauth_client_secret: str | None,
 ):
-    """Start the winremote MCP server."""
+    """Start the remoteos MCP server."""
     if ctx.invoked_subcommand is not None:
         return  # subcommand will handle it
 
@@ -1688,7 +1688,7 @@ def cli(
     use_oauth = bool(oauth_client_id or oauth_client_secret)
 
     if use_oauth and transport != "stdio":
-        from winremote.oauth import OAuthStore, build_oauth_routes, validate_oauth_token
+        from remoteos.oauth import OAuthStore, build_oauth_routes, validate_oauth_token
 
         oauth_store = OAuthStore()
         scheme = "https" if (ssl_certfile and ssl_keyfile) else "http"
@@ -1713,11 +1713,11 @@ def cli(
         middleware.append(Middleware(IPAllowlistMiddleware, allowlist=allowlist_networks))
 
     if auth_key:
-        from winremote.auth import AuthKeyMiddleware
+        from remoteos.auth import AuthKeyMiddleware
 
         middleware.append(Middleware(AuthKeyMiddleware, auth_key=auth_key, oauth_validator=oauth_validator))
     elif oauth_validator:
-        from winremote.auth import OAuthOnlyMiddleware
+        from remoteos.auth import OAuthOnlyMiddleware
 
         middleware.append(Middleware(OAuthOnlyMiddleware, oauth_validator=oauth_validator))
 
@@ -1738,7 +1738,7 @@ def cli(
                 tiers_line = f"[tiers: {','.join(enabled_tiers)}]"
                 tools_line = f"[tools: {len(enabled_tools)}/{len(ALL_TOOLS)}]"
                 pad = " " * 10  # align with uvicorn log text
-                ver_line = f"winremote-mcp v{__version__}"
+                ver_line = f"remoteos-mcp v{__version__}"
                 lines = [
                     f"{pad}+----------------------------------+",
                     f"{pad}|  {ver_line:<32s}|",
@@ -1790,9 +1790,9 @@ def install():
     # Create start_mcp.bat for Chinese Windows compatibility
     python_exe = subprocess.run(["where", "python"], capture_output=True, text=True).stdout.strip().split("\n")[0]
     bat_content = f"""@echo off
-rem winremote-mcp startup script with UTF-8 encoding for Chinese Windows
+rem remoteos-mcp startup script with UTF-8 encoding for Chinese Windows
 set PYTHONIOENCODING=utf-8
-"{python_exe}" -m winremote %*
+"{python_exe}" -m remoteos %*
 """
 
     # Write batch file to user's profile directory
@@ -1808,11 +1808,11 @@ set PYTHONIOENCODING=utf-8
         return
 
     # Create scheduled task using the batch file
-    task_cmd = f'schtasks /Create /SC ONSTART /TN "WinRemoteMCP" /TR "{bat_path}" /RU {username} /F'
+    task_cmd = f'schtasks /Create /SC ONSTART /TN "RemoteOSMCP" /TR "{bat_path}" /RU {username} /F'
     try:
         result = subprocess.run(task_cmd, shell=True, capture_output=True, text=True)
         if result.returncode == 0:
-            click.echo("[OK] Scheduled task 'WinRemoteMCP' created for auto-start.")
+            click.echo("[OK] Scheduled task 'RemoteOSMCP' created for auto-start.")
             click.echo("The server will start automatically on system boot.")
             click.echo("Note: Uses start_mcp.bat for Chinese Windows compatibility.")
         else:
@@ -1823,14 +1823,14 @@ set PYTHONIOENCODING=utf-8
 
 @cli.command()
 def uninstall():
-    """Remove the WinRemoteMCP scheduled task."""
+    """Remove the RemoteOSMCP scheduled task."""
     import os
 
-    task_cmd = 'schtasks /Delete /TN "WinRemoteMCP" /F'
+    task_cmd = 'schtasks /Delete /TN "RemoteOSMCP" /F'
     try:
         result = subprocess.run(task_cmd, shell=True, capture_output=True, text=True)
         if result.returncode == 0:
-            click.echo("[OK] Scheduled task 'WinRemoteMCP' removed.")
+            click.echo("[OK] Scheduled task 'RemoteOSMCP' removed.")
         else:
             click.echo(f"[ERROR] Failed to remove task:\n{result.stderr or result.stdout}")
     except Exception as e:
