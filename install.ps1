@@ -142,13 +142,14 @@ if ($pipShow -match "Version: (.+)") {
 # --- Generate or preserve auth key ---
 Write-Host "  [3/6] Configuring auth key..." -ForegroundColor White
 $ExistingKey = $null
-if (Test-Path "$ConfigDir\config.json") {
-    try {
-        $existingConfig = Get-Content "$ConfigDir\config.json" -Raw | ConvertFrom-Json
-        $ExistingKey = $existingConfig.auth_key
-        Write-Host "        Reusing existing auth key" -ForegroundColor Green
-    } catch {
-        Write-Host "        Could not read existing config, generating new key" -ForegroundColor Yellow
+# Check new config dir first, then fall back to old winremote-mcp config
+foreach ($cfgPath in @("$ConfigDir\config.json", "$desktopProfile\.winremote-mcp\config.json")) {
+    if ((Test-Path $cfgPath) -and (-not $ExistingKey)) {
+        try {
+            $existingConfig = Get-Content $cfgPath -Raw | ConvertFrom-Json
+            $ExistingKey = $existingConfig.auth_key
+            Write-Host "        Reusing existing auth key (from $cfgPath)" -ForegroundColor Green
+        } catch {}
     }
 }
 if (-not $ExistingKey) {
