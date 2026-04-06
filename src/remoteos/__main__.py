@@ -940,25 +940,26 @@ def FileSearch(pattern: str, path: str = ".", recursive: bool | str = True, limi
     """
     try:
         p = Path(path)
-        if _tobool(recursive):
-            matches = list(p.rglob(pattern))
-        else:
-            matches = list(p.glob(pattern))
+        glob_iter = p.rglob(pattern) if _tobool(recursive) else p.glob(pattern)
 
-        if not matches:
+        # Stream results — stop as soon as we have enough (don't scan entire disk)
+        lines = []
+        total = 0
+        for m in glob_iter:
+            total += 1
+            if len(lines) < limit:
+                try:
+                    size = m.stat().st_size
+                    lines.append(f"  {m} ({size} bytes)")
+                except Exception:
+                    lines.append(f"  {m}")
+            if len(lines) >= limit:
+                break  # Don't keep scanning after hitting limit
+
+        if not lines:
             return f"No files matching '{pattern}' in {path}"
 
-        lines = []
-        for m in matches[:limit]:
-            try:
-                size = m.stat().st_size
-                lines.append(f"  {m} ({size} bytes)")
-            except Exception:
-                lines.append(f"  {m}")
-
-        result = f"Found {len(matches)} files"
-        if len(matches) > limit:
-            result += f" (showing first {limit})"
+        result = f"Found {total}+ files (showing first {limit})"
         result += ":\n" + "\n".join(lines)
         return result
     except Exception as e:

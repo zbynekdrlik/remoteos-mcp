@@ -275,18 +275,24 @@ $hostName = $env:COMPUTERNAME.ToLower()
 # --- Stop old server processes ---
 Write-Host ""
 Write-Host "  Stopping old server..." -ForegroundColor Cyan
-# Kill by window title (catches python/cmd with the batch title, avoids killing unrelated python)
+# Kill by window title (catches python/cmd with the batch title)
 Get-Process -ErrorAction SilentlyContinue | Where-Object {
     $_.MainWindowTitle -match "RemoteOS|WinRemote"
 } | Stop-Process -Force -ErrorAction SilentlyContinue
-# Kill server python by port (only the one on our port, not other pythons)
+# Kill python processes running remoteos or winremote modules
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -match "remoteos|winremote" -and $_.Name -match "python"
+} | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+}
+# Kill server by port (fallback — catches anything on our port)
 $portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
     ($_.ToString().Trim() -split "\s+")[-1]
 }) | Select-Object -First 1
 if ($portPid) {
     Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
 }
-Start-Sleep -Seconds 2
+Start-Sleep -Seconds 3
 
 # --- Clean up old config from other users (if installer was run under wrong user before) ---
 $currentUserConfig = "$env:USERPROFILE\.remoteos-mcp"

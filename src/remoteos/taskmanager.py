@@ -206,7 +206,15 @@ class TaskManager:
         return task.to_dict() if task else None
 
     def _cleanup_old(self) -> None:
-        """Remove old completed tasks beyond max_history."""
+        """Remove old completed tasks beyond max_history, and cancel stale running tasks."""
+        now = time.time()
+        # Cancel tasks running longer than 5 minutes (they're likely stuck)
+        for t in list(self._tasks.values()):
+            if t.status == TaskStatus.RUNNING and t.started_at and (now - t.started_at) > 300:
+                elapsed = now - t.started_at
+                logger.warning("Auto-cancelling stale task %s (%s) after %.0fs", t.task_id, t.tool_name, elapsed)
+                t.cancel()
+
         completed = [
             t
             for t in self._tasks.values()
@@ -226,8 +234,8 @@ class TaskManager:
         def wrapper(*args, **kwargs):
             task = self.create_task(tool_name)
 
-            # Try to acquire semaphore
-            if sem and not sem.acquire(timeout=30):
+            # Try to acquire semaphore — wait up to 60s
+            if sem and not sem.acquire(timeout=60):
                 task.status = TaskStatus.FAILED
                 task.error = f"Timeout waiting for {category.value} lock (another {category.value} task is running)"
                 task.completed_at = time.time()
