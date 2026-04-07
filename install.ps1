@@ -114,6 +114,14 @@ Write-Host "  [2/6] Installing remoteos-mcp..." -ForegroundColor White
 # pip warnings on stderr must not abort the script
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
+# Preserve auth key from old config BEFORE deleting it
+$oldConfigDir = "$desktopProfile\.winremote-mcp"
+$_oldKey = $null
+if (Test-Path "$oldConfigDir\config.json") {
+    try {
+        $_oldKey = (Get-Content "$oldConfigDir\config.json" -Raw | ConvertFrom-Json).auth_key
+    } catch {}
+}
 # Uninstall old winremote-mcp if present
 $oldPkg = & $python -m pip show winremote-mcp 2>&1 | Out-String
 if ($oldPkg -match "Version:") {
@@ -121,7 +129,6 @@ if ($oldPkg -match "Version:") {
     & $python -m pip uninstall winremote-mcp -y 2>&1 | Out-Null
 }
 # Clean up old config and scheduled task
-$oldConfigDir = "$desktopProfile\.winremote-mcp"
 if (Test-Path $oldConfigDir) {
     Remove-Item -Recurse -Force $oldConfigDir -ErrorAction SilentlyContinue
     Write-Host "        Cleaned up old .winremote-mcp config" -ForegroundColor Gray
@@ -142,15 +149,17 @@ if ($pipShow -match "Version: (.+)") {
 # --- Generate or preserve auth key ---
 Write-Host "  [3/6] Configuring auth key..." -ForegroundColor White
 $ExistingKey = $null
-# Check new config dir first, then fall back to old winremote-mcp config
-foreach ($cfgPath in @("$ConfigDir\config.json", "$desktopProfile\.winremote-mcp\config.json")) {
-    if ((Test-Path $cfgPath) -and (-not $ExistingKey)) {
-        try {
-            $existingConfig = Get-Content $cfgPath -Raw | ConvertFrom-Json
-            $ExistingKey = $existingConfig.auth_key
-            Write-Host "        Reusing existing auth key (from $cfgPath)" -ForegroundColor Green
-        } catch {}
-    }
+# Check new config dir first
+if (Test-Path "$ConfigDir\config.json") {
+    try {
+        $ExistingKey = (Get-Content "$ConfigDir\config.json" -Raw | ConvertFrom-Json).auth_key
+        Write-Host "        Reusing existing auth key" -ForegroundColor Green
+    } catch {}
+}
+# Fall back to key saved from old .winremote-mcp config (before it was deleted)
+if (-not $ExistingKey -and $_oldKey) {
+    $ExistingKey = $_oldKey
+    Write-Host "        Reusing auth key from old winremote-mcp config" -ForegroundColor Green
 }
 if (-not $ExistingKey) {
     $ExistingKey = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
