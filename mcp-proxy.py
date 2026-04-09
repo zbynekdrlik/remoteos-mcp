@@ -10,12 +10,12 @@ Usage:
 
 proxies.json example:
     [
-        {"local_port": 18090, "remote_url": "http://host.example.local:8090", "name": "stream-snv"},
-        {"local_port": 18091, "remote_url": "http://192.0.2.10:8090", "name": "host-a"}
+        {"local_port": 18092, "remote_url": "http://host.example.local:8092", "name": "stream-snv"},
+        {"local_port": 18091, "remote_url": "http://192.0.2.10:8092", "name": "host-a"}
     ]
 
 Then in .mcp.json, point Claude Code to localhost:
-    "win-stream-snv": {"type": "http", "url": "http://localhost:18090/mcp", ...}
+    "win-stream-snv": {"type": "http", "url": "http://localhost:18092/mcp", ...}
 """
 
 import argparse

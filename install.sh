@@ -3,7 +3,7 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.sh | bash
 set -euo pipefail
 
-PORT=8090
+PORT=8092
 CONFIG_DIR="$HOME/.remoteos-mcp"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 PLIST_LABEL="com.remoteos-mcp"
@@ -17,12 +17,13 @@ echo ""
 # --- [1/5] Check Python ---
 echo "  [1/5] Checking Python..."
 PYTHON=""
-for cmd in python3 python; do
-    if command -v "$cmd" &>/dev/null; then
+# Check PATH and common install locations (curl|bash may have a minimal PATH)
+for cmd in python3 python /usr/local/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3.13 /usr/local/bin/python3.12 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12; do
+    if command -v "$cmd" &>/dev/null || [[ -x "$cmd" ]]; then
         ver=$("$cmd" --version 2>&1 || true)
         if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( ${BASH_REMATCH[1]} >= 10 )); then
             PYTHON="$cmd"
-            echo "        Found $ver"
+            echo "        Found $ver ($cmd)"
             break
         fi
     fi
