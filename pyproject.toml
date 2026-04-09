@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remoteos-mcp"
-version = "0.6.0.dev1"
+version = "0.7.0.dev1"
 description = "Remote OS MCP Server - control Windows and macOS desktops via MCP protocol"
 readme = "README.md"
 license = "MIT"
