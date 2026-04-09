@@ -2,7 +2,7 @@
 # Usage: irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
-$Port = 8090
+$Port = 8092
 
 Write-Host ""
 Write-Host "  RemoteOS MCP Installer" -ForegroundColor Cyan

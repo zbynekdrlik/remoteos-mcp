@@ -3,7 +3,7 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.sh | bash
 set -euo pipefail
 
-PORT=8090
+PORT=8092
 CONFIG_DIR="$HOME/.remoteos-mcp"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 PLIST_LABEL="com.remoteos-mcp"

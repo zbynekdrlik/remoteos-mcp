@@ -1625,7 +1625,7 @@ def _apply_tool_filter(enabled_tools: set[str]) -> None:
 @click.group(invoke_without_command=True)
 @click.option("--transport", default="streamable-http", type=click.Choice(["stdio", "streamable-http"]))
 @click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1; use 0.0.0.0 for remote access)")
-@click.option("--port", default=8090, type=int)
+@click.option("--port", default=8092, type=int)
 @click.option("--reload", is_flag=True, default=False, help="Enable hot reload (streamable-http only)")
 @click.option("--auth-key", default=None, envvar="REMOTEOS_AUTH_KEY", help="API key for authentication")
 @click.option("--config", default=None, help="Path to remoteos.toml config file")
@@ -1672,7 +1672,7 @@ def cli(
     cfg = load_config(config_path)
 
     host = _choose_value(ctx, "host", host, cfg.server.host, "127.0.0.1")
-    port = int(_choose_value(ctx, "port", port, cfg.server.port, 8090))
+    port = int(_choose_value(ctx, "port", port, cfg.server.port, 8092))
     auth_key = _choose_value(ctx, "auth_key", auth_key, cfg.server.auth_key, None)
     ssl_certfile = _choose_value(ctx, "ssl_certfile", ssl_certfile, cfg.server.ssl_certfile, None)
     ssl_keyfile = _choose_value(ctx, "ssl_keyfile", ssl_keyfile, cfg.server.ssl_keyfile, None)

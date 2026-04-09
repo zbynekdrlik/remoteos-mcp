@@ -37,7 +37,7 @@ After install, the script prints a command like:
 
 ```bash
 claude mcp add --transport http win-mypc \
-  http://192.168.1.100:8090/mcp \
+  http://192.168.1.100:8092/mcp \
   --header "Authorization: Bearer abc123..."
 ```
 
@@ -54,7 +54,7 @@ Create `.mcp.json` in your project directory:
   "mcpServers": {
     "win-strih": {
       "type": "http",
-      "url": "http://192.168.1.10:8090/mcp",
+      "url": "http://192.168.1.10:8092/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_KEY"
       }

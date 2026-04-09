@@ -14,7 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 @dataclass
 class ServerConfig:
     host: str = "127.0.0.1"
-    port: int = 8090
+    port: int = 8092
     auth_key: str | None = None
     ssl_certfile: str | None = None
     ssl_keyfile: str | None = None
