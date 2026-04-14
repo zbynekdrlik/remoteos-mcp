@@ -10,21 +10,21 @@ Usage:
 
 proxies.json example:
     [
-        {"local_port": 18092, "remote_url": "http://host.example.local:8092", "name": "stream-snv"},
-        {"local_port": 18091, "remote_url": "http://192.0.2.10:8092", "name": "host-a"}
+        {"local_port": 18092, "remote_url": "http://host-a.example.local:8092", "name": "host-a"},
+        {"local_port": 18091, "remote_url": "http://192.0.2.10:8092", "name": "host-b"}
     ]
 
 Then in .mcp.json, point Claude Code to localhost:
-    "win-stream-snv": {"type": "http", "url": "http://localhost:18092/mcp", ...}
+    "win-host-a": {"type": "http", "url": "http://localhost:18092/mcp", ...}
 """
 
 import argparse
 import json
 import sys
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.request import Request, urlopen
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 
 class MCPProxyHandler(BaseHTTPRequestHandler):

@@ -22,19 +22,10 @@ Usage analysis of devbridge sessions (3,427 MCP calls) shows the priority:
 
 ## Target Machines
 
-### Existing Windows machines (unchanged)
-- win-iem-snv (host.example.local / 192.0.2.30)
-- win-stream-snv (192.0.2.30)
-- win-mbc-snv (host.example.local)
-- win-print-client (host.example.local)
-- win-print-server (host.example.local)
-- win-host-server (192.0.2.20)
-- win-host-a (192.0.2.10)
-- win-host-b (192.0.2.10)
-- win-host-c (192.0.2.20)
+Target inventory (hostnames/IPs) is maintained in private operator config, not in this repo. Summary only:
 
-### New macOS machine
-- mac-host-a (192.0.2.30), macOS 15.6 Sequoia, Apple Silicon (arm64), Python 3.9.6
+- Multiple Windows hosts across local LAN and WireGuard-reached customer networks.
+- One macOS host (Apple Silicon, macOS 15.6 Sequoia, Python 3.9.6) — first macOS deployment target.
 
 ## Architecture
 
@@ -162,8 +153,8 @@ Steps:
 | Source: `src/winremote/` | `src/remoteos/` |
 
 ### MCP config naming convention
-- Windows servers: `win-*` prefix (e.g., `win-host-a`)
-- macOS servers: `mac-*` prefix (e.g., `mac-host-a`)
+- Windows servers: `win-*` prefix
+- macOS servers: `mac-*` prefix
 
 ### Backward compatibility
 None. Clean break. The installer handles the transition — uninstalls old `winremote-mcp`, installs `remoteos-mcp`.
@@ -190,11 +181,11 @@ None. Clean break. The installer handles the transition — uninstalls old `winr
 ## Rollout Order
 
 1. Refactor codebase (rename + add platform backends)
-2. Test on Mac ProPresenter (192.0.2.30) — install.sh, verify tools
-3. Re-run install.ps1 on one Windows machine to confirm nothing broke
+2. Test on the macOS target — `install.sh`, verify tools
+3. Re-run `install.ps1` on one Windows machine to confirm nothing broke
 4. Roll out to remaining Windows machines
 5. Update all `.mcp.json` files across projects (package name in URLs changes)
 
 ## Test Target
 
-First macOS deployment: mac-host-a at 192.0.2.30 (SSH: newlevel@192.0.2.30)
+First macOS deployment: a macOS target (connection details in private operator config).
