@@ -27,10 +27,10 @@ from starlette.responses import JSONResponse
 
 from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
-from remoteos.platform import get_desktop, get_services, get_system, is_macos, is_windows
+from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.taskmanager import manager as task_manager
-from remoteos.tiers import ALL_TOOLS, get_tier_names, parse_tool_csv, resolve_enabled_tools
+from remoteos.tiers import ALL_TOOLS, LINUX_EXCLUDED_TOOLS, get_tier_names, parse_tool_csv, resolve_enabled_tools
 
 load_dotenv()
 
@@ -1696,12 +1696,14 @@ def cli(
     excluded_tools = cli_excluded if _param_explicit(ctx, "exclude_tools") else cfg.tools.exclude
     allowlist_entries = cli_allowlist if _param_explicit(ctx, "ip_allowlist") else cfg.security.ip_allowlist
 
+    platform_excludes = LINUX_EXCLUDED_TOOLS if is_linux() else None
     enabled_tools = resolve_enabled_tools(
         enable_tier3=enable_tier3,
         disable_tier2=disable_tier2,
         enable_all=enable_all,
         explicit_tools=selected_tools,
         exclude_tools=excluded_tools,
+        platform_excludes=platform_excludes,
     )
     _apply_tool_filter(enabled_tools)
     enabled_tiers = get_tier_names(enabled_tools)

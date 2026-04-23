@@ -58,6 +58,30 @@ TOOL_TIERS = {
 ALL_TOOLS = TOOL_TIERS["tier1"] | TOOL_TIERS["tier2"] | TOOL_TIERS["tier3"]
 _NAME_LOOKUP = {name.lower(): name for name in ALL_TOOLS}
 
+# Tools that require a display or are platform-specific (Windows/macOS only)
+LINUX_EXCLUDED_TOOLS = {
+    "Snapshot",
+    "AnnotatedSnapshot",
+    "OCR",
+    "ScreenRecord",
+    "Click",
+    "Type",
+    "Move",
+    "Scroll",
+    "Shortcut",
+    "FocusWindow",
+    "MinimizeAll",
+    "App",
+    "Scrape",
+    "GetClipboard",
+    "SetClipboard",
+    "RegRead",
+    "RegWrite",
+    "ReconnectSession",
+    "LockScreen",
+    "Notification",
+}
+
 
 def parse_tool_csv(raw: str | None) -> list[str]:
     if not raw:
@@ -87,6 +111,7 @@ def resolve_enabled_tools(
     enable_all: bool = False,
     explicit_tools: list[str] | None = None,
     exclude_tools: list[str] | None = None,
+    platform_excludes: set[str] | None = None,
 ) -> set[str]:
     """Resolve active tools.
 
@@ -108,6 +133,9 @@ def resolve_enabled_tools(
 
     if exclude_tools:
         enabled -= set(normalize_tool_names(exclude_tools))
+
+    if platform_excludes:
+        enabled -= platform_excludes
 
     return enabled
 
