@@ -100,8 +100,8 @@ fi
 
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
-"$PYTHON" -m pip install --no-cache-dir --break-system-packages \
-    "git+https://github.com/zbynekdrlik/remoteos-mcp.git" 2>&1 | tail -1 || true
+"$PYTHON" -m pip install --no-cache-dir --break-system-packages --ignore-installed \
+    "git+https://github.com/zbynekdrlik/remoteos-mcp.git" 2>&1 | tail -3 || true
 
 # Verify installation
 PKG_VER=$("$PYTHON" -m pip show remoteos-mcp 2>/dev/null | grep "^Version:" | awk '{print $2}' || true)
