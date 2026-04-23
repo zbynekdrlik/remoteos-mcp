@@ -6,18 +6,18 @@ import base64
 import os
 import platform
 import subprocess
+import sys as _sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import click
-import sys as _sys
+from click.core import ParameterSource
 
 if _sys.platform != "linux":
     import pyautogui
     pyautogui.FAILSAFE = False
     pyautogui.PAUSE = 0.05
-from click.core import ParameterSource
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent

@@ -176,7 +176,7 @@ _LEVEL_MAP = {
 def event_log(log_name: str = "system", count: int = 20, level: str = "") -> str:
     """Read systemd journal entries via journalctl."""
     try:
-        cmd = ["journalctl", "--no-pager", f"-n", str(count), "-o", "short-iso"]
+        cmd = ["journalctl", "--no-pager", "-n", str(count), "-o", "short-iso"]
         if log_name and log_name.lower() != "system":
             cmd += ["-u", log_name]
         if level:
