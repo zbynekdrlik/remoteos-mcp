@@ -11,7 +11,12 @@ from datetime import datetime
 from pathlib import Path
 
 import click
-import pyautogui
+import sys as _sys
+
+if _sys.platform != "linux":
+    import pyautogui
+    pyautogui.FAILSAFE = False
+    pyautogui.PAUSE = 0.05
 from click.core import ParameterSource
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -34,15 +39,12 @@ from remoteos.tiers import ALL_TOOLS, LINUX_EXCLUDED_TOOLS, get_tier_names, pars
 
 load_dotenv()
 
-pyautogui.FAILSAFE = False
-pyautogui.PAUSE = 0.05
-
 mcp = FastMCP(
     "remoteos-mcp",
     instructions=(
         "Remote OS MCP Server. Provides desktop control, window management, "
         "shell execution, file operations, network tools, registry, services, "
-        "and system management tools for Windows and macOS machines."
+        "and system management tools for Windows, macOS, and Linux machines."
     ),
 )
 
@@ -503,7 +505,7 @@ def App(
     )
 )
 def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
-    """Execute a shell command (PowerShell on Windows, zsh on macOS).
+    """Execute a shell command (PowerShell on Windows, zsh on macOS, bash on Linux).
 
     Args:
         command: Command to execute.
@@ -515,10 +517,14 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             if cwd:
                 command = f"cd {cwd}; {command}"
             shell_cmd = ["powershell", "-NoProfile", "-Command", command]
-        else:
+        elif is_macos():
             if cwd:
                 command = f"cd {cwd} && {command}"
             shell_cmd = ["/bin/zsh", "-c", command]
+        else:
+            if cwd:
+                command = f"cd {cwd} && {command}"
+            shell_cmd = ["/bin/bash", "-c", command]
 
         proc = subprocess.Popen(
             shell_cmd,

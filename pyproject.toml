@@ -5,26 +5,27 @@ build-backend = "hatchling.build"
 [project]
 name = "remoteos-mcp"
 version = "0.7.0.dev3"
-description = "Remote OS MCP Server - control Windows and macOS desktops via MCP protocol"
+description = "Remote OS MCP Server - control Windows, macOS, and Linux machines via MCP protocol"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "remoteos contributors" }]
-keywords = ["mcp", "remote", "automation", "desktop", "windows", "macos"]
+keywords = ["mcp", "remote", "automation", "desktop", "windows", "macos", "linux"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Topic :: Desktop Environment",
 ]
 dependencies = [
     "fastmcp>=2.0.0",
-    "pyautogui>=0.9.54",
+    "pyautogui>=0.9.54; sys_platform != 'linux'",
     "psutil>=5.9.0",
     "pywin32>=306; sys_platform == 'win32'",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
-    "Pillow>=10.0.0",
+    "Pillow>=10.0.0; sys_platform != 'linux'",
     "click>=8.0.0",
     "python-dotenv>=1.0.0",
     "thefuzz[speedup]>=0.20.0",
