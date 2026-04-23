@@ -67,6 +67,37 @@ fi
 
 PYTHON_PATH=$(command -v "$PYTHON")
 
+# Ensure git is available (needed for pip install from GitHub)
+if ! command -v git &>/dev/null; then
+    echo "        git not found, installing..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq git
+    elif command -v dnf &>/dev/null; then
+        dnf install -y git
+    elif command -v yum &>/dev/null; then
+        yum install -y git
+    fi
+fi
+
+# Ensure pip is available
+if ! "$PYTHON" -m pip --version &>/dev/null; then
+    echo "        pip not found, installing..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq python3-pip python3-venv
+    elif command -v dnf &>/dev/null; then
+        dnf install -y python3-pip
+    elif command -v yum &>/dev/null; then
+        yum install -y python3-pip
+    else
+        "$PYTHON" -m ensurepip --upgrade 2>/dev/null || true
+    fi
+    if ! "$PYTHON" -m pip --version &>/dev/null; then
+        echo "        [X] pip could not be installed"
+        exit 1
+    fi
+    echo "        pip installed"
+fi
+
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
 "$PYTHON" -m pip install --no-cache-dir --break-system-packages \
