@@ -1,3 +1,7 @@
-"""Backward-compatible re-export during refactoring."""
-from remoteos.platform.win.desktop import *  # noqa: F401,F403
-from remoteos.platform.win.desktop import HAS_WIN32, WindowInfo  # noqa: F401
+"""Backward-compatible re-export — delegates to detected platform."""
+from remoteos.platform import get_desktop as _get_desktop
+
+_mod = _get_desktop()
+
+HAS_WIN32 = getattr(_mod, "HAS_WIN32", False)
+WindowInfo = _mod.WindowInfo

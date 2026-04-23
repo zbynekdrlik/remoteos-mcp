@@ -8,7 +8,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PIL import ImageGrab
+try:
+    from PIL import ImageGrab
+except ImportError:
+    ImageGrab = None  # type: ignore[assignment,misc]
 
 
 def _screenshot_region(
