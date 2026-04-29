@@ -94,12 +94,13 @@ def get_system_info() -> str:
     uptime = datetime.datetime.now() - boot
 
     net = psutil.net_io_counters()
+    disk_label = "C:" if platform.system() == "Windows" else "/"
 
     lines = [
         f"**System:** {platform.system()} {platform.release()} ({platform.machine()})",
         f"**CPU:** {cpu_pct}% ({cpu_count} cores)",
         f"**Memory:** {mem.percent}% — {mem.used // 1048576}MB / {mem.total // 1048576}MB",
-        f"**Disk (C:):** {disk.percent}% — {disk.used // (1024**3)}GB / {disk.total // (1024**3)}GB",
+        f"**Disk ({disk_label}):** {disk.percent}% — {disk.used // (1024**3)}GB / {disk.total // (1024**3)}GB",
         f"**Network:** Sent {net.bytes_sent // 1048576}MB / Recv {net.bytes_recv // 1048576}MB",
         f"**Uptime:** {str(uptime).split('.')[0]} (boot: {boot.strftime('%Y-%m-%d %H:%M')})",
     ]

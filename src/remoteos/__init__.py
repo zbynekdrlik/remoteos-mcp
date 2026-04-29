@@ -1,3 +1,5 @@
 """remoteos-mcp: Cross-Platform Remote OS MCP Server."""
 
-__version__ = "0.6.0.dev1"
+from importlib.metadata import version as _pkg_version
+
+__version__ = _pkg_version("remoteos-mcp")

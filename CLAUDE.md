@@ -24,6 +24,14 @@ DO NOT run ad-hoc `pip install` commands to upgrade. Always use the installer.
 curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.sh | bash
 ```
 
+## Installing / Upgrading on Linux machines
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh | sudo bash
+```
+
+Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and other systemd-based distributions.
+
 ## Repository structure
 
 This repo contains both the installer scripts and the remoteos-mcp Python package source:

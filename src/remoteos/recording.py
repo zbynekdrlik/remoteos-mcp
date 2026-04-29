@@ -6,7 +6,10 @@ import base64
 import io
 import time
 
-from PIL import ImageGrab
+try:
+    from PIL import ImageGrab
+except ImportError:
+    ImageGrab = None  # type: ignore[assignment,misc]
 
 
 def record_screen(

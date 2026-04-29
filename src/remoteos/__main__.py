@@ -6,13 +6,18 @@ import base64
 import os
 import platform
 import subprocess
+import sys as _sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import click
-import pyautogui
 from click.core import ParameterSource
+
+if _sys.platform != "linux":
+    import pyautogui
+    pyautogui.FAILSAFE = False
+    pyautogui.PAUSE = 0.05
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from mcp.types import ImageContent, TextContent
@@ -27,22 +32,19 @@ from starlette.responses import JSONResponse
 
 from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
-from remoteos.platform import get_desktop, get_services, get_system, is_macos, is_windows
+from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.taskmanager import manager as task_manager
-from remoteos.tiers import ALL_TOOLS, get_tier_names, parse_tool_csv, resolve_enabled_tools
+from remoteos.tiers import ALL_TOOLS, LINUX_EXCLUDED_TOOLS, get_tier_names, parse_tool_csv, resolve_enabled_tools
 
 load_dotenv()
-
-pyautogui.FAILSAFE = False
-pyautogui.PAUSE = 0.05
 
 mcp = FastMCP(
     "remoteos-mcp",
     instructions=(
         "Remote OS MCP Server. Provides desktop control, window management, "
         "shell execution, file operations, network tools, registry, services, "
-        "and system management tools for Windows and macOS machines."
+        "and system management tools for Windows, macOS, and Linux machines."
     ),
 )
 
@@ -503,7 +505,7 @@ def App(
     )
 )
 def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
-    """Execute a shell command (PowerShell on Windows, zsh on macOS).
+    """Execute a shell command (PowerShell on Windows, zsh on macOS, bash on Linux).
 
     Args:
         command: Command to execute.
@@ -515,10 +517,14 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             if cwd:
                 command = f"cd {cwd}; {command}"
             shell_cmd = ["powershell", "-NoProfile", "-Command", command]
-        else:
+        elif is_macos():
             if cwd:
                 command = f"cd {cwd} && {command}"
             shell_cmd = ["/bin/zsh", "-c", command]
+        else:
+            if cwd:
+                command = f"cd {cwd} && {command}"
+            shell_cmd = ["/bin/bash", "-c", command]
 
         proc = subprocess.Popen(
             shell_cmd,
@@ -1696,12 +1702,14 @@ def cli(
     excluded_tools = cli_excluded if _param_explicit(ctx, "exclude_tools") else cfg.tools.exclude
     allowlist_entries = cli_allowlist if _param_explicit(ctx, "ip_allowlist") else cfg.security.ip_allowlist
 
+    platform_excludes = LINUX_EXCLUDED_TOOLS if is_linux() else None
     enabled_tools = resolve_enabled_tools(
         enable_tier3=enable_tier3,
         disable_tier2=disable_tier2,
         enable_all=enable_all,
         explicit_tools=selected_tools,
         exclude_tools=excluded_tools,
+        platform_excludes=platform_excludes,
     )
     _apply_tool_filter(enabled_tools)
     enabled_tiers = get_tier_names(enabled_tools)
