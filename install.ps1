@@ -265,8 +265,8 @@ try {
     } | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
     # Remove old rule if exists
     Remove-NetFirewallRule -DisplayName "RemoteOS MCP" -ErrorAction SilentlyContinue
-    New-NetFirewallRule -DisplayName "RemoteOS MCP" -Direction Inbound -LocalPort $Port -Protocol TCP -Action Allow -Profile Private,Domain | Out-Null
-    Write-Host "        Firewall rule added (port $Port, private/domain networks)" -ForegroundColor Green
+    New-NetFirewallRule -DisplayName "RemoteOS MCP" -Direction Inbound -LocalPort $Port -Protocol TCP -Action Allow -Profile Any | Out-Null
+    Write-Host "        Firewall rule added (port $Port, all profiles - reliable across network drift)" -ForegroundColor Green
 } catch {
     Write-Host "        [!] Could not add firewall rule (need admin)" -ForegroundColor Yellow
     Write-Host "        Manually allow TCP port $Port inbound" -ForegroundColor Yellow
