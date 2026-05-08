@@ -128,7 +128,8 @@ if [[ -f "$CONFIG_FILE" ]]; then
 fi
 
 if [[ -z "$AUTH_KEY" ]]; then
-    AUTH_KEY=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+    # head -c closes pipe, tr gets SIGPIPE → pipefail aborts. Use python instead.
+    AUTH_KEY=$("$PYTHON" -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(32)))")
     echo "        Generated new auth key"
 fi
 
