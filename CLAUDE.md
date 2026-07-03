@@ -1,52 +1,21 @@
-# RemoteOS Setup
+# remoteos-mcp — Project Instructions
 
-## Installing / Upgrading on Windows machines
+## Project overview
 
-The ONLY correct way to install or upgrade remoteos-mcp on a Windows machine is via the one-liner:
+Python MCP server for remote OS control across Windows, macOS, and Linux machines.
+Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynekdrlik/remoteos-mcp.
 
-```powershell
-irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.ps1 | iex
-```
+## Playbook router
 
-Run this via SSH or MCP Shell. It handles everything:
+| Topic | Where to look |
+|---|---|
+| Install / upgrade / redeploy on any machine | `/remoteos-install` skill |
+| `.mcp.json` setup, restore after clone, add new machine | `/remoteos-mcp-config` skill |
+| Which MCP server belongs to which project | memory: `reference_mcp_project_mapping.md` |
+| SSH credentials for managed machines | memory: `reference_ssh_credentials.md` |
 
-- Installs/upgrades pip package from this repo
-- Preserves existing auth key on reinstall
-- Sets up VBS hidden launcher (no CMD window)
-- Registers scheduled task with auto-restart
-- Configures firewall
+## Always-apply rules
 
-DO NOT run ad-hoc `pip install` commands to upgrade. Always use the installer.
-
-## Installing / Upgrading on macOS machines
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.sh | bash
-```
-
-## Installing / Upgrading on Linux machines
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh | sudo bash
-```
-
-Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and other systemd-based distributions.
-
-## Repository structure
-
-This repo contains both the installer scripts and the remoteos-mcp Python package source:
-
-- `install.ps1` / `uninstall.ps1` — Windows installer scripts
-- `src/remoteos/` — the Python package (forked from dddabtc/winremote-mcp, MIT license)
-- `pyproject.toml` — package metadata
-
-After pushing changes, run the installer on each target machine to deploy.
-
-## Windows machines
-
-Network profiles must be set to Private (not Public) for the firewall rule to work.
-If a machine's network is Public, fix it:
-
-```powershell
-Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private
-```
+- **Never run ad-hoc `pip install` to upgrade.** Always use the OS-appropriate one-liner installer.
+- **Never commit `.mcp.json`** — it contains bearer tokens. Symlink from `~/.claude/mcp-configs/`.
+- **Deploy policy:** `python3 airuleset.py push` is not used here; after source changes push to git, then run the installer on each target machine via SSH.

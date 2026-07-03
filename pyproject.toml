@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remoteos-mcp"
-version = "0.7.0.dev4"
+version = "0.7.0.dev6"
 description = "Remote OS MCP Server - control Windows, macOS, and Linux machines via MCP protocol"
 readme = "README.md"
 license = "MIT"
@@ -25,7 +25,7 @@ dependencies = [
     "psutil>=5.9.0",
     "pywin32>=306; sys_platform == 'win32'",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
-    "Pillow>=10.0.0; sys_platform != 'linux'",
+    "Pillow>=10.0.0",
     "click>=8.0.0",
     "python-dotenv>=1.0.0",
     "thefuzz[speedup]>=0.20.0",

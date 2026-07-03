@@ -35,7 +35,15 @@ from remoteos.config import discover_config_path, load_config
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.taskmanager import manager as task_manager
-from remoteos.tiers import ALL_TOOLS, LINUX_EXCLUDED_TOOLS, get_tier_names, parse_tool_csv, resolve_enabled_tools
+from remoteos.tiers import (
+    ALL_TOOLS,
+    LINUX_ALWAYS_EXCLUDED_TOOLS,
+    LINUX_DISPLAY_TOOLS,
+    LINUX_EXCLUDED_TOOLS,
+    get_tier_names,
+    parse_tool_csv,
+    resolve_enabled_tools,
+)
 
 load_dotenv()
 
@@ -246,6 +254,8 @@ def Click(
         action: 'click', 'double', or 'hover'.
     """
     try:
+        if is_linux():
+            return get_desktop().click(x, y, button=button, action=action)
         if action == "hover":
             pyautogui.moveTo(x, y)
             return f"Hovered at ({x},{y})"
@@ -283,6 +293,10 @@ def Type(
         press_enter: Press Enter after typing.
     """
     try:
+        if is_linux():
+            return get_desktop().type_text(
+                text, x=x, y=y, clear=_tobool(clear), press_enter=_tobool(press_enter)
+            )
         if x and y:
             pyautogui.click(x, y)
             time.sleep(0.1)
@@ -320,6 +334,8 @@ def Scroll(
         horizontal: Horizontal scroll instead of vertical.
     """
     try:
+        if is_linux():
+            return get_desktop().scroll(amount, x=x, y=y, horizontal=_tobool(horizontal))
         if x and y:
             pyautogui.moveTo(x, y)
         if _tobool(horizontal):
@@ -358,6 +374,10 @@ def Move(
         duration: Movement duration in seconds.
     """
     try:
+        if is_linux():
+            return get_desktop().move(
+                x, y, drag=_tobool(drag), start_x=start_x, start_y=start_y, duration=duration
+            )
         if _tobool(drag):
             if start_x and start_y:
                 pyautogui.moveTo(start_x, start_y)
@@ -384,6 +404,8 @@ def Shortcut(keys: str) -> str:
         keys: Shortcut string, e.g. 'ctrl+c', 'alt+tab', 'win+e'.
     """
     try:
+        if is_linux():
+            return get_desktop().shortcut(keys)
         parts = [k.strip() for k in keys.lower().split("+")]
         pyautogui.hotkey(*parts)
         return f"Executed shortcut: {keys}"
@@ -1702,7 +1724,25 @@ def cli(
     excluded_tools = cli_excluded if _param_explicit(ctx, "exclude_tools") else cfg.tools.exclude
     allowlist_entries = cli_allowlist if _param_explicit(ctx, "ip_allowlist") else cfg.security.ip_allowlist
 
-    platform_excludes = LINUX_EXCLUDED_TOOLS if is_linux() else None
+    # On Linux, gate the display-dependent tools on a runtime session check:
+    # a machine with an active X11 session (e.g. imag-nb) gets the full desktop
+    # tool set; a headless box (cam1..4) keeps them excluded — zero regression.
+    platform_excludes = None
+    if is_linux():
+        platform_excludes = set(LINUX_ALWAYS_EXCLUDED_TOOLS)
+        try:
+            from remoteos.platform.linux import desktop as _linux_desktop
+
+            session = _linux_desktop.get_session()
+            if session.mode != "x11":
+                platform_excludes |= LINUX_DISPLAY_TOOLS
+            print(
+                f"  Linux session: {session.mode}"
+                + (f" (display={session.display})" if session.mode == "x11" else "")
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"  Linux session detection failed ({exc}); excluding display tools")
+            platform_excludes = set(LINUX_EXCLUDED_TOOLS)
     enabled_tools = resolve_enabled_tools(
         enable_tier3=enable_tier3,
         disable_tier2=disable_tier2,

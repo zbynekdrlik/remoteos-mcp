@@ -120,6 +120,48 @@ Write-Output $result.Text
             pass
 
 
+def ocr_linux_tesseract(
+    left: int | None = None,
+    top: int | None = None,
+    right: int | None = None,
+    bottom: int | None = None,
+    lang: str = "eng",
+) -> str:
+    """OCR on Linux: screenshot via the X11 provider (scrot) → tesseract CLI.
+
+    Uses the Linux desktop provider's ``capture_png`` so the same session
+    detection / X-authority handling used for Snapshot applies here, then runs
+    the ``tesseract`` binary directly (no pytesseract/PIL dependency needed).
+    Raises when there is no usable X11 session so ``run_ocr`` surfaces it.
+    """
+    from remoteos.platform.linux import desktop as linux_desktop
+
+    session = linux_desktop.get_session()
+    if session.mode != "x11":
+        raise RuntimeError(linux_desktop._unavailable())
+
+    bbox = None
+    if all(v is not None for v in (left, top, right, bottom)):
+        bbox = (left, top, right, bottom)
+    png = linux_desktop.capture_png(bbox)
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp.write(png)
+        tmp_path = tmp.name
+    try:
+        result = subprocess.run(
+            ["tesseract", tmp_path, "stdout", "-l", lang],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"tesseract failed: {result.stderr.strip()}")
+        return result.stdout.strip()
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 def ocr_macos_shortcuts(
     left: int | None = None,
     top: int | None = None,
@@ -160,6 +202,14 @@ def run_ocr(
 ) -> str:
     """Run OCR, trying pytesseract first, then platform-specific fallback."""
     errors = []
+
+    # Linux: use the X11 provider screenshot + tesseract CLI (no PIL/pytesseract).
+    if sys.platform == "linux":
+        try:
+            return ocr_linux_tesseract(left, top, right, bottom, lang=lang)
+        except Exception as e:
+            errors.append(f"linux tesseract: {e}")
+
     # Try pytesseract first
     try:
         return ocr_pytesseract(left, top, right, bottom, lang=lang)
