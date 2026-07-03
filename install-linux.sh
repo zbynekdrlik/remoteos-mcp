@@ -113,6 +113,38 @@ else
     exit 1
 fi
 
+# --- [2b] Install desktop-control tools (only when a graphical session exists) ---
+# Headless boxes (cam1..4) stay stub-only and skip these; a machine with an
+# active X11/Wayland session gets xdotool/scrot/xclip/wmctrl + tesseract so the
+# desktop tools (Snapshot, Click, Type, clipboard, OCR, ...) actually work.
+echo "  [+]   Checking for a graphical session..."
+GRAPHICAL=""
+if command -v loginctl &>/dev/null; then
+    for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+        stype=$(loginctl show-session "$s" -p Type --value 2>/dev/null || true)
+        sclass=$(loginctl show-session "$s" -p Class --value 2>/dev/null || true)
+        if [[ "$sclass" == "user" && ( "$stype" == "x11" || "$stype" == "wayland" ) ]]; then
+            GRAPHICAL="$stype"
+            break
+        fi
+    done
+fi
+
+if [[ -n "$GRAPHICAL" ]]; then
+    echo "        Graphical session detected ($GRAPHICAL) — installing desktop tools"
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq || true
+        # idempotent: apt-get install is a no-op for already-present packages
+        apt-get install -y -qq xdotool scrot xclip wmctrl tesseract-ocr \
+            || echo "        [!] Some desktop tools failed to install; desktop control may be limited"
+        echo "        Desktop tools ready (xdotool scrot xclip wmctrl tesseract-ocr)"
+    else
+        echo "        [!] Non-apt system — install 'xdotool scrot xclip wmctrl tesseract' manually"
+    fi
+else
+    echo "        Headless (no graphical session) — skipping desktop tools"
+fi
+
 # --- [3/5] Configure auth key ---
 echo "  [3/5] Configuring auth key..."
 mkdir -p "$CONFIG_DIR"

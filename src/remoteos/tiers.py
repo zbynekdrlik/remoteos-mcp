@@ -58,12 +58,28 @@ TOOL_TIERS = {
 ALL_TOOLS = TOOL_TIERS["tier1"] | TOOL_TIERS["tier2"] | TOOL_TIERS["tier3"]
 _NAME_LOOKUP = {name.lower(): name for name in ALL_TOOLS}
 
-# Tools that require a display or are platform-specific (Windows/macOS only)
-LINUX_EXCLUDED_TOOLS = {
-    "Snapshot",
+# Tools that are never available on Linux regardless of a display:
+#   - Registry tools are Windows-only by nature
+#   - ReconnectSession is a Windows RDP-session reconnect
+#   - ScreenRecord (ffmpeg x11grab) and the AT-SPI accessibility tree that
+#     AnnotatedSnapshot needs are a separate follow-up (tracked upstream)
+#   - Scrape is platform-agnostic but historically bundled here; kept excluded
+#     to avoid changing headless-box behavior in this change
+LINUX_ALWAYS_EXCLUDED_TOOLS = {
     "AnnotatedSnapshot",
-    "OCR",
     "ScreenRecord",
+    "Scrape",
+    "RegRead",
+    "RegWrite",
+    "ReconnectSession",
+}
+
+# Display-dependent tools: available on Linux ONLY when a graphical (X11)
+# session is detected at runtime; excluded on headless boxes (cam1..4) so their
+# behavior is unchanged.
+LINUX_DISPLAY_TOOLS = {
+    "Snapshot",
+    "OCR",
     "Click",
     "Type",
     "Move",
@@ -72,15 +88,14 @@ LINUX_EXCLUDED_TOOLS = {
     "FocusWindow",
     "MinimizeAll",
     "App",
-    "Scrape",
     "GetClipboard",
     "SetClipboard",
-    "RegRead",
-    "RegWrite",
-    "ReconnectSession",
     "LockScreen",
     "Notification",
 }
+
+# Backward-compatible union — the full set excluded on a headless Linux box.
+LINUX_EXCLUDED_TOOLS = LINUX_ALWAYS_EXCLUDED_TOOLS | LINUX_DISPLAY_TOOLS
 
 
 def parse_tool_csv(raw: str | None) -> list[str]:

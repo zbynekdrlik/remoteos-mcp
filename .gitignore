@@ -1,3 +1,7 @@
 .claude/
 .mcp.json
 __pycache__/
+.venv-test/
+.venv/
+venv/
+*.egg-info/
