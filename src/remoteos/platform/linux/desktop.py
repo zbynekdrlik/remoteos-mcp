@@ -683,10 +683,19 @@ class _AtspiAdapter:
     so the pure walk in :func:`_collect_actionable` can be unit-tested with
     synthetic nodes and never touches the library. Every method is defensive:
     one malformed node must not abort the whole walk.
+
+    ``coord`` selects how ``extents`` maps to screen pixels. GTK4 apps report
+    ``CoordType.SCREEN`` extents as ``(0, 0)`` (a gtk-at-spi limitation), so the
+    default is ``"window"``: read the reliable WINDOW-relative extents and add the
+    window's screen ``offset`` (its content origin — see :func:`_content_origin`),
+    which lands boxes exactly on the elements. ``"screen"`` reads SCREEN extents
+    directly (fallback when the window geometry can't be resolved).
     """
 
-    def __init__(self, atspi):
+    def __init__(self, atspi, coord: str = "window", offset: tuple[int, int] = (0, 0)):
         self._a = atspi
+        self._coord = coord
+        self._ox, self._oy = offset
 
     def children(self, node) -> list:
         try:
@@ -714,10 +723,16 @@ class _AtspiAdapter:
 
     def extents(self, node):
         try:
-            r = node.get_extents(self._a.CoordType.SCREEN)
+            coord_type = self._a.CoordType.WINDOW if self._coord == "window" else self._a.CoordType.SCREEN
+            r = node.get_extents(coord_type)
             if r is None:
                 return None
-            return (int(r.x), int(r.y), int(r.x + r.width), int(r.y + r.height))
+            return (
+                int(r.x) + self._ox,
+                int(r.y) + self._oy,
+                int(r.x + r.width) + self._ox,
+                int(r.y + r.height) + self._oy,
+            )
         except Exception:  # pragma: no cover
             return None
 
@@ -818,6 +833,60 @@ def _atspi_active_frame(atspi):
     return fallback
 
 
+def _content_origin(win_geo: tuple[int, int, int, int], frame_w: int, frame_h: int) -> tuple[int, int]:
+    """Screen origin of the app's content area (PURE).
+
+    ``win_geo`` is the X toplevel ``(x, y, w, h)`` (from xdotool — for a GTK
+    client-side-decorated window that includes the invisible resize/shadow
+    margin). The AT-SPI frame reports only the ``frame_w x frame_h`` content, so
+    the content's top-left sits half the size difference inside the toplevel.
+    For a server-decorated window (no shadow) the difference is ~0 and the origin
+    is just ``(x, y)``. Adding this origin to WINDOW-relative element extents
+    yields correct screen coordinates.
+    """
+    x, y, w, h = win_geo
+    return x + max(0, (w - frame_w) // 2), y + max(0, (h - frame_h) // 2)
+
+
+def _active_window_geometry() -> Optional[tuple[int, int, int, int]]:
+    """Return the focused window's ``(x, y, w, h)`` via xdotool, or ``None``."""
+    try:
+        out = _xdotool(["getactivewindow", "getwindowgeometry", "--shell"])
+    except RuntimeError:
+        return None
+    g: dict[str, int] = {}
+    for line in out.splitlines():
+        key, _, val = line.partition("=")
+        val = val.strip()
+        if val.lstrip("-").isdigit():
+            g[key.strip()] = int(val)
+    if all(k in g for k in ("X", "Y", "WIDTH", "HEIGHT")):
+        return g["X"], g["Y"], g["WIDTH"], g["HEIGHT"]
+    return None
+
+
+def _atspi_coord_strategy(atspi, frame) -> tuple[str, tuple[int, int]]:
+    """Decide how to map AT-SPI extents to screen pixels for ``frame``.
+
+    Returns ``("window", (ox, oy))`` — read WINDOW-relative extents and add the
+    content origin ``(ox, oy)`` — whenever the focused-window geometry is
+    resolvable (the reliable path; GTK4 reports SCREEN as ``(0,0)``). Falls back
+    to ``("screen", (0, 0))`` when the frame already reports a real (non-origin)
+    SCREEN position, else best-effort raw WINDOW coords.
+    """
+    geo = _active_window_geometry()
+    try:
+        fw = frame.get_extents(atspi.CoordType.WINDOW)
+        fs = frame.get_extents(atspi.CoordType.SCREEN)
+    except Exception:  # pragma: no cover - defensive
+        fw = fs = None
+    if geo is not None and fw is not None:
+        return "window", _content_origin(geo, int(fw.width), int(fw.height))
+    if fs is not None and (int(fs.x) > 0 or int(fs.y) > 0):
+        return "screen", (0, 0)  # toolkit reports real SCREEN coords
+    return "window", (0, 0)  # last resort: window-relative positions only
+
+
 def get_interactive_elements() -> list[dict]:
     """Interactive UI elements of the focused app via the AT-SPI accessibility tree.
 
@@ -825,6 +894,10 @@ def get_interactive_elements() -> list[dict]:
     imports gi), when AT-SPI is unavailable, or when the focused app exposes no
     accessible tree (common for Qt/Electron/legacy apps). Never crashes, never
     fabricates — a partial-but-honest list beats a failure.
+
+    Coordinates are screen pixels: WINDOW-relative AT-SPI extents plus the focused
+    window's content origin (GTK4 reports SCREEN extents as ``(0,0)``, so the
+    window offset is required — see :func:`_atspi_coord_strategy`).
     """
     if get_session().mode != "x11":
         return []
@@ -838,8 +911,15 @@ def get_interactive_elements() -> list[dict]:
         if frame is None:
             log.info("AT-SPI: no active/showing frame found")
             return []
-        elements = _collect_actionable(frame, _AtspiAdapter(atspi))
-        log.info("AT-SPI: collected %d interactive elements from focused app", len(elements))
+        coord, offset = _atspi_coord_strategy(atspi, frame)
+        adapter = _AtspiAdapter(atspi, coord=coord, offset=offset)
+        elements = _collect_actionable(frame, adapter)
+        log.info(
+            "AT-SPI: collected %d interactive elements (coord=%s, offset=%s)",
+            len(elements),
+            coord,
+            offset,
+        )
         return elements
     except Exception as e:
         log.warning("AT-SPI walk failed (%s) — returning no elements", e)

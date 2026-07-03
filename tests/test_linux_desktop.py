@@ -517,6 +517,18 @@ def test_get_interactive_elements_collects_from_active_frame(monkeypatch):
     frame = _node("frame", "W", (0, 0, 800, 600), children=[_node("push button", "Go", (5, 5, 55, 35))])
     monkeypatch.setattr(d, "_load_atspi", lambda: object())
     monkeypatch.setattr(d, "_atspi_active_frame", lambda atspi: frame)
-    monkeypatch.setattr(d, "_AtspiAdapter", lambda atspi: _FakeAdapter())
+    monkeypatch.setattr(d, "_atspi_coord_strategy", lambda atspi, fr: ("window", (0, 0)))
+    monkeypatch.setattr(d, "_AtspiAdapter", lambda *a, **k: _FakeAdapter())
     els = d.get_interactive_elements()
     assert len(els) == 1 and els[0]["text"] == "Go" and els[0]["class"] == "push button"
+
+
+def test_content_origin_csd_shadow_margin():
+    # GTK4 CSD: X toplevel (482x613) wraps a 360x491 content -> 61px shadow each
+    # side, so content origin = (5+61, 497+61). (Verified live on imag-nb.)
+    assert d._content_origin((5, 497, 482, 613), 360, 491) == (66, 558)
+
+
+def test_content_origin_no_decoration_margin():
+    # Server-side decorated / no shadow: toplevel == content -> origin is (x, y).
+    assert d._content_origin((100, 200, 800, 600), 800, 600) == (100, 200)
