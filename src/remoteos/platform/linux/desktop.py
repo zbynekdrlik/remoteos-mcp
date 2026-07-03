@@ -550,21 +550,49 @@ def minimize_all() -> str:
         return f"Failed: {e}"
 
 
+def _spawn_x(cmd: list[str], settle: float = 1.2) -> Optional[int]:
+    """Start a command DETACHED and return its exit code, or ``None`` if it is
+    still running after ``settle`` seconds.
+
+    Launching an app is fire-and-forget: a GUI process runs indefinitely, so we
+    must NOT wait for it to exit (that is what made ``_run_x`` hang on
+    ``gnome-text-editor``). We start it in its own session with output discarded,
+    wait briefly to catch an immediate failure, and treat "still running" (a live
+    GUI) or "exited 0" (a launcher that forked the app) as success.
+    """
+    s = get_session()
+    argv, env = _build_invocation(s, cmd)
+    log.debug("x-spawn: %s", argv)
+    try:
+        p = subprocess.Popen(
+            argv, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except FileNotFoundError:
+        return 127
+    try:
+        return p.wait(timeout=settle)
+    except subprocess.TimeoutExpired:
+        return None  # still running → a live GUI app → success
+
+
 def launch_app(name: str, args: str = "") -> str:
-    """Launch an application: gtk-launch, then xdg-open, then direct exec."""
+    """Launch an application: gtk-launch (.desktop id), then xdg-open, then exec.
+
+    Each attempt is spawned detached so a long-running GUI process never blocks.
+    """
     if get_session().mode != "x11":
         return _unavailable()
     arg_list = args.split() if args else []
-    # 1) gtk-launch by .desktop id (strip a trailing .desktop if present).
     desktop_id = name[:-8] if name.endswith(".desktop") else name
+    last_rc: Optional[int] = None
     for attempt in (["gtk-launch", desktop_id, *arg_list], ["xdg-open", name], [name, *arg_list]):
-        try:
-            _run_x(attempt, timeout=10)
+        rc = _spawn_x(attempt)
+        if rc is None or rc == 0:
             return f"Launched {name} (via {attempt[0]})"
-        except RuntimeError as e:
-            log.debug("launch attempt %s failed: %s", attempt[0], e)
-            last_err = e
-    return f"Failed to launch {name}: {last_err}"
+        log.debug("launch attempt %s exited rc=%s", attempt[0], rc)
+        last_rc = rc
+    return f"Failed to launch {name} (last rc={last_rc})"
 
 
 def resize_window(handle: int, width: int, height: int) -> str:
