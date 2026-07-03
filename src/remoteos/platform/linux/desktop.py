@@ -205,8 +205,11 @@ def _run_capture(cmd: list[str], timeout: int = 10) -> tuple[int, str, str]:
 def _detect() -> SessionInfo:
     """Detect the current graphical session (does real subprocess/proc work)."""
     # 1) Environment already carries a display (interactive run inside a session).
+    #    Trust our OWN env only when NOT running as root: a root service's own env
+    #    is never the real seat (and a leaked/inherited DISPLAY would otherwise make
+    #    it classify itself as a uid-0 session, dropping the sudo -u <user> wrap).
     env_mode = _mode_from_env(os.environ)
-    if env_mode in ("x11", "wayland"):
+    if env_mode in ("x11", "wayland") and os.geteuid() != 0:
         uid = os.getuid()
         try:
             user = pwd.getpwuid(uid).pw_name
@@ -396,6 +399,11 @@ def _run_x(
         r = _subprocess_run(argv, env, input_bytes, timeout, discard_output)
     except FileNotFoundError as e:
         raise RuntimeError(f"{cmd[0]} not installed: {e}") from e
+    except subprocess.TimeoutExpired as e:
+        # A hang raises TimeoutExpired, which is NOT a RuntimeError — convert it so
+        # it honors the "raises RuntimeError" contract and hits callers' handlers
+        # instead of escaping to the outer `except Exception` (losing the message).
+        raise RuntimeError(f"{cmd[0]} timed out after {timeout}s") from e
     if r.returncode != 0:
         # One retry with a freshly-detected session.
         s2 = get_session(force=True)
@@ -406,6 +414,8 @@ def _run_x(
                 r = _subprocess_run(argv2, env2, input_bytes, timeout, discard_output)
             except FileNotFoundError as e:
                 raise RuntimeError(f"{cmd[0]} not installed: {e}") from e
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(f"{cmd[0]} timed out after {timeout}s") from e
         if r.returncode != 0:
             stderr = (r.stderr or b"").decode("utf-8", "replace").strip()
             raise RuntimeError(f"{cmd[0]} failed (rc={r.returncode}): {stderr or '(no stderr)'}")
@@ -422,13 +432,34 @@ def _xdotool(subargs: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _capture_tmp(suffix: str) -> Path:
+    """Return a PRIVATE temp path for a screen capture (may hold on-screen secrets).
+
+    Captures must NOT be created in world-readable ``/tmp`` (files land 0644 under
+    the sticky dir, so a co-located local user can read a screenshot/recording
+    before it is unlinked). The session user's ``XDG_RUNTIME_DIR``
+    (``/run/user/<uid>``, mode 0700, owned by that user) is private AND writable by
+    the session user even when the service runs as root and shells the capture out
+    via ``sudo -u <user>`` — a root-owned 0700 temp dir would NOT be. ``_detect``
+    always populates ``runtime_dir`` for an X11 session (the only mode these
+    capture paths run in), so the ``/tmp`` fallback is a last resort for a
+    malformed session only.
+    """
+    s = get_session()
+    runtime_dir = s.runtime_dir
+    name = f"remoteos-{uuid.uuid4().hex}{suffix}"
+    if runtime_dir and Path(runtime_dir).is_dir():
+        return Path(runtime_dir) / name
+    return Path("/tmp") / name
+
+
 def capture_png(bbox: Optional[tuple[int, int, int, int]] = None) -> bytes:
     """Capture the screen (or a region) as PNG bytes via scrot (fallback: import).
 
     ``bbox`` is ``(left, top, right, bottom)`` in screen coordinates, or ``None``
     for the full screen. Only valid on an X11 session — callers must gate on mode.
     """
-    tmp = Path("/tmp") / f"remoteos-shot-{uuid.uuid4().hex}.png"
+    tmp = _capture_tmp(".png")
     scrot_cmd = ["scrot", "--overwrite"]
     if bbox is not None:
         left, top, right, bottom = bbox
@@ -448,7 +479,10 @@ def capture_png(bbox: Optional[tuple[int, int, int, int]] = None) -> bytes:
                 import_cmd += ["-crop", f"{right - left}x{bottom - top}+{left}+{top}"]
             import_cmd.append("png:-")
             r = _run_x(import_cmd)
-            return r.stdout or b""
+            data = r.stdout or b""
+            if not data:
+                raise RuntimeError("ImageMagick import produced empty output")
+            return data
         data = tmp.read_bytes()
         if not data:
             raise RuntimeError("screenshot produced an empty file")
@@ -572,7 +606,7 @@ def record_screen(
             region = (li, ti, ri, bi)
 
     dur = min(max(float(duration), 0.5), 10.0)
-    tmp = Path("/tmp") / f"remoteos-rec-{uuid.uuid4().hex}.gif"
+    tmp = _capture_tmp(".gif")
     argv = _ffmpeg_x11grab_argv(s.display or ":0", str(tmp), duration=dur, fps=fps, region=region, max_width=max_width)
     log.info("record_screen: %.1fs @ %sfps region=%s -> %s", dur, fps, region, tmp)
     try:
@@ -779,26 +813,47 @@ def _collect_actionable(root, adapter, *, max_elements: int = 60, max_nodes: int
 def _load_atspi():
     """Import the ``Atspi`` GI module with the session's a11y bus reachable.
 
-    In-process AT-SPI reads ``DBUS_SESSION_BUS_ADDRESS`` / ``DISPLAY`` from THIS
-    process's environment to find the user's accessibility bus, so we inject the
-    resolved-session values first (a systemd service usually starts with none).
-    Raises on any failure; callers degrade to an empty element list.
+    In-process AT-SPI reads ``DBUS_SESSION_BUS_ADDRESS`` / ``DISPLAY`` / ... from
+    THIS process's environment to find the user's accessibility bus, so we inject
+    the resolved-session values first (a systemd service usually starts with none)
+    and force the a11y-bus connection to be established NOW, while they are set.
+    ``Atspi`` (via libdbus) caches that connection process-wide, so the later tree
+    walk keeps working after we RESTORE the original environment in the ``finally``.
+
+    Restoring is essential: leaking these keys into the global ``os.environ`` would
+    poison every later ``Shell`` tool call (which inherits the process env) AND make
+    a root-service force-redetect misclassify itself as a uid-0 env session (which
+    drops the ``sudo -u <user>`` wrap and breaks clipboard/notifications). Raises on
+    any failure; callers degrade to an empty element list.
     """
     s = get_session()
-    if s.dbus_address:
-        os.environ["DBUS_SESSION_BUS_ADDRESS"] = s.dbus_address
-    if s.display:
-        os.environ["DISPLAY"] = s.display
-    if s.xauthority:
-        os.environ["XAUTHORITY"] = s.xauthority
-    if s.runtime_dir:
-        os.environ["XDG_RUNTIME_DIR"] = s.runtime_dir
-    import gi
+    keys = ("DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR")
+    saved = {k: os.environ.get(k) for k in keys}
+    overrides = {
+        "DBUS_SESSION_BUS_ADDRESS": s.dbus_address,
+        "DISPLAY": s.display,
+        "XAUTHORITY": s.xauthority,
+        "XDG_RUNTIME_DIR": s.runtime_dir,
+    }
+    try:
+        for k, v in overrides.items():
+            if v:
+                os.environ[k] = v
+        import gi
 
-    gi.require_version("Atspi", "2.0")
-    from gi.repository import Atspi
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
 
-    return Atspi
+        # Establish (and let Atspi/libdbus cache) the a11y-bus connection while the
+        # session env is live, so the tree walk still works once we restore it.
+        Atspi.get_desktop(0)
+        return Atspi
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def _atspi_active_frame(atspi):

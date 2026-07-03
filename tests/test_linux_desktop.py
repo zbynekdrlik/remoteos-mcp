@@ -13,6 +13,9 @@ Three concerns:
 from __future__ import annotations
 
 import base64
+import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -532,3 +535,245 @@ def test_content_origin_csd_shadow_margin():
 def test_content_origin_no_decoration_margin():
     # Server-side decorated / no shadow: toplevel == content -> origin is (x, y).
     assert d._content_origin((100, 200, 800, 600), 800, 600) == (100, 200)
+
+
+# ---------------------------------------------------------------------------
+# #10 — hardening regressions (review fixes for #6/#7/#8)
+# ---------------------------------------------------------------------------
+
+
+def test_run_x_timeout_becomes_runtimeerror(monkeypatch):
+    # Regression (#10 fix 3): a subprocess timeout raises subprocess.TimeoutExpired,
+    # which is NOT a RuntimeError — so it used to escape _run_x's retry AND every
+    # caller's `except RuntimeError`, surfacing only at the outer `except Exception`
+    # and losing the tailored message. _run_x must convert it to RuntimeError.
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(d.os, "geteuid", lambda: 1000)  # no sudo wrap → cmd[0] preserved
+
+    def _timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="xdotool", timeout=15)
+
+    monkeypatch.setattr(d.subprocess, "run", _timeout)
+    with pytest.raises(RuntimeError) as exc:
+        d._run_x(["xdotool", "key", "a"], timeout=15)
+    assert "xdotool" in str(exc.value) and "timed out" in str(exc.value)
+
+
+def test_click_surfaces_timeout_via_runtimeerror(monkeypatch):
+    # Regression (#10 fix 3): the tailored timeout message must reach the caller's
+    # `except RuntimeError` path (here click), not blow past it as TimeoutExpired.
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(d.os, "geteuid", lambda: 1000)
+
+    def _timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="xdotool", timeout=15)
+
+    monkeypatch.setattr(d.subprocess, "run", _timeout)
+    msg = d.click(10, 10)
+    assert "timed out" in msg and "xdotool" in msg
+
+
+def test_detect_root_ignores_env_display_uses_loginctl(monkeypatch):
+    # Regression (#10 fix 1/5, layer b): a root service whose own environment has
+    # DISPLAY set must NOT be classified as a uid-0 x11 env-session (that would
+    # drop the `sudo -n -u <user>` wrapping). A root process's own env is never
+    # the real seat — it must resolve the session via loginctl.
+    monkeypatch.setattr(d.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(d.os, "getuid", lambda: 0)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+
+    def _fake_run_capture(cmd, timeout=10):
+        if cmd[:2] == ["loginctl", "list-sessions"]:
+            return 0, "1 1000 newlevel seat0\n", ""
+        if cmd[:2] == ["loginctl", "show-session"]:
+            return (
+                0,
+                "Id=1\nUser=1000\nName=newlevel\nType=x11\nClass=user\nActive=yes\nState=active\nDisplay=\n",
+                "",
+            )
+        return 1, "", "unexpected"
+
+    monkeypatch.setattr(d, "_run_capture", _fake_run_capture)
+    monkeypatch.setattr(d, "_scan_proc_for_x_env", lambda uid: (":0", "/run/user/1000/gdm/Xauthority"))
+    info = d._detect()
+    assert info.mode == "x11"
+    assert info.uid == 1000  # resolved via loginctl, NOT os.getuid()==0
+    assert info.user == "newlevel"
+
+
+def test_detect_non_root_still_uses_env(monkeypatch):
+    # Complement to the above: a NON-root process whose env advertises a display
+    # still takes the fast env branch (the session-user service on imag-nb).
+    monkeypatch.setattr(d.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(d.os, "getuid", lambda: 1000)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+
+    def _boom(*a, **k):  # pragma: no cover - env branch must not consult loginctl
+        raise AssertionError("non-root env session must not fall through to loginctl")
+
+    monkeypatch.setattr(d, "_run_capture", _boom)
+    info = d._detect()
+    assert info.mode == "x11"
+    assert info.uid == 1000
+
+
+def test_load_atspi_restores_env(monkeypatch):
+    # Regression (#10 fix 1/5, layer a): _load_atspi injects the session's
+    # DISPLAY/XAUTHORITY/XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS so in-process
+    # AT-SPI can reach the a11y bus, but it MUST restore os.environ afterwards.
+    # Leaking them poisons later Shell tool calls and triggers the root-misdetect.
+    sess = d.SessionInfo(
+        mode="x11",
+        display=":0",
+        xauthority="/run/user/1000/gdm/Xauthority",
+        uid=1000,
+        user="newlevel",
+        runtime_dir="/run/user/1000",
+        dbus_address="unix:path=/run/user/1000/bus",
+    )
+    monkeypatch.setattr(d, "_SESSION", sess)
+    keys = ("DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+    for k in keys:
+        monkeypatch.delenv(k, raising=False)
+    before = {k: d.os.environ.get(k) for k in keys}
+
+    # Mock the external gi/Atspi import so no real AT-SPI stack is needed.
+    fake_atspi = types.SimpleNamespace(get_desktop=lambda n: object())
+    fake_gi = types.SimpleNamespace(require_version=lambda *a, **k: None)
+    fake_repo = types.SimpleNamespace(Atspi=fake_atspi)
+    monkeypatch.setitem(sys.modules, "gi", fake_gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", fake_repo)
+
+    atspi = d._load_atspi()
+    assert atspi is fake_atspi
+    after = {k: d.os.environ.get(k) for k in keys}
+    assert after == before  # env fully restored — no global leak
+
+
+def test_get_interactive_elements_leaves_env_clean(monkeypatch):
+    # Regression (#10 fix 1/5): a full AnnotatedSnapshot must leave os.environ
+    # exactly as it found it (the user-visible invariant behind the Shell-leak).
+    sess = d.SessionInfo(
+        mode="x11",
+        display=":0",
+        xauthority="/run/user/1000/gdm/Xauthority",
+        uid=1000,
+        user="newlevel",
+        runtime_dir="/run/user/1000",
+        dbus_address="unix:path=/run/user/1000/bus",
+    )
+    monkeypatch.setattr(d, "_SESSION", sess)
+    keys = ("DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+    for k in keys:
+        monkeypatch.delenv(k, raising=False)
+    before = {k: d.os.environ.get(k) for k in keys}
+
+    fake_atspi = types.SimpleNamespace(get_desktop=lambda n: object())
+    fake_gi = types.SimpleNamespace(require_version=lambda *a, **k: None)
+    fake_repo = types.SimpleNamespace(Atspi=fake_atspi)
+    monkeypatch.setitem(sys.modules, "gi", fake_gi)
+    monkeypatch.setitem(sys.modules, "gi.repository", fake_repo)
+    frame = _node("frame", "W", (0, 0, 800, 600), children=[_node("push button", "Go", (5, 5, 55, 35))])
+    monkeypatch.setattr(d, "_atspi_active_frame", lambda atspi: frame)
+    monkeypatch.setattr(d, "_atspi_coord_strategy", lambda atspi, fr: ("window", (0, 0)))
+    monkeypatch.setattr(d, "_AtspiAdapter", lambda *a, **k: _FakeAdapter())
+
+    els = d.get_interactive_elements()
+    assert len(els) == 1  # the walk ran end-to-end
+    after = {k: d.os.environ.get(k) for k in keys}
+    assert after == before  # no leak after the snapshot
+
+
+def test_capture_png_uses_private_runtime_dir(monkeypatch, tmp_path):
+    # Regression (#10 fix 2): screen captures may contain on-screen secrets, so
+    # they must NOT be created in world-readable /tmp (0644 under a sticky dir).
+    # They belong in the session user's private XDG_RUNTIME_DIR (/run/user/<uid>,
+    # mode 0700), which is also writable by the session user under `sudo -u`.
+    runtime = tmp_path / "run-user-1000"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        d,
+        "_SESSION",
+        d.SessionInfo(
+            mode="x11",
+            display=":0",
+            xauthority="/run/user/1000/gdm/Xauthority",
+            uid=1000,
+            user="newlevel",
+            runtime_dir=str(runtime),
+            dbus_address="unix:path=/run/user/1000/bus",
+        ),
+    )
+    seen: dict = {}
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        seen["target"] = Path(cmd[-1])
+        seen["target"].write_bytes(b"\x89PNG\r\n-fake")  # scrot writes the capture
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    data = d.capture_png()
+    assert data == b"\x89PNG\r\n-fake"
+    assert seen["target"].parent == runtime  # inside the private 0700 dir…
+    assert seen["target"].parent != Path("/tmp")  # …not the world-readable bare /tmp
+
+
+def test_record_screen_uses_private_runtime_dir(monkeypatch, tmp_path):
+    # Regression (#10 fix 2): recordings share the same secrecy concern as
+    # screenshots and must also land in the private runtime dir, not /tmp.
+    runtime = tmp_path / "run"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        d,
+        "_SESSION",
+        d.SessionInfo(mode="x11", display=":0", uid=1000, user="newlevel", runtime_dir=str(runtime)),
+    )
+    seen: dict = {}
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        seen["target"] = Path(cmd[-1])
+        seen["target"].write_bytes(b"GIF89a-x")
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    b64 = d.record_screen(duration=1, fps=5)
+    assert base64.b64decode(b64) == b"GIF89a-x"
+    assert seen["target"].parent == runtime
+    assert seen["target"].parent != Path("/tmp")
+
+
+def test_capture_png_empty_import_output_raises(monkeypatch):
+    # Regression (#10 fix 4): the ImageMagick `import` fallback must guard against
+    # empty stdout (like the scrot path) instead of silently returning b"".
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        if cmd[:1] == ["scrot"]:
+            raise RuntimeError("scrot failed (rc=1): (no stderr)")  # force the fallback
+        if cmd[:1] == ["import"]:
+            return _FakeProc(stdout=b"")  # ImageMagick produced nothing
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    with pytest.raises(RuntimeError) as exc:
+        d.capture_png()
+    assert "empty" in str(exc.value).lower()
+
+
+def test_capture_png_import_fallback_returns_data(monkeypatch):
+    # Complement to the above: a NON-empty ImageMagick fallback still returns bytes.
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        if cmd[:1] == ["scrot"]:
+            raise RuntimeError("scrot failed")
+        if cmd[:1] == ["import"]:
+            return _FakeProc(stdout=b"\x89PNG-from-imagemagick")
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    assert d.capture_png() == b"\x89PNG-from-imagemagick"
