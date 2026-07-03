@@ -129,11 +129,7 @@ def _choose_session(sessions: list[dict]) -> Optional[dict]:
         return (p.get("Active", "").lower() == "yes") or (p.get("State", "").lower() == "active")
 
     def _candidate(p: dict, want_type: str) -> bool:
-        return (
-            p.get("Type", "").lower() == want_type
-            and p.get("Class", "").lower() == "user"
-            and _active(p)
-        )
+        return p.get("Type", "").lower() == want_type and p.get("Class", "").lower() == "user" and _active(p)
 
     for want in ("x11", "wayland"):
         for p in sessions:
@@ -238,8 +234,27 @@ def _detect() -> SessionInfo:
     props_list: list[dict] = []
     for sid in session_ids:
         srrc, srout, _ = _run_capture(
-            ["loginctl", "show-session", sid, "-p", "Id", "-p", "User", "-p", "Name",
-             "-p", "Type", "-p", "Class", "-p", "Active", "-p", "State", "-p", "Display"]
+            [
+                "loginctl",
+                "show-session",
+                sid,
+                "-p",
+                "Id",
+                "-p",
+                "User",
+                "-p",
+                "Name",
+                "-p",
+                "Type",
+                "-p",
+                "Class",
+                "-p",
+                "Active",
+                "-p",
+                "State",
+                "-p",
+                "Display",
+            ]
         )
         if srrc == 0:
             props_list.append(_parse_show_session(srout))
@@ -326,7 +341,11 @@ def _build_invocation(s: SessionInfo, cmd: list[str]) -> tuple[list[str], dict[s
     """
     if os.geteuid() == 0 and s.user and s.uid not in (None, 0):
         prefix = [
-            "sudo", "-n", "-u", s.user, "env",
+            "sudo",
+            "-n",
+            "-u",
+            s.user,
+            "env",
             f"DISPLAY={s.display or ''}",
             f"XAUTHORITY={s.xauthority or ''}",
             f"XDG_RUNTIME_DIR={s.runtime_dir or f'/run/user/{s.uid}'}",
@@ -347,8 +366,12 @@ def _subprocess_run(argv, env, input_bytes, timeout, discard_output):
     """
     if discard_output:
         return subprocess.run(
-            argv, input=input_bytes, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=env, timeout=timeout,
+            argv,
+            input=input_bytes,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=timeout,
         )
     return subprocess.run(argv, input=input_bytes, capture_output=True, env=env, timeout=timeout)
 
@@ -467,6 +490,109 @@ def take_screenshot(quality: int = 65, max_width: int = 1280, monitor: int = 0) 
 
 
 # ---------------------------------------------------------------------------
+# Screen recording — ffmpeg x11grab (issue #8)
+# ---------------------------------------------------------------------------
+
+
+def _ffmpeg_x11grab_argv(
+    display: str,
+    out_path: str,
+    *,
+    duration: float,
+    fps: int,
+    region: Optional[tuple[int, int, int, int]],
+    max_width: int,
+) -> list[str]:
+    """Build the ``ffmpeg -f x11grab`` argv for a bounded recording (PURE).
+
+    ``region`` is ``(left, top, right, bottom)`` or ``None`` for the whole display
+    (x11grab auto-detects the root-window size when no ``-video_size`` is given).
+    Output is an animated GIF so the shared ``ScreenRecord`` tool returns it the
+    SAME way as Windows/macOS (``ImageContent`` ``image/gif``). Split out from
+    :func:`record_screen` so the argv can be unit-tested without a display.
+    """
+    fps = min(max(int(fps), 1), 10)
+    duration = min(max(float(duration), 0.5), 10.0)
+    argv = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "x11grab",
+        "-framerate",
+        str(fps),
+    ]
+    input_spec = display or ":0"
+    if region is not None:
+        left, top, right, bottom = region
+        width = max(2, right - left)
+        height = max(2, bottom - top)
+        argv += ["-video_size", f"{width}x{height}"]
+        input_spec = f"{input_spec}+{left},{top}"
+    argv += ["-i", input_spec, "-t", f"{duration:g}"]
+    vf = [f"fps={fps}"]
+    if max_width and int(max_width) > 0:
+        # ``-2`` keeps the aspect ratio while rounding to an even dimension.
+        vf.append(f"scale={int(max_width)}:-2:flags=lanczos")
+    argv += ["-vf", ",".join(vf), out_path]
+    return argv
+
+
+def record_screen(
+    duration: float = 3.0,
+    fps: int = 5,
+    left: Optional[int] = None,
+    top: Optional[int] = None,
+    right: Optional[int] = None,
+    bottom: Optional[int] = None,
+    max_width: int = 800,
+) -> str:
+    """Record the X11 screen via ffmpeg x11grab; return a base64 animated GIF.
+
+    Mirrors :func:`remoteos.recording.record_screen`'s signature + return shape
+    (a base64 string) so the shared ``ScreenRecord`` tool treats Linux exactly
+    like Windows/macOS. Runs inside the session via ``_build_invocation`` (env
+    injection as the session user, ``sudo -u`` wrap when running as root), the
+    same as every other X command.
+
+    Raises :class:`RuntimeError` with the headless stub message on a non-X11 box
+    — the same contract as :func:`take_screenshot`, so the headless cam1..4 boxes
+    never shell out and never crash (the tool is display-gated off there anyway).
+    """
+    s = get_session()
+    if s.mode != "x11":
+        raise RuntimeError(_unavailable())
+
+    region: Optional[tuple[int, int, int, int]] = None
+    if None not in (left, top, right, bottom):
+        li, ti, ri, bi = int(left), int(top), int(right), int(bottom)  # type: ignore[arg-type]
+        if ri > li and bi > ti:
+            region = (li, ti, ri, bi)
+
+    dur = min(max(float(duration), 0.5), 10.0)
+    tmp = Path("/tmp") / f"remoteos-rec-{uuid.uuid4().hex}.gif"
+    argv = _ffmpeg_x11grab_argv(s.display or ":0", str(tmp), duration=dur, fps=fps, region=region, max_width=max_width)
+    log.info("record_screen: %.1fs @ %sfps region=%s -> %s", dur, fps, region, tmp)
+    try:
+        # ffmpeg records for `dur` seconds then encodes — allow generous headroom.
+        _run_x(argv, timeout=int(dur) + 30)
+        data = tmp.read_bytes()
+        if not data:
+            raise RuntimeError("ffmpeg x11grab produced an empty recording")
+        import base64
+
+        log.info("record_screen: produced %d bytes of GIF", len(data))
+        return base64.b64encode(data).decode()
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover - defensive
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Window enumeration / management
 # ---------------------------------------------------------------------------
 
@@ -488,9 +614,7 @@ def _parse_wmctrl_windows(text: str) -> list[WindowInfo]:
         except ValueError:
             continue
         title = parts[8] if len(parts) >= 9 else ""
-        results.append(
-            WindowInfo(handle=handle, title=title, rect=(x, y, x + w, y + h), visible=True, pid=pid)
-        )
+        results.append(WindowInfo(handle=handle, title=title, rect=(x, y, x + w, y + h), visible=True, pid=pid))
     return results
 
 
@@ -506,9 +630,300 @@ def enumerate_windows() -> list[WindowInfo]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# Interactive elements — AT-SPI2 accessibility tree (issue #7)
+# ---------------------------------------------------------------------------
+#
+# On Windows/macOS the interactive-element list comes from the platform
+# accessibility API (UIAutomation / AX). The Linux equivalent is **AT-SPI2**,
+# reached in-process via GObject-Introspection (``gi.repository.Atspi``).
+#
+# Coverage is app-dependent: GTK apps expose a rich tree; many Qt / Electron /
+# legacy-X apps expose little or nothing. We therefore DEGRADE GRACEFULLY —
+# return whatever AT-SPI exposes (possibly few or zero elements), never crash,
+# never fabricate. An empty list is an honest "the focused app exposed nothing".
+
+# Roles worth surfacing as click/interaction targets. Compared case-folded
+# against ``Atspi.Accessible.get_role_name()``.
+_ACTIONABLE_ROLES = frozenset(
+    {
+        "push button",
+        "toggle button",
+        "check box",
+        "radio button",
+        "menu item",
+        "check menu item",
+        "radio menu item",
+        "menu",
+        "menu bar",
+        "text",
+        "entry",
+        "password text",
+        "combo box",
+        "list item",
+        "table cell",
+        "link",
+        "slider",
+        "spin button",
+        "page tab",
+        "tab",
+        "icon",
+        "list box",
+        "tree item",
+        "button",
+    }
+)
+
+
+class _AtspiAdapter:
+    """Thin adapter over a real ``Atspi.Accessible`` node.
+
+    Isolates every call into the EXTERNAL AT-SPI library behind a tiny duck-typed
+    surface (``children`` / ``role_name`` / ``name`` / ``is_showing`` / ``extents``)
+    so the pure walk in :func:`_collect_actionable` can be unit-tested with
+    synthetic nodes and never touches the library. Every method is defensive:
+    one malformed node must not abort the whole walk.
+
+    ``coord`` selects how ``extents`` maps to screen pixels. GTK4 apps report
+    ``CoordType.SCREEN`` extents as ``(0, 0)`` (a gtk-at-spi limitation), so the
+    default is ``"window"``: read the reliable WINDOW-relative extents and add the
+    window's screen ``offset`` (its content origin — see :func:`_content_origin`),
+    which lands boxes exactly on the elements. ``"screen"`` reads SCREEN extents
+    directly (fallback when the window geometry can't be resolved).
+    """
+
+    def __init__(self, atspi, coord: str = "window", offset: tuple[int, int] = (0, 0)):
+        self._a = atspi
+        self._coord = coord
+        self._ox, self._oy = offset
+
+    def children(self, node) -> list:
+        try:
+            return [node.get_child_at_index(i) for i in range(node.get_child_count())]
+        except Exception:  # pragma: no cover - defensive (live lib only)
+            return []
+
+    def role_name(self, node) -> str:
+        try:
+            return (node.get_role_name() or "").strip().lower()
+        except Exception:  # pragma: no cover
+            return ""
+
+    def name(self, node) -> str:
+        try:
+            return (node.get_name() or "").strip()
+        except Exception:  # pragma: no cover
+            return ""
+
+    def is_showing(self, node) -> bool:
+        try:
+            return bool(node.get_state_set().contains(self._a.StateType.SHOWING))
+        except Exception:  # pragma: no cover
+            return True  # don't over-filter when state is unreadable
+
+    def extents(self, node):
+        try:
+            coord_type = self._a.CoordType.WINDOW if self._coord == "window" else self._a.CoordType.SCREEN
+            r = node.get_extents(coord_type)
+            if r is None:
+                return None
+            return (
+                int(r.x) + self._ox,
+                int(r.y) + self._oy,
+                int(r.x + r.width) + self._ox,
+                int(r.y + r.height) + self._oy,
+            )
+        except Exception:  # pragma: no cover
+            return None
+
+
+def _collect_actionable(root, adapter, *, max_elements: int = 60, max_nodes: int = 4000) -> list[dict]:
+    """Breadth-first walk collecting actionable elements (PURE — no AT-SPI here).
+
+    ``adapter`` supplies ``children`` / ``role_name`` / ``name`` / ``is_showing`` /
+    ``extents``; in production it wraps ``Atspi.Accessible``, in tests it wraps a
+    synthetic tree. Returns element dicts in the SAME shape as the Windows/macOS
+    provider (``index`` / ``class`` / ``text`` / ``rect``) so the shared
+    ``AnnotatedSnapshot`` tool layer treats every platform identically.
+
+    Bounded by ``max_elements`` and ``max_nodes`` so a pathological tree can't
+    hang the walk. Elements with no positive on-screen area are dropped (this also
+    discards the ``(-1,-1)`` application node AT-SPI reports).
+    """
+    from collections import deque
+
+    out: list[dict] = []
+    seen = 0
+    queue = deque([root])
+    while queue and len(out) < max_elements and seen < max_nodes:
+        node = queue.popleft()
+        seen += 1
+        role = adapter.role_name(node)
+        if role in _ACTIONABLE_ROLES and adapter.is_showing(node):
+            ext = adapter.extents(node)
+            if ext and ext[2] > ext[0] and ext[3] > ext[1] and ext[2] > 0 and ext[3] > 0:
+                out.append(
+                    {
+                        "index": len(out) + 1,
+                        "class": role,
+                        "text": adapter.name(node),
+                        "rect": {"left": ext[0], "top": ext[1], "right": ext[2], "bottom": ext[3]},
+                    }
+                )
+        for child in adapter.children(node):
+            if child is not None:
+                queue.append(child)
+    return out
+
+
+def _load_atspi():
+    """Import the ``Atspi`` GI module with the session's a11y bus reachable.
+
+    In-process AT-SPI reads ``DBUS_SESSION_BUS_ADDRESS`` / ``DISPLAY`` from THIS
+    process's environment to find the user's accessibility bus, so we inject the
+    resolved-session values first (a systemd service usually starts with none).
+    Raises on any failure; callers degrade to an empty element list.
+    """
+    s = get_session()
+    if s.dbus_address:
+        os.environ["DBUS_SESSION_BUS_ADDRESS"] = s.dbus_address
+    if s.display:
+        os.environ["DISPLAY"] = s.display
+    if s.xauthority:
+        os.environ["XAUTHORITY"] = s.xauthority
+    if s.runtime_dir:
+        os.environ["XDG_RUNTIME_DIR"] = s.runtime_dir
+    import gi
+
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+
+    return Atspi
+
+
+def _atspi_active_frame(atspi):
+    """Return the ACTIVE top-level window (frame), or the first SHOWING one.
+
+    Iterates the AT-SPI desktop's applications and their window children. Prefers
+    a frame in the ACTIVE state (the focused window); falls back to the first
+    SHOWING frame; returns ``None`` when nothing qualifies.
+    """
+    desktop = atspi.get_desktop(0)
+    fallback = None
+    for i in range(desktop.get_child_count()):
+        app = desktop.get_child_at_index(i)
+        if app is None:
+            continue
+        try:
+            win_count = app.get_child_count()
+        except Exception:  # pragma: no cover - defensive
+            continue
+        for j in range(win_count):
+            win = app.get_child_at_index(j)
+            if win is None:
+                continue
+            try:
+                states = win.get_state_set()
+            except Exception:  # pragma: no cover
+                continue
+            if states.contains(atspi.StateType.ACTIVE):
+                return win
+            if fallback is None and states.contains(atspi.StateType.SHOWING):
+                fallback = win
+    return fallback
+
+
+def _content_origin(win_geo: tuple[int, int, int, int], frame_w: int, frame_h: int) -> tuple[int, int]:
+    """Screen origin of the app's content area (PURE).
+
+    ``win_geo`` is the X toplevel ``(x, y, w, h)`` (from xdotool — for a GTK
+    client-side-decorated window that includes the invisible resize/shadow
+    margin). The AT-SPI frame reports only the ``frame_w x frame_h`` content, so
+    the content's top-left sits half the size difference inside the toplevel.
+    For a server-decorated window (no shadow) the difference is ~0 and the origin
+    is just ``(x, y)``. Adding this origin to WINDOW-relative element extents
+    yields correct screen coordinates.
+    """
+    x, y, w, h = win_geo
+    return x + max(0, (w - frame_w) // 2), y + max(0, (h - frame_h) // 2)
+
+
+def _active_window_geometry() -> Optional[tuple[int, int, int, int]]:
+    """Return the focused window's ``(x, y, w, h)`` via xdotool, or ``None``."""
+    try:
+        out = _xdotool(["getactivewindow", "getwindowgeometry", "--shell"])
+    except RuntimeError:
+        return None
+    g: dict[str, int] = {}
+    for line in out.splitlines():
+        key, _, val = line.partition("=")
+        val = val.strip()
+        if val.lstrip("-").isdigit():
+            g[key.strip()] = int(val)
+    if all(k in g for k in ("X", "Y", "WIDTH", "HEIGHT")):
+        return g["X"], g["Y"], g["WIDTH"], g["HEIGHT"]
+    return None
+
+
+def _atspi_coord_strategy(atspi, frame) -> tuple[str, tuple[int, int]]:
+    """Decide how to map AT-SPI extents to screen pixels for ``frame``.
+
+    Returns ``("window", (ox, oy))`` — read WINDOW-relative extents and add the
+    content origin ``(ox, oy)`` — whenever the focused-window geometry is
+    resolvable (the reliable path; GTK4 reports SCREEN as ``(0,0)``). Falls back
+    to ``("screen", (0, 0))`` when the frame already reports a real (non-origin)
+    SCREEN position, else best-effort raw WINDOW coords.
+    """
+    geo = _active_window_geometry()
+    try:
+        fw = frame.get_extents(atspi.CoordType.WINDOW)
+        fs = frame.get_extents(atspi.CoordType.SCREEN)
+    except Exception:  # pragma: no cover - defensive
+        fw = fs = None
+    if geo is not None and fw is not None:
+        return "window", _content_origin(geo, int(fw.width), int(fw.height))
+    if fs is not None and (int(fs.x) > 0 or int(fs.y) > 0):
+        return "screen", (0, 0)  # toolkit reports real SCREEN coords
+    return "window", (0, 0)  # last resort: window-relative positions only
+
+
 def get_interactive_elements() -> list[dict]:
-    """Accessibility tree — not implemented on Linux yet (needs AT-SPI)."""
-    return []
+    """Interactive UI elements of the focused app via the AT-SPI accessibility tree.
+
+    Returns an empty list on a non-X11 box (headless contract — never shells out /
+    imports gi), when AT-SPI is unavailable, or when the focused app exposes no
+    accessible tree (common for Qt/Electron/legacy apps). Never crashes, never
+    fabricates — a partial-but-honest list beats a failure.
+
+    Coordinates are screen pixels: WINDOW-relative AT-SPI extents plus the focused
+    window's content origin (GTK4 reports SCREEN extents as ``(0,0)``, so the
+    window offset is required — see :func:`_atspi_coord_strategy`).
+    """
+    if get_session().mode != "x11":
+        return []
+    try:
+        atspi = _load_atspi()
+    except Exception as e:
+        log.warning("AT-SPI unavailable (%s) — no interactive elements", e)
+        return []
+    try:
+        frame = _atspi_active_frame(atspi)
+        if frame is None:
+            log.info("AT-SPI: no active/showing frame found")
+            return []
+        coord, offset = _atspi_coord_strategy(atspi, frame)
+        adapter = _AtspiAdapter(atspi, coord=coord, offset=offset)
+        elements = _collect_actionable(frame, adapter)
+        log.info(
+            "AT-SPI: collected %d interactive elements (coord=%s, offset=%s)",
+            len(elements),
+            coord,
+            offset,
+        )
+        return elements
+    except Exception as e:
+        log.warning("AT-SPI walk failed (%s) — returning no elements", e)
+        return []
 
 
 def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> str:
@@ -565,8 +980,12 @@ def _spawn_x(cmd: list[str], settle: float = 1.2) -> Optional[int]:
     log.debug("x-spawn: %s", argv)
     try:
         p = subprocess.Popen(
-            argv, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            argv,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except FileNotFoundError:
         return 127
@@ -688,12 +1107,33 @@ def move(x: int, y: int, drag: bool = False, start_x: int = 0, start_y: int = 0,
 
 # Map pyautogui-style key names to the X keysym names xdotool expects.
 _KEY_ALIASES = {
-    "win": "super", "cmd": "super", "command": "super", "super": "super",
-    "ctrl": "ctrl", "control": "ctrl", "alt": "alt", "option": "alt", "shift": "shift",
-    "enter": "Return", "return": "Return", "esc": "Escape", "escape": "Escape",
-    "del": "Delete", "delete": "Delete", "ins": "Insert", "tab": "Tab", "space": "space",
-    "backspace": "BackSpace", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
-    "home": "Home", "end": "End", "pageup": "Prior", "pagedown": "Next",
+    "win": "super",
+    "cmd": "super",
+    "command": "super",
+    "super": "super",
+    "ctrl": "ctrl",
+    "control": "ctrl",
+    "alt": "alt",
+    "option": "alt",
+    "shift": "shift",
+    "enter": "Return",
+    "return": "Return",
+    "esc": "Escape",
+    "escape": "Escape",
+    "del": "Delete",
+    "delete": "Delete",
+    "ins": "Insert",
+    "tab": "Tab",
+    "space": "space",
+    "backspace": "BackSpace",
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+    "home": "Home",
+    "end": "End",
+    "pageup": "Prior",
+    "pagedown": "Next",
 }
 
 

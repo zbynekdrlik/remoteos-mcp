@@ -12,6 +12,9 @@ Three concerns:
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
+
 import pytest
 from remoteos.platform.linux import desktop as d
 
@@ -190,8 +193,12 @@ def x11(monkeypatch):
         d,
         "_SESSION",
         d.SessionInfo(
-            mode="x11", display=":0", xauthority="/run/user/1000/gdm/Xauthority",
-            uid=1000, user="newlevel", session_id="1",
+            mode="x11",
+            display=":0",
+            xauthority="/run/user/1000/gdm/Xauthority",
+            uid=1000,
+            user="newlevel",
+            session_id="1",
         ),
     )
     calls: list[list[str]] = []
@@ -289,8 +296,12 @@ def test_x11_resize_window(x11):
 
 def _x11_session():
     return d.SessionInfo(
-        mode="x11", display=":0", xauthority="/run/user/1000/gdm/Xauthority",
-        uid=1000, user="newlevel", session_id="1",
+        mode="x11",
+        display=":0",
+        xauthority="/run/user/1000/gdm/Xauthority",
+        uid=1000,
+        user="newlevel",
+        session_id="1",
     )
 
 
@@ -338,3 +349,186 @@ def test_unavailable_message_wayland(monkeypatch):
 def test_unavailable_message_headless(monkeypatch):
     monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
     assert d._unavailable() == _MSG
+
+
+# ---------------------------------------------------------------------------
+# #8 — ScreenRecord via ffmpeg x11grab
+# ---------------------------------------------------------------------------
+
+
+def test_ffmpeg_argv_fullscreen():
+    argv = d._ffmpeg_x11grab_argv(":0", "/tmp/out.gif", duration=3, fps=5, region=None, max_width=800)
+    assert argv[:9] == [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "x11grab",
+        "-framerate",
+        "5",
+    ]
+    assert "-video_size" not in argv  # full screen → x11grab auto-detects size
+    assert argv[argv.index("-i") + 1] == ":0"
+    assert argv[argv.index("-t") + 1] == "3"
+    vf = argv[argv.index("-vf") + 1]
+    assert "fps=5" in vf and "scale=800:-2" in vf
+    assert argv[-1] == "/tmp/out.gif"
+
+
+def test_ffmpeg_argv_region_and_no_scale():
+    argv = d._ffmpeg_x11grab_argv(":0", "/tmp/o.gif", duration=2, fps=8, region=(100, 50, 900, 650), max_width=0)
+    assert argv[argv.index("-video_size") + 1] == "800x600"
+    assert argv[argv.index("-i") + 1] == ":0+100,50"
+    assert argv[argv.index("-vf") + 1] == "fps=8"  # max_width=0 → no scale filter
+
+
+def test_ffmpeg_argv_clamps_fps_and_duration():
+    argv = d._ffmpeg_x11grab_argv(":0", "/tmp/o.gif", duration=99, fps=99, region=None, max_width=800)
+    assert argv[argv.index("-framerate") + 1] == "10"  # fps clamped to 10
+    assert argv[argv.index("-t") + 1] == "10"  # duration clamped to 10
+
+
+def test_record_screen_headless_raises_stub_and_never_shells_out(headless, monkeypatch):
+    def _boom(*a, **k):  # pragma: no cover - must not be called
+        raise AssertionError("headless record_screen must not run subprocesses")
+
+    monkeypatch.setattr(d, "_run_x", _boom)
+    with pytest.raises(RuntimeError) as exc:
+        headless.record_screen(duration=1)
+    assert str(exc.value) == _MSG
+
+
+def test_record_screen_x11_runs_ffmpeg_and_returns_b64(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    calls: list[list[str]] = []
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        calls.append(cmd)
+        Path(cmd[-1]).write_bytes(b"GIF89a-fake-frames")  # ffmpeg writes the out file
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    b64 = d.record_screen(duration=1, fps=5)
+    assert base64.b64decode(b64) == b"GIF89a-fake-frames"
+    assert calls and calls[0][0] == "ffmpeg" and "x11grab" in calls[0]
+    assert not Path(calls[0][-1]).exists()  # temp file cleaned up
+
+
+def test_record_screen_x11_empty_output_raises(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        Path(cmd[-1]).write_bytes(b"")  # ffmpeg "succeeded" but produced nothing
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    with pytest.raises(RuntimeError) as exc:
+        d.record_screen(duration=1)
+    assert "empty recording" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# #7 — AnnotatedSnapshot via the AT-SPI accessibility tree
+# ---------------------------------------------------------------------------
+
+
+class _FakeAdapter:
+    """Synthetic stand-in for _AtspiAdapter over dict nodes (no real AT-SPI)."""
+
+    def children(self, n):
+        return n.get("children", [])
+
+    def role_name(self, n):
+        return n.get("role", "")
+
+    def name(self, n):
+        return n.get("name", "")
+
+    def is_showing(self, n):
+        return n.get("showing", True)
+
+    def extents(self, n):
+        return n.get("ext")
+
+
+def _node(role="", name="", ext=None, showing=True, children=None):
+    return {"role": role, "name": name, "ext": ext, "showing": showing, "children": children or []}
+
+
+def test_collect_actionable_maps_only_actionable_visible_valid():
+    tree = _node(
+        "frame",
+        "Win",
+        (0, 0, 800, 600),
+        children=[
+            _node(
+                "panel",
+                "",
+                (0, 0, 800, 600),
+                children=[
+                    _node("push button", "OK", (10, 20, 110, 60)),
+                    _node("entry", "name field", (10, 80, 300, 110)),
+                    _node("label", "just text", (10, 120, 200, 140)),  # not actionable
+                    _node("push button", "", (-1, -1, -2, -2)),  # invalid extents
+                    _node("check box", "Agree", (10, 160, 40, 190), showing=False),  # hidden
+                ],
+            )
+        ],
+    )
+    els = d._collect_actionable(tree, _FakeAdapter())
+    assert [e["class"] for e in els] == ["push button", "entry"]
+    assert els[0] == {
+        "index": 1,
+        "class": "push button",
+        "text": "OK",
+        "rect": {"left": 10, "top": 20, "right": 110, "bottom": 60},
+    }
+    assert els[1]["index"] == 2 and els[1]["text"] == "name field"
+
+
+def test_collect_actionable_respects_max_elements():
+    kids = [_node("push button", f"b{i}", (0, 0, 10, 10)) for i in range(10)]
+    root = _node("frame", "W", (0, 0, 100, 100), children=kids)
+    els = d._collect_actionable(root, _FakeAdapter(), max_elements=3)
+    assert [e["index"] for e in els] == [1, 2, 3]
+
+
+def test_get_interactive_elements_atspi_unavailable_returns_empty(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+
+    def _boom():
+        raise RuntimeError("gi/Atspi not importable")
+
+    monkeypatch.setattr(d, "_load_atspi", _boom)
+    assert d.get_interactive_elements() == []
+
+
+def test_get_interactive_elements_no_frame_returns_empty(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(d, "_load_atspi", lambda: object())
+    monkeypatch.setattr(d, "_atspi_active_frame", lambda atspi: None)
+    assert d.get_interactive_elements() == []
+
+
+def test_get_interactive_elements_collects_from_active_frame(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    frame = _node("frame", "W", (0, 0, 800, 600), children=[_node("push button", "Go", (5, 5, 55, 35))])
+    monkeypatch.setattr(d, "_load_atspi", lambda: object())
+    monkeypatch.setattr(d, "_atspi_active_frame", lambda atspi: frame)
+    monkeypatch.setattr(d, "_atspi_coord_strategy", lambda atspi, fr: ("window", (0, 0)))
+    monkeypatch.setattr(d, "_AtspiAdapter", lambda *a, **k: _FakeAdapter())
+    els = d.get_interactive_elements()
+    assert len(els) == 1 and els[0]["text"] == "Go" and els[0]["class"] == "push button"
+
+
+def test_content_origin_csd_shadow_margin():
+    # GTK4 CSD: X toplevel (482x613) wraps a 360x491 content -> 61px shadow each
+    # side, so content origin = (5+61, 497+61). (Verified live on imag-nb.)
+    assert d._content_origin((5, 497, 482, 613), 360, 491) == (66, 558)
+
+
+def test_content_origin_no_decoration_margin():
+    # Server-side decorated / no shadow: toplevel == content -> origin is (x, y).
+    assert d._content_origin((100, 200, 800, 600), 800, 600) == (100, 200)
