@@ -11,6 +11,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 |---|---|
 | Install / upgrade / redeploy on any machine | `/remoteos-install` skill |
 | `.mcp.json` setup, restore after clone, add new machine | `/remoteos-mcp-config` skill |
+| Linux X11 desktop provider (session detection, xdotool/scrot backends, deploy/test) | `.claude/skills/linux-desktop` |
 | Which MCP server belongs to which project | memory: `reference_mcp_project_mapping.md` |
 | SSH credentials for managed machines | memory: `reference_ssh_credentials.md` |
 
