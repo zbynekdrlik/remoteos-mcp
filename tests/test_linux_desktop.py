@@ -718,8 +718,8 @@ def test_capture_png_uses_private_runtime_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "_run_x", _fake_run_x)
     data = d.capture_png()
     assert data == b"\x89PNG\r\n-fake"
-    assert seen["target"].parent == runtime  # inside the private dir…
-    assert not str(seen["target"]).startswith("/tmp/")  # …not bare /tmp
+    assert seen["target"].parent == runtime  # inside the private 0700 dir…
+    assert seen["target"].parent != Path("/tmp")  # …not the world-readable bare /tmp
 
 
 def test_record_screen_uses_private_runtime_dir(monkeypatch, tmp_path):
@@ -743,7 +743,7 @@ def test_record_screen_uses_private_runtime_dir(monkeypatch, tmp_path):
     b64 = d.record_screen(duration=1, fps=5)
     assert base64.b64decode(b64) == b"GIF89a-x"
     assert seen["target"].parent == runtime
-    assert not str(seen["target"]).startswith("/tmp/")
+    assert seen["target"].parent != Path("/tmp")
 
 
 def test_capture_png_empty_import_output_raises(monkeypatch):
