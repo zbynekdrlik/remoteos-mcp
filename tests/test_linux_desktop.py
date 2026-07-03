@@ -196,7 +196,7 @@ def x11(monkeypatch):
     )
     calls: list[list[str]] = []
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
         calls.append(cmd)
         # xclip -o (get_clipboard) returns fake clipboard content
         if cmd[:1] == ["xclip"] and "-o" in cmd:
@@ -292,6 +292,24 @@ def _x11_session():
         mode="x11", display=":0", xauthority="/run/user/1000/gdm/Xauthority",
         uid=1000, user="newlevel", session_id="1",
     )
+
+
+def test_set_clipboard_uses_discard_output(monkeypatch):
+    # Regression guard: xclip forks to stay resident holding the selection, so a
+    # captured pipe blocks subprocess.run until timeout. set_clipboard MUST route
+    # through _run_x with discard_output=True. (Found live on imag-nb.)
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    captured: dict = {}
+
+    def _rec(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        captured.update(cmd=cmd, discard=discard_output, input=input_bytes)
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _rec)
+    assert d.set_clipboard("hi") == "Clipboard set"
+    assert captured["cmd"] == ["xclip", "-selection", "clipboard"]
+    assert captured["discard"] is True
+    assert captured["input"] == b"hi"
 
 
 def test_build_invocation_same_user_injects_env(monkeypatch):

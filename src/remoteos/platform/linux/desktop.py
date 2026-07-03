@@ -336,7 +336,30 @@ def _build_invocation(s: SessionInfo, cmd: list[str]) -> tuple[list[str], dict[s
     return cmd, _session_env(s)
 
 
-def _run_x(cmd: list[str], *, input_bytes: Optional[bytes] = None, timeout: int = _TIMEOUT):
+def _subprocess_run(argv, env, input_bytes, timeout, discard_output):
+    """Thin wrapper choosing capture vs DEVNULL output.
+
+    ``discard_output=True`` sends stdout/stderr to ``/dev/null`` instead of a
+    pipe. This is REQUIRED for a command that forks and stays resident holding
+    the pipe open — notably ``xclip`` when SETTING a selection, which forks a
+    background process to serve the clipboard; a captured pipe would keep
+    ``subprocess.run`` blocked until timeout even though the command succeeded.
+    """
+    if discard_output:
+        return subprocess.run(
+            argv, input=input_bytes, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=env, timeout=timeout,
+        )
+    return subprocess.run(argv, input=input_bytes, capture_output=True, env=env, timeout=timeout)
+
+
+def _run_x(
+    cmd: list[str],
+    *,
+    input_bytes: Optional[bytes] = None,
+    timeout: int = _TIMEOUT,
+    discard_output: bool = False,
+):
     """Run an X-session command; returns ``subprocess.CompletedProcess``.
 
     Raises :class:`RuntimeError` on non-zero exit so callers can surface a clear
@@ -347,7 +370,7 @@ def _run_x(cmd: list[str], *, input_bytes: Optional[bytes] = None, timeout: int 
     argv, env = _build_invocation(s, cmd)
     log.debug("x-run: %s", argv)
     try:
-        r = subprocess.run(argv, input=input_bytes, capture_output=True, env=env, timeout=timeout)
+        r = _subprocess_run(argv, env, input_bytes, timeout, discard_output)
     except FileNotFoundError as e:
         raise RuntimeError(f"{cmd[0]} not installed: {e}") from e
     if r.returncode != 0:
@@ -357,7 +380,7 @@ def _run_x(cmd: list[str], *, input_bytes: Optional[bytes] = None, timeout: int 
             argv2, env2 = _build_invocation(s2, cmd)
             log.debug("x-run retry: %s", argv2)
             try:
-                r = subprocess.run(argv2, input=input_bytes, capture_output=True, env=env2, timeout=timeout)
+                r = _subprocess_run(argv2, env2, input_bytes, timeout, discard_output)
             except FileNotFoundError as e:
                 raise RuntimeError(f"{cmd[0]} not installed: {e}") from e
         if r.returncode != 0:
@@ -684,7 +707,13 @@ def set_clipboard(text: str) -> str:
     if get_session().mode != "x11":
         return _unavailable()
     try:
-        _run_x(["xclip", "-selection", "clipboard"], input_bytes=text.encode("utf-8"))
+        # xclip forks to stay resident serving the selection — discard_output so
+        # the inherited pipe doesn't keep subprocess.run blocked until timeout.
+        _run_x(
+            ["xclip", "-selection", "clipboard"],
+            input_bytes=text.encode("utf-8"),
+            discard_output=True,
+        )
         return "Clipboard set"
     except RuntimeError as e:
         return f"Error: {e}"
