@@ -61,13 +61,13 @@ _NAME_LOOKUP = {name.lower(): name for name in ALL_TOOLS}
 # Tools that are never available on Linux regardless of a display:
 #   - Registry tools are Windows-only by nature
 #   - ReconnectSession is a Windows RDP-session reconnect
-#   - ScreenRecord (ffmpeg x11grab) and the AT-SPI accessibility tree that
-#     AnnotatedSnapshot needs are a separate follow-up (tracked upstream)
+#   - AnnotatedSnapshot needs the AT-SPI accessibility tree (separate follow-up #7)
 #   - Scrape is platform-agnostic but historically bundled here; kept excluded
 #     to avoid changing headless-box behavior in this change
+# (ScreenRecord is now implemented on Linux via ffmpeg x11grab (#8) — it moved
+#  into LINUX_DISPLAY_TOOLS below and enables on an X11 session.)
 LINUX_ALWAYS_EXCLUDED_TOOLS = {
     "AnnotatedSnapshot",
-    "ScreenRecord",
     "Scrape",
     "RegRead",
     "RegWrite",
@@ -79,6 +79,7 @@ LINUX_ALWAYS_EXCLUDED_TOOLS = {
 # behavior is unchanged.
 LINUX_DISPLAY_TOOLS = {
     "Snapshot",
+    "ScreenRecord",
     "OCR",
     "Click",
     "Type",

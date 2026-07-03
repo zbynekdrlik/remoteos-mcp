@@ -129,11 +129,7 @@ def _choose_session(sessions: list[dict]) -> Optional[dict]:
         return (p.get("Active", "").lower() == "yes") or (p.get("State", "").lower() == "active")
 
     def _candidate(p: dict, want_type: str) -> bool:
-        return (
-            p.get("Type", "").lower() == want_type
-            and p.get("Class", "").lower() == "user"
-            and _active(p)
-        )
+        return p.get("Type", "").lower() == want_type and p.get("Class", "").lower() == "user" and _active(p)
 
     for want in ("x11", "wayland"):
         for p in sessions:
@@ -238,8 +234,27 @@ def _detect() -> SessionInfo:
     props_list: list[dict] = []
     for sid in session_ids:
         srrc, srout, _ = _run_capture(
-            ["loginctl", "show-session", sid, "-p", "Id", "-p", "User", "-p", "Name",
-             "-p", "Type", "-p", "Class", "-p", "Active", "-p", "State", "-p", "Display"]
+            [
+                "loginctl",
+                "show-session",
+                sid,
+                "-p",
+                "Id",
+                "-p",
+                "User",
+                "-p",
+                "Name",
+                "-p",
+                "Type",
+                "-p",
+                "Class",
+                "-p",
+                "Active",
+                "-p",
+                "State",
+                "-p",
+                "Display",
+            ]
         )
         if srrc == 0:
             props_list.append(_parse_show_session(srout))
@@ -326,7 +341,11 @@ def _build_invocation(s: SessionInfo, cmd: list[str]) -> tuple[list[str], dict[s
     """
     if os.geteuid() == 0 and s.user and s.uid not in (None, 0):
         prefix = [
-            "sudo", "-n", "-u", s.user, "env",
+            "sudo",
+            "-n",
+            "-u",
+            s.user,
+            "env",
             f"DISPLAY={s.display or ''}",
             f"XAUTHORITY={s.xauthority or ''}",
             f"XDG_RUNTIME_DIR={s.runtime_dir or f'/run/user/{s.uid}'}",
@@ -347,8 +366,12 @@ def _subprocess_run(argv, env, input_bytes, timeout, discard_output):
     """
     if discard_output:
         return subprocess.run(
-            argv, input=input_bytes, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=env, timeout=timeout,
+            argv,
+            input=input_bytes,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            timeout=timeout,
         )
     return subprocess.run(argv, input=input_bytes, capture_output=True, env=env, timeout=timeout)
 
@@ -467,6 +490,109 @@ def take_screenshot(quality: int = 65, max_width: int = 1280, monitor: int = 0) 
 
 
 # ---------------------------------------------------------------------------
+# Screen recording — ffmpeg x11grab (issue #8)
+# ---------------------------------------------------------------------------
+
+
+def _ffmpeg_x11grab_argv(
+    display: str,
+    out_path: str,
+    *,
+    duration: float,
+    fps: int,
+    region: Optional[tuple[int, int, int, int]],
+    max_width: int,
+) -> list[str]:
+    """Build the ``ffmpeg -f x11grab`` argv for a bounded recording (PURE).
+
+    ``region`` is ``(left, top, right, bottom)`` or ``None`` for the whole display
+    (x11grab auto-detects the root-window size when no ``-video_size`` is given).
+    Output is an animated GIF so the shared ``ScreenRecord`` tool returns it the
+    SAME way as Windows/macOS (``ImageContent`` ``image/gif``). Split out from
+    :func:`record_screen` so the argv can be unit-tested without a display.
+    """
+    fps = min(max(int(fps), 1), 10)
+    duration = min(max(float(duration), 0.5), 10.0)
+    argv = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "x11grab",
+        "-framerate",
+        str(fps),
+    ]
+    input_spec = display or ":0"
+    if region is not None:
+        left, top, right, bottom = region
+        width = max(2, right - left)
+        height = max(2, bottom - top)
+        argv += ["-video_size", f"{width}x{height}"]
+        input_spec = f"{input_spec}+{left},{top}"
+    argv += ["-i", input_spec, "-t", f"{duration:g}"]
+    vf = [f"fps={fps}"]
+    if max_width and int(max_width) > 0:
+        # ``-2`` keeps the aspect ratio while rounding to an even dimension.
+        vf.append(f"scale={int(max_width)}:-2:flags=lanczos")
+    argv += ["-vf", ",".join(vf), out_path]
+    return argv
+
+
+def record_screen(
+    duration: float = 3.0,
+    fps: int = 5,
+    left: Optional[int] = None,
+    top: Optional[int] = None,
+    right: Optional[int] = None,
+    bottom: Optional[int] = None,
+    max_width: int = 800,
+) -> str:
+    """Record the X11 screen via ffmpeg x11grab; return a base64 animated GIF.
+
+    Mirrors :func:`remoteos.recording.record_screen`'s signature + return shape
+    (a base64 string) so the shared ``ScreenRecord`` tool treats Linux exactly
+    like Windows/macOS. Runs inside the session via ``_build_invocation`` (env
+    injection as the session user, ``sudo -u`` wrap when running as root), the
+    same as every other X command.
+
+    Raises :class:`RuntimeError` with the headless stub message on a non-X11 box
+    — the same contract as :func:`take_screenshot`, so the headless cam1..4 boxes
+    never shell out and never crash (the tool is display-gated off there anyway).
+    """
+    s = get_session()
+    if s.mode != "x11":
+        raise RuntimeError(_unavailable())
+
+    region: Optional[tuple[int, int, int, int]] = None
+    if None not in (left, top, right, bottom):
+        li, ti, ri, bi = int(left), int(top), int(right), int(bottom)  # type: ignore[arg-type]
+        if ri > li and bi > ti:
+            region = (li, ti, ri, bi)
+
+    dur = min(max(float(duration), 0.5), 10.0)
+    tmp = Path("/tmp") / f"remoteos-rec-{uuid.uuid4().hex}.gif"
+    argv = _ffmpeg_x11grab_argv(s.display or ":0", str(tmp), duration=dur, fps=fps, region=region, max_width=max_width)
+    log.info("record_screen: %.1fs @ %sfps region=%s -> %s", dur, fps, region, tmp)
+    try:
+        # ffmpeg records for `dur` seconds then encodes — allow generous headroom.
+        _run_x(argv, timeout=int(dur) + 30)
+        data = tmp.read_bytes()
+        if not data:
+            raise RuntimeError("ffmpeg x11grab produced an empty recording")
+        import base64
+
+        log.info("record_screen: produced %d bytes of GIF", len(data))
+        return base64.b64encode(data).decode()
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover - defensive
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Window enumeration / management
 # ---------------------------------------------------------------------------
 
@@ -488,9 +614,7 @@ def _parse_wmctrl_windows(text: str) -> list[WindowInfo]:
         except ValueError:
             continue
         title = parts[8] if len(parts) >= 9 else ""
-        results.append(
-            WindowInfo(handle=handle, title=title, rect=(x, y, x + w, y + h), visible=True, pid=pid)
-        )
+        results.append(WindowInfo(handle=handle, title=title, rect=(x, y, x + w, y + h), visible=True, pid=pid))
     return results
 
 
@@ -565,8 +689,12 @@ def _spawn_x(cmd: list[str], settle: float = 1.2) -> Optional[int]:
     log.debug("x-spawn: %s", argv)
     try:
         p = subprocess.Popen(
-            argv, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            argv,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except FileNotFoundError:
         return 127
@@ -688,12 +816,33 @@ def move(x: int, y: int, drag: bool = False, start_x: int = 0, start_y: int = 0,
 
 # Map pyautogui-style key names to the X keysym names xdotool expects.
 _KEY_ALIASES = {
-    "win": "super", "cmd": "super", "command": "super", "super": "super",
-    "ctrl": "ctrl", "control": "ctrl", "alt": "alt", "option": "alt", "shift": "shift",
-    "enter": "Return", "return": "Return", "esc": "Escape", "escape": "Escape",
-    "del": "Delete", "delete": "Delete", "ins": "Insert", "tab": "Tab", "space": "space",
-    "backspace": "BackSpace", "up": "Up", "down": "Down", "left": "Left", "right": "Right",
-    "home": "Home", "end": "End", "pageup": "Prior", "pagedown": "Next",
+    "win": "super",
+    "cmd": "super",
+    "command": "super",
+    "super": "super",
+    "ctrl": "ctrl",
+    "control": "ctrl",
+    "alt": "alt",
+    "option": "alt",
+    "shift": "shift",
+    "enter": "Return",
+    "return": "Return",
+    "esc": "Escape",
+    "escape": "Escape",
+    "del": "Delete",
+    "delete": "Delete",
+    "ins": "Insert",
+    "tab": "Tab",
+    "space": "space",
+    "backspace": "BackSpace",
+    "up": "Up",
+    "down": "Down",
+    "left": "Left",
+    "right": "Right",
+    "home": "Home",
+    "end": "End",
+    "pageup": "Prior",
+    "pagedown": "Next",
 }
 
 

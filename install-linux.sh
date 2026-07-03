@@ -135,11 +135,12 @@ if [[ -n "$GRAPHICAL" ]]; then
     if command -v apt-get &>/dev/null; then
         apt-get update -qq || true
         # idempotent: apt-get install is a no-op for already-present packages
-        apt-get install -y -qq xdotool scrot xclip wmctrl tesseract-ocr \
+        #   ffmpeg → ScreenRecord (x11grab, issue #8)
+        apt-get install -y -qq xdotool scrot xclip wmctrl tesseract-ocr ffmpeg \
             || echo "        [!] Some desktop tools failed to install; desktop control may be limited"
-        echo "        Desktop tools ready (xdotool scrot xclip wmctrl tesseract-ocr)"
+        echo "        Desktop tools ready (xdotool scrot xclip wmctrl tesseract-ocr ffmpeg)"
     else
-        echo "        [!] Non-apt system — install 'xdotool scrot xclip wmctrl tesseract' manually"
+        echo "        [!] Non-apt system — install 'xdotool scrot xclip wmctrl tesseract ffmpeg' manually"
     fi
 else
     echo "        Headless (no graphical session) — skipping desktop tools"

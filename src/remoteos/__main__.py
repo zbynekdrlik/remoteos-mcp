@@ -16,6 +16,7 @@ from click.core import ParameterSource
 
 if _sys.platform != "linux":
     import pyautogui
+
     pyautogui.FAILSAFE = False
     pyautogui.PAUSE = 0.05
 from dotenv import load_dotenv
@@ -294,9 +295,7 @@ def Type(
     """
     try:
         if is_linux():
-            return get_desktop().type_text(
-                text, x=x, y=y, clear=_tobool(clear), press_enter=_tobool(press_enter)
-            )
+            return get_desktop().type_text(text, x=x, y=y, clear=_tobool(clear), press_enter=_tobool(press_enter))
         if x and y:
             pyautogui.click(x, y)
             time.sleep(0.1)
@@ -375,9 +374,7 @@ def Move(
     """
     try:
         if is_linux():
-            return get_desktop().move(
-                x, y, drag=_tobool(drag), start_x=start_x, start_y=start_y, duration=duration
-            )
+            return get_desktop().move(x, y, drag=_tobool(drag), start_x=start_x, start_y=start_y, duration=duration)
         if _tobool(drag):
             if start_x and start_y:
                 pyautogui.moveTo(start_x, start_y)
@@ -562,12 +559,14 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
                 try:
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                        capture_output=True, timeout=5,
+                        capture_output=True,
+                        timeout=5,
                     )
                 except Exception:
                     pass
             else:
                 import signal
+
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
                 except Exception:
@@ -1376,7 +1375,13 @@ def ScreenRecord(
         region = {}
         if left or top or right or bottom:
             region = {"left": left, "top": top, "right": right, "bottom": bottom}
-        b64 = recording.record_screen(duration=duration, fps=fps, max_width=max_width, **region)
+        if is_linux():
+            # Linux path: ffmpeg x11grab in the resolved session (issue #8). Same
+            # base64-GIF return shape as recording.record_screen, so the content
+            # below is identical to the Windows/macOS path.
+            b64 = get_desktop().record_screen(duration=duration, fps=fps, max_width=max_width, **region)
+        else:
+            b64 = recording.record_screen(duration=duration, fps=fps, max_width=max_width, **region)
         return [
             ImageContent(type="image", data=b64, mimeType="image/gif"),
             TextContent(
@@ -1737,8 +1742,7 @@ def cli(
             if session.mode != "x11":
                 platform_excludes |= LINUX_DISPLAY_TOOLS
             print(
-                f"  Linux session: {session.mode}"
-                + (f" (display={session.display})" if session.mode == "x11" else "")
+                f"  Linux session: {session.mode}" + (f" (display={session.display})" if session.mode == "x11" else "")
             )
         except Exception as exc:  # pragma: no cover - defensive
             print(f"  Linux session detection failed ({exc}); excluding display tools")

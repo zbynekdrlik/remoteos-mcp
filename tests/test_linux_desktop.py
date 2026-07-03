@@ -12,6 +12,9 @@ Three concerns:
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
+
 import pytest
 from remoteos.platform.linux import desktop as d
 
@@ -190,8 +193,12 @@ def x11(monkeypatch):
         d,
         "_SESSION",
         d.SessionInfo(
-            mode="x11", display=":0", xauthority="/run/user/1000/gdm/Xauthority",
-            uid=1000, user="newlevel", session_id="1",
+            mode="x11",
+            display=":0",
+            xauthority="/run/user/1000/gdm/Xauthority",
+            uid=1000,
+            user="newlevel",
+            session_id="1",
         ),
     )
     calls: list[list[str]] = []
@@ -289,8 +296,12 @@ def test_x11_resize_window(x11):
 
 def _x11_session():
     return d.SessionInfo(
-        mode="x11", display=":0", xauthority="/run/user/1000/gdm/Xauthority",
-        uid=1000, user="newlevel", session_id="1",
+        mode="x11",
+        display=":0",
+        xauthority="/run/user/1000/gdm/Xauthority",
+        uid=1000,
+        user="newlevel",
+        session_id="1",
     )
 
 
@@ -338,3 +349,81 @@ def test_unavailable_message_wayland(monkeypatch):
 def test_unavailable_message_headless(monkeypatch):
     monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
     assert d._unavailable() == _MSG
+
+
+# ---------------------------------------------------------------------------
+# #8 — ScreenRecord via ffmpeg x11grab
+# ---------------------------------------------------------------------------
+
+
+def test_ffmpeg_argv_fullscreen():
+    argv = d._ffmpeg_x11grab_argv(":0", "/tmp/out.gif", duration=3, fps=5, region=None, max_width=800)
+    assert argv[:9] == [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "x11grab",
+        "-framerate",
+        "5",
+    ]
+    assert "-video_size" not in argv  # full screen → x11grab auto-detects size
+    assert argv[argv.index("-i") + 1] == ":0"
+    assert argv[argv.index("-t") + 1] == "3"
+    vf = argv[argv.index("-vf") + 1]
+    assert "fps=5" in vf and "scale=800:-2" in vf
+    assert argv[-1] == "/tmp/out.gif"
+
+
+def test_ffmpeg_argv_region_and_no_scale():
+    argv = d._ffmpeg_x11grab_argv(":0", "/tmp/o.gif", duration=2, fps=8, region=(100, 50, 900, 650), max_width=0)
+    assert argv[argv.index("-video_size") + 1] == "800x600"
+    assert argv[argv.index("-i") + 1] == ":0+100,50"
+    assert argv[argv.index("-vf") + 1] == "fps=8"  # max_width=0 → no scale filter
+
+
+def test_ffmpeg_argv_clamps_fps_and_duration():
+    argv = d._ffmpeg_x11grab_argv(":0", "/tmp/o.gif", duration=99, fps=99, region=None, max_width=800)
+    assert argv[argv.index("-framerate") + 1] == "10"  # fps clamped to 10
+    assert argv[argv.index("-t") + 1] == "10"  # duration clamped to 10
+
+
+def test_record_screen_headless_raises_stub_and_never_shells_out(headless, monkeypatch):
+    def _boom(*a, **k):  # pragma: no cover - must not be called
+        raise AssertionError("headless record_screen must not run subprocesses")
+
+    monkeypatch.setattr(d, "_run_x", _boom)
+    with pytest.raises(RuntimeError) as exc:
+        headless.record_screen(duration=1)
+    assert str(exc.value) == _MSG
+
+
+def test_record_screen_x11_runs_ffmpeg_and_returns_b64(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    calls: list[list[str]] = []
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        calls.append(cmd)
+        Path(cmd[-1]).write_bytes(b"GIF89a-fake-frames")  # ffmpeg writes the out file
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    b64 = d.record_screen(duration=1, fps=5)
+    assert base64.b64decode(b64) == b"GIF89a-fake-frames"
+    assert calls and calls[0][0] == "ffmpeg" and "x11grab" in calls[0]
+    assert not Path(calls[0][-1]).exists()  # temp file cleaned up
+
+
+def test_record_screen_x11_empty_output_raises(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        Path(cmd[-1]).write_bytes(b"")  # ffmpeg "succeeded" but produced nothing
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    with pytest.raises(RuntimeError) as exc:
+        d.record_screen(duration=1)
+    assert "empty recording" in str(exc.value)
