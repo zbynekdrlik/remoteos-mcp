@@ -135,12 +135,14 @@ if [[ -n "$GRAPHICAL" ]]; then
     if command -v apt-get &>/dev/null; then
         apt-get update -qq || true
         # idempotent: apt-get install is a no-op for already-present packages
-        #   ffmpeg → ScreenRecord (x11grab, issue #8)
+        #   ffmpeg                     → ScreenRecord (x11grab, issue #8)
+        #   python3-pyatspi/gir/gi     → AnnotatedSnapshot AT-SPI tree (issue #7)
         apt-get install -y -qq xdotool scrot xclip wmctrl tesseract-ocr ffmpeg \
+            python3-pyatspi gir1.2-atspi-2.0 python3-gi \
             || echo "        [!] Some desktop tools failed to install; desktop control may be limited"
-        echo "        Desktop tools ready (xdotool scrot xclip wmctrl tesseract-ocr ffmpeg)"
+        echo "        Desktop tools ready (xdotool scrot xclip wmctrl tesseract-ocr ffmpeg AT-SPI)"
     else
-        echo "        [!] Non-apt system — install 'xdotool scrot xclip wmctrl tesseract ffmpeg' manually"
+        echo "        [!] Non-apt system — install 'xdotool scrot xclip wmctrl tesseract ffmpeg python3-pyatspi gir1.2-atspi-2.0' manually"
     fi
 else
     echo "        Headless (no graphical session) — skipping desktop tools"

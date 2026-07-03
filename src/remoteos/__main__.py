@@ -1396,6 +1396,109 @@ def ScreenRecord(
 # ======================== ANNOTATED SNAPSHOT ===============================
 
 
+def _draw_annotations(img, elements: list, scale: float, max_elements: int) -> list[str]:
+    """Draw numbered red boxes on ``img`` in place; return the text-summary lines.
+
+    Shared by the Windows and Linux ``AnnotatedSnapshot`` paths so the drawing +
+    labelling is identical on every platform. ``scale`` maps native element
+    coordinates to the (possibly resized) image. ``elements`` are the shared
+    ``{index, class, text, rect}`` dicts.
+    """
+    from PIL import ImageDraw, ImageFont
+
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("arial.ttf", 14)
+    except Exception:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 14)  # present on Linux
+        except Exception:
+            font = ImageFont.load_default()
+
+    lines: list[str] = []
+    for el in elements[:max_elements]:
+        idx = el["index"]
+        r = el["rect"]
+        x1 = int(r["left"] * scale)
+        y1 = int(r["top"] * scale)
+        x2 = int(r["right"] * scale)
+        y2 = int(r["bottom"] * scale)
+
+        draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
+
+        label = str(idx)
+        bbox = font.getbbox(label)
+        lw = bbox[2] - bbox[0] + 6
+        lh = bbox[3] - bbox[1] + 4
+        draw.rectangle([x1, y1 - lh - 2, x1 + lw, y1 - 2], fill="red")
+        draw.text((x1 + 3, y1 - lh - 1), label, fill="white", font=font)
+
+        cx = (r["left"] + r["right"]) // 2
+        cy = (r["top"] + r["bottom"]) // 2
+        name = el["text"] or el["class"]
+        lines.append(f"  [{idx}] {name} — center ({cx},{cy})")
+    return lines
+
+
+def _annotated_snapshot_linux(max_elements: int, quality: int, max_width: int) -> list:
+    """AnnotatedSnapshot on Linux: base image via the provider (scrot, NOT
+    ``ImageGrab.grab()``), interactive elements via the AT-SPI accessibility tree.
+
+    Degrades gracefully: when AT-SPI exposes no elements for the focused app
+    (common for Qt/Electron/legacy apps) it returns the plain screenshot with an
+    honest note rather than failing (issue #7).
+    """
+    import io
+
+    from PIL import Image
+
+    d = get_desktop()
+    session = d.get_session()
+    if session.mode != "x11":
+        return [TextContent(type="text", text=d._unavailable())]
+
+    try:
+        png = d.capture_png()
+        img = Image.open(io.BytesIO(png))
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+    except Exception as e:
+        return [TextContent(type="text", text=f"AnnotatedSnapshot error: {e}")]
+
+    native_width = img.width
+    if max_width and max_width > 0 and img.width > max_width:
+        ratio = max_width / img.width
+        img = img.resize((max_width, int(img.height * ratio)))
+    scale = (img.width / native_width) if native_width else 1.0
+
+    try:
+        elements = d.get_interactive_elements()
+    except Exception:
+        elements = []
+
+    if not elements:
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return [
+            ImageContent(type="image", data=b64, mimeType="image/jpeg"),
+            TextContent(
+                type="text",
+                text="No interactive elements found (AT-SPI exposed none for the focused app).",
+            ),
+        ]
+
+    element_lines = _draw_annotations(img, elements, scale, max_elements)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    text_summary = f"**Annotated {len(element_lines)} elements:**\n" + "\n".join(element_lines)
+    return [
+        ImageContent(type="image", data=b64, mimeType="image/jpeg"),
+        TextContent(type="text", text=text_summary),
+    ]
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="AnnotatedSnapshot",
@@ -1419,9 +1522,12 @@ def AnnotatedSnapshot(
         max_width: Max image width in pixels. 0=native resolution (default).
     """
     try:
+        if is_linux():
+            return _annotated_snapshot_linux(max_elements, quality, max_width)
+
         import io
 
-        from PIL import ImageDraw, ImageFont, ImageGrab
+        from PIL import ImageGrab
 
         # Take screenshot (auto-reconnect session if grab fails)
         try:
@@ -1455,42 +1561,10 @@ def AnnotatedSnapshot(
                 TextContent(type="text", text="No interactive elements found."),
             ]
 
-        draw = ImageDraw.Draw(img)
-
-        # Try to get a font
-        try:
-            font = ImageFont.truetype("arial.ttf", 14)
-        except Exception:
-            font = ImageFont.load_default()
-
         # Scale factor if image was resized
         scale = img.width / ImageGrab.grab().width if img.width != ImageGrab.grab().width else 1.0
 
-        element_lines = []
-        for el in elements[:max_elements]:
-            idx = el["index"]
-            r = el["rect"]
-            x1 = int(r["left"] * scale)
-            y1 = int(r["top"] * scale)
-            x2 = int(r["right"] * scale)
-            y2 = int(r["bottom"] * scale)
-
-            # Draw red rectangle
-            draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
-
-            # Draw label background + number
-            label = str(idx)
-            bbox = font.getbbox(label)
-            lw = bbox[2] - bbox[0] + 6
-            lh = bbox[3] - bbox[1] + 4
-            draw.rectangle([x1, y1 - lh - 2, x1 + lw, y1 - 2], fill="red")
-            draw.text((x1 + 3, y1 - lh - 1), label, fill="white", font=font)
-
-            # Build text description
-            cx = (r["left"] + r["right"]) // 2
-            cy = (r["top"] + r["bottom"]) // 2
-            name = el["text"] or el["class"]
-            element_lines.append(f"  [{idx}] {name} — center ({cx},{cy})")
+        element_lines = _draw_annotations(img, elements, scale, max_elements)
 
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)

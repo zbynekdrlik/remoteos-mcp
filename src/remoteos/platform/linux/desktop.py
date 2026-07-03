@@ -630,9 +630,220 @@ def enumerate_windows() -> list[WindowInfo]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# Interactive elements — AT-SPI2 accessibility tree (issue #7)
+# ---------------------------------------------------------------------------
+#
+# On Windows/macOS the interactive-element list comes from the platform
+# accessibility API (UIAutomation / AX). The Linux equivalent is **AT-SPI2**,
+# reached in-process via GObject-Introspection (``gi.repository.Atspi``).
+#
+# Coverage is app-dependent: GTK apps expose a rich tree; many Qt / Electron /
+# legacy-X apps expose little or nothing. We therefore DEGRADE GRACEFULLY —
+# return whatever AT-SPI exposes (possibly few or zero elements), never crash,
+# never fabricate. An empty list is an honest "the focused app exposed nothing".
+
+# Roles worth surfacing as click/interaction targets. Compared case-folded
+# against ``Atspi.Accessible.get_role_name()``.
+_ACTIONABLE_ROLES = frozenset(
+    {
+        "push button",
+        "toggle button",
+        "check box",
+        "radio button",
+        "menu item",
+        "check menu item",
+        "radio menu item",
+        "menu",
+        "menu bar",
+        "text",
+        "entry",
+        "password text",
+        "combo box",
+        "list item",
+        "table cell",
+        "link",
+        "slider",
+        "spin button",
+        "page tab",
+        "tab",
+        "icon",
+        "list box",
+        "tree item",
+        "button",
+    }
+)
+
+
+class _AtspiAdapter:
+    """Thin adapter over a real ``Atspi.Accessible`` node.
+
+    Isolates every call into the EXTERNAL AT-SPI library behind a tiny duck-typed
+    surface (``children`` / ``role_name`` / ``name`` / ``is_showing`` / ``extents``)
+    so the pure walk in :func:`_collect_actionable` can be unit-tested with
+    synthetic nodes and never touches the library. Every method is defensive:
+    one malformed node must not abort the whole walk.
+    """
+
+    def __init__(self, atspi):
+        self._a = atspi
+
+    def children(self, node) -> list:
+        try:
+            return [node.get_child_at_index(i) for i in range(node.get_child_count())]
+        except Exception:  # pragma: no cover - defensive (live lib only)
+            return []
+
+    def role_name(self, node) -> str:
+        try:
+            return (node.get_role_name() or "").strip().lower()
+        except Exception:  # pragma: no cover
+            return ""
+
+    def name(self, node) -> str:
+        try:
+            return (node.get_name() or "").strip()
+        except Exception:  # pragma: no cover
+            return ""
+
+    def is_showing(self, node) -> bool:
+        try:
+            return bool(node.get_state_set().contains(self._a.StateType.SHOWING))
+        except Exception:  # pragma: no cover
+            return True  # don't over-filter when state is unreadable
+
+    def extents(self, node):
+        try:
+            r = node.get_extents(self._a.CoordType.SCREEN)
+            if r is None:
+                return None
+            return (int(r.x), int(r.y), int(r.x + r.width), int(r.y + r.height))
+        except Exception:  # pragma: no cover
+            return None
+
+
+def _collect_actionable(root, adapter, *, max_elements: int = 60, max_nodes: int = 4000) -> list[dict]:
+    """Breadth-first walk collecting actionable elements (PURE — no AT-SPI here).
+
+    ``adapter`` supplies ``children`` / ``role_name`` / ``name`` / ``is_showing`` /
+    ``extents``; in production it wraps ``Atspi.Accessible``, in tests it wraps a
+    synthetic tree. Returns element dicts in the SAME shape as the Windows/macOS
+    provider (``index`` / ``class`` / ``text`` / ``rect``) so the shared
+    ``AnnotatedSnapshot`` tool layer treats every platform identically.
+
+    Bounded by ``max_elements`` and ``max_nodes`` so a pathological tree can't
+    hang the walk. Elements with no positive on-screen area are dropped (this also
+    discards the ``(-1,-1)`` application node AT-SPI reports).
+    """
+    from collections import deque
+
+    out: list[dict] = []
+    seen = 0
+    queue = deque([root])
+    while queue and len(out) < max_elements and seen < max_nodes:
+        node = queue.popleft()
+        seen += 1
+        role = adapter.role_name(node)
+        if role in _ACTIONABLE_ROLES and adapter.is_showing(node):
+            ext = adapter.extents(node)
+            if ext and ext[2] > ext[0] and ext[3] > ext[1] and ext[2] > 0 and ext[3] > 0:
+                out.append(
+                    {
+                        "index": len(out) + 1,
+                        "class": role,
+                        "text": adapter.name(node),
+                        "rect": {"left": ext[0], "top": ext[1], "right": ext[2], "bottom": ext[3]},
+                    }
+                )
+        for child in adapter.children(node):
+            if child is not None:
+                queue.append(child)
+    return out
+
+
+def _load_atspi():
+    """Import the ``Atspi`` GI module with the session's a11y bus reachable.
+
+    In-process AT-SPI reads ``DBUS_SESSION_BUS_ADDRESS`` / ``DISPLAY`` from THIS
+    process's environment to find the user's accessibility bus, so we inject the
+    resolved-session values first (a systemd service usually starts with none).
+    Raises on any failure; callers degrade to an empty element list.
+    """
+    s = get_session()
+    if s.dbus_address:
+        os.environ["DBUS_SESSION_BUS_ADDRESS"] = s.dbus_address
+    if s.display:
+        os.environ["DISPLAY"] = s.display
+    if s.xauthority:
+        os.environ["XAUTHORITY"] = s.xauthority
+    if s.runtime_dir:
+        os.environ["XDG_RUNTIME_DIR"] = s.runtime_dir
+    import gi
+
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+
+    return Atspi
+
+
+def _atspi_active_frame(atspi):
+    """Return the ACTIVE top-level window (frame), or the first SHOWING one.
+
+    Iterates the AT-SPI desktop's applications and their window children. Prefers
+    a frame in the ACTIVE state (the focused window); falls back to the first
+    SHOWING frame; returns ``None`` when nothing qualifies.
+    """
+    desktop = atspi.get_desktop(0)
+    fallback = None
+    for i in range(desktop.get_child_count()):
+        app = desktop.get_child_at_index(i)
+        if app is None:
+            continue
+        try:
+            win_count = app.get_child_count()
+        except Exception:  # pragma: no cover - defensive
+            continue
+        for j in range(win_count):
+            win = app.get_child_at_index(j)
+            if win is None:
+                continue
+            try:
+                states = win.get_state_set()
+            except Exception:  # pragma: no cover
+                continue
+            if states.contains(atspi.StateType.ACTIVE):
+                return win
+            if fallback is None and states.contains(atspi.StateType.SHOWING):
+                fallback = win
+    return fallback
+
+
 def get_interactive_elements() -> list[dict]:
-    """Accessibility tree — not implemented on Linux yet (needs AT-SPI)."""
-    return []
+    """Interactive UI elements of the focused app via the AT-SPI accessibility tree.
+
+    Returns an empty list on a non-X11 box (headless contract — never shells out /
+    imports gi), when AT-SPI is unavailable, or when the focused app exposes no
+    accessible tree (common for Qt/Electron/legacy apps). Never crashes, never
+    fabricates — a partial-but-honest list beats a failure.
+    """
+    if get_session().mode != "x11":
+        return []
+    try:
+        atspi = _load_atspi()
+    except Exception as e:
+        log.warning("AT-SPI unavailable (%s) — no interactive elements", e)
+        return []
+    try:
+        frame = _atspi_active_frame(atspi)
+        if frame is None:
+            log.info("AT-SPI: no active/showing frame found")
+            return []
+        elements = _collect_actionable(frame, _AtspiAdapter(atspi))
+        log.info("AT-SPI: collected %d interactive elements from focused app", len(elements))
+        return elements
+    except Exception as e:
+        log.warning("AT-SPI walk failed (%s) — returning no elements", e)
+        return []
 
 
 def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> str:

@@ -427,3 +427,96 @@ def test_record_screen_x11_empty_output_raises(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         d.record_screen(duration=1)
     assert "empty recording" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# #7 — AnnotatedSnapshot via the AT-SPI accessibility tree
+# ---------------------------------------------------------------------------
+
+
+class _FakeAdapter:
+    """Synthetic stand-in for _AtspiAdapter over dict nodes (no real AT-SPI)."""
+
+    def children(self, n):
+        return n.get("children", [])
+
+    def role_name(self, n):
+        return n.get("role", "")
+
+    def name(self, n):
+        return n.get("name", "")
+
+    def is_showing(self, n):
+        return n.get("showing", True)
+
+    def extents(self, n):
+        return n.get("ext")
+
+
+def _node(role="", name="", ext=None, showing=True, children=None):
+    return {"role": role, "name": name, "ext": ext, "showing": showing, "children": children or []}
+
+
+def test_collect_actionable_maps_only_actionable_visible_valid():
+    tree = _node(
+        "frame",
+        "Win",
+        (0, 0, 800, 600),
+        children=[
+            _node(
+                "panel",
+                "",
+                (0, 0, 800, 600),
+                children=[
+                    _node("push button", "OK", (10, 20, 110, 60)),
+                    _node("entry", "name field", (10, 80, 300, 110)),
+                    _node("label", "just text", (10, 120, 200, 140)),  # not actionable
+                    _node("push button", "", (-1, -1, -2, -2)),  # invalid extents
+                    _node("check box", "Agree", (10, 160, 40, 190), showing=False),  # hidden
+                ],
+            )
+        ],
+    )
+    els = d._collect_actionable(tree, _FakeAdapter())
+    assert [e["class"] for e in els] == ["push button", "entry"]
+    assert els[0] == {
+        "index": 1,
+        "class": "push button",
+        "text": "OK",
+        "rect": {"left": 10, "top": 20, "right": 110, "bottom": 60},
+    }
+    assert els[1]["index"] == 2 and els[1]["text"] == "name field"
+
+
+def test_collect_actionable_respects_max_elements():
+    kids = [_node("push button", f"b{i}", (0, 0, 10, 10)) for i in range(10)]
+    root = _node("frame", "W", (0, 0, 100, 100), children=kids)
+    els = d._collect_actionable(root, _FakeAdapter(), max_elements=3)
+    assert [e["index"] for e in els] == [1, 2, 3]
+
+
+def test_get_interactive_elements_atspi_unavailable_returns_empty(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+
+    def _boom():
+        raise RuntimeError("gi/Atspi not importable")
+
+    monkeypatch.setattr(d, "_load_atspi", _boom)
+    assert d.get_interactive_elements() == []
+
+
+def test_get_interactive_elements_no_frame_returns_empty(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(d, "_load_atspi", lambda: object())
+    monkeypatch.setattr(d, "_atspi_active_frame", lambda atspi: None)
+    assert d.get_interactive_elements() == []
+
+
+def test_get_interactive_elements_collects_from_active_frame(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    frame = _node("frame", "W", (0, 0, 800, 600), children=[_node("push button", "Go", (5, 5, 55, 35))])
+    monkeypatch.setattr(d, "_load_atspi", lambda: object())
+    monkeypatch.setattr(d, "_atspi_active_frame", lambda atspi: frame)
+    monkeypatch.setattr(d, "_AtspiAdapter", lambda atspi: _FakeAdapter())
+    els = d.get_interactive_elements()
+    assert len(els) == 1 and els[0]["text"] == "Go" and els[0]["class"] == "push button"
