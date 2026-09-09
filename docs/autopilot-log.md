@@ -60,3 +60,14 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Skill fix:** `.claude/skills/install/SKILL.md` had `master` in all 3 one-liner URLs; fixed to `main`. Also un-gitignored `.claude/skills/` so skills are version-controlled (previously gitignored, unavailable in clones/worktrees).
 - **Commits:** `3cabcb3` version bump 0.7.0.dev11; `ea25b9b` fix master→main + track skills in git.
 - **Tests:** 78/78 pass, ruff clean.
+
+## 2026-09-09 — #12 Installer hardening (ro-rootfs + version self-check)
+
+- **Task:** Harden install-linux.sh and install.sh (macOS) after live deploy on cam1 surfaced two gaps: no ro-rootfs detection and no post-install version verification.
+- **Commits:** `fdbdf1e` version bump 0.7.0.dev13; `870dcdf` [red] 3 regression tests; `c7e5bff` [green] ro pre-flight + version self-check + pip TMPDIR.
+- **Tests:** `tests/test_installer_hardening.py` (3 new): ro-rootfs abort, Linux version mismatch, macOS version mismatch. Total: 81 pass, ruff clean.
+- **Changes:**
+  - `install-linux.sh`: PRE-FLIGHT ro-rootfs check via `findmnt -no OPTIONS /`; pip install uses fresh `mktemp -d` TMPDIR; POST-INSTALL polls `/health` and compares version to `pip show`.
+  - `install.sh`: POST-INSTALL version self-check (same as Linux).
+  - `.claude/skills/install/SKILL.md`: gotcha about cam boxes booting with read-only rootfs.
+- **Skipped:** `install.ps1` version self-check (not trivially portable to PowerShell — listed as follow-up candidate).
