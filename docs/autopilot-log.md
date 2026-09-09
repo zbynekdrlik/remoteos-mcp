@@ -2,6 +2,14 @@
 
 Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 
+## 2026-09-09 — #13 Add GitHub Actions CI
+
+- **Issue:** #13 Add GitHub Actions CI: ruff lint + pytest + dev>main version-check (repo has no workflows).
+- **Commits:** `6f6ef37` version bump 0.7.0.dev9; `a18df21` ci.yml with lint/test/version-check jobs (#13); `3921304` fix pre-existing ruff I001 import sorting.
+- **Files added:** `.github/workflows/ci.yml` (69 lines) — 3 jobs: lint (ruff check), test (pytest), version-check (PR-only, packaging.version comparison).
+- **Key decisions:** Single workflow file (vs separate per-job — unnecessary at this scale). Concurrency group added to auto-cancel superseded runs. Python 3.12 on ubuntu-latest. Version-check uses `packaging.version.Version` for PEP 440 comparison.
+- **Local verification:** ruff check: 0 errors (after fixing pre-existing I001). pytest: 71 passed in 4.45s.
+
 ## 2026-07-03 — #6 Linux X11 desktop provider
 
 - **Issue:** #6 Implement Linux desktop provider (X11) — replace headless stub with real X11 backends, gated on runtime session detection.
