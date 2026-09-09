@@ -184,8 +184,17 @@ def _guess_xauthority(uid: int, user: Optional[str]) -> Optional[str]:
         except KeyError:
             pass
     for c in candidates:
-        if Path(c).exists():
-            return c
+        try:
+            if Path(c).exists():
+                return c
+        except OSError as exc:
+            # Path.exists() does NOT ignore EACCES (PermissionError) — it raises
+            # when the parent directory is unreadable (e.g. /home/packer on a CI
+            # runner where uid 1000 = packer but the process runs as another user).
+            # A real fleet box can hit this too (session-user service probing a
+            # root-owned home dir). Treat as "candidate not found" and continue.
+            log.debug("xauthority candidate %s inaccessible: %s", c, exc)
+            continue
     return None
 
 
