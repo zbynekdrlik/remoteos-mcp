@@ -23,6 +23,15 @@ fi
 # Determine the actual user who invoked sudo
 ACTUAL_USER="${SUDO_USER:-root}"
 
+# --- Pre-flight: check for read-only root filesystem ---
+if command -v findmnt &>/dev/null; then
+    ROOT_OPTS=$(findmnt -no OPTIONS / 2>/dev/null || true)
+    if echo ",$ROOT_OPTS," | grep -q ',ro,'; then
+        echo "  [X] Root filesystem is read-only — run: mount -o remount,rw / (and fix /etc/fstab: '/ ext4 ro' → 'defaults') then rerun."
+        exit 1
+    fi
+fi
+
 # --- [1/5] Check Python ---
 echo "  [1/5] Checking Python..."
 PYTHON=""
@@ -101,8 +110,13 @@ fi
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
 export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
-"$PYTHON" -m pip install --no-cache-dir --break-system-packages --ignore-installed \
+# Use a fresh temp dir so pip cannot reuse stale build artifacts from a prior
+# failed install (the cam1 incident: a read-only-fs failure left a partial
+# checkout in /tmp that the next run resolved instead of fetching fresh).
+PIP_TMPDIR=$(mktemp -d)
+TMPDIR="$PIP_TMPDIR" "$PYTHON" -m pip install --no-cache-dir --break-system-packages --ignore-installed \
     "git+https://github.com/zbynekdrlik/remoteos-mcp.git" 2>&1 | tail -3 || true
+rm -rf "$PIP_TMPDIR"
 
 # Verify installation
 PKG_VER=$("$PYTHON" -m pip show remoteos-mcp 2>/dev/null | grep "^Version:" | awk '{print $2}' || true)
@@ -201,6 +215,29 @@ systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 echo "        systemd service enabled and started: $SERVICE_NAME"
+
+# --- Post-install: verify service reports the correct version ---
+echo "  [+]   Verifying installed version matches running service..."
+HEALTH_OK=false
+for _attempt in $(seq 1 6); do
+    HEALTH_JSON=$(curl -sf "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)
+    if [[ -n "$HEALTH_JSON" ]]; then
+        HEALTH_VER=$(echo "$HEALTH_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)
+        if [[ "$HEALTH_VER" == "$PKG_VER" ]]; then
+            HEALTH_OK=true
+            echo "        Health check OK: v${HEALTH_VER}"
+            break
+        elif [[ -n "$HEALTH_VER" ]]; then
+            echo "  [X] Installed ${PKG_VER} but service reports ${HEALTH_VER}"
+            exit 1
+        fi
+    fi
+    sleep 5
+done
+if [[ "$HEALTH_OK" != "true" ]]; then
+    echo "  [X] Health endpoint (http://127.0.0.1:${PORT}/health) did not respond within 30s"
+    exit 1
+fi
 
 # --- [5/5] Configure firewall and get network info ---
 echo "  [5/5] Configuring firewall and getting network info..."

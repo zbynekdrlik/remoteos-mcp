@@ -13,13 +13,10 @@ no root, no network, no system changes.  Hermetic via tmp_path.
 
 from __future__ import annotations
 
-import os
 import stat
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER_LINUX = ROOT / "install-linux.sh"
@@ -63,7 +60,7 @@ def _prepare_linux_installer(tmp_path: Path) -> Path:
         f'CONFIG_DIR="{etc_dir}"',
     )
     content = content.replace(
-        'SERVICE_FILE="/etc/systemd/system/${{SERVICE_NAME}}.service"',
+        'SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"',
         f'SERVICE_FILE="{tmp_path}/remoteos-mcp.service"',
     )
 
@@ -88,8 +85,22 @@ def _prepare_macos_installer(tmp_path: Path) -> Path:
         f'CONFIG_DIR="{config_dir}"',
     )
     content = content.replace(
-        'PLIST_PATH="$HOME/Library/LaunchAgents/${{PLIST_LABEL}}.plist"',
+        'PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"',
         f'PLIST_PATH="{launch_dir}/com.remoteos-mcp.plist"',
+    )
+    # The macOS auth-key generation uses `tr -dc ... | head -c 32` which
+    # causes SIGPIPE+pipefail on Linux (works on macOS).  Replace with the
+    # Python approach the Linux installer already uses.
+    content = content.replace(
+        "AUTH_KEY=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)",
+        'AUTH_KEY=$("$PYTHON" -c "import secrets,string; '
+        "print(''.join(secrets.choice(string.ascii_letters+string.digits) "
+        'for _ in range(32)))")',
+    )
+    # mkdir for LaunchAgents — ensure directory exists under tmp HOME
+    content = content.replace(
+        'mkdir -p "$HOME/Library/LaunchAgents"',
+        f'mkdir -p "{launch_dir}"',
     )
 
     script = tmp_path / "install-macos.sh"
