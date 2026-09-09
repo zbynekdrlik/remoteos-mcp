@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[dev]'
+      - run: ruff check src/ tests/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      - run: pytest
+
+  version-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install packaging
+      - name: Check PR version is strictly greater than base
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          PR_VERSION=$(python3 -c "
+          import re, pathlib
+          text = pathlib.Path('pyproject.toml').read_text()
+          m = re.search(r'^version\s*=\s*\"([^\"]+)\"', text, re.MULTILINE)
+          print(m.group(1))
+          ")
+          BASE_VERSION=$(git show origin/${{ github.base_ref }}:pyproject.toml | python3 -c "
+          import re, sys
+          text = sys.stdin.read()
+          m = re.search(r'^version\s*=\s*\"([^\"]+)\"', text, re.MULTILINE)
+          print(m.group(1))
+          ")
+          echo "PR version:   $PR_VERSION"
+          echo "Base version: $BASE_VERSION"
+          python3 -c "
+          from packaging.version import Version
+          pr = Version('$PR_VERSION')
+          base = Version('$BASE_VERSION')
+          if not (pr > base):
+              raise SystemExit(f'FAIL: PR version {pr} is not strictly greater than base version {base}')
+          print(f'OK: {pr} > {base}')
+          "
