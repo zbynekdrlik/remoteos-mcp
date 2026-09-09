@@ -3,9 +3,14 @@
 Tests that install-linux.sh:
 (a) Aborts BEFORE any install when root filesystem is mounted read-only.
 (b) Detects version mismatch between pip-installed package and /health endpoint.
+(d) Uses --force-reinstall (not --ignore-installed) for reliable upgrades.
 
 Also tests install.sh (macOS):
 (c) Detects version mismatch between pip-installed package and /health endpoint.
+(d) Uses --force-reinstall (not --ignore-installed) for reliable upgrades.
+
+Also tests install.ps1 (Windows):
+(d) Uses --force-reinstall for reliable upgrades.
 
 All tests run the real installer under bash with a FAKE PATH of shim scripts —
 no root, no network, no system changes.  Hermetic via tmp_path.
@@ -21,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER_LINUX = ROOT / "install-linux.sh"
 INSTALLER_MACOS = ROOT / "install.sh"
+INSTALLER_WINDOWS = ROOT / "install.ps1"
 
 
 # ---------------------------------------------------------------------------
@@ -467,4 +473,49 @@ exit 0
         assert installed_ver in output and health_ver in output, (
             f"Expected both '{installed_ver}' and '{health_ver}' in "
             f"mismatch output.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# (d) All installers must use --force-reinstall (not --ignore-installed)
+# ---------------------------------------------------------------------------
+
+
+class TestForceReinstall:
+    """Installers must use --force-reinstall to ensure pip always re-clones
+    from git.  Using --ignore-installed does NOT force a re-download when an
+    older version is already installed (the imag.lan dev8-instead-of-dev13
+    incident, #12 live deploy 2026-09-09)."""
+
+    def test_linux_installer_uses_force_reinstall(self) -> None:
+        """install-linux.sh pip line must contain --force-reinstall."""
+        content = INSTALLER_LINUX.read_text()
+        assert "--force-reinstall" in content, (
+            "install-linux.sh must use --force-reinstall in its pip install "
+            "command to ensure upgrades always fetch the latest from git"
+        )
+
+    def test_linux_installer_no_ignore_installed(self) -> None:
+        """install-linux.sh must NOT use --ignore-installed (insufficient for
+        git-based upgrades)."""
+        content = INSTALLER_LINUX.read_text()
+        assert "--ignore-installed" not in content, (
+            "install-linux.sh must not use --ignore-installed — it does not "
+            "force pip to re-clone from git when an older version exists"
+        )
+
+    def test_macos_installer_uses_force_reinstall(self) -> None:
+        """install.sh (macOS) pip line must contain --force-reinstall."""
+        content = INSTALLER_MACOS.read_text()
+        assert "--force-reinstall" in content, (
+            "install.sh (macOS) must use --force-reinstall in its pip install "
+            "command to ensure upgrades always fetch the latest from git"
+        )
+
+    def test_windows_installer_uses_force_reinstall(self) -> None:
+        """install.ps1 pip line must contain --force-reinstall."""
+        content = INSTALLER_WINDOWS.read_text()
+        assert "--force-reinstall" in content, (
+            "install.ps1 must use --force-reinstall in its pip install "
+            "command to ensure upgrades always fetch the latest from git"
         )
