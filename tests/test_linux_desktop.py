@@ -19,6 +19,7 @@ import types
 from pathlib import Path
 
 import pytest
+
 from remoteos.platform.linux import desktop as d
 
 _MSG = "Not available on headless Linux (no display)"

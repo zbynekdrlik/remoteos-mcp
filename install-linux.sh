@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # RemoteOS MCP - One-line installer for Linux (systemd)
-# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh | sudo bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash
 set -euo pipefail
 
 PORT=8092
@@ -100,6 +100,7 @@ fi
 
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
+export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
 "$PYTHON" -m pip install --no-cache-dir --break-system-packages --ignore-installed \
     "git+https://github.com/zbynekdrlik/remoteos-mcp.git" 2>&1 | tail -3 || true
 
@@ -240,5 +241,5 @@ echo ""
 echo "  Then restart Claude Code."
 echo ""
 echo "  To uninstall later:"
-echo "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/uninstall-linux.sh | sudo bash"
+echo "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall-linux.sh | sudo bash"
 echo ""

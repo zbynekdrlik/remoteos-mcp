@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # RemoteOS MCP - Uninstaller for Linux (systemd)
-# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/uninstall-linux.sh | sudo bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall-linux.sh | sudo bash
 set -euo pipefail
 
 SERVICE_NAME="remoteos-mcp"
