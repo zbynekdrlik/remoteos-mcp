@@ -781,7 +781,7 @@ git commit -m "Fix disk label in GetSystemInfo for non-Windows platforms"
 ```bash
 #!/usr/bin/env bash
 # RemoteOS MCP - One-line installer for Linux (systemd)
-# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh | sudo bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash
 set -euo pipefail
 
 PORT=8092
@@ -963,7 +963,7 @@ echo "    sudo systemctl restart $SERVICE_NAME"
 echo "    sudo journalctl -u $SERVICE_NAME -f"
 echo ""
 echo "  To uninstall later:"
-echo "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/uninstall-linux.sh | sudo bash"
+echo "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall-linux.sh | sudo bash"
 echo ""
 ```
 
@@ -992,7 +992,7 @@ git commit -m "Add Linux installer with systemd service setup"
 ```bash
 #!/usr/bin/env bash
 # RemoteOS MCP - Uninstaller for Linux
-# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/uninstall-linux.sh | sudo bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall-linux.sh | sudo bash
 set -euo pipefail
 
 SERVICE_NAME="remoteos-mcp"
@@ -1103,7 +1103,7 @@ Add Linux installer section. Change the existing macOS section header area to in
 ## Installing / Upgrading on Linux machines
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash
 ```
 
 Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and other systemd-based distributions.
@@ -1131,7 +1131,7 @@ git push origin dev
 - [ ] **Step 2: Install on presenter.lan via SSH**
 
 ```bash
-sshpass -p 'newlevel' ssh newlevel@presenter.lan "curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh | sudo -S bash <<< 'newlevel'"
+sshpass -p 'newlevel' ssh newlevel@presenter.lan "curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo -S bash <<< 'newlevel'"
 ```
 
 Wait for installer output showing the auth key and IP.

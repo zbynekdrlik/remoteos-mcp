@@ -1,5 +1,4 @@
-.claude/*
-!.claude/skills/
+.claude/
 .mcp.json
 __pycache__/
 .venv-test/
