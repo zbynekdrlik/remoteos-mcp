@@ -54,6 +54,8 @@ curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/insta
 
 Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and other systemd-based distributions.
 
+**Gotcha — cam boxes can boot with a read-only rootfs** (fstab `ro`). The installer now refuses to run until remounted rw + fstab fixed (`mount -o remount,rw /` then edit `/etc/fstab`). Both Linux and macOS installers also verify after restart that the `/health` endpoint reports the version just installed — a stale pre-existing install is caught and reported as failure.
+
 ## Repository structure
 
 - `install.ps1` / `uninstall.ps1` — Windows installer scripts
