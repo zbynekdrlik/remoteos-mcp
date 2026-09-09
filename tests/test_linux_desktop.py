@@ -24,6 +24,26 @@ from remoteos.platform.linux import desktop as d
 
 _MSG = "Not available on headless Linux (no display)"
 
+# ---------------------------------------------------------------------------
+# Autouse fixture: ensure no test depends on the CI runner's real display env
+# ---------------------------------------------------------------------------
+
+_DISPLAY_ENV_VARS = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_SESSION_TYPE",
+    "XAUTHORITY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_display_env(monkeypatch):
+    """Remove display-related env vars so tests are hermetic on any runner."""
+    for var in _DISPLAY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
 
 # ---------------------------------------------------------------------------
 # 1) Pure session detection logic
@@ -778,3 +798,33 @@ def test_capture_png_import_fallback_returns_data(monkeypatch):
 
     monkeypatch.setattr(d, "_run_x", _fake_run_x)
     assert d.capture_png() == b"\x89PNG-from-imagemagick"
+
+
+# ---------------------------------------------------------------------------
+# #13 CI fix — _guess_xauthority must tolerate unreadable home directories
+# ---------------------------------------------------------------------------
+
+
+def test_guess_xauthority_tolerates_unreadable_home(tmp_path, monkeypatch):
+    """Regression (#13 CI): _guess_xauthority must not raise PermissionError
+    when a candidate Xauthority path sits inside a directory the process cannot
+    read (e.g. /home/packer on a GitHub runner where uid 1000 = packer but the
+    runner process runs as a different user).
+
+    Python's Path.exists() does NOT ignore EACCES (errno 13) — it raises
+    PermissionError, crashing the entire session-detection path.
+    """
+    restricted = tmp_path / "restricted_home"
+    restricted.mkdir(mode=0o000)
+
+    import pwd as pwd_mod
+
+    FakeEntry = type("FakeEntry", (), {"pw_dir": str(restricted)})
+    monkeypatch.setattr(pwd_mod, "getpwnam", lambda name: FakeEntry())
+
+    # _guess_xauthority must NOT raise — it should return None gracefully
+    result = d._guess_xauthority(99999, "fakepacker")
+    assert result is None
+
+    # Cleanup: restore permissions so pytest's tmp_path cleanup succeeds
+    restricted.chmod(0o755)
