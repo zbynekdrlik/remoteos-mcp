@@ -122,7 +122,7 @@ All other tools: Shell, Snapshot, Click, Type, Move, Scroll, Shortcut, App, Focu
 
 ## macOS Installer (`install.sh`)
 
-One-liner: `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.sh | bash`
+One-liner: `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.sh | bash`
 
 Steps:
 1. **Python check** — needs 3.10+. macOS ships 3.9.6. If too old: install via `brew install python@3.12` or exit with instructions.
