@@ -137,6 +137,29 @@ launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
 echo "        LaunchAgent loaded: $PLIST_LABEL"
 
+# --- Post-install: verify service reports the correct version ---
+echo "  [+]   Verifying installed version matches running service..."
+HEALTH_OK=false
+for _attempt in $(seq 1 6); do
+    HEALTH_JSON=$(curl -sf "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)
+    if [[ -n "$HEALTH_JSON" ]]; then
+        HEALTH_VER=$(echo "$HEALTH_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)
+        if [[ "$HEALTH_VER" == "$PKG_VER" ]]; then
+            HEALTH_OK=true
+            echo "        Health check OK: v${HEALTH_VER}"
+            break
+        elif [[ -n "$HEALTH_VER" ]]; then
+            echo "  [X] Installed ${PKG_VER} but service reports ${HEALTH_VER}"
+            exit 1
+        fi
+    fi
+    sleep 5
+done
+if [[ "$HEALTH_OK" != "true" ]]; then
+    echo "  [X] Health endpoint (http://127.0.0.1:${PORT}/health) did not respond within 30s"
+    exit 1
+fi
+
 # --- [5/5] Get network info ---
 echo "  [5/5] Getting network info..."
 LOCAL_IP=$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "MAC_IP")
