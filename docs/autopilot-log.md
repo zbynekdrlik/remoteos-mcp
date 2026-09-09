@@ -9,6 +9,7 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Files added:** `.github/workflows/ci.yml` (69 lines) — 3 jobs: lint (ruff check), test (pytest), version-check (PR-only, packaging.version comparison).
 - **Key decisions:** Single workflow file (vs separate per-job — unnecessary at this scale). Concurrency group added to auto-cancel superseded runs. Python 3.12 on ubuntu-latest. Version-check uses `packaging.version.Version` for PEP 440 comparison.
 - **Local verification:** ruff check: 0 errors (after fixing pre-existing I001). pytest: 71 passed in 4.45s.
+- **CI fix (post-merge):** First CI run failed: `test_detect_non_root_still_uses_env` raised `PermissionError: /home/packer/.Xauthority` on GitHub runner. Root cause: `_guess_xauthority` calls `Path(c).exists()` which does NOT ignore EACCES (errno 13); on the runner uid 1000 = `packer` whose home is mode 0700. Fix: `3939e6a` [red] regression test + autouse env-cleaning fixture; `591e581` [green] catch OSError in `_guess_xauthority`. 72 tests pass.
 
 ## 2026-07-03 — #6 Linux X11 desktop provider
 
