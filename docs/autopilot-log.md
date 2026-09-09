@@ -71,3 +71,12 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - `install.sh`: POST-INSTALL version self-check (same as Linux).
   - `.claude/skills/install/SKILL.md`: gotcha about cam boxes booting with read-only rootfs.
 - **Skipped:** `install.ps1` version self-check (not trivially portable to PowerShell — listed as follow-up candidate).
+
+## 2026-09-09 — #12 Installer --force-reinstall fix + deploy dev13
+
+- **Task:** Deploy 0.7.0.dev13 to imag.lan, cam1.lan, cam2.lan. Fix installer bug discovered during deploy.
+- **Bug found:** Installer's `--ignore-installed` flag does not force pip to re-clone from git URL when an older version is already installed. On imag.lan (had dev8) and cam2.lan (had dev12), the canonical installer installed the OLD version instead of current main (dev13).
+- **Fix:** Replaced `--ignore-installed` with `--force-reinstall` in all 3 installers; pinned `@main` in git URL for Linux/macOS.
+- **Commits:** `7387132` version bump 0.7.0.dev14; `9507976` [red] 4 static analysis tests; `5c39537` [green] fix: --force-reinstall in all installers.
+- **Tests:** 85/85 pass, ruff clean.
+- **Deploy results:** All 3 boxes at 0.7.0.dev13, health OK, MCP handshake 200, systemctl active, tokens preserved.

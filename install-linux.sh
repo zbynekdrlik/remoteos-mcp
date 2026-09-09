@@ -114,8 +114,8 @@ export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mc
 # failed install (the cam1 incident: a read-only-fs failure left a partial
 # checkout in /tmp that the next run resolved instead of fetching fresh).
 PIP_TMPDIR=$(mktemp -d)
-TMPDIR="$PIP_TMPDIR" "$PYTHON" -m pip install --no-cache-dir --break-system-packages --ignore-installed \
-    "git+https://github.com/zbynekdrlik/remoteos-mcp.git" 2>&1 | tail -3 || true
+TMPDIR="$PIP_TMPDIR" "$PYTHON" -m pip install --no-cache-dir --break-system-packages --force-reinstall \
+    "git+https://github.com/zbynekdrlik/remoteos-mcp.git@main" 2>&1 | tail -3 || true
 rm -rf "$PIP_TMPDIR"
 
 # Verify installation

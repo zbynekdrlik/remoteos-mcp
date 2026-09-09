@@ -51,8 +51,8 @@ fi
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
 export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
-"$PYTHON" -m pip install --no-cache-dir --break-system-packages \
-    "git+https://github.com/zbynekdrlik/remoteos-mcp.git" 2>&1 | tail -1 || true
+"$PYTHON" -m pip install --no-cache-dir --break-system-packages --force-reinstall \
+    "git+https://github.com/zbynekdrlik/remoteos-mcp.git@main" 2>&1 | tail -1 || true
 
 # Verify installation
 PKG_VER=$("$PYTHON" -m pip show remoteos-mcp 2>/dev/null | grep "^Version:" | awk '{print $2}' || true)
