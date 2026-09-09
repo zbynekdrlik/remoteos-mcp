@@ -41,3 +41,14 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - Installer graphical branch adds `ffmpeg python3-pyatspi gir1.2-atspi-2.0 python3-gi`.
 - **Live verification:** imag-nb (X11) — dev7, `[tools: 40/44]`, `Linux session: x11`. ScreenRecord: 3s@5fps → valid GIF89a 640x360 **15 frames** 3000ms. AnnotatedSnapshot (real `__main__` tool path): gnome-calculator → **34 elements**, boxes pixel-aligned on every button (C ( ) mod π, 7-9, 4-6, 1-3, 0 . = + − ×, etc.). cam1 (headless, root) — dev7, `[tools: 24/44]` unchanged, both tools return the exact stub, `/health`=0.7.0.dev7, service healthy. Zero regression.
 - **Follow-ups:** none dropped. Wayland still a non-goal.
+
+## 2026-09-09 — #12 Pin transitive dependencies
+
+- **Issue:** #12 Pin transitive dependencies in pyproject.toml (currently >= floors) for reproducible fleet installs.
+- **Commits:** `675e664` version bump 0.7.0.dev10; `f870e0d` pin deps + constraints.txt + installer PIP_CONSTRAINT + master→main fix + tests (#12).
+- **Tests:** `tests/test_dependency_pins.py` (6 new): exact-pin format, no-floor-pins, constraints file existence/format/direct-dep coverage. Total: 77 pass, ruff clean.
+- **Key decisions:**
+  - Two-layer pinning: direct deps exact `==` in pyproject.toml + committed `constraints.txt` (uv-generated, universal cross-platform) for transitive graph.
+  - All 3 installers set `PIP_CONSTRAINT` env var to raw GitHub URL of constraints.txt before pip install.
+  - install.ps1 `archive/master.zip` returns HTTP 302→main; corrected all `master` refs to `main` across all installers, uninstallers, and README.
+  - Clean-venv install verified: `PIP_CONSTRAINT=constraints.txt pip install . && pip check` → clean.

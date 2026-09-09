@@ -1,5 +1,5 @@
 # RemoteOS MCP - One-line installer
-# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 $Port = 8092
@@ -135,14 +135,15 @@ if (Test-Path $oldConfigDir) {
 }
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
-& $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/master.zip" 2>&1 | Out-Null
+$env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
+& $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" 2>&1 | Out-Null
 $pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
 if ($pipShow -match "Version: (.+)") {
     Write-Host "        Installed v$($Matches[1].Trim())" -ForegroundColor Green
 } else {
     Write-Host "        [X] pip install failed" -ForegroundColor Red
-    Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/master.zip" -ForegroundColor Yellow
+    Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" -ForegroundColor Yellow
     return
 }
 
@@ -351,5 +352,5 @@ Write-Host ""
 Write-Host "  Then restart Claude Code." -ForegroundColor Gray
 Write-Host ""
 Write-Host "  To uninstall later:" -ForegroundColor Gray
-Write-Host "  irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/uninstall.ps1 | iex" -ForegroundColor Gray
+Write-Host "  irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps1 | iex" -ForegroundColor Gray
 Write-Host ""
