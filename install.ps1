@@ -144,9 +144,11 @@ schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
 Get-Process -ErrorAction SilentlyContinue | Where-Object {
     $_.MainWindowTitle -match "RemoteOS|WinRemote"
 } | Stop-Process -Force -ErrorAction SilentlyContinue
-# Kill python processes running remoteos or winremote modules
+# Kill ALL processes related to remoteos/winremote (python server, CMD batch
+# restart loop, wscript VBS launcher) — the CMD batch has a restart loop that
+# will re-launch python within 10s if only python is killed.
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -match "remoteos|winremote" -and $_.Name -match "python"
+    $_.CommandLine -match "remoteos|winremote"
 } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
