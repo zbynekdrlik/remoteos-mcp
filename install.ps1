@@ -144,11 +144,15 @@ schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
 Get-Process -ErrorAction SilentlyContinue | Where-Object {
     $_.MainWindowTitle -match "RemoteOS|WinRemote"
 } | Stop-Process -Force -ErrorAction SilentlyContinue
-# Kill ALL processes related to remoteos/winremote (python server, CMD batch
-# restart loop, wscript VBS launcher) — the CMD batch has a restart loop that
-# will re-launch python within 10s if only python is killed.
+# Kill ALL processes related to the running server: the python server process,
+# the CMD batch restart loop (start-remoteos.bat), and the wscript VBS launcher.
+# The CMD batch has a restart loop that will re-launch python within 10s if
+# only python is killed.  Match specific command patterns to avoid killing the
+# installer's own PowerShell process (whose CommandLine contains "remoteos"
+# in the download URL).
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -match "remoteos|winremote"
+    ($_.CommandLine -match "-m remoteos" -or $_.CommandLine -match "start-remoteos" -or
+     $_.CommandLine -match "-m winremote" -or $_.CommandLine -match "start-winremote")
 } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
