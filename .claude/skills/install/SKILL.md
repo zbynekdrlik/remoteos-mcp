@@ -58,6 +58,16 @@ Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and
 
 **Gotcha — pip's `--ignore-installed` does not force a re-clone from a git URL** (discovered 2026-09-09 deploying dev13 to imag.lan/cam2.lan). When an older version of remoteos-mcp is already installed, pip with `--ignore-installed` may reuse the existing package instead of fetching the latest from the git URL. All three installers now use `--force-reinstall` instead, which uninstalls the old version and installs fresh from git. On some boxes (cam2), even `--force-reinstall git+https://...` can fail due to deeper pip git caching — the workaround is a fresh `git clone` + install from the local path. The `@main` branch is now pinned in the git URL for Linux/macOS installers.
 
+**Gotcha — Windows `--force-reinstall` from archive URL corrupts fastmcp** (discovered 2026-09-10 deploying dev14 to resolume/iem). `pip install --force-reinstall https://...archive/main.zip` can delete fastmcp's `__init__.py`, leaving a namespace package that cannot import `FastMCP`. The Windows installer now verifies the fastmcp import after pip install and repairs it with a targeted `pip install --force-reinstall fastmcp==4.0.3` if broken. This does NOT affect the Linux/macOS installers (they use `git+https://` URLs).
+
+**Gotcha — some Windows SSH servers reject piped PowerShell one-liners** (iem.lan, 2026-09-10). The `irm ... | iex` one-liner fails with `exec request failed on channel 0` when run via SSH exec channel on some boxes. Workaround: download the script first, then run it with `-File`:
+```powershell
+ssh user@box 'powershell -NoProfile -Command "Invoke-WebRequest -Uri https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 -OutFile C:\Users\user\install-remoteos.ps1"'
+ssh user@box 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\install-remoteos.ps1'
+```
+
+**Gotcha — server won't start from SSH session 0** (Windows, all boxes). The VBS hidden launcher uses `WScript.Shell.Run` which needs a desktop session. After deploying over SSH, trigger the scheduled task: `schtasks /Run /TN RemoteOSMCP` (it runs in the desktop user's interactive session). All three installers now have a post-install health self-check (~30s poll) that verifies the server actually started with the correct version.
+
 ## Repository structure
 
 - `install.ps1` / `uninstall.ps1` — Windows installer scripts
