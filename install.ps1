@@ -147,10 +147,13 @@ Get-Process -ErrorAction SilentlyContinue | Where-Object {
 # Kill ALL processes related to the running server: the python server process,
 # the CMD batch restart loop (start-remoteos.bat), and the wscript VBS launcher.
 # The CMD batch has a restart loop that will re-launch python within 10s if
-# only python is killed.  Match specific command patterns to avoid killing the
-# installer's own PowerShell process (whose CommandLine contains "remoteos"
-# in the download URL).
+# only python is killed.  Exclude the current process AND its parent — the
+# installer's own source code (and the SSH cmd.exe wrapper carrying it) contain
+# these patterns as string literals and would match themselves.
+$myPid = $PID
+$parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId = $myPid" -ErrorAction SilentlyContinue).ParentProcessId
 Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ProcessId -ne $myPid -and $_.ProcessId -ne $parentPid -and
     ($_.CommandLine -match "-m remoteos" -or $_.CommandLine -match "start-remoteos" -or
      $_.CommandLine -match "-m winremote" -or $_.CommandLine -match "start-winremote")
 } | ForEach-Object {
