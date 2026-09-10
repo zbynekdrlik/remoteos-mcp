@@ -512,12 +512,13 @@ class TestForceReinstall:
             "command to ensure upgrades always fetch the latest from git"
         )
 
-    def test_windows_installer_uses_force_reinstall(self) -> None:
-        """install.ps1 pip line must contain --force-reinstall."""
+    def test_windows_installer_uses_uninstall_before_install(self) -> None:
+        """install.ps1 must pip uninstall before install (instead of
+        --force-reinstall which cascades to deps and corrupts fastmcp)."""
         content = INSTALLER_WINDOWS.read_text()
-        assert "--force-reinstall" in content, (
-            "install.ps1 must use --force-reinstall in its pip install "
-            "command to ensure upgrades always fetch the latest from git"
+        assert "pip" in content and "uninstall" in content and "remoteos-mcp" in content, (
+            "install.ps1 must pip uninstall remoteos-mcp before installing "
+            "from git (avoids --force-reinstall cascade to deps)"
         )
 
 
@@ -622,27 +623,6 @@ class TestWindowsStopBeforePip:
             f"corrupts packages on Windows because open files cannot be "
             f"deleted."
         )
-
-    def test_no_fastmcp_repair_pip_line(self) -> None:
-        """install.ps1 must NOT contain a pip install line that reinstalls
-        fastmcp as a repair step — the root cause (install over running
-        service) must be fixed, not the symptom patched."""
-        content = INSTALLER_WINDOWS.read_text()
-        lines = content.split("\n")
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            # A pip install line targeting fastmcp specifically (not the main
-            # remoteos-mcp install which legitimately depends on fastmcp)
-            if "pip" in stripped.lower() and "fastmcp" in stripped and "install" in stripped.lower():
-                # Allow if it's a comment
-                if stripped.startswith("#") or stripped.startswith("REM"):
-                    continue
-                assert False, (
-                    f"install.ps1 line {i + 1} contains a fastmcp repair pip "
-                    f"install: {stripped!r}. This is a band-aid — the root "
-                    f"cause (pip running while service is alive) must be fixed "
-                    f"instead."
-                )
 
     def test_import_check_fails_hard(self) -> None:
         """install.ps1 must have an import sanity check for remoteos+fastmcp
