@@ -519,3 +519,141 @@ class TestForceReinstall:
             "install.ps1 must use --force-reinstall in its pip install "
             "command to ensure upgrades always fetch the latest from git"
         )
+
+
+# ---------------------------------------------------------------------------
+# (e) Windows: post-install health/version self-check
+# ---------------------------------------------------------------------------
+
+
+class TestWindowsVersionSelfCheck:
+    """install.ps1 must verify the running service reports the correct version
+    after the scheduled task starts — the same self-check Linux/macOS have."""
+
+    def test_windows_installer_has_health_check(self) -> None:
+        """install.ps1 must poll the health endpoint after starting the server."""
+        content = INSTALLER_WINDOWS.read_text()
+        assert "health" in content.lower(), (
+            "install.ps1 must poll the /health endpoint after starting the "
+            "server to verify the installed version matches the running version"
+        )
+        # Must use Invoke-RestMethod or Invoke-WebRequest for health check
+        assert (
+            "Invoke-RestMethod" in content or "Invoke-WebRequest" in content
+        ), (
+            "install.ps1 must use Invoke-RestMethod or Invoke-WebRequest to "
+            "poll the health endpoint"
+        )
+
+    def test_windows_installer_compares_versions(self) -> None:
+        """install.ps1 must compare installed version with health version and
+        exit non-zero on mismatch."""
+        content = INSTALLER_WINDOWS.read_text()
+        # Must read installed version via importlib.metadata
+        assert "importlib.metadata" in content or "pip show" in content, (
+            "install.ps1 must read the installed package version (via "
+            "importlib.metadata or pip show) to compare with /health"
+        )
+        # Must exit on mismatch
+        assert "exit 1" in content or "exit(1)" in content, (
+            "install.ps1 must exit non-zero when installed version does not "
+            "match the running service version"
+        )
+
+    def test_windows_installer_exits_on_health_timeout(self) -> None:
+        """install.ps1 must exit non-zero if health endpoint does not respond."""
+        content = INSTALLER_WINDOWS.read_text()
+        # Must have a timeout/retry loop AND exit on failure
+        assert "30" in content or "attempt" in content.lower(), (
+            "install.ps1 must poll health with a bounded timeout (~30s)"
+        )
+        # The mismatch/timeout message pattern
+        assert "[X]" in content and "health" in content.lower(), (
+            "install.ps1 must print an [X] error message when health check "
+            "fails (mismatch or timeout)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# (f) Windows: stop running service BEFORE pip install, fail-hard import check
+# ---------------------------------------------------------------------------
+
+
+class TestWindowsStopBeforePip:
+    """install.ps1 must stop the running service BEFORE pip install.
+    Running pip --force-reinstall while the old python process has fastmcp's
+    files open on Windows leaves a corrupt package (no __init__.py) because
+    Windows cannot delete open files.  The fix is to stop the service first,
+    not to repair the corruption after."""
+
+    def test_stop_precedes_pip_install(self) -> None:
+        """The stop-task/kill-process block must appear textually BEFORE the
+        pip install command in install.ps1."""
+        content = INSTALLER_WINDOWS.read_text()
+        # Find position of process kill (the definitive stop)
+        stop_pos = content.find("Stop-Process")
+        assert stop_pos != -1, (
+            "install.ps1 must contain a Stop-Process call to kill the old "
+            "server before pip install"
+        )
+        # Find position of the actual pip install COMMAND (starts with &),
+        # not comments/error messages that mention "pip install"
+        lines = content.split("\n")
+        pip_line_offset = 0
+        pip_found = False
+        for line in lines:
+            stripped = line.strip()
+            if (
+                "pip install" in stripped
+                and not stripped.startswith("#")
+                and not stripped.startswith("REM")
+                and "Write-Host" not in stripped
+                and ("& $python" in stripped or "pip install" in stripped)
+                and "--force-reinstall" in stripped
+            ):
+                pip_found = True
+                break
+            pip_line_offset += len(line) + 1  # +1 for newline
+        assert pip_found, "install.ps1 must contain a pip install command"
+        assert stop_pos < pip_line_offset, (
+            f"install.ps1 must stop the running server (Stop-Process at char "
+            f"{stop_pos}) BEFORE running pip install (at char "
+            f"{pip_line_offset}). Running pip while the old service is alive "
+            f"corrupts packages on Windows because open files cannot be "
+            f"deleted."
+        )
+
+    def test_no_fastmcp_repair_pip_line(self) -> None:
+        """install.ps1 must NOT contain a pip install line that reinstalls
+        fastmcp as a repair step — the root cause (install over running
+        service) must be fixed, not the symptom patched."""
+        content = INSTALLER_WINDOWS.read_text()
+        lines = content.split("\n")
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # A pip install line targeting fastmcp specifically (not the main
+            # remoteos-mcp install which legitimately depends on fastmcp)
+            if "pip" in stripped.lower() and "fastmcp" in stripped and "install" in stripped.lower():
+                # Allow if it's a comment
+                if stripped.startswith("#") or stripped.startswith("REM"):
+                    continue
+                assert False, (
+                    f"install.ps1 line {i + 1} contains a fastmcp repair pip "
+                    f"install: {stripped!r}. This is a band-aid — the root "
+                    f"cause (pip running while service is alive) must be fixed "
+                    f"instead."
+                )
+
+    def test_import_check_fails_hard(self) -> None:
+        """install.ps1 must have an import sanity check for remoteos+fastmcp
+        that exits non-zero on failure (never repairs)."""
+        content = INSTALLER_WINDOWS.read_text()
+        # Must import both remoteos and fastmcp
+        assert "import remoteos" in content or "import fastmcp" in content, (
+            "install.ps1 must have a post-install import sanity check for "
+            "remoteos and/or fastmcp"
+        )
+        # The import check block must contain exit 1 (fail hard)
+        assert "exit 1" in content, (
+            "install.ps1 import check must exit 1 on failure — never repair"
+        )

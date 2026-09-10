@@ -58,6 +58,16 @@ Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and
 
 **Gotcha — pip's `--ignore-installed` does not force a re-clone from a git URL** (discovered 2026-09-09 deploying dev13 to imag.lan/cam2.lan). When an older version of remoteos-mcp is already installed, pip with `--ignore-installed` may reuse the existing package instead of fetching the latest from the git URL. All three installers now use `--force-reinstall` instead, which uninstalls the old version and installs fresh from git. On some boxes (cam2), even `--force-reinstall git+https://...` can fail due to deeper pip git caching — the workaround is a fresh `git clone` + install from the local path. The `@main` branch is now pinned in the git URL for Linux/macOS installers.
 
+**Gotcha — on Windows, pip must not run while the old server is alive** (discovered 2026-09-10 deploying dev14 to resolume/iem). `pip install --force-reinstall` uninstalls and reinstalls all dependencies; on Windows, if the old python process (running `python -m remoteos`) still has the package files open, pip cannot delete them — fastmcp's `__init__.py` gets silently dropped, leaving a namespace package that cannot import `FastMCP`. Linux does not have this problem (POSIX unlink works on open files). The fix: the installer now stops the scheduled task (`schtasks /End`) and kills all running remoteos python processes BEFORE pip install, and verifies the import (`import remoteos, fastmcp`) after install — a broken import fails the installer hard (`exit 1`), never repairs.
+
+**Gotcha — some Windows SSH servers reject piped PowerShell one-liners** (iem.lan, 2026-09-10). The `irm ... | iex` one-liner fails with `exec request failed on channel 0` when run via SSH exec channel on some boxes. Workaround: download the script first, then run it with `-File`:
+```powershell
+ssh user@box 'powershell -NoProfile -Command "Invoke-WebRequest -Uri https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 -OutFile C:\Users\user\install-remoteos.ps1"'
+ssh user@box 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\install-remoteos.ps1'
+```
+
+**Gotcha — server won't start from SSH session 0** (Windows, all boxes). The VBS hidden launcher uses `WScript.Shell.Run` which needs a desktop session. After deploying over SSH, trigger the scheduled task: `schtasks /Run /TN RemoteOSMCP` (it runs in the desktop user's interactive session). All three installers now have a post-install health self-check (~30s poll) that verifies the server actually started with the correct version.
+
 ## Repository structure
 
 - `install.ps1` / `uninstall.ps1` — Windows installer scripts

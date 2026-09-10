@@ -135,6 +135,29 @@ if (Test-Path $oldConfigDir) {
 }
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
+# Stop running server BEFORE pip install — pip --force-reinstall on Windows
+# cannot delete files held open by the running python process, which corrupts
+# packages (e.g. fastmcp's __init__.py gets deleted, leaving a namespace package).
+Write-Host "        Stopping running server..." -ForegroundColor Gray
+schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
+# Kill by window title (catches python/cmd with the batch title)
+Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.MainWindowTitle -match "RemoteOS|WinRemote"
+} | Stop-Process -Force -ErrorAction SilentlyContinue
+# Kill python processes running remoteos or winremote modules
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -match "remoteos|winremote" -and $_.Name -match "python"
+} | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+}
+# Kill server by port (fallback — catches anything on our port)
+$portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
+    ($_.ToString().Trim() -split "\s+")[-1]
+}) | Select-Object -First 1
+if ($portPid) {
+    Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Seconds 3
 $env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
 & $python -m pip install --no-cache-dir --force-reinstall "https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" 2>&1 | Out-Null
 $pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
@@ -145,6 +168,13 @@ if ($pipShow -match "Version: (.+)") {
     Write-Host "        [X] pip install failed" -ForegroundColor Red
     Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" -ForegroundColor Yellow
     return
+}
+# Sanity check: verify remoteos and fastmcp can be imported (fail hard, never repair)
+$importCheck = & $python -c "import remoteos, fastmcp; from fastmcp import FastMCP" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "        [X] Import check failed — remoteos or fastmcp broken after install" -ForegroundColor Red
+    Write-Host "        $importCheck" -ForegroundColor Red
+    exit 1
 }
 
 # --- Generate or preserve auth key ---
@@ -282,28 +312,6 @@ $localIP = (Get-NetIPAddress -AddressFamily IPv4 |
 if (-not $localIP) { $localIP = "WINDOWS_IP" }
 $hostName = $env:COMPUTERNAME.ToLower()
 
-# --- Stop old server processes ---
-Write-Host ""
-Write-Host "  Stopping old server..." -ForegroundColor Cyan
-# Kill by window title (catches python/cmd with the batch title)
-Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.MainWindowTitle -match "RemoteOS|WinRemote"
-} | Stop-Process -Force -ErrorAction SilentlyContinue
-# Kill python processes running remoteos or winremote modules
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -match "remoteos|winremote" -and $_.Name -match "python"
-} | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-}
-# Kill server by port (fallback — catches anything on our port)
-$portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
-    ($_.ToString().Trim() -split "\s+")[-1]
-}) | Select-Object -First 1
-if ($portPid) {
-    Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
-}
-Start-Sleep -Seconds 3
-
 # --- Clean up old config from other users (if installer was run under wrong user before) ---
 $currentUserConfig = "$env:USERPROFILE\.remoteos-mcp"
 if ($currentUserConfig -ne $ConfigDir -and (Test-Path $currentUserConfig)) {
@@ -316,20 +324,29 @@ Write-Host "  Starting server..." -ForegroundColor Cyan
 Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-remoteos.vbs`""
 Start-Sleep -Seconds 5
 
-# Test if it's running
-$running = $false
-try {
-    $response = Invoke-WebRequest -Uri "http://localhost:$Port" -Method GET -TimeoutSec 5 -ErrorAction SilentlyContinue
-    $running = $true
-} catch {
-    # Even a 404/401 means the server is up
-    if ($_.Exception.Response) { $running = $true }
+# --- Post-install: verify service reports the correct version ---
+Write-Host "  Verifying installed version matches running service..." -ForegroundColor Cyan
+$PKG_VER = & $python -c "import importlib.metadata as m; print(m.version('remoteos-mcp'))" 2>&1 | Out-String
+$PKG_VER = $PKG_VER.Trim()
+$healthOk = $false
+for ($attempt = 1; $attempt -le 6; $attempt++) {
+    try {
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5 -ErrorAction Stop
+        $healthVer = $health.version
+        if ($healthVer -eq $PKG_VER) {
+            $healthOk = $true
+            Write-Host "        Health check OK: v${healthVer}" -ForegroundColor Green
+            break
+        } elseif ($healthVer) {
+            Write-Host "  [X] Installed ${PKG_VER} but service reports ${healthVer}" -ForegroundColor Red
+            exit 1
+        }
+    } catch {}
+    Start-Sleep -Seconds 5
 }
-
-if ($running) {
-    Write-Host "  Server is running!" -ForegroundColor Green
-} else {
-    Write-Host "  [!] Server may still be starting... check Task Manager for python" -ForegroundColor Yellow
+if (-not $healthOk) {
+    Write-Host "  [X] Health endpoint (http://127.0.0.1:${Port}/health) did not respond within 30s" -ForegroundColor Red
+    exit 1
 }
 
 # --- Summary ---
