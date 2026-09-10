@@ -657,3 +657,99 @@ class TestWindowsStopBeforePip:
         assert "exit 1" in content, (
             "install.ps1 import check must exit 1 on failure — never repair"
         )
+
+
+# ---------------------------------------------------------------------------
+# (g) Windows: prevent fastmcp namespace corruption from --force-reinstall
+# ---------------------------------------------------------------------------
+
+
+class TestWindowsFastmcpRecovery:
+    """install.ps1 must prevent the fastmcp/__init__.py corruption caused by
+    pip's --force-reinstall cascading to ALL dependencies.
+
+    Root cause (discovered 2026-09-10 deploying dev18 to win-stream-snv): the
+    fastmcp PyPI package is split into fastmcp (meta, zero Python files) and
+    fastmcp-slim (all code incl. fastmcp/__init__.py).  pip install
+    --force-reinstall cascades to both, and the uninstall/reinstall ordering
+    drops __init__.py — leaving fastmcp as a namespace package that cannot
+    import FastMCP.  This is NOT the file-locking bug (stop-before-pip
+    prevents that); it's a pip ordering bug with overlapping namespaces.
+
+    Fix: use pip uninstall + pip install (no --force-reinstall cascade to
+    deps), plus a targeted fastmcp-slim recovery step if the import check
+    fails (handles boxes corrupted by the old installer)."""
+
+    def test_windows_no_force_reinstall_cascade(self) -> None:
+        """install.ps1 must NOT use --force-reinstall on the main remoteos-mcp
+        install line without --no-deps — that cascades to fastmcp/fastmcp-slim
+        and corrupts __init__.py."""
+        content = INSTALLER_WINDOWS.read_text()
+        lines = content.split("\n")
+        for line in lines:
+            stripped = line.strip()
+            # Skip comments and Write-Host lines
+            if stripped.startswith("#") or stripped.startswith("REM") or "Write-Host" in stripped:
+                continue
+            # A pip install with --force-reinstall AND the main zip URL,
+            # WITHOUT --no-deps = cascading force-reinstall (banned)
+            if (
+                "pip" in stripped
+                and "install" in stripped
+                and "--force-reinstall" in stripped
+                and "main.zip" in stripped
+            ):
+                assert "--no-deps" in stripped, (
+                    f"install.ps1 must not cascade --force-reinstall to "
+                    f"dependencies (causes fastmcp/__init__.py corruption "
+                    f"via the fastmcp/fastmcp-slim split package ordering "
+                    f"bug). Use pip uninstall + pip install instead. "
+                    f"Found: {stripped!r}"
+                )
+
+    def test_windows_has_fastmcp_recovery(self) -> None:
+        """install.ps1 must have a targeted fastmcp-slim recovery step that
+        runs when the import check fails — handles boxes corrupted by the old
+        installer's cascading --force-reinstall."""
+        content = INSTALLER_WINDOWS.read_text()
+        assert "fastmcp-slim" in content, (
+            "install.ps1 must have a targeted fastmcp-slim recovery step "
+            "for boxes whose fastmcp/__init__.py was corrupted by a prior "
+            "cascading --force-reinstall"
+        )
+
+    def test_windows_uninstalls_before_install(self) -> None:
+        """install.ps1 must pip uninstall remoteos-mcp before installing from
+        git — this avoids the need for --force-reinstall entirely."""
+        content = INSTALLER_WINDOWS.read_text()
+        lines = content.split("\n")
+        uninstall_pos = None
+        install_pos = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("REM") or "Write-Host" in stripped:
+                continue
+            # Find pip uninstall remoteos-mcp
+            if "pip" in stripped and "uninstall" in stripped and "remoteos-mcp" in stripped:
+                if uninstall_pos is None:
+                    uninstall_pos = i
+            # Find pip install from main.zip (the main install, not recovery)
+            if (
+                "pip" in stripped
+                and "install" in stripped
+                and "main.zip" in stripped
+                and "fastmcp" not in stripped
+            ):
+                if install_pos is None:
+                    install_pos = i
+        assert uninstall_pos is not None, (
+            "install.ps1 must pip uninstall remoteos-mcp before re-installing "
+            "from git (avoids --force-reinstall cascade to deps)"
+        )
+        assert install_pos is not None, (
+            "install.ps1 must have a pip install line for remoteos-mcp"
+        )
+        assert uninstall_pos < install_pos, (
+            f"install.ps1 must pip uninstall (line {uninstall_pos + 1}) "
+            f"BEFORE pip install (line {install_pos + 1})"
+        )
