@@ -80,3 +80,10 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Commits:** `7387132` version bump 0.7.0.dev14; `9507976` [red] 4 static analysis tests; `5c39537` [green] fix: --force-reinstall in all installers.
 - **Tests:** 85/85 pass, ruff clean.
 - **Deploy results:** All 3 boxes at 0.7.0.dev13, health OK, MCP handshake 200, systemctl active, tokens preserved.
+
+### 2026-09-10 — #12 install.ps1 self-check + fastmcp repair + Windows fleet deploy (0.7.0.dev15)
+- **Part A (deploy):** Deployed 0.7.0.dev14 (current main) to resolume.lan and iem.lan via canonical one-liner. Found and worked around fastmcp corruption bug on both boxes (manual `pip install --force-reinstall fastmcp==4.0.3`). Both boxes verified: /health = dev14, MCP 200, auth keys preserved.
+- **Part B (code):** Added post-install health/version self-check to install.ps1 (Invoke-RestMethod, 6x5s poll, exit 1 on mismatch/timeout). Added fastmcp import repair step after pip install. Version reads via importlib.metadata.
+- **Bug found:** `pip install --force-reinstall` from archive URL (`main.zip`) on Windows corrupts fastmcp's `__init__.py` — leaves a namespace package. Repair: targeted reinstall of fastmcp after main install.
+- **Commits:** `d0fe5a0` version bump 0.7.0.dev15; `ba6482b` [red] 4 structural tests; `9bc4fad` [green] fix: self-check + fastmcp repair.
+- **Tests:** 89/89 pass, ruff clean. pwsh not available locally — no hermetic behavioral test for install.ps1.
