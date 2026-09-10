@@ -588,7 +588,7 @@ class TestWindowsStopBeforePip:
 
     def test_stop_precedes_pip_install(self) -> None:
         """The stop-task/kill-process block must appear textually BEFORE the
-        pip install line in install.ps1."""
+        pip install command in install.ps1."""
         content = INSTALLER_WINDOWS.read_text()
         # Find position of process kill (the definitive stop)
         stop_pos = content.find("Stop-Process")
@@ -596,14 +596,31 @@ class TestWindowsStopBeforePip:
             "install.ps1 must contain a Stop-Process call to kill the old "
             "server before pip install"
         )
-        # Find position of pip install
-        pip_pos = content.find("pip install")
-        assert pip_pos != -1, "install.ps1 must contain a pip install line"
-        assert stop_pos < pip_pos, (
+        # Find position of the actual pip install COMMAND (starts with &),
+        # not comments/error messages that mention "pip install"
+        lines = content.split("\n")
+        pip_line_offset = 0
+        pip_found = False
+        for line in lines:
+            stripped = line.strip()
+            if (
+                "pip install" in stripped
+                and not stripped.startswith("#")
+                and not stripped.startswith("REM")
+                and "Write-Host" not in stripped
+                and ("& $python" in stripped or "pip install" in stripped)
+                and "--force-reinstall" in stripped
+            ):
+                pip_found = True
+                break
+            pip_line_offset += len(line) + 1  # +1 for newline
+        assert pip_found, "install.ps1 must contain a pip install command"
+        assert stop_pos < pip_line_offset, (
             f"install.ps1 must stop the running server (Stop-Process at char "
-            f"{stop_pos}) BEFORE running pip install (at char {pip_pos}). "
-            f"Running pip while the old service is alive corrupts packages on "
-            f"Windows because open files cannot be deleted."
+            f"{stop_pos}) BEFORE running pip install (at char "
+            f"{pip_line_offset}). Running pip while the old service is alive "
+            f"corrupts packages on Windows because open files cannot be "
+            f"deleted."
         )
 
     def test_no_fastmcp_repair_pip_line(self) -> None:

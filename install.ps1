@@ -135,6 +135,29 @@ if (Test-Path $oldConfigDir) {
 }
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
+# Stop running server BEFORE pip install — pip --force-reinstall on Windows
+# cannot delete files held open by the running python process, which corrupts
+# packages (e.g. fastmcp's __init__.py gets deleted, leaving a namespace package).
+Write-Host "        Stopping running server..." -ForegroundColor Gray
+schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
+# Kill by window title (catches python/cmd with the batch title)
+Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.MainWindowTitle -match "RemoteOS|WinRemote"
+} | Stop-Process -Force -ErrorAction SilentlyContinue
+# Kill python processes running remoteos or winremote modules
+Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -match "remoteos|winremote" -and $_.Name -match "python"
+} | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+}
+# Kill server by port (fallback — catches anything on our port)
+$portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
+    ($_.ToString().Trim() -split "\s+")[-1]
+}) | Select-Object -First 1
+if ($portPid) {
+    Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Seconds 3
 $env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
 & $python -m pip install --no-cache-dir --force-reinstall "https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" 2>&1 | Out-Null
 $pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
@@ -146,18 +169,12 @@ if ($pipShow -match "Version: (.+)") {
     Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" -ForegroundColor Yellow
     return
 }
-# Repair fastmcp if --force-reinstall from archive URL corrupted it
-# (known pip bug: __init__.py gets deleted, leaving a namespace package)
-$fmcpCheck = & $python -c "from fastmcp import FastMCP" 2>&1
+# Sanity check: verify remoteos and fastmcp can be imported (fail hard, never repair)
+$importCheck = & $python -c "import remoteos, fastmcp; from fastmcp import FastMCP" 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "        fastmcp import broken, repairing..." -ForegroundColor Yellow
-    & $python -m pip install --no-cache-dir --force-reinstall fastmcp==4.0.3 2>&1 | Out-Null
-    $fmcpRecheck = & $python -c "from fastmcp import FastMCP" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "        [X] fastmcp repair failed — server will not start" -ForegroundColor Red
-        return
-    }
-    Write-Host "        fastmcp repaired" -ForegroundColor Green
+    Write-Host "        [X] Import check failed — remoteos or fastmcp broken after install" -ForegroundColor Red
+    Write-Host "        $importCheck" -ForegroundColor Red
+    exit 1
 }
 
 # --- Generate or preserve auth key ---
@@ -294,28 +311,6 @@ $localIP = (Get-NetIPAddress -AddressFamily IPv4 |
 
 if (-not $localIP) { $localIP = "WINDOWS_IP" }
 $hostName = $env:COMPUTERNAME.ToLower()
-
-# --- Stop old server processes ---
-Write-Host ""
-Write-Host "  Stopping old server..." -ForegroundColor Cyan
-# Kill by window title (catches python/cmd with the batch title)
-Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.MainWindowTitle -match "RemoteOS|WinRemote"
-} | Stop-Process -Force -ErrorAction SilentlyContinue
-# Kill python processes running remoteos or winremote modules
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -match "remoteos|winremote" -and $_.Name -match "python"
-} | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-}
-# Kill server by port (fallback — catches anything on our port)
-$portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
-    ($_.ToString().Trim() -split "\s+")[-1]
-}) | Select-Object -First 1
-if ($portPid) {
-    Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
-}
-Start-Sleep -Seconds 3
 
 # --- Clean up old config from other users (if installer was run under wrong user before) ---
 $currentUserConfig = "$env:USERPROFILE\.remoteos-mcp"
