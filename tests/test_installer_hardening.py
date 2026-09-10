@@ -575,24 +575,68 @@ class TestWindowsVersionSelfCheck:
 
 
 # ---------------------------------------------------------------------------
-# (f) Windows: fastmcp import repair after --force-reinstall
+# (f) Windows: stop running service BEFORE pip install, fail-hard import check
 # ---------------------------------------------------------------------------
 
 
-class TestWindowsFastmcpRepair:
-    """install.ps1 must verify that the fastmcp import works after pip install
-    and repair it if corrupted (the --force-reinstall archive URL bug found on
-    resolume + iem 2026-09-10: __init__.py deleted, namespace package)."""
+class TestWindowsStopBeforePip:
+    """install.ps1 must stop the running service BEFORE pip install.
+    Running pip --force-reinstall while the old python process has fastmcp's
+    files open on Windows leaves a corrupt package (no __init__.py) because
+    Windows cannot delete open files.  The fix is to stop the service first,
+    not to repair the corruption after."""
 
-    def test_windows_installer_checks_fastmcp_import(self) -> None:
-        """install.ps1 must verify fastmcp can be imported after pip install."""
+    def test_stop_precedes_pip_install(self) -> None:
+        """The stop-task/kill-process block must appear textually BEFORE the
+        pip install line in install.ps1."""
         content = INSTALLER_WINDOWS.read_text()
-        assert "fastmcp" in content.lower() and "import" in content.lower(), (
-            "install.ps1 must verify the fastmcp import works after pip install "
-            "(--force-reinstall from archive URL can corrupt the package)"
+        # Find position of process kill (the definitive stop)
+        stop_pos = content.find("Stop-Process")
+        assert stop_pos != -1, (
+            "install.ps1 must contain a Stop-Process call to kill the old "
+            "server before pip install"
         )
-        # Must have a repair step
-        assert "fastmcp" in content and "pip" in content.lower(), (
-            "install.ps1 must have a fastmcp repair step that reinstalls it "
-            "if the import check fails"
+        # Find position of pip install
+        pip_pos = content.find("pip install")
+        assert pip_pos != -1, "install.ps1 must contain a pip install line"
+        assert stop_pos < pip_pos, (
+            f"install.ps1 must stop the running server (Stop-Process at char "
+            f"{stop_pos}) BEFORE running pip install (at char {pip_pos}). "
+            f"Running pip while the old service is alive corrupts packages on "
+            f"Windows because open files cannot be deleted."
+        )
+
+    def test_no_fastmcp_repair_pip_line(self) -> None:
+        """install.ps1 must NOT contain a pip install line that reinstalls
+        fastmcp as a repair step — the root cause (install over running
+        service) must be fixed, not the symptom patched."""
+        content = INSTALLER_WINDOWS.read_text()
+        lines = content.split("\n")
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # A pip install line targeting fastmcp specifically (not the main
+            # remoteos-mcp install which legitimately depends on fastmcp)
+            if "pip" in stripped.lower() and "fastmcp" in stripped and "install" in stripped.lower():
+                # Allow if it's a comment
+                if stripped.startswith("#") or stripped.startswith("REM"):
+                    continue
+                assert False, (
+                    f"install.ps1 line {i + 1} contains a fastmcp repair pip "
+                    f"install: {stripped!r}. This is a band-aid — the root "
+                    f"cause (pip running while service is alive) must be fixed "
+                    f"instead."
+                )
+
+    def test_import_check_fails_hard(self) -> None:
+        """install.ps1 must have an import sanity check for remoteos+fastmcp
+        that exits non-zero on failure (never repairs)."""
+        content = INSTALLER_WINDOWS.read_text()
+        # Must import both remoteos and fastmcp
+        assert "import remoteos" in content or "import fastmcp" in content, (
+            "install.ps1 must have a post-install import sanity check for "
+            "remoteos and/or fastmcp"
+        )
+        # The import check block must contain exit 1 (fail hard)
+        assert "exit 1" in content, (
+            "install.ps1 import check must exit 1 on failure — never repair"
         )
