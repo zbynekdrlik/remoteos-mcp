@@ -519,3 +519,80 @@ class TestForceReinstall:
             "install.ps1 must use --force-reinstall in its pip install "
             "command to ensure upgrades always fetch the latest from git"
         )
+
+
+# ---------------------------------------------------------------------------
+# (e) Windows: post-install health/version self-check
+# ---------------------------------------------------------------------------
+
+
+class TestWindowsVersionSelfCheck:
+    """install.ps1 must verify the running service reports the correct version
+    after the scheduled task starts — the same self-check Linux/macOS have."""
+
+    def test_windows_installer_has_health_check(self) -> None:
+        """install.ps1 must poll the health endpoint after starting the server."""
+        content = INSTALLER_WINDOWS.read_text()
+        assert "health" in content.lower(), (
+            "install.ps1 must poll the /health endpoint after starting the "
+            "server to verify the installed version matches the running version"
+        )
+        # Must use Invoke-RestMethod or Invoke-WebRequest for health check
+        assert (
+            "Invoke-RestMethod" in content or "Invoke-WebRequest" in content
+        ), (
+            "install.ps1 must use Invoke-RestMethod or Invoke-WebRequest to "
+            "poll the health endpoint"
+        )
+
+    def test_windows_installer_compares_versions(self) -> None:
+        """install.ps1 must compare installed version with health version and
+        exit non-zero on mismatch."""
+        content = INSTALLER_WINDOWS.read_text()
+        # Must read installed version via importlib.metadata
+        assert "importlib.metadata" in content or "pip show" in content, (
+            "install.ps1 must read the installed package version (via "
+            "importlib.metadata or pip show) to compare with /health"
+        )
+        # Must exit on mismatch
+        assert "exit 1" in content or "exit(1)" in content, (
+            "install.ps1 must exit non-zero when installed version does not "
+            "match the running service version"
+        )
+
+    def test_windows_installer_exits_on_health_timeout(self) -> None:
+        """install.ps1 must exit non-zero if health endpoint does not respond."""
+        content = INSTALLER_WINDOWS.read_text()
+        # Must have a timeout/retry loop AND exit on failure
+        assert "30" in content or "attempt" in content.lower(), (
+            "install.ps1 must poll health with a bounded timeout (~30s)"
+        )
+        # The mismatch/timeout message pattern
+        assert "[X]" in content and "health" in content.lower(), (
+            "install.ps1 must print an [X] error message when health check "
+            "fails (mismatch or timeout)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# (f) Windows: fastmcp import repair after --force-reinstall
+# ---------------------------------------------------------------------------
+
+
+class TestWindowsFastmcpRepair:
+    """install.ps1 must verify that the fastmcp import works after pip install
+    and repair it if corrupted (the --force-reinstall archive URL bug found on
+    resolume + iem 2026-09-10: __init__.py deleted, namespace package)."""
+
+    def test_windows_installer_checks_fastmcp_import(self) -> None:
+        """install.ps1 must verify fastmcp can be imported after pip install."""
+        content = INSTALLER_WINDOWS.read_text()
+        assert "fastmcp" in content.lower() and "import" in content.lower(), (
+            "install.ps1 must verify the fastmcp import works after pip install "
+            "(--force-reinstall from archive URL can corrupt the package)"
+        )
+        # Must have a repair step
+        assert "fastmcp" in content and "pip" in content.lower(), (
+            "install.ps1 must have a fastmcp repair step that reinstalls it "
+            "if the import check fails"
+        )
