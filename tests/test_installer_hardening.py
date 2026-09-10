@@ -597,20 +597,21 @@ class TestWindowsStopBeforePip:
             "install.ps1 must contain a Stop-Process call to kill the old "
             "server before pip install"
         )
-        # Find position of the actual pip install COMMAND (starts with &),
-        # not comments/error messages that mention "pip install"
+        # Find position of the MAIN pip install command (the one installing
+        # from main.zip, not the fastmcp-slim recovery line).
         lines = content.split("\n")
         pip_line_offset = 0
         pip_found = False
         for line in lines:
             stripped = line.strip()
             if (
-                "pip install" in stripped
+                "pip" in stripped
+                and "install" in stripped
+                and "main.zip" in stripped
                 and not stripped.startswith("#")
                 and not stripped.startswith("REM")
                 and "Write-Host" not in stripped
-                and ("& $python" in stripped or "pip install" in stripped)
-                and "--force-reinstall" in stripped
+                and "fastmcp" not in stripped
             ):
                 pip_found = True
                 break
