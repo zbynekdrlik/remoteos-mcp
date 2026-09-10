@@ -168,7 +168,13 @@ if ($portPid) {
 }
 Start-Sleep -Seconds 3
 $env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
-& $python -m pip install --no-cache-dir --force-reinstall "https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" 2>&1 | Out-Null
+# Pre-uninstall all three packages so no stale RECORD can delete files the new
+# install writes.  Root cause (#12 wheel evidence): monolithic fastmcp 2.x
+# RECORD claims fastmcp/__init__.py — same file fastmcp-slim 4.x writes.
+# pip --force-reinstall can install slim (writes it) then uninstall old 2.x
+# (deletes it).  Explicit pre-uninstall + clean install avoids this entirely.
+& $python -m pip uninstall -y remoteos-mcp fastmcp fastmcp-slim 2>&1 | Out-Null
+& $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" 2>&1 | Out-Null
 $pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
 if ($pipShow -match "Version: (.+)") {

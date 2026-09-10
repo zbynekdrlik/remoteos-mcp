@@ -481,43 +481,17 @@ exit 0
 # ---------------------------------------------------------------------------
 
 
-class TestForceReinstall:
-    """Installers must use --force-reinstall to ensure pip always re-clones
-    from git.  Using --ignore-installed does NOT force a re-download when an
-    older version is already installed (the imag.lan dev8-instead-of-dev13
-    incident, #12 live deploy 2026-09-09)."""
-
-    def test_linux_installer_uses_force_reinstall(self) -> None:
-        """install-linux.sh pip line must contain --force-reinstall."""
-        content = INSTALLER_LINUX.read_text()
-        assert "--force-reinstall" in content, (
-            "install-linux.sh must use --force-reinstall in its pip install "
-            "command to ensure upgrades always fetch the latest from git"
-        )
+class TestNoIgnoreInstalled:
+    """Installers must NOT use --ignore-installed (insufficient for git-based
+    upgrades — the imag.lan dev8-instead-of-dev13 incident, #12 2026-09-09).
+    The correct approach is pre-uninstall + install (no --force-reinstall)."""
 
     def test_linux_installer_no_ignore_installed(self) -> None:
-        """install-linux.sh must NOT use --ignore-installed (insufficient for
-        git-based upgrades)."""
+        """install-linux.sh must NOT use --ignore-installed."""
         content = INSTALLER_LINUX.read_text()
         assert "--ignore-installed" not in content, (
             "install-linux.sh must not use --ignore-installed — it does not "
             "force pip to re-clone from git when an older version exists"
-        )
-
-    def test_macos_installer_uses_force_reinstall(self) -> None:
-        """install.sh (macOS) pip line must contain --force-reinstall."""
-        content = INSTALLER_MACOS.read_text()
-        assert "--force-reinstall" in content, (
-            "install.sh (macOS) must use --force-reinstall in its pip install "
-            "command to ensure upgrades always fetch the latest from git"
-        )
-
-    def test_windows_installer_uses_force_reinstall(self) -> None:
-        """install.ps1 pip line must contain --force-reinstall."""
-        content = INSTALLER_WINDOWS.read_text()
-        assert "--force-reinstall" in content, (
-            "install.ps1 must use --force-reinstall in its pip install "
-            "command to ensure upgrades always fetch the latest from git"
         )
 
 
@@ -596,20 +570,21 @@ class TestWindowsStopBeforePip:
             "install.ps1 must contain a Stop-Process call to kill the old "
             "server before pip install"
         )
-        # Find position of the actual pip install COMMAND (starts with &),
-        # not comments/error messages that mention "pip install"
+        # Find position of the MAIN pip install command (the one installing
+        # from main.zip, not the fastmcp-slim recovery line).
         lines = content.split("\n")
         pip_line_offset = 0
         pip_found = False
         for line in lines:
             stripped = line.strip()
             if (
-                "pip install" in stripped
+                "pip" in stripped
+                and "install" in stripped
+                and "main.zip" in stripped
                 and not stripped.startswith("#")
                 and not stripped.startswith("REM")
                 and "Write-Host" not in stripped
-                and ("& $python" in stripped or "pip install" in stripped)
-                and "--force-reinstall" in stripped
+                and "fastmcp" not in stripped
             ):
                 pip_found = True
                 break
@@ -622,27 +597,6 @@ class TestWindowsStopBeforePip:
             f"corrupts packages on Windows because open files cannot be "
             f"deleted."
         )
-
-    def test_no_fastmcp_repair_pip_line(self) -> None:
-        """install.ps1 must NOT contain a pip install line that reinstalls
-        fastmcp as a repair step — the root cause (install over running
-        service) must be fixed, not the symptom patched."""
-        content = INSTALLER_WINDOWS.read_text()
-        lines = content.split("\n")
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            # A pip install line targeting fastmcp specifically (not the main
-            # remoteos-mcp install which legitimately depends on fastmcp)
-            if "pip" in stripped.lower() and "fastmcp" in stripped and "install" in stripped.lower():
-                # Allow if it's a comment
-                if stripped.startswith("#") or stripped.startswith("REM"):
-                    continue
-                assert False, (
-                    f"install.ps1 line {i + 1} contains a fastmcp repair pip "
-                    f"install: {stripped!r}. This is a band-aid — the root "
-                    f"cause (pip running while service is alive) must be fixed "
-                    f"instead."
-                )
 
     def test_import_check_fails_hard(self) -> None:
         """install.ps1 must have an import sanity check for remoteos+fastmcp
@@ -657,3 +611,165 @@ class TestWindowsStopBeforePip:
         assert "exit 1" in content, (
             "install.ps1 import check must exit 1 on failure — never repair"
         )
+
+
+# ---------------------------------------------------------------------------
+# (g) All installers: deterministic pre-uninstall before install
+# ---------------------------------------------------------------------------
+
+
+def _find_first_code_line(content: str, *keywords: str, exclude: str | None = None) -> int | None:
+    """Return the 0-based line index of the first non-comment code line that
+    contains ALL of the given keywords (and does NOT contain exclude), or None."""
+    for i, line in enumerate(content.split("\n")):
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith("REM") or "Write-Host" in stripped:
+            continue
+        if all(kw in stripped for kw in keywords):
+            if exclude and exclude in stripped:
+                continue
+            return i
+    return None
+
+
+class TestDeterministicPreUninstall:
+    """All three installers must explicitly pip uninstall remoteos-mcp, fastmcp,
+    AND fastmcp-slim BEFORE pip install — so no stale RECORD from a pre-split
+    monolithic fastmcp 2.x can delete fastmcp/__init__.py that fastmcp-slim
+    just wrote.
+
+    Root cause (wheel RECORD evidence, #12 win-stream-snv):
+    - fastmcp 2.x (monolithic) RECORD claims fastmcp/__init__.py
+    - fastmcp-slim 4.x RECORD also claims fastmcp/__init__.py
+    - pip --force-reinstall can install fastmcp-slim (writes __init__.py)
+      then uninstall old fastmcp 2.x (deletes __init__.py from its RECORD)
+
+    The fix is deterministic: pre-uninstall all three packages, then install
+    fresh with no --force-reinstall.  No recovery/repair blocks."""
+
+    # --- Windows (install.ps1) ---
+
+    def test_windows_pre_uninstall_present(self) -> None:
+        """install.ps1 must pip uninstall remoteos-mcp, fastmcp, AND
+        fastmcp-slim before the main pip install."""
+        content = INSTALLER_WINDOWS.read_text()
+        uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
+        install_pos = _find_first_code_line(content, "pip", "install", "main.zip")
+        assert uninstall_pos is not None, (
+            "install.ps1 must pip uninstall remoteos-mcp before install"
+        )
+        assert install_pos is not None, (
+            "install.ps1 must have a pip install line"
+        )
+        assert uninstall_pos < install_pos, (
+            f"install.ps1: pre-uninstall (line {uninstall_pos + 1}) must "
+            f"precede pip install (line {install_pos + 1})"
+        )
+        # The uninstall line must also name fastmcp and fastmcp-slim
+        lines = content.split("\n")
+        uninstall_line = lines[uninstall_pos].strip()
+        assert "fastmcp" in uninstall_line, (
+            f"install.ps1 pre-uninstall must include fastmcp: {uninstall_line!r}"
+        )
+
+    def test_windows_no_force_reinstall(self) -> None:
+        """install.ps1 must NOT use --force-reinstall on the main install."""
+        content = INSTALLER_WINDOWS.read_text()
+        assert _find_first_code_line(content, "pip", "install", "--force-reinstall", "main.zip") is None, (
+            "install.ps1 must not use --force-reinstall on the main install "
+            "(cascades to deps and corrupts fastmcp/__init__.py)"
+        )
+
+    def test_windows_no_recovery_lines(self) -> None:
+        """install.ps1 must NOT have fastmcp-slim repair/recovery pip install
+        lines (pip uninstall lines naming fastmcp-slim are fine — that is the
+        pre-uninstall, not a recovery)."""
+        content = INSTALLER_WINDOWS.read_text()
+        for i, line in enumerate(content.split("\n")):
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("REM") or "Write-Host" in stripped:
+                continue
+            # A pip install (not uninstall) targeting fastmcp-slim specifically
+            if (
+                "pip" in stripped
+                and "install" in stripped
+                and "uninstall" not in stripped
+                and "fastmcp-slim" in stripped
+            ):
+                assert False, (
+                    f"install.ps1 line {i + 1} has a fastmcp-slim repair line: "
+                    f"{stripped!r}. The pre-uninstall eliminates the root cause; "
+                    f"no recovery is needed."
+                )
+
+    # --- Linux (install-linux.sh) ---
+
+    def test_linux_pre_uninstall_present(self) -> None:
+        """install-linux.sh must pip uninstall remoteos-mcp, fastmcp, AND
+        fastmcp-slim before the main pip install."""
+        content = INSTALLER_LINUX.read_text()
+        uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
+        install_pos = _find_first_code_line(content, "pip", "install", "remoteos-mcp", exclude="uninstall")
+        assert uninstall_pos is not None, (
+            "install-linux.sh must pip uninstall before install"
+        )
+        assert install_pos is not None
+        assert uninstall_pos < install_pos, (
+            f"install-linux.sh: pre-uninstall (line {uninstall_pos + 1}) must "
+            f"precede pip install (line {install_pos + 1})"
+        )
+        lines = content.split("\n")
+        uninstall_line = lines[uninstall_pos]
+        assert "fastmcp" in uninstall_line, (
+            f"install-linux.sh pre-uninstall must include fastmcp: {uninstall_line!r}"
+        )
+
+    def test_linux_no_force_reinstall(self) -> None:
+        """install-linux.sh must NOT use --force-reinstall on the main install.
+        The flag may span continuation lines, so check all non-comment lines."""
+        content = INSTALLER_LINUX.read_text()
+        for i, line in enumerate(content.split("\n")):
+            stripped = line.strip().rstrip("\\")
+            if stripped.startswith("#"):
+                continue
+            if "pip" in stripped and "install" in stripped and "--force-reinstall" in stripped:
+                assert False, (
+                    f"install-linux.sh line {i + 1} uses --force-reinstall: "
+                    f"{stripped!r}. Use pre-uninstall + install instead."
+                )
+
+    # --- macOS (install.sh) ---
+
+    def test_macos_pre_uninstall_present(self) -> None:
+        """install.sh must pip uninstall remoteos-mcp, fastmcp, AND
+        fastmcp-slim before the main pip install."""
+        content = INSTALLER_MACOS.read_text()
+        uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
+        install_pos = _find_first_code_line(content, "pip", "install", "remoteos-mcp", exclude="uninstall")
+        assert uninstall_pos is not None, (
+            "install.sh must pip uninstall before install"
+        )
+        assert install_pos is not None
+        assert uninstall_pos < install_pos, (
+            f"install.sh: pre-uninstall (line {uninstall_pos + 1}) must "
+            f"precede pip install (line {install_pos + 1})"
+        )
+        lines = content.split("\n")
+        uninstall_line = lines[uninstall_pos]
+        assert "fastmcp" in uninstall_line, (
+            f"install.sh pre-uninstall must include fastmcp: {uninstall_line!r}"
+        )
+
+    def test_macos_no_force_reinstall(self) -> None:
+        """install.sh must NOT use --force-reinstall on the main install.
+        The flag may span continuation lines, so check all non-comment lines."""
+        content = INSTALLER_MACOS.read_text()
+        for i, line in enumerate(content.split("\n")):
+            stripped = line.strip().rstrip("\\")
+            if stripped.startswith("#"):
+                continue
+            if "pip" in stripped and "install" in stripped and "--force-reinstall" in stripped:
+                assert False, (
+                    f"install.sh line {i + 1} uses --force-reinstall: "
+                    f"{stripped!r}. Use pre-uninstall + install instead."
+                )
