@@ -168,10 +168,12 @@ if ($portPid) {
 }
 Start-Sleep -Seconds 3
 $env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
-# Uninstall first, then install fresh — avoids --force-reinstall's cascading
-# dependency reinstall which corrupts fastmcp's __init__.py on Windows (the
-# fastmcp/fastmcp-slim split package ordering bug, #12 win-stream-snv).
-& $python -m pip uninstall remoteos-mcp -y 2>&1 | Out-Null
+# Pre-uninstall all three packages so no stale RECORD can delete files the new
+# install writes.  Root cause (#12 wheel evidence): monolithic fastmcp 2.x
+# RECORD claims fastmcp/__init__.py — same file fastmcp-slim 4.x writes.
+# pip --force-reinstall can install slim (writes it) then uninstall old 2.x
+# (deletes it).  Explicit pre-uninstall + clean install avoids this entirely.
+& $python -m pip uninstall -y remoteos-mcp fastmcp fastmcp-slim 2>&1 | Out-Null
 & $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" 2>&1 | Out-Null
 $pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
@@ -182,21 +184,12 @@ if ($pipShow -match "Version: (.+)") {
     Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" -ForegroundColor Yellow
     return
 }
-# Sanity check: verify remoteos and fastmcp can be imported
+# Sanity check: verify remoteos and fastmcp can be imported (fail hard, never repair)
 $importCheck = & $python -c "import remoteos, fastmcp; from fastmcp import FastMCP" 2>&1
 if ($LASTEXITCODE -ne 0) {
-    # Recovery: fastmcp may be corrupted from a previous --force-reinstall.
-    # The fastmcp/fastmcp-slim split means __init__.py can get dropped during
-    # cascading reinstall.  Targeted reinstall of fastmcp-slim fixes it.
-    Write-Host "        Import check failed, recovering fastmcp-slim..." -ForegroundColor Yellow
-    & $python -m pip install --no-cache-dir --force-reinstall --no-deps fastmcp-slim 2>&1 | Out-Null
-    $importCheck = & $python -c "import remoteos, fastmcp; from fastmcp import FastMCP" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "        [X] Import check failed after recovery — remoteos or fastmcp broken" -ForegroundColor Red
-        Write-Host "        $importCheck" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "        Recovery succeeded — fastmcp-slim reinstalled" -ForegroundColor Green
+    Write-Host "        [X] Import check failed — remoteos or fastmcp broken after install" -ForegroundColor Red
+    Write-Host "        $importCheck" -ForegroundColor Red
+    exit 1
 }
 
 # --- Generate or preserve auth key ---

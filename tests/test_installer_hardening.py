@@ -618,14 +618,16 @@ class TestWindowsStopBeforePip:
 # ---------------------------------------------------------------------------
 
 
-def _find_first_code_line(content: str, *keywords: str) -> int | None:
+def _find_first_code_line(content: str, *keywords: str, exclude: str | None = None) -> int | None:
     """Return the 0-based line index of the first non-comment code line that
-    contains ALL of the given keywords, or None if not found."""
+    contains ALL of the given keywords (and does NOT contain exclude), or None."""
     for i, line in enumerate(content.split("\n")):
         stripped = line.strip()
         if stripped.startswith("#") or stripped.startswith("REM") or "Write-Host" in stripped:
             continue
         if all(kw in stripped for kw in keywords):
+            if exclude and exclude in stripped:
+                continue
             return i
     return None
 
@@ -679,13 +681,21 @@ class TestDeterministicPreUninstall:
         )
 
     def test_windows_no_recovery_lines(self) -> None:
-        """install.ps1 must NOT have fastmcp-slim repair/recovery pip lines."""
+        """install.ps1 must NOT have fastmcp-slim repair/recovery pip install
+        lines (pip uninstall lines naming fastmcp-slim are fine — that is the
+        pre-uninstall, not a recovery)."""
         content = INSTALLER_WINDOWS.read_text()
         for i, line in enumerate(content.split("\n")):
             stripped = line.strip()
             if stripped.startswith("#") or stripped.startswith("REM") or "Write-Host" in stripped:
                 continue
-            if "pip" in stripped and "install" in stripped and "fastmcp-slim" in stripped:
+            # A pip install (not uninstall) targeting fastmcp-slim specifically
+            if (
+                "pip" in stripped
+                and "install" in stripped
+                and "uninstall" not in stripped
+                and "fastmcp-slim" in stripped
+            ):
                 assert False, (
                     f"install.ps1 line {i + 1} has a fastmcp-slim repair line: "
                     f"{stripped!r}. The pre-uninstall eliminates the root cause; "
@@ -699,7 +709,7 @@ class TestDeterministicPreUninstall:
         fastmcp-slim before the main pip install."""
         content = INSTALLER_LINUX.read_text()
         uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
-        install_pos = _find_first_code_line(content, "pip", "install", "remoteos-mcp")
+        install_pos = _find_first_code_line(content, "pip", "install", "remoteos-mcp", exclude="uninstall")
         assert uninstall_pos is not None, (
             "install-linux.sh must pip uninstall before install"
         )
@@ -735,7 +745,7 @@ class TestDeterministicPreUninstall:
         fastmcp-slim before the main pip install."""
         content = INSTALLER_MACOS.read_text()
         uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
-        install_pos = _find_first_code_line(content, "pip", "install", "remoteos-mcp")
+        install_pos = _find_first_code_line(content, "pip", "install", "remoteos-mcp", exclude="uninstall")
         assert uninstall_pos is not None, (
             "install.sh must pip uninstall before install"
         )

@@ -110,11 +110,15 @@ fi
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
 export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
+# Pre-uninstall all three packages so no stale RECORD can delete files the new
+# install writes.  Root cause (#12 wheel evidence): monolithic fastmcp 2.x
+# RECORD claims fastmcp/__init__.py — same file fastmcp-slim 4.x writes.
+"$PYTHON" -m pip uninstall -y remoteos-mcp fastmcp fastmcp-slim 2>&1 | tail -1 || true
 # Use a fresh temp dir so pip cannot reuse stale build artifacts from a prior
 # failed install (the cam1 incident: a read-only-fs failure left a partial
 # checkout in /tmp that the next run resolved instead of fetching fresh).
 PIP_TMPDIR=$(mktemp -d)
-TMPDIR="$PIP_TMPDIR" "$PYTHON" -m pip install --no-cache-dir --break-system-packages --force-reinstall \
+TMPDIR="$PIP_TMPDIR" "$PYTHON" -m pip install --no-cache-dir --break-system-packages \
     "git+https://github.com/zbynekdrlik/remoteos-mcp.git@main" 2>&1 | tail -3 || true
 rm -rf "$PIP_TMPDIR"
 
