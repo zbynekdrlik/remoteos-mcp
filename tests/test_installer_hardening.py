@@ -773,3 +773,55 @@ class TestDeterministicPreUninstall:
                     f"install.sh line {i + 1} uses --force-reinstall: "
                     f"{stripped!r}. Use pre-uninstall + install instead."
                 )
+
+
+# ---------------------------------------------------------------------------
+# (h) Linux/macOS: pip uninstall must use --break-system-packages
+# ---------------------------------------------------------------------------
+
+
+class TestPreUninstallBreakSystemPackages:
+    """On PEP 668 systems (Ubuntu 24.04+), pip uninstall without
+    --break-system-packages fails with 'externally-managed-environment',
+    causing the pre-uninstall to silently fail (swallowed by || true).
+    Stale packages then interfere with the fresh install.
+
+    Root cause (cam1.lan 2026-09-10): canonical installer ran on Ubuntu 24.04.
+    The pre-uninstall `pip uninstall -y remoteos-mcp fastmcp fastmcp-slim`
+    failed silently (PEP 668, no --break-system-packages). The subsequent
+    pip install installed 0.7.0.dev12 instead of dev19 because stale packages
+    from a prior half-failed install were still present."""
+
+    def test_linux_pre_uninstall_has_break_system_packages(self) -> None:
+        """install-linux.sh pip uninstall must include --break-system-packages
+        so it succeeds on PEP 668 systems (Ubuntu 24.04+)."""
+        content = INSTALLER_LINUX.read_text()
+        uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
+        assert uninstall_pos is not None, (
+            "install-linux.sh must have a pip uninstall line"
+        )
+        lines = content.split("\n")
+        uninstall_line = lines[uninstall_pos]
+        assert "--break-system-packages" in uninstall_line, (
+            f"install-linux.sh pip uninstall (line {uninstall_pos + 1}) must "
+            f"include --break-system-packages for PEP 668 systems. "
+            f"Without it, the uninstall silently fails on Ubuntu 24.04+ and "
+            f"stale packages interfere with the fresh install. "
+            f"Line: {uninstall_line.strip()!r}"
+        )
+
+    def test_macos_pre_uninstall_has_break_system_packages(self) -> None:
+        """install.sh (macOS) pip uninstall must include --break-system-packages
+        for consistency and future PEP 668 compliance."""
+        content = INSTALLER_MACOS.read_text()
+        uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
+        assert uninstall_pos is not None, (
+            "install.sh must have a pip uninstall line"
+        )
+        lines = content.split("\n")
+        uninstall_line = lines[uninstall_pos]
+        assert "--break-system-packages" in uninstall_line, (
+            f"install.sh pip uninstall (line {uninstall_pos + 1}) must "
+            f"include --break-system-packages for PEP 668 systems. "
+            f"Line: {uninstall_line.strip()!r}"
+        )
