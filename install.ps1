@@ -146,6 +146,19 @@ if ($pipShow -match "Version: (.+)") {
     Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" -ForegroundColor Yellow
     return
 }
+# Repair fastmcp if --force-reinstall from archive URL corrupted it
+# (known pip bug: __init__.py gets deleted, leaving a namespace package)
+$fmcpCheck = & $python -c "from fastmcp import FastMCP" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "        fastmcp import broken, repairing..." -ForegroundColor Yellow
+    & $python -m pip install --no-cache-dir --force-reinstall fastmcp==4.0.3 2>&1 | Out-Null
+    $fmcpRecheck = & $python -c "from fastmcp import FastMCP" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "        [X] fastmcp repair failed — server will not start" -ForegroundColor Red
+        return
+    }
+    Write-Host "        fastmcp repaired" -ForegroundColor Green
+}
 
 # --- Generate or preserve auth key ---
 Write-Host "  [3/6] Configuring auth key..." -ForegroundColor White
@@ -316,20 +329,29 @@ Write-Host "  Starting server..." -ForegroundColor Cyan
 Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-remoteos.vbs`""
 Start-Sleep -Seconds 5
 
-# Test if it's running
-$running = $false
-try {
-    $response = Invoke-WebRequest -Uri "http://localhost:$Port" -Method GET -TimeoutSec 5 -ErrorAction SilentlyContinue
-    $running = $true
-} catch {
-    # Even a 404/401 means the server is up
-    if ($_.Exception.Response) { $running = $true }
+# --- Post-install: verify service reports the correct version ---
+Write-Host "  Verifying installed version matches running service..." -ForegroundColor Cyan
+$PKG_VER = & $python -c "import importlib.metadata as m; print(m.version('remoteos-mcp'))" 2>&1 | Out-String
+$PKG_VER = $PKG_VER.Trim()
+$healthOk = $false
+for ($attempt = 1; $attempt -le 6; $attempt++) {
+    try {
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5 -ErrorAction Stop
+        $healthVer = $health.version
+        if ($healthVer -eq $PKG_VER) {
+            $healthOk = $true
+            Write-Host "        Health check OK: v${healthVer}" -ForegroundColor Green
+            break
+        } elseif ($healthVer) {
+            Write-Host "  [X] Installed ${PKG_VER} but service reports ${healthVer}" -ForegroundColor Red
+            exit 1
+        }
+    } catch {}
+    Start-Sleep -Seconds 5
 }
-
-if ($running) {
-    Write-Host "  Server is running!" -ForegroundColor Green
-} else {
-    Write-Host "  [!] Server may still be starting... check Task Manager for python" -ForegroundColor Yellow
+if (-not $healthOk) {
+    Write-Host "  [X] Health endpoint (http://127.0.0.1:${Port}/health) did not respond within 30s" -ForegroundColor Red
+    exit 1
 }
 
 # --- Summary ---
