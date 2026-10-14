@@ -33,10 +33,10 @@ from pathlib import Path
 from typing import Optional
 
 from remoteos.coords import CaptureGeometry, frame_for
-from remoteos.paste import paste_text
 from remoteos.platform.linux.display import query_geometry
 from remoteos.scroll import wheel_steps
 from remoteos.snapshot import fit_to_frame
+from remoteos.text_entry import enter_text
 
 log = logging.getLogger("remoteos.platform.linux.desktop")
 
@@ -1114,32 +1114,46 @@ def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
         return f"Click error: {e}"
 
 
-def type_text(
-    text: str, x: int = 0, y: int = 0, clear: bool = False, press_enter: bool = False, method: str = "keys"
-) -> str:
-    """Type text, optionally clicking at (x,y) first / clearing / pressing Enter.
+def type_unicode(text: str) -> int:
+    """Type ``text`` at the keyboard focus with ``xdotool type`` (Unicode-safe, #30).
 
-    ``method="keys"``: ``xdotool type`` (Unicode-safe); ``"paste"``: through the
-    clipboard (xclip + Ctrl+V), restoring its previous text (#30).
+    Returns the number of characters handed to xdotool; a failing xdotool raises.
+    """
+    if get_session().mode != "x11":
+        raise RuntimeError(_unavailable())
+    _xdotool(["type", "--delay", "20", "--", text])
+    return len(text)
+
+
+def type_text(
+    text: str,
+    x: int | None = None,
+    y: int | None = None,
+    clear: bool = False,
+    press_enter: bool = False,
+    method: str = "keys",
+) -> str:
+    """Type text, optionally clicking screen point (x, y) first / clearing / pressing Enter.
+
+    Text goes through ``remoteos.text_entry``: ``method="keys"`` = ``type_unicode``,
+    ``"paste"`` = the clipboard (xclip + Ctrl+V), restoring its previous text (#30).
     """
     if get_session().mode != "x11":
         return _unavailable()
     try:
-        if x and y:
+        if x is not None and y is not None:
             _xdotool(["mousemove", str(x), str(y), "click", "1"])
         if clear:
             _xdotool(["key", "--clearmodifiers", "ctrl+a"])
             _xdotool(["key", "Delete"])
-        if method == "paste":
-            reply = paste_text(
-                text,
-                get_clipboard=get_clipboard,
-                set_clipboard=set_clipboard,
-                press_paste=lambda: _xdotool(["key", "--clearmodifiers", "ctrl+v"]),
-            )
-        else:
-            _xdotool(["type", "--delay", "20", "--", text])
-            reply = f"Typed {len(text)} chars"
+        reply = enter_text(
+            text,
+            method,
+            type_unicode=type_unicode,
+            get_clipboard=get_clipboard,
+            set_clipboard=set_clipboard,
+            press_paste=lambda: _xdotool(["key", "--clearmodifiers", "ctrl+v"]),
+        )
         if press_enter:
             _xdotool(["key", "Return"])
         return reply

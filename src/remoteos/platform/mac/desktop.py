@@ -9,14 +9,17 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import pyautogui
+
 from remoteos.coords import CaptureGeometry, frame_for
 from remoteos.scroll import chunks, wheel_steps
 from remoteos.snapshot import fit_to_frame
+from remoteos.text_entry import enter_text
 from remoteos.typing_input import ENTER, TAB, Stroke, plan
 
-# The modifier of the edit shortcuts (select all, paste) the Type tool sends: Command.
+# The modifier of the edit shortcuts (select all, paste) that type_text() sends: Command.
 # Ctrl+A in a Cocoa text field moves the caret to the start of the paragraph instead.
-SHORTCUT_MODIFIER = "command"
+_SHORTCUT_MODIFIER = "command"
 
 # Quartz imports (will fail on non-macOS — caught at tool level)
 try:
@@ -256,17 +259,29 @@ def _key_pair(stroke: Stroke) -> list:
     return events
 
 
+def _require_post_event_access() -> None:
+    """Raise unless this process may post events: without it macOS drops them SILENTLY."""
+    preflight = getattr(Quartz, "CGPreflightPostEventAccess", None)  # macOS 10.15+
+    if preflight is not None and not preflight():
+        raise RuntimeError(
+            "macOS does not let this process post keyboard events — allow it in System Settings › "
+            "Privacy & Security › Accessibility (nothing was typed)"
+        )
+
+
 def type_unicode(text: str) -> int:
-    """Type ``text`` at the keyboard focus; returns the number of characters delivered.
+    """Type ``text`` at the keyboard focus; returns the number of characters handed to macOS.
 
     Quartz keyboard events carrying the text as a Unicode string, in runs of at
     most 20 UTF-16 units (``remoteos.typing_input.plan``); line breaks and tabs are
     the real Return / Tab keys. Not pyautogui: 0.9.54 maps only ASCII and silently
-    skips everything else. Every event is built before any is posted, so a failed
-    ``CGEventCreateKeyboardEvent`` types nothing.
+    skips everything else. ``CGEventPost`` reports nothing, so the posting
+    permission is checked first, and every event is built before any is posted:
+    a refusal types nothing. A locked console still drops posted events unseen.
     """
     if not HAS_QUARTZ:
         raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
+    _require_post_event_access()
     strokes = plan(text, max_units=_MAX_UNITS_PER_EVENT)
     pairs = [_key_pair(stroke) for stroke in strokes]  # all or nothing
     for index, pair in enumerate(pairs):
@@ -275,6 +290,41 @@ def type_unicode(text: str) -> int:
         for event in pair:
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
     return sum(stroke.chars for stroke in strokes)
+
+
+def type_text(
+    text: str,
+    x: int | None = None,
+    y: int | None = None,
+    clear: bool = False,
+    press_enter: bool = False,
+    method: str = "keys",
+) -> str:
+    """The Type tool: click screen point (x, y) if given, clear, type or paste ``text``, press Enter.
+
+    Points are in the ``CGDisplayBounds`` space. Text goes through
+    ``remoteos.text_entry`` (``type_unicode`` keystrokes, or a clipboard paste).
+    pyautogui only clicks and presses named keys here (Command+A, Delete,
+    Command+V, Enter); it never types text.
+    """
+    if x is not None and y is not None:
+        pyautogui.click(x, y)
+        time.sleep(0.1)
+    if clear:
+        pyautogui.hotkey(_SHORTCUT_MODIFIER, "a")
+        pyautogui.press("delete")
+        time.sleep(0.05)
+    reply = enter_text(
+        text,
+        method,
+        type_unicode=type_unicode,
+        get_clipboard=get_clipboard,
+        set_clipboard=set_clipboard,
+        press_paste=lambda: pyautogui.hotkey(_SHORTCUT_MODIFIER, "v"),
+    )
+    if press_enter:
+        pyautogui.press("enter")
+    return reply
 
 
 # ---------------------------------------------------------------------------

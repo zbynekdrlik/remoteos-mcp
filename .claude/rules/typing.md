@@ -1,7 +1,7 @@
 ---
 paths:
   - "src/remoteos/typing_input.py"
-  - "src/remoteos/paste.py"
+  - "src/remoteos/text_entry.py"
   - "src/remoteos/__main__.py"
   - "src/remoteos/platform/*/desktop.py"
   - "tests/test_typing_input.py"
@@ -14,7 +14,16 @@ paths:
 - **Never type text through pyautogui 0.9.54.** `write` is an alias of `typewrite`. Its key
   map covers only `chr(32..127)` and SILENTLY skips everything else, on Windows and macOS.
   That is how `Type("Žltý kôň")` dropped the diacritics and still replied `Typed 8 chars`.
-  pyautogui stays only for click / select-all / Delete / Enter around the text.
+  - In the win/mac `type_text`, pyautogui only clicks and presses named keys: select-all,
+    Delete, the paste keys and Enter.
+- **One provider call, like Scroll.**
+  - The tool validates `method`, maps the point, and calls
+    `get_desktop().type_text(text, x, y, clear, press_enter, method)`.
+  - A point is used only when it `is not None`. x=0 or y=0 is a real screen row/column.
+  - Every provider also has `type_unicode(text) -> int`, the Unicode-safe primitive
+    (#34/#35 build on it).
+  - The text step is shared: `remoteos.text_entry.enter_text` runs keys → `type_unicode` +
+    `typed_reply`, or paste → `paste_text`.
 - **`remoteos.typing_input` is pure.**
   - `plan(text, max_units)` splits text into `Stroke`s: Unicode text as UTF-16 code units,
     or a special key. `\n`, `\r\n` and a lone `\r` are ONE Enter each; `\t` is Tab.
@@ -32,31 +41,38 @@ paths:
     block is silent here too: SendInput still succeeds.
   - 10 ms between characters.
 - **macOS: keyboard events with keycode 0 + `CGEventKeyboardSetUnicodeString`.**
-  - The string is set on both the down and the up event.
+  - The string is set on both the down and the up event; the length is in UTF-16 units, as
+    pynput passes it.
   - At most 20 UTF-16 units per event: Quartz truncates a longer string.
   - Return / Tab are real keycodes (`kVK_Return` 0x24, `kVK_Tab` 0x30).
+  - `CGEventPost` returns nothing, and without the posting permission macOS drops events
+    SILENTLY. So `type_unicode` checks `CGPreflightPostEventAccess()` (macOS 10.15+) first;
+    when it is false it raises and types nothing.
+  - A locked console still drops events unseen. That diagnosis is #32.
   - Every event is built before any is posted, as in the scroll code.
-  - The edit-shortcut modifier is **Command**. Each provider has a `SHORTCUT_MODIFIER`
-    (win `ctrl`, mac `command`). Ctrl+A in Cocoa moves the caret to the paragraph start, so
-    the old `clear` deleted one character.
-- **The reply is the delivered count.** Providers return how many characters they handed to
-  the OS. The tool runs `typed_reply(delivered, len(text))`, and any shortfall is an error,
-  never `Typed N chars`.
-- **`method="paste"` = `remoteos.paste.paste_text`, shared by all three OSes.**
+  - The edit-shortcut modifier is **Command** (`_SHORTCUT_MODIFIER`). Ctrl+A in Cocoa moves
+    the caret to the paragraph start, so the old `clear` deleted one character.
+- **The reply is the delivered count.** `typed_reply(delivered, len(text))`: any shortfall is
+  an error, never `Typed N chars`.
+- **`method="paste"` = `text_entry.paste_text`.**
   - It goes through the providers' existing `get_clipboard` / `set_clipboard`. Those REPORT a
-    failure as an `Error: …` string and do not raise. A failed read means "no text to
-    restore"; a failed write raises before the paste keys are pressed.
+    failure as an `Error: …` string and do not raise.
+  - A failed or EMPTY read means "no text to restore". macOS `pbpaste` prints `""` for an
+    image too, so "restoring" `""` would only wipe it.
+  - A failed write raises before the paste keys are pressed. The `finally` restores even when
+    the paste keys fail.
   - It waits 0.3 s before restoring, because the target app reads the clipboard when it
     handles the paste keys.
-  - Only text survives. macOS `pbpaste` cannot tell an empty clipboard from a non-text one.
-  - `method` is validated before anything is clicked or typed.
+  - Never log clipboard content or the typed text; log only counts and method.
 - **Tests fake only the OS boundary.**
   - `_FakeInput.raw` keeps each `SendInput` call's INPUT bytes. `_key_calls` decodes them with
     the Win32 offsets (union at 8 on x64 / 4 on x86; `wVk`, `wScan` WORDs, then `dwFlags`),
     not with our field names.
-  - `_FakeClipboard` stands in for `win32clipboard`. The fake Quartz records keyboard events as
-    dicts.
+  - `_FakeClipboard` stands in for `win32clipboard`. The fake Quartz records keyboard events
+    and has `CGPreflightPostEventAccess`. `_mac_pasteboard` fakes `pbcopy`/`pbpaste`.
+  - The tool-layer fixtures patch BOTH `server.pyautogui` and the provider's `pyautogui`.
   - Expected values are literals (0x0004, 0x017D for Ž, 0xD83D/0xDE00).
-- **Live check on Windows (non-destructive):** open Notepad, run `Type("Žltý kôň ďakuje – €")`,
-  read the edit control back with `WM_GETTEXT` / UIA, and expect an exact match. Close
-  without saving.
+- **Live checks (non-destructive):**
+  - **Windows:** open Notepad, run `Type("Žltý kôň ďakuje – €")`, read the edit control back
+    with `WM_GETTEXT` / UIA, and expect an exact match. Close without saving.
+  - **macOS:** TextEdit, `Type("Žltý kôň 😀")`, read the text back with AppleScript.

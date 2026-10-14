@@ -35,10 +35,11 @@ from PIL import ImageGrab  # noqa: E402
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
 from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
+from remoteos.text_entry import enter_text  # noqa: E402
 from remoteos.typing_input import ENTER, TAB, Stroke, plan  # noqa: E402
 
-# The modifier of the edit shortcuts (select all, paste) the Type tool sends.
-SHORTCUT_MODIFIER = "ctrl"
+# The modifier of the edit shortcuts (select all, paste) that type_text() sends.
+_SHORTCUT_MODIFIER = "ctrl"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -331,6 +332,40 @@ def type_unicode(text: str) -> int:
             )
         delivered += stroke.chars
     return delivered
+
+
+def type_text(
+    text: str,
+    x: int | None = None,
+    y: int | None = None,
+    clear: bool = False,
+    press_enter: bool = False,
+    method: str = "keys",
+) -> str:
+    """The Type tool: click screen point (x, y) if given, clear, type or paste ``text``, press Enter.
+
+    Text goes through ``remoteos.text_entry`` (``type_unicode`` keystrokes, or a
+    clipboard paste). pyautogui only clicks and presses named keys here (Ctrl+A,
+    Delete, Ctrl+V, Enter); it never types text.
+    """
+    if x is not None and y is not None:
+        pyautogui.click(x, y)
+        time.sleep(0.1)
+    if clear:
+        pyautogui.hotkey(_SHORTCUT_MODIFIER, "a")
+        pyautogui.press("delete")
+        time.sleep(0.05)
+    reply = enter_text(
+        text,
+        method,
+        type_unicode=type_unicode,
+        get_clipboard=get_clipboard,
+        set_clipboard=set_clipboard,
+        press_paste=lambda: pyautogui.hotkey(_SHORTCUT_MODIFIER, "v"),
+    )
+    if press_enter:
+        pyautogui.press("enter")
+    return reply
 
 
 # ---------------------------------------------------------------------------
