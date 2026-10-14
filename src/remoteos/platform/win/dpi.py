@@ -41,7 +41,16 @@ def _read_back(user32) -> str | None:
         # DPI_AWARENESS_CONTEXT is a handle: keep it pointer-sized, never a truncated int.
         get_context.restype = ctypes.c_void_p
         get_awareness.argtypes = [ctypes.c_void_p]
-        return _AWARENESS_NAMES.get(get_awareness(get_context()))
+        context = get_context()
+        name = _AWARENESS_NAMES.get(get_awareness(context))
+        # DPI_AWARENESS reports v1 and v2 both as "per-monitor"; only a context
+        # comparison tells a (manifest-)preset v2 apart.
+        same = getattr(user32, "AreDpiAwarenessContextsEqual", None)
+        if name == "per-monitor" and same is not None:
+            same.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            if same(context, _DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+                return "per-monitor-v2"
+        return name
     except OSError as e:
         log.warning("DPI awareness read-back failed: %s", e)
         return None
@@ -85,11 +94,13 @@ def _request(windll) -> str:
 def enable_per_monitor_dpi_awareness(windll=None) -> str:
     """Request per-monitor-v2 DPI awareness, falling back to v1, then system-aware.
 
-    Returns the mode that took effect: ``"per-monitor-v2"``, ``"per-monitor"``,
-    ``"system"``, ``"unchanged"`` (every call refused — awareness was already set
-    by something else), or ``"unavailable"`` (not Windows). Idempotent for the
-    real process. ``windll`` is injectable so the fallback chain is testable off
-    Windows; an injected ``windll`` never touches the process-wide cache.
+    Returns the awareness the process actually has: ``"per-monitor-v2"``,
+    ``"per-monitor"``, ``"system"`` or ``"unaware"`` (read back from the OS on
+    Windows 10 1607+); ``"unchanged"`` when every call was refused and the OS
+    cannot be asked (pre-1607); ``"unavailable"`` when not on Windows.
+    Idempotent for the real process. ``windll`` is injectable so the fallback
+    chain is testable off Windows; an injected ``windll`` never touches the
+    process-wide cache.
     """
     global _MODE
     if windll is not None:

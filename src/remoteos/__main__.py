@@ -582,8 +582,9 @@ def App(
         name: Application name or path (for launch/switch).
         args: Arguments (for launch).
         handle: Window handle (for resize/switch).
-        width: New width (for resize), in SCREEN pixels — not Snapshot image pixels.
-        height: New height (for resize), in SCREEN pixels — not Snapshot image pixels.
+        width: New width (for resize), in raw screen units (the coords="screen" space:
+            physical pixels on Windows/Linux, points on macOS) — not Snapshot image pixels.
+        height: New height (for resize), in the same raw screen units as width.
     """
     try:
         if action == "launch":
