@@ -206,6 +206,15 @@ def _capture_snapshot_frame(monitor: int, max_width: int):
     return img, frame
 
 
+def _optional_point(x: int, y: int) -> list[tuple[int, int]]:
+    """``[(x, y)]``, or ``[]`` when BOTH are 0 — the input tools' documented "no point" default.
+
+    x=0 alone or y=0 alone is a real column/row of the frame (#31), so the test is
+    ``x or y`` (upstream winremote c3a675174c), never ``x and y``.
+    """
+    return [(x, y)] if (x or y) else []
+
+
 def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coords: str):
     """Map input-tool points to screen coordinates; returns ``(screen_points, reply_note)``."""
     if check_space(coords) == "screen" or not points:
@@ -358,8 +367,9 @@ def Type(
 
     Args:
         text: Text to type.
-        x: X in Snapshot image pixels (0 = current position).
-        y: Y in Snapshot image pixels (0 = current position).
+        x: X in Snapshot image pixels. x=0 with y=0 = no click (type at the current
+            focus); x=0 alone is the left column.
+        y: Y in Snapshot image pixels. y=0 alone is the top row.
         clear: Clear existing content first (select all, Delete).
         press_enter: Press Enter after typing.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
@@ -374,7 +384,7 @@ def Type(
     """
     try:
         how = check_method(method)
-        points, note = _to_screen([(x, y)] if x and y else [], monitor, max_width, coords)
+        points, note = _to_screen(_optional_point(x, y), monitor, max_width, coords)
         sx, sy = points[0] if points else (None, None)
         log.debug("Type %d chars by %s at %s (clear=%s, enter=%s)", len(text), how, points, clear, press_enter)
         reply = get_desktop().type_text(
@@ -415,8 +425,9 @@ def Scroll(
             sign picks the direction — positive = up/right, negative = down/left.
         direction: 'up', 'down', 'left' or 'right'. When given it wins over the
             sign of amount and over horizontal.
-        x: X in Snapshot image pixels (0 = current).
-        y: Y in Snapshot image pixels (0 = current).
+        x: X in Snapshot image pixels. x=0 with y=0 = where the mouse already is;
+            x=0 alone is the left column.
+        y: Y in Snapshot image pixels. y=0 alone is the top row.
         horizontal: Legacy, only without direction: scroll left/right instead of up/down.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
@@ -424,7 +435,7 @@ def Scroll(
     """
     try:
         steps = normalize_request(amount, direction, _tobool(horizontal))
-        points, note = _to_screen([(x, y)] if x and y else [], monitor, max_width, coords)
+        points, note = _to_screen(_optional_point(x, y), monitor, max_width, coords)
         sx, sy = points[0] if points else (None, None)
         log.debug("Scroll %s x%d (requested %d) at %s", steps.direction, steps.clicks, steps.requested, points)
         return get_desktop().scroll(steps.direction, steps.requested, x=sx, y=sy) + note
@@ -458,8 +469,9 @@ def Move(
         x: Target X in Snapshot image pixels.
         y: Target Y in Snapshot image pixels.
         drag: If true, drag from start position to target.
-        start_x: Drag start X in image pixels (0 = from the current position).
-        start_y: Drag start Y in image pixels (0 = from the current position).
+        start_x: Drag start X in image pixels. start_x=0 with start_y=0 = drag from
+            the current position; start_x=0 alone is the left column.
+        start_y: Drag start Y in image pixels. start_y=0 alone is the top row.
         duration: Movement duration in seconds.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
@@ -467,16 +479,15 @@ def Move(
     """
     try:
         drag = _tobool(drag)
-        has_start = bool(drag and start_x and start_y)
-        points = [(start_x, start_y), (x, y)] if has_start else [(x, y)]
-        mapped, note = _to_screen(points, monitor, max_width, coords)
+        start = _optional_point(start_x, start_y) if drag else []
+        mapped, note = _to_screen([*start, (x, y)], monitor, max_width, coords)
         x, y = mapped[-1]
-        start_x, start_y = mapped[0] if has_start else (0, 0)
+        start_x, start_y = mapped[0] if start else (None, None)
         if is_linux():
             msg = get_desktop().move(x, y, drag=drag, start_x=start_x, start_y=start_y, duration=duration)
             return msg + note
         if drag:
-            if has_start:
+            if start:
                 pyautogui.moveTo(start_x, start_y)
             pyautogui.drag(x - pyautogui.position()[0], y - pyautogui.position()[1], duration=duration)
             return f"Dragged to ({x},{y}){note}"

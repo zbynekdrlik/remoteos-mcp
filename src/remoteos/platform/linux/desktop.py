@@ -1178,13 +1178,23 @@ def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = No
         return f"Scroll error: {e}"
 
 
-def move(x: int, y: int, drag: bool = False, start_x: int = 0, start_y: int = 0, duration: float = 0.3) -> str:
-    """Move the mouse, or drag from a start position to the target."""
+def move(
+    x: int,
+    y: int,
+    drag: bool = False,
+    start_x: int | None = None,
+    start_y: int | None = None,
+    duration: float = 0.3,
+) -> str:
+    """Move the mouse, or drag to the target from screen point (start_x, start_y) or the current position.
+
+    A start point is used only when it ``is not None``: x=0 / y=0 is a real screen column/row (#31).
+    """
     if get_session().mode != "x11":
         return _unavailable()
     try:
         if drag:
-            if start_x and start_y:
+            if start_x is not None and start_y is not None:
                 _xdotool(["mousemove", str(start_x), str(start_y)])
             _xdotool(["mousedown", "1"])
             _xdotool(["mousemove", str(x), str(y)])
