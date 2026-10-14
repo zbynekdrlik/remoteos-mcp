@@ -107,3 +107,16 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Commits:** `61bc08b` bump; `2e1ab54` [red]; `f01a11c` [green]; `c84faa8` test split (test_gateway.py was 1179 lines); review fixes (fresh-connection retry client, invariants documented, rule paths) after one review pass (0🔴 2🟡 3🔵).
 - **Tests (RED→GREEN):** `test_machine_closing_a_pooled_connection_as_the_request_arrives_is_retried_not_503`, `test_one_stale_connection_failure_before_the_response_is_retried_once[*]`, `test_two_consecutive_stale_connection_failures_are_503_after_exactly_one_retry`, `test_idle_pooled_connections_expire_well_before_the_machines_keep_alive`, `test_the_production_client_drops_a_pooled_connection_after_2s_idle`.
 - **Loopback sweep:** real uvicorn + 60 ms latency proxy. Pre-fix: 503 at 4.88 s / 4.92 s idle. Retry alone: 4 retries, all 200. Production fix: 0 retries, all 200.
+
+## #12 — installers on Ubuntu 26.04 / Debian-owned deps: preflight, rollback, full pip error (0.7.0.dev24)
+
+- **Root cause (strih-pp, Python 3.14, Debian pip 25.1.1):** the pinned set must replace apt `python3-*` packages (cryptography, PyJWT, psutil, …). Debian's pip refuses ("installed by debian"). `| tail -3 || true` hid the error, and the pre-uninstall had already removed remoteos, so the box was left without a package.
+- **Fix:**
+  - Linux: `--ignore-installed`, safe because the pre-uninstall of remoteos-mcp, fastmcp and fastmcp-slim stays.
+  - Linux and macOS: a `pip install --dry-run` preflight with the same flags and `PIP_CONSTRAINT`, run before any uninstall. A RECORD-file snapshot of the three dists. On failure, `rollback_install` restores the old version byte for byte, offline, and the installer still exits non-zero. Full pip output on failure.
+  - `install.ps1`: the install output is captured and printed on failure (error-output parity only).
+- **Decision (on #12, ROZHODNUTÉ):** the rollback restores local files. A networked reinstall of the old commit or tag would re-resolve and rebuild everything, so it would fail the same way the install just did.
+- **Commits:** `e999e4c` bump; `e147d68` retire the dev14 no-`--ignore-installed` static test (the design reverses it); `71fd468` move shims to `tests/installer_harness.py`; `306674b` [red] 9 tests + `tests/fake_pip.py` (stateful Debian-pip fake); `7cc8be3` [green].
+- **Tests (RED→GREEN):** `test_upgrade_over_debian_owned_dependencies_succeeds_with_ignore_installed`, `test_failed_dry_run_aborts_before_any_uninstall_and_prints_the_full_error` (Linux + macOS), `test_failed_install_after_pre_uninstall_restores_the_recorded_version`, `test_failed_install_prints_the_full_pip_output`, `test_failed_install_on_a_fresh_box_exits_nonzero_with_the_full_error`, `test_upgrade_runs_preflight_then_pre_uninstall_then_install`, `test_failed_install_restores_the_recorded_version_and_prints_the_full_error`, `test_main_pip_install_output_is_kept_and_printed_on_failure`. Result: 269 pass, ruff and shellcheck clean.
+- **Real-pip check:** in a pip 24.0 venv, snapshot → uninstall → restore of tabulate gave byte-identical files. The console script stayed +x, and pip show, import and `pip check` were all OK.
+- **Not done here:** running the installer on strih-pp and stream-pp (26.04). The supervisor deploys and verifies.
