@@ -1,10 +1,11 @@
-"""Windows / macOS provider geometry + the pyautogui input branch (#28), run on any OS.
+"""Windows / macOS provider geometry, the pyautogui input branch (#28) and the wheel (#29).
 
 The Windows and macOS providers are imported here against FAKE OS APIs — the
-external boundary only: ``ctypes.windll`` / pywin32 / ``ImageGrab.grab`` /
-pyautogui on Windows, the ``Quartz`` framework and the ``screencapture``
+external boundary only: ``ctypes.windll`` (user32 ``SendInput`` / ``SetCursorPos``
+included) / pywin32 / ``ImageGrab.grab`` / pyautogui on Windows, the ``Quartz``
+framework (event creation + posting included) and the ``screencapture``
 subprocess on macOS. Everything of ours (``capture_geometry``, ``capture_frame``,
-the frame math, the tool functions) is the real code.
+``scroll``, the frame math, the tool functions) is the real code.
 """
 
 from __future__ import annotations
@@ -46,15 +47,37 @@ def _purge(name: str) -> None:
         delattr(sys.modules[parent], child)
 
 
+class _FakeInput:
+    """user32 cursor + ``SendInput``: records every call in order, reading the INPUT array."""
+
+    def __init__(self):
+        self.log: list[tuple] = []
+        self.inserted: int | None = None  # None = all events accepted
+
+    def SetCursorPos(self, x, y):
+        self.log.append(("SetCursorPos", x, y))
+        return 1
+
+    def SendInput(self, count, events, size):
+        entries = [(e.type, e.u.mi.dwFlags, e.u.mi.mouseData, e.u.mi.dx, e.u.mi.dy) for e in events[:count]]
+        self.log.append(("SendInput", count, entries, size))
+        return count if self.inserted is None else self.inserted
+
+
 @pytest.fixture
 def win(monkeypatch):
+    user_input = _FakeInput()
     windll = types.SimpleNamespace(
         user32=types.SimpleNamespace(
             GetSystemMetrics=lambda i: _METRICS[i],
             SetProcessDpiAwarenessContext=lambda ctx: 1,
             SetProcessDPIAware=lambda: 1,
+            SetCursorPos=user_input.SetCursorPos,
+            SendInput=user_input.SendInput,
         ),
         shcore=types.SimpleNamespace(SetProcessDpiAwareness=lambda v: 0),
+        kernel32=types.SimpleNamespace(GetLastError=lambda: 5),
+        input=user_input,  # not a DLL: the tests' handle on the recorded input
     )
     monkeypatch.setattr(ctypes, "windll", windll, raising=False)
     from remoteos.platform.win import dpi
@@ -154,18 +177,99 @@ def test_pyautogui_drag_maps_start_and_target(pyautogui_branch):
     assert fake.drag.calls == [((220, 698), {"duration": 0.3})]
 
 
-def test_pyautogui_type_and_scroll_points(pyautogui_branch):
+def test_pyautogui_type_point(pyautogui_branch):
     server, fake = pyautogui_branch
     server.Type("hi", x=640, y=228)
-    server.Scroll(-2, x=640, y=228)
     assert fake.click.calls == [((320, 798), {})]
-    assert fake.moveTo.calls == [((320, 798), {})]
 
 
 def test_pyautogui_screen_coords_pass_through(pyautogui_branch):
     server, fake = pyautogui_branch
     server.Move(-1500, 20, coords="screen")
     assert fake.moveTo.calls == [((-1500, 20), {"duration": 0.3})]
+
+
+# --- Windows: the mouse wheel is one SendInput event of clicks × WHEEL_DELTA (#29) ---
+
+_INPUT_MOUSE, _WHEEL, _HWHEEL = 0, 0x0800, 0x1000
+# sizeof(INPUT): SendInput rejects any other cbSize (x64: 40, x86: 28).
+_SIZEOF_INPUT = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
+
+
+def _sent(win_input):
+    """The (type, dwFlags, mouseData) of every SendInput event, and the cbSizes it was given."""
+    calls = [entry for entry in win_input.log if entry[0] == "SendInput"]
+    return [e[:3] for _, _, entries, _ in calls for e in entries], {size for *_, size in calls}
+
+
+@pytest.mark.parametrize(
+    ("direction", "clicks", "flags", "data"),
+    [
+        ("up", 3, _WHEEL, 360),
+        ("down", 3, _WHEEL, -360),
+        ("right", 2, _HWHEEL, 240),
+        ("left", 2, _HWHEEL, -240),
+        ("down", 500, _WHEEL, -12000),  # clamped to 100 clicks
+    ],
+)
+def test_windows_scroll_sends_one_wheel_event(win, direction, clicks, flags, data):
+    mod, _ = win
+    mod.scroll(direction, clicks)
+    events, sizes = _sent(ctypes.windll.input)
+    assert events == [(_INPUT_MOUSE, flags, data)]
+    assert sizes == {_SIZEOF_INPUT}
+
+
+def test_windows_scroll_puts_the_cursor_on_the_point_first(win):
+    mod, _ = win
+    mod.scroll("down", 1, x=-1500, y=0)  # y=0 is a real screen row, not "no point"
+    log = ctypes.windll.input.log
+    assert log[0] == ("SetCursorPos", -1500, 0)
+    assert log[1][0] == "SendInput"
+
+
+def test_windows_scroll_without_point_leaves_the_cursor(win):
+    mod, _ = win
+    assert mod.scroll("up", 2) == "Scrolled 2 clicks up"
+    assert [entry[0] for entry in ctypes.windll.input.log] == ["SendInput"]
+
+
+def test_windows_blocked_sendinput_is_an_error(win):
+    mod, _ = win
+    ctypes.windll.input.inserted = 0  # UIPI / a locked or disconnected session
+    with pytest.raises(RuntimeError, match=r"SendInput inserted 0 of 1 wheel events \(error 5\)"):
+        mod.scroll("up", 1)
+
+
+def test_windows_scroll_tool_maps_the_point_and_sends_the_wheel(pyautogui_branch):
+    server, fake = pyautogui_branch
+    out = server.Scroll(-2, x=640, y=228)  # legacy signed amount → down 2
+    assert ctypes.windll.input.log[0] == ("SetCursorPos", 320, 798)
+    assert _sent(ctypes.windll.input)[0] == [(_INPUT_MOUSE, _WHEEL, -240)]
+    assert out.startswith("Scrolled 2 clicks down [image (640,228) → screen (320,798)")
+    assert fake.scroll.calls == [] and fake.moveTo.calls == []  # pyautogui's wheel is never used
+
+
+def test_windows_legacy_horizontal_scroll_is_horizontal(pyautogui_branch):
+    server, fake = pyautogui_branch
+    replies = [server.Scroll(2, horizontal=True), server.Scroll(-3, horizontal="true")]
+    # pyautogui 0.9.54's hscroll was a VERTICAL raw-delta event on Windows; this is the real tilt wheel
+    assert _sent(ctypes.windll.input)[0] == [(_INPUT_MOUSE, _HWHEEL, 240), (_INPUT_MOUSE, _HWHEEL, -360)]
+    assert fake.hscroll.calls == [] and fake.scroll.calls == []
+    assert replies == ["Scrolled 2 clicks right", "Scrolled 3 clicks left"]
+
+
+def test_windows_scroll_direction_wins_over_sign_and_horizontal(pyautogui_branch):
+    server, _ = pyautogui_branch
+    assert server.Scroll(-3, direction="up", horizontal=True) == "Scrolled 3 clicks up"
+    assert _sent(ctypes.windll.input)[0] == [(_INPUT_MOUSE, _WHEEL, 360)]
+
+
+def test_windows_scroll_unknown_direction_sends_nothing(pyautogui_branch):
+    server, _ = pyautogui_branch
+    out = server.Scroll(3, direction="sideways")
+    assert out == "Scroll error: direction must be one of up, down, left, right (got 'sideways')"
+    assert ctypes.windll.input.log == []
 
 
 # --- Windows: a failed grab is retried once after reconnecting the RDP session ---
@@ -263,6 +367,17 @@ def mac(monkeypatch):
     quartz.CGDisplayCopyDisplayMode = lambda did: did
     quartz.CGDisplayModeGetPixelWidth = lambda mode: _MAC_DISPLAYS[mode][1][0]
     quartz.CGDisplayModeGetPixelHeight = lambda mode: _MAC_DISPLAYS[mode][1][1]
+    # Quartz event API (#29): created events are plain dicts, every post is recorded in order.
+    quartz.kCGScrollEventUnitLine, quartz.kCGHIDEventTap = 1, 0
+    quartz.kCGEventMouseMoved, quartz.kCGMouseButtonLeft = 5, 0
+    quartz.posted = []
+    quartz.CGEventCreateScrollWheelEvent = lambda src, unit, count, *wheels: {
+        "scroll": (unit, count, *wheels),
+        "location": None,
+    }
+    quartz.CGEventCreateMouseEvent = lambda src, kind, point, button: {"mouse": (kind, tuple(point), button)}
+    quartz.CGEventSetLocation = lambda event, point: event.update(location=tuple(point))
+    quartz.CGEventPost = lambda tap, event: quartz.posted.append((tap, event))
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
     _purge("remoteos.platform.mac.desktop")
     mod = importlib.import_module("remoteos.platform.mac.desktop")
@@ -309,3 +424,66 @@ def test_mac_unknown_monitor_raises(mac):
     mod, _ = mac
     with pytest.raises(IndexError):
         mod.capture_geometry(3)
+
+
+# --- macOS: the wheel is Quartz line events, one line per click (#29) ---
+
+
+def _scrolls(quartz):
+    return [event["scroll"] for _, event in quartz.posted if "scroll" in event]
+
+
+@pytest.mark.parametrize(
+    ("direction", "clicks", "wheels"),
+    [
+        ("up", 3, [(1, 2, 3, 0)]),  # line units, 2 wheels, wheel1 = vertical (+ = up)
+        ("down", 3, [(1, 2, -3, 0)]),
+        ("left", 2, [(1, 2, 0, 2)]),  # Quartz wheel2: POSITIVE = LEFT
+        ("right", 2, [(1, 2, 0, -2)]),
+        ("down", 25, [(1, 2, -10, 0), (1, 2, -10, 0), (1, 2, -5, 0)]),  # at most 10 lines per event
+    ],
+)
+def test_mac_scroll_posts_line_events(mac, direction, clicks, wheels):
+    mod, _ = mac
+    quartz = sys.modules["Quartz"]
+    assert mod.scroll(direction, clicks) == f"Scrolled {clicks} clicks {direction}"
+    assert _scrolls(quartz) == wheels
+    assert {tap for tap, _ in quartz.posted} == {0}  # the HID event tap
+    assert all(event["location"] is None for _, event in quartz.posted)
+
+
+def test_mac_scroll_at_a_point_moves_there_and_locates_every_event(mac):
+    mod, _ = mac
+    quartz = sys.modules["Quartz"]
+    mod.scroll("up", 12, x=720, y=450)
+    first, *scrolls = [event for _, event in quartz.posted]
+    assert first == {"mouse": (5, (720, 450), 0)}  # a mouse-moved event to the point first
+    assert [e["scroll"] for e in scrolls] == [(1, 2, 10, 0), (1, 2, 2, 0)]
+    assert [e["location"] for e in scrolls] == [(720, 450), (720, 450)]
+
+
+@pytest.fixture
+def mac_tool_layer(monkeypatch, mac):
+    import remoteos.__main__ as server
+
+    mod, _ = mac
+    fake = types.SimpleNamespace(scroll=_Recorder(), hscroll=_Recorder(), moveTo=_Recorder())
+    monkeypatch.setattr(server, "pyautogui", fake, raising=False)
+    monkeypatch.setattr(server, "is_linux", lambda: False)
+    monkeypatch.setattr(server, "get_desktop", lambda: mod)
+    return server, fake, sys.modules["Quartz"]
+
+
+def test_mac_legacy_horizontal_scroll_is_horizontal(mac_tool_layer):
+    server, fake, quartz = mac_tool_layer
+    assert server.Scroll(2, horizontal=True) == "Scrolled 2 clicks right"
+    assert _scrolls(quartz) == [(1, 2, 0, -2)]
+    assert fake.hscroll.calls == [] and fake.scroll.calls == []
+
+
+def test_mac_scroll_tool_maps_the_image_point_to_points(mac_tool_layer):
+    server, _, quartz = mac_tool_layer
+    server.Scroll(3, direction="down", x=640, y=400)  # main display 1440x900 pt, image 1280x800
+    _, first = quartz.posted[0]
+    assert first == {"mouse": (5, (720, 450), 0)}
+    assert _scrolls(quartz) == [(1, 2, -3, 0)]

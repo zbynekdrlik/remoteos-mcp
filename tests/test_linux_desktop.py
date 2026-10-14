@@ -177,7 +177,7 @@ def test_headless_screenshot_raises_stub_message(headless):
         lambda m: m.show_notification("t", "b"),
         lambda m: m.click(10, 10),
         lambda m: m.type_text("hi"),
-        lambda m: m.scroll(3),
+        lambda m: m.scroll("up", 3),
         lambda m: m.move(5, 5),
         lambda m: m.shortcut("ctrl+c"),
     ],
@@ -261,16 +261,26 @@ def test_x11_type_text_with_clear_and_enter(x11):
     assert ["xdotool", "key", "Return"] in argvs
 
 
-def test_x11_scroll_down(x11):
+@pytest.mark.parametrize(
+    ("direction", "button"),
+    [("up", "4"), ("down", "5"), ("left", "6"), ("right", "7")],  # the X11 wheel buttons
+)
+def test_x11_scroll_direction_picks_the_wheel_button(x11, direction, button):
     mod, calls = x11
-    mod.scroll(-3)
-    assert calls[-1] == ["xdotool", "click", "--repeat", "3", "5"]  # 5 = wheel down
+    assert mod.scroll(direction, 3) == f"Scrolled 3 clicks {direction}"
+    assert calls == [["xdotool", "click", "--repeat", "3", button]]
 
 
-def test_x11_scroll_up(x11):
+def test_x11_scroll_clicks_are_clamped_to_100(x11):
     mod, calls = x11
-    mod.scroll(2)
-    assert calls[-1] == ["xdotool", "click", "--repeat", "2", "4"]  # 4 = wheel up
+    assert mod.scroll("down", 500) == "Scrolled 100 clicks down (requested 500, clamped to 1..100)"
+    assert calls[-1] == ["xdotool", "click", "--repeat", "100", "5"]
+
+
+def test_x11_scroll_moves_to_the_point_even_on_column_0(x11):
+    mod, calls = x11
+    mod.scroll("down", 1, x=0, y=300)  # x=0 is the left screen column, not "no point"
+    assert calls == [["xdotool", "mousemove", "0", "300"], ["xdotool", "click", "--repeat", "1", "5"]]
 
 
 def test_x11_shortcut_maps_win_and_enter(x11):
