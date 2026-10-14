@@ -130,4 +130,12 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - A failed rollback keeps the snapshot.
   - `install.ps1` checks `$LASTEXITCODE`.
   - Result: 285 pass, shellcheck clean at default severity. All 42 installer tests also pass under bash 3.2.57 (`bash:3.2` container, uid 1000). Real pip 24.0 check of `names`/`plan`/`snapshot`/`restore` OK.
+- **Review round 2:** 0🔴 2🟡 8🔵, all fixed in this branch except the Windows rollback (follow-up candidate).
+  - Commits: `d053f84` [red] (9 fail), `54fdbd8` [green].
+  - The rollback is armed by state (EXIT trap + `ROLLBACK_ARMED`, SIGPIPE ignored while armed). A lost console (no-tty ssh drop) or a truncated download now rolls back. Before, bash died on SIGPIPE and the snapshot was deleted.
+  - The helper reads `importlib.metadata` (RECORD + INSTALLER) instead of parsing `pip show`. Real pip prints a multi-line License with a raw `---` and a `Name:` line.
+  - The rollback removes every visible pip-owned copy of the three, the changed and the added deps, one per pip call, so an apt refusal cannot skip the rest.
+  - plan and snapshot abort when a RECORD is missing or does not list its own METADATA.
+  - The fake box got two site dirs (pip over apt).
+  - Result: 297 pass. 52/52 shell-dependent installer tests pass under bash 3.2.57. Real pip 24.0 check of plan/pipowned/snapshot/restore OK.
 - **Not done here:** running the installer on strih-pp and stream-pp (26.04). The supervisor deploys and verifies.
