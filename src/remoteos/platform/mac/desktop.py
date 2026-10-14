@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import base64
-import io
+import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from typing import Optional
+
+from remoteos.coords import CaptureGeometry, frame_for
+from remoteos.snapshot import encode_jpeg, fit_to_frame
 
 # Quartz imports (will fail on non-macOS — caught at tool level)
 try:
@@ -108,76 +110,85 @@ def get_interactive_elements() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _get_monitor_bbox(monitor: int) -> tuple[int, int, int, int] | None:
-    """Get bounding box for a specific monitor (1-indexed). Returns None for all monitors."""
-    if monitor <= 0:
-        return None
-    if not HAS_QUARTZ:
-        return None
-    try:
-        max_displays = 16
-        (err, display_ids, count) = Quartz.CGGetActiveDisplayList(max_displays, None, None)
-        if err != 0 or monitor > count:
-            raise IndexError(f"Monitor {monitor} not found (have {count})")
-        display_id = display_ids[monitor - 1]
-        bounds = Quartz.CGDisplayBounds(display_id)
-        x = int(bounds.origin.x)
-        y = int(bounds.origin.y)
-        w = int(bounds.size.width)
-        h = int(bounds.size.height)
-        return (x, y, x + w, y + h)
-    except Exception:
-        raise
+def _display_id(monitor: int):
+    """Quartz display id for ``monitor``: 0 = main display, N = N-th active display.
 
-
-def take_screenshot(quality: int = 65, max_width: int = 1280, monitor: int = 0) -> str:
-    """Capture screen, return base64 JPEG. Resizes if wider than max_width.
-
-    Args:
-        quality: JPEG quality 1-100.
-        max_width: Max width in pixels. 0=no resize (native resolution).
-        monitor: 0=all monitors, 1/2/3=specific monitor.
+    ``CGGetActiveDisplayList`` always lists the main display first, matching
+    ``screencapture -D 1`` (= main), so ``-D N`` and this id are the same display.
     """
+    if not HAS_QUARTZ:
+        raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
+    if monitor <= 0:
+        return Quartz.CGMainDisplayID()
+    (err, display_ids, count) = Quartz.CGGetActiveDisplayList(16, None, None)
+    if err != 0 or monitor > count:
+        raise IndexError(f"Monitor {monitor} not found (have {count})")
+    return display_ids[monitor - 1]
+
+
+def capture_geometry(monitor: int = 0) -> CaptureGeometry:
+    """Screen bounds of a capture target for the coordinate contract (#28).
+
+    Bounds are in POINTS (``CGDisplayBounds``, the global space pyautogui moves
+    in); the capture size is the display mode's PIXEL size (what ``screencapture``
+    writes). On Retina the two differ by the backing scale, so the 2x lands in the
+    frame's ``scale`` instead of in every click. ``monitor=0`` is the main display
+    (``screencapture`` with one output file captures one display), origin (0,0).
+    """
+    display_id = _display_id(monitor)
+    bounds = Quartz.CGDisplayBounds(display_id)
+    x, y = int(bounds.origin.x), int(bounds.origin.y)
+    width, height = int(bounds.size.width), int(bounds.size.height)
+    mode = Quartz.CGDisplayCopyDisplayMode(display_id)
+    pixel_width = int(Quartz.CGDisplayModeGetPixelWidth(mode)) if mode is not None else 0
+    pixel_height = int(Quartz.CGDisplayModeGetPixelHeight(mode)) if mode is not None else 0
+    if pixel_width <= 0 or pixel_height <= 0:  # no mode info → assume 1:1
+        pixel_width, pixel_height = width, height
+    return CaptureGeometry(x=x, y=y, width=width, height=height, pixel_width=pixel_width, pixel_height=pixel_height)
+
+
+def capture_frame(monitor: int = 0, max_width: int = 1280):
+    """Capture ``monitor`` and fit it to its frame → ``(PIL image, Frame)``."""
     if Image is None:
         raise RuntimeError("Pillow not installed — run `pip install Pillow`")
+    frame = frame_for(monitor, max_width, capture_geometry(monitor))
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp_path = tmp.name
 
-    # screencapture -x = no sound, captures full screen
+    # screencapture -x = no sound; -D N selects the display (1 = main)
     cmd = ["screencapture", "-x"]
     if monitor > 0:
-        # -D flag selects display (1-indexed)
         cmd.extend(["-D", str(monitor)])
     cmd.append(tmp_path)
 
     try:
-        subprocess.run(cmd, timeout=10, capture_output=True, check=True)
-    except FileNotFoundError:
-        raise RuntimeError("screencapture not found — requires macOS")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"screencapture failed: {e.stderr.decode().strip()}")
-
-    try:
+        try:
+            subprocess.run(cmd, timeout=10, capture_output=True, check=True)
+        except FileNotFoundError:
+            raise RuntimeError("screencapture not found — requires macOS")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"screencapture failed: {e.stderr.decode().strip()}")
         img = Image.open(tmp_path)
-        # Resize if needed
-        if max_width > 0 and img.width > max_width:
-            ratio = max_width / img.width
-            new_height = int(img.height * ratio)
-            img = img.resize((max_width, new_height), resample=Image.LANCZOS)
-        # Convert to JPEG
-        if img.mode in ("RGBA", "LA"):
-            img = img.convert("RGB")
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality, optimize=True)
-        return base64.b64encode(buf.getvalue()).decode()
+        img.load()  # read the pixels before the temp file is unlinked
+        return fit_to_frame(img, frame), frame
     finally:
-        import os
-
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def take_screenshot(quality: int = 65, max_width: int = 1280, monitor: int = 0) -> str:
+    """Capture screen, return base64 JPEG sized to the Snapshot frame.
+
+    Args:
+        quality: JPEG quality 1-100.
+        max_width: Max width in pixels. 0=no resize (native resolution).
+        monitor: 0=main display, 1/2/3=specific display.
+    """
+    img, _frame = capture_frame(monitor=monitor, max_width=max_width)
+    return encode_jpeg(img, quality)
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from remoteos.coords import CaptureGeometry, frame_for
+from remoteos.platform.linux.display import parse_display_geometry, parse_xrandr_monitors
+from remoteos.snapshot import encode_jpeg, fit_to_frame
+
 log = logging.getLogger("remoteos.platform.linux.desktop")
 
 HAS_WIN32 = False  # compatibility flag — always False on Linux
@@ -503,33 +507,52 @@ def capture_png(bbox: Optional[tuple[int, int, int, int]] = None) -> bytes:
             pass
 
 
+def capture_geometry(monitor: int = 0) -> CaptureGeometry:
+    """Screen bounds of a capture target for the coordinate contract (#28).
+
+    ``monitor=0`` is the whole X root (what a full-screen scrot captures; an X
+    root always starts at ``(0,0)``). ``monitor=N`` is entry ``N-1`` of ``xrandr
+    --listmonitors``. X11 input (xdotool) and capture share one pixel space, so
+    the capture size equals the bounds. Raises :class:`RuntimeError` with the
+    stub message when there is no X11 session (never shells out then).
+    """
+    if get_session().mode != "x11":
+        raise RuntimeError(_unavailable())
+    if monitor <= 0:
+        width, height = parse_display_geometry(_xdotool(["getdisplaygeometry"]))
+        return CaptureGeometry(x=0, y=0, width=width, height=height, pixel_width=width, pixel_height=height)
+    r = _run_x(["xrandr", "--listmonitors"])
+    monitors = parse_xrandr_monitors((r.stdout or b"").decode("utf-8", "replace"))
+    if monitor > len(monitors):
+        raise IndexError(f"Monitor {monitor} not found (have {len(monitors)})")
+    x, y, width, height = monitors[monitor - 1]
+    return CaptureGeometry(x=x, y=y, width=width, height=height, pixel_width=width, pixel_height=height)
+
+
+def capture_frame(monitor: int = 0, max_width: int = 1280):
+    """Capture ``monitor`` and fit it to its frame → ``(PIL image, Frame)``."""
+    import io
+
+    from PIL import Image
+
+    geometry = capture_geometry(monitor)
+    frame = frame_for(monitor, max_width, geometry)
+    bbox = None
+    if monitor > 0:
+        bbox = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height)
+    img = Image.open(io.BytesIO(capture_png(bbox)))
+    return fit_to_frame(img, frame), frame
+
+
 def take_screenshot(quality: int = 65, max_width: int = 1280, monitor: int = 0) -> str:
-    """Capture screen, return base64 JPEG. Resizes if wider than ``max_width``.
+    """Capture screen, return base64 JPEG sized to the Snapshot frame.
 
     Mirrors the Windows/macOS providers. Raises :class:`RuntimeError` (which the
     ``Snapshot`` tool catches) when there is no usable X11 session — preserving
     the headless contract exactly.
     """
-    s = get_session()
-    if s.mode != "x11":
-        raise RuntimeError(_unavailable())
-
-    import base64
-    import io
-
-    from PIL import Image
-
-    png = capture_png()
-    img = Image.open(io.BytesIO(png))
-    if max_width > 0 and img.width > max_width:
-        ratio = max_width / img.width
-        new_height = int(img.height * ratio)
-        img = img.resize((max_width, new_height), resample=Image.LANCZOS)
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
-    return base64.b64encode(buf.getvalue()).decode()
+    img, _frame = capture_frame(monitor=monitor, max_width=max_width)
+    return encode_jpeg(img, quality)
 
 
 # ---------------------------------------------------------------------------
