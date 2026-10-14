@@ -641,20 +641,24 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     Args:
         command: Command to execute.
         timeout: Timeout in seconds (default 30).
-        cwd: Working directory. If provided, the command runs inside that directory.
+        cwd: Working directory (spaces and quotes are fine, ~ is expanded). If
+            provided, the command runs inside that directory; a directory that
+            does not exist is an error and the command does not run.
     """
     try:
+        # The directory goes to the process itself (#31): pasting it into the
+        # command as ``cd {cwd}`` broke on spaces/quotes and ran ``; <cmd>`` in it.
+        workdir = None
+        if cwd:
+            workdir = os.path.expanduser(cwd)
+            if not os.path.isdir(workdir):
+                log.warning("Shell refused: working directory not found: %r", cwd)
+                return f"Shell error: working directory not found: {cwd}"
         if is_windows():
-            if cwd:
-                command = f"cd {cwd}; {command}"
             shell_cmd = ["powershell", "-NoProfile", "-Command", command]
         elif is_macos():
-            if cwd:
-                command = f"cd {cwd} && {command}"
             shell_cmd = ["/bin/zsh", "-c", command]
         else:
-            if cwd:
-                command = f"cd {cwd} && {command}"
             shell_cmd = ["/bin/bash", "-c", command]
 
         proc = subprocess.Popen(
@@ -662,6 +666,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            cwd=workdir,
             start_new_session=not is_windows(),
         )
         try:
