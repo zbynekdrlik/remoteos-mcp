@@ -1,19 +1,23 @@
-"""RED regression tests for installer hardening (surfaced by #12 live deploy).
+"""Regression tests for installer hardening (surfaced by #12 live deploys).
 
-Tests that install-linux.sh:
-(a) Aborts BEFORE any install when root filesystem is mounted read-only.
-(b) Detects version mismatch between pip-installed package and /health endpoint.
-(d) Uses --force-reinstall (not --ignore-installed) for reliable upgrades.
+install-linux.sh:
+(a) Aborts BEFORE any install when the root filesystem is mounted read-only.
+(b) Detects a version mismatch between the pip-installed package and /health.
 
-Also tests install.sh (macOS):
-(c) Detects version mismatch between pip-installed package and /health endpoint.
-(d) Uses --force-reinstall (not --ignore-installed) for reliable upgrades.
+install.sh (macOS):
+(c) Detects a version mismatch between the pip-installed package and /health.
 
-Also tests install.ps1 (Windows):
-(d) Uses --force-reinstall for reliable upgrades.
+install.ps1 (Windows):
+(e) Post-install /health version self-check.
+(f) Stops the running service before pip install; fail-hard import check.
 
-All tests run the real installer under bash with a FAKE PATH of shim scripts —
-no root, no network, no system changes.  Hermetic via tmp_path.
+All installers:
+(g) Deterministic pre-uninstall of remoteos-mcp, fastmcp, fastmcp-slim, and
+    no --force-reinstall on the main install.
+(h) The Linux/macOS pre-uninstall passes --break-system-packages.
+
+The behavioural tests run the real installer under bash with a FAKE PATH of
+shim scripts — no root, no network, no system changes.  Hermetic via tmp_path.
 """
 
 from __future__ import annotations
@@ -473,25 +477,6 @@ exit 0
         assert installed_ver in output and health_ver in output, (
             f"Expected both '{installed_ver}' and '{health_ver}' in "
             f"mismatch output.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# (d) All installers must use --force-reinstall (not --ignore-installed)
-# ---------------------------------------------------------------------------
-
-
-class TestNoIgnoreInstalled:
-    """Installers must NOT use --ignore-installed (insufficient for git-based
-    upgrades — the imag.lan dev8-instead-of-dev13 incident, #12 2026-09-09).
-    The correct approach is pre-uninstall + install (no --force-reinstall)."""
-
-    def test_linux_installer_no_ignore_installed(self) -> None:
-        """install-linux.sh must NOT use --ignore-installed."""
-        content = INSTALLER_LINUX.read_text()
-        assert "--ignore-installed" not in content, (
-            "install-linux.sh must not use --ignore-installed — it does not "
-            "force pip to re-clone from git when an older version exists"
         )
 
 
