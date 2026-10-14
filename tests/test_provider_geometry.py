@@ -53,10 +53,11 @@ class _FakeInput:
     def __init__(self):
         self.log: list[tuple] = []
         self.inserted: int | None = None  # None = all events accepted
+        self.cursor_ok = True
 
     def SetCursorPos(self, x, y):
         self.log.append(("SetCursorPos", x, y))
-        return 1
+        return 1 if self.cursor_ok else 0
 
     def SendInput(self, count, events, size):
         entries = [(e.type, e.u.mi.dwFlags, e.u.mi.mouseData, e.u.mi.dx, e.u.mi.dy) for e in events[:count]]
@@ -76,7 +77,6 @@ def win(monkeypatch):
             SendInput=user_input.SendInput,
         ),
         shcore=types.SimpleNamespace(SetProcessDpiAwareness=lambda v: 0),
-        kernel32=types.SimpleNamespace(GetLastError=lambda: 5),
         input=user_input,  # not a DLL: the tests' handle on the recorded input
     )
     monkeypatch.setattr(ctypes, "windll", windll, raising=False)
@@ -236,9 +236,18 @@ def test_windows_scroll_without_point_leaves_the_cursor(win):
 
 def test_windows_blocked_sendinput_is_an_error(win):
     mod, _ = win
-    ctypes.windll.input.inserted = 0  # UIPI / a locked or disconnected session
-    with pytest.raises(RuntimeError, match=r"SendInput inserted 0 of 1 wheel events \(error 5\)"):
+    ctypes.windll.input.inserted = 0  # a locked or disconnected session (a UIPI block is silent)
+    # no GetLastError in the text: windll's last error is unreliable, and kernel32 is not faked here
+    with pytest.raises(RuntimeError, match=r"^SendInput inserted 0 of 1 wheel events — input is blocked"):
         mod.scroll("up", 1)
+
+
+def test_windows_failed_setcursorpos_is_an_error_and_sends_nothing(win):
+    mod, _ = win
+    ctypes.windll.input.cursor_ok = False
+    with pytest.raises(RuntimeError, match=r"^SetCursorPos\(-1500,0\) failed — no interactive desktop"):
+        mod.scroll("down", 1, x=-1500, y=0)
+    assert [entry[0] for entry in ctypes.windll.input.log] == ["SetCursorPos"]
 
 
 def test_windows_scroll_tool_maps_the_point_and_sends_the_wheel(pyautogui_branch):
@@ -460,6 +469,16 @@ def test_mac_scroll_at_a_point_moves_there_and_locates_every_event(mac):
     assert first == {"mouse": (5, (720, 450), 0)}  # a mouse-moved event to the point first
     assert [e["scroll"] for e in scrolls] == [(1, 2, 10, 0), (1, 2, 2, 0)]
     assert [e["location"] for e in scrolls] == [(720, 450), (720, 450)]
+
+
+@pytest.mark.parametrize("factory", ["CGEventCreateMouseEvent", "CGEventCreateScrollWheelEvent"])
+def test_mac_failed_event_creation_is_an_error_and_posts_nothing(mac, monkeypatch, factory):
+    mod, _ = mac
+    quartz = sys.modules["Quartz"]
+    monkeypatch.setattr(quartz, factory, lambda *args: None)
+    with pytest.raises(RuntimeError, match=f"^{factory} returned no event"):
+        mod.scroll("up", 3, x=720, y=450)
+    assert quartz.posted == []
 
 
 @pytest.fixture

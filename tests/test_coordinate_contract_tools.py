@@ -275,6 +275,8 @@ def test_headless_input_tool_returns_the_exact_provider_stub(monkeypatch):
     monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
     assert server.Click(10, 10) == "Not available on headless Linux (no display)"
     assert server.Move(10, 10) == "Not available on headless Linux (no display)"
+    assert server.Scroll(3, direction="down", x=10, y=10) == "Not available on headless Linux (no display)"
+    assert server.Scroll(-3) == "Not available on headless Linux (no display)"
 
 
 def test_annotated_snapshot_states_contract(fake_x11):

@@ -12,21 +12,21 @@ import pytest
 
 from remoteos.scroll import chunks, normalize_request, wheel_steps
 
-# (direction, clicks) → (dy, dx, horizontal, Windows mouseData)
+# (direction, clicks) → (signed clicks: + = up/right, horizontal, Windows mouseData)
 _TABLE = [
-    ("up", 3, 3, 0, False, 360),
-    ("down", 3, -3, 0, False, -360),
-    ("left", 2, 0, -2, True, -240),
-    ("right", 2, 0, 2, True, 240),
-    ("down", 1, -1, 0, False, -120),
+    ("up", 3, 3, False, 360),
+    ("down", 3, -3, False, -360),
+    ("left", 2, -2, True, -240),
+    ("right", 2, 2, True, 240),
+    ("down", 1, -1, False, -120),
 ]
 
 
-@pytest.mark.parametrize(("direction", "clicks", "dy", "dx", "horizontal", "delta"), _TABLE)
-def test_wheel_steps_table(direction, clicks, dy, dx, horizontal, delta):
+@pytest.mark.parametrize(("direction", "clicks", "signed", "horizontal", "delta"), _TABLE)
+def test_wheel_steps_table(direction, clicks, signed, horizontal, delta):
     steps = wheel_steps(direction, clicks)
     assert (steps.direction, steps.clicks) == (direction, clicks)
-    assert (steps.dy, steps.dx) == (dy, dx)
+    assert steps.signed_clicks == signed
     assert steps.horizontal is horizontal
     assert steps.delta == delta
 
@@ -40,7 +40,7 @@ def test_clicks_are_clamped_to_1_100():
 
 def test_direction_is_case_and_space_insensitive():
     assert wheel_steps(" Down ", 2).direction == "down"
-    assert wheel_steps("RIGHT", 2).dx == 2
+    assert wheel_steps("RIGHT", 2).signed_clicks == 2
 
 
 @pytest.mark.parametrize("bad", ["sideways", "", "u p", "north"])
@@ -80,8 +80,8 @@ def test_legacy_signed_amount_is_mapped(amount, horizontal, direction, clicks):
 
 def test_explicit_direction_wins_over_sign_and_horizontal():
     steps = normalize_request(-3, direction="up", horizontal=True)
-    assert (steps.direction, steps.clicks, steps.dy) == ("up", 3, 3)
-    assert normalize_request(7, direction="left").dx == -7
+    assert (steps.direction, steps.clicks, steps.signed_clicks) == ("up", 3, 3)
+    assert normalize_request(7, direction="left").signed_clicks == -7
 
 
 def test_request_keeps_the_requested_count_for_the_clamp_note():
