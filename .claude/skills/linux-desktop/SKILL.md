@@ -11,7 +11,10 @@ Landed in #6. #7 (AnnotatedSnapshot via AT-SPI) + #8 (ScreenRecord via ffmpeg x1
 
 - **Input tools (Click/Type/Scroll/Move/Shortcut) are dispatched in `__main__.py` via `pyautogui`, NOT the provider.** pyautogui is deliberately NOT imported on Linux (`if _sys.platform != "linux"`). So each input handler has an `if is_linux(): return get_desktop().<fn>(...)` branch that routes to xdotool in the provider. Win/Mac keep the pyautogui path.
 - **Tool gating is runtime-session-aware.** `tiers.py` splits the old `LINUX_EXCLUDED_TOOLS` into `LINUX_ALWAYS_EXCLUDED_TOOLS` (Reg*, ReconnectSession, ScreenRecord, Scrape, AnnotatedSnapshot) + `LINUX_DISPLAY_TOOLS` (enabled only when X11 is detected). `__main__.py` calls `linux.desktop.get_session()` at startup; headless → exclude display tools (byte-identical to before, `[tools: 24/44]`), X11 → keep them (`[tools: 38/44]`). Startup log prints `Linux session: <mode>`.
-- **OCR on Linux** = provider `capture_png` (scrot) → `tesseract` CLI (no PIL/pytesseract). Pillow is a Linux dep only for the screenshot resize/JPEG in `take_screenshot`.
+- **OCR on Linux** = provider `capture_png` (scrot) → `tesseract` CLI (no PIL/pytesseract). Pillow is a Linux dep for the screenshot fit/JPEG (`capture_frame` → `remoteos.snapshot`).
+- **Coordinate contract (#28).** `capture_geometry(monitor)` → `CaptureGeometry`, via `platform/linux/display.py`:
+  - `monitor=0` = the X ROOT, sized by `xrandr --current` (`current W x H`), origin (0,0). Not `xdotool getdisplaygeometry`: that is the FIRST Xinerama head only and is wrong on multi-head.
+  - `monitor=N` = entry N-1 of `xrandr --listmonitors`, captured with `scrot -a`. `capture_frame()` resizes the capture to the frame from `remoteos.coords`. The tool layer maps IMAGE pixels to screen pixels BEFORE calling `click`/`move`/`scroll`/`type_text`, so the provider input functions keep taking SCREEN pixels. Needs `xrandr` (`x11-xserver-utils`, which the installer adds) for every frame. All fleet X11 boxes had it on 2026-10-14.
 
 ## Session detection gotcha (the load-bearing one)
 
@@ -37,7 +40,7 @@ Managed X11 box: **imag-nb**, `newlevel@10.77.9.182` (creds in memory `reference
 
 ## ScreenRecord — ffmpeg x11grab (#8)
 
-`provider.record_screen()` returns a base64 **animated GIF** (same return shape as `recording.record_screen`, so the shared `ScreenRecord` tool treats Linux like Windows/Mac). It builds the ffmpeg argv in `_ffmpeg_x11grab_argv()` (pure, unit-tested) and runs it through `_run_x` (session env-inject / `sudo -u` wrap). Flags that matter: full-screen omits `-video_size` (x11grab auto-detects the root size from the display); a region uses `-video_size WxH -i :0+X,Y`; `-vf "fps=N,scale=W:-2:flags=lanczos"` (`-2` = keep aspect, even dimension). fps clamped ≤10, duration ≤10, timeout `dur+30`. Headless → raises the stub (like `take_screenshot`), never shells out. Needs `ffmpeg` (installer adds it in the graphical branch).
+`provider.record_screen()` returns a base64 **animated GIF** (same return shape as `recording.record_screen`, so the shared `ScreenRecord` tool treats Linux like Windows/Mac). It builds the ffmpeg argv in `_ffmpeg_x11grab_argv()` (pure, unit-tested) and runs it through `_run_x` (session env-inject / `sudo -u` wrap). Flags that matter: full-screen omits `-video_size` (x11grab auto-detects the root size from the display); a region uses `-video_size WxH -i :0+X,Y`; `-vf "fps=N,scale=W:-2:flags=lanczos"` (`-2` = keep aspect, even dimension). fps clamped ≤10, duration ≤10, timeout `dur+30`. Headless → raises the stub (like `capture_frame`), never shells out. Needs `ffmpeg` (installer adds it in the graphical branch).
 
 ## AnnotatedSnapshot — AT-SPI2 accessibility tree (#7)
 

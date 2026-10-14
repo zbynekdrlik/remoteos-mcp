@@ -1,0 +1,261 @@
+"""Tool-level coordinate contract (#28): Snapshot image pixels in, native screen point out.
+
+The real MCP tool functions (``Snapshot`` / ``Click`` / ``Move`` / ``Scroll`` /
+``Type`` / ``AnnotatedSnapshot``) run end-to-end through the real Linux provider
+on a FAKE 2560x1600 X11 display. Only the external process boundary is stubbed —
+``_run_x`` (xdotool / scrot / wmctrl / xrandr subprocesses) and the AT-SPI
+library loader — exactly like ``tests/test_linux_desktop.py``. The acceptance
+case from the issue: a 2560x1600 desktop at max_width 1280 → a Click at an
+IMAGE point hits the matching NATIVE point.
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+from pathlib import Path
+
+import pytest
+from PIL import Image
+
+import remoteos.__main__ as server
+from remoteos.platform.linux import desktop as d
+
+
+class _Proc:
+    def __init__(self, stdout: bytes = b""):
+        self.stdout = stdout
+        self.returncode = 0
+        self.stderr = b""
+
+
+def _install_fake_x11(monkeypatch, root, heads, capture_size=None, xrandr_installed=True):
+    """Fake X11 world: ``root`` = (W, H) of the X screen, ``heads`` = [(x, y, w, h), ...].
+
+    Mirrors the real tools: ``xrandr --current`` reports the ROOT size, ``xrandr
+    --listmonitors`` the heads, and ``xdotool getdisplaygeometry`` only the FIRST
+    head (libxdo's Xinerama viewport — the trap a root-size query must avoid). A
+    full-screen scrot captures the whole root (``capture_size`` overrides that).
+    ``xrandr_installed=False`` makes xrandr fail the way ``_run_x`` reports a
+    missing binary.
+    """
+    monkeypatch.setattr(
+        d,
+        "_SESSION",
+        d.SessionInfo(mode="x11", display=":0", uid=1000, user="newlevel", session_id="1"),
+    )
+    calls: list[list[str]] = []
+    listing = f"Monitors: {len(heads)}\n" + "".join(
+        f" {i}: +HEAD-{i} {w}/500x{h}/300+{x}+{y}  HEAD-{i}\n" for i, (x, y, w, h) in enumerate(heads)
+    )
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        calls.append(list(cmd))
+        if cmd[:1] == ["xrandr"] and not xrandr_installed:
+            raise RuntimeError("xrandr not installed: [Errno 2] No such file or directory: 'xrandr'")
+        if cmd[:2] == ["xdotool", "getdisplaygeometry"]:
+            return _Proc(f"{heads[0][2]} {heads[0][3]}\n".encode())
+        if cmd[:2] == ["xrandr", "--current"]:
+            return _Proc(
+                f"Screen 0: minimum 8 x 8, current {root[0]} x {root[1]}, maximum 32767 x 32767\n"
+                f"HEAD-0 connected primary {heads[0][2]}x{heads[0][3]}+0+0\n".encode()
+            )
+        if cmd[:2] == ["xrandr", "--listmonitors"]:
+            return _Proc(listing.encode())
+        if cmd[:1] == ["wmctrl"]:
+            return _Proc(b"0x0400000a 0 3210 100 50 800 600 host Editor\n")
+        if cmd[:1] == ["scrot"]:
+            if "-a" in cmd:
+                _x, _y, w, h = (int(v) for v in cmd[cmd.index("-a") + 1].split(","))
+            else:
+                w, h = capture_size or root
+            Image.new("RGB", (w, h), (255, 255, 255)).save(Path(cmd[-1]), format="PNG")
+            return _Proc()
+        return _Proc()
+
+    def _no_atspi():
+        raise ImportError("no AT-SPI bus in unit tests")
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(d, "_load_atspi", _no_atspi)
+    return calls
+
+
+@pytest.fixture
+def fake_x11(monkeypatch):
+    """The issue's acceptance case: one 2560x1600 display."""
+    return _install_fake_x11(monkeypatch, root=(2560, 1600), heads=[(0, 0, 2560, 1600)])
+
+
+@pytest.fixture
+def dual_x11(monkeypatch):
+    """Two heads side by side: 2560x1600 at +0+0 and 1920x1080 at +2560+0 → root 4480x1600."""
+    return _install_fake_x11(monkeypatch, root=(4480, 1600), heads=[(0, 0, 2560, 1600), (2560, 0, 1920, 1080)])
+
+
+def _mousemoves(calls):
+    return [c[2:4] for c in calls if c[:2] == ["xdotool", "mousemove"]]
+
+
+def _text(parts) -> str:
+    return "\n".join(p.text for p in parts if getattr(p, "type", None) == "text")
+
+
+def _image_size(parts) -> tuple[int, int]:
+    (img,) = [p for p in parts if getattr(p, "type", None) == "image"]
+    return Image.open(io.BytesIO(base64.b64decode(img.data))).size
+
+
+# ---------------------------------------------------------------------------
+# input tools take IMAGE pixels by default
+# ---------------------------------------------------------------------------
+
+
+def test_click_image_point_hits_native_point(fake_x11):
+    out = server.Click(640, 400)
+    assert _mousemoves(fake_x11) == [["1280", "800"]]
+    assert "screen (1280,800)" in out
+
+
+def test_click_hover_and_double_are_mapped(fake_x11):
+    server.Click(100, 50, action="hover")
+    server.Click(100, 50, action="double")
+    assert _mousemoves(fake_x11) == [["200", "100"], ["200", "100"]]
+
+
+def test_move_and_drag_start_are_mapped(fake_x11):
+    server.Move(640, 400)
+    server.Move(640, 400, drag=True, start_x=10, start_y=20)
+    assert _mousemoves(fake_x11) == [["1280", "800"], ["20", "40"], ["1280", "800"]]
+
+
+def test_scroll_and_type_points_are_mapped(fake_x11):
+    server.Scroll(-3, x=300, y=200)
+    server.Type("hi", x=300, y=200)
+    assert _mousemoves(fake_x11) == [["600", "400"], ["600", "400"]]
+
+
+def test_type_and_scroll_without_point_do_not_move(fake_x11):
+    server.Type("hi")
+    server.Scroll(2)
+    assert _mousemoves(fake_x11) == []
+
+
+def test_click_clamps_to_frame(fake_x11):
+    server.Click(5000, 5000)
+    assert _mousemoves(fake_x11) == [["2559", "1599"]]
+
+
+def test_click_coords_screen_passes_through(fake_x11):
+    out = server.Click(1280, 800, coords="screen")
+    assert _mousemoves(fake_x11) == [["1280", "800"]]
+    geometry_queries = [c for c in fake_x11 if c[:1] == ["xrandr"] or c[:2] == ["xdotool", "getdisplaygeometry"]]
+    assert geometry_queries == []  # no frame needed for screen coords
+    assert "image (" not in out
+
+
+def test_click_rejects_unknown_coords(fake_x11):
+    out = server.Click(1, 1, coords="pixels")
+    assert "coords must be 'image' or 'screen'" in out
+    assert _mousemoves(fake_x11) == []
+
+
+def test_click_on_second_monitor_frame(dual_x11):
+    server.Click(640, 360, monitor=2)  # 1920x1080 at +2560+0 → image 1280x720, scale 1.5
+    assert _mousemoves(dual_x11) == [["3520", "540"]]
+
+
+def test_click_native_frame_max_width_0(fake_x11):
+    server.Click(640, 400, max_width=0)
+    assert _mousemoves(fake_x11) == [["640", "400"]]
+
+
+# ---------------------------------------------------------------------------
+# Snapshot / AnnotatedSnapshot state the contract and list IMAGE pixels
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_states_contract_and_lists_image_pixels(fake_x11):
+    parts = server.Snapshot()
+    assert _image_size(parts) == (1280, 800)
+    text = _text(parts)
+    assert (
+        "Image 1280x800 = screen 2560x1600 at origin (0,0), scale 2.000; "
+        "input tools take IMAGE pixels of this frame (monitor=0, max_width=1280)"
+    ) in text
+    # wmctrl window at native 100,50 800x600 → image 50,25 400x300
+    assert "[67108874] Editor (400x300 at 50,25)" in text
+
+
+def test_snapshot_without_vision_still_states_contract(fake_x11):
+    parts = server.Snapshot(use_vision=False)
+    assert not [p for p in parts if getattr(p, "type", None) == "image"]
+    assert "scale 2.000" in _text(parts)
+
+
+def test_snapshot_second_monitor_reports_origin(dual_x11):
+    parts = server.Snapshot(monitor=2)
+    assert _image_size(parts) == (1280, 720)
+    assert "screen 1920x1080 at origin (2560,0), scale 1.500" in _text(parts)
+    assert ["scrot", "--overwrite", "-a", "2560,0,1920,1080"] == [c for c in dual_x11 if c[:1] == ["scrot"]][0][:4]
+
+
+def test_snapshot_all_monitors_covers_the_whole_x_root(dual_x11):
+    # monitor=0 is the X ROOT (both heads), not the first Xinerama head
+    parts = server.Snapshot()
+    assert _image_size(parts) == (1280, 457)
+    assert "Image 1280x457 = screen 4480x1600 at origin (0,0), scale 3.500" in _text(parts)
+
+
+def test_click_all_monitors_reaches_the_second_head(dual_x11):
+    server.Click(1000, 100)  # image x 1000 * 3.5 = 3500 → on the 1920 head at +2560
+    assert _mousemoves(dual_x11) == [["3500", "350"]]
+
+
+def test_capture_size_mismatch_is_logged(monkeypatch, caplog):
+    # A capture that does not match the reported geometry is unexpected: it is
+    # still fitted to the frame, but never silently.
+    _install_fake_x11(monkeypatch, root=(2560, 1600), heads=[(0, 0, 2560, 1600)], capture_size=(2000, 1000))
+    with caplog.at_level("WARNING"):
+        parts = server.Snapshot()
+    assert _image_size(parts) == (1280, 800)
+    assert "capture is 2000x1000 but the display geometry says 2560x1600" in caplog.text
+
+
+def test_matching_capture_logs_no_mismatch_warning(fake_x11, caplog):
+    with caplog.at_level("WARNING"):
+        parts = server.Snapshot()
+    assert _image_size(parts) == (1280, 800)  # the capture really happened
+    assert "capture is" not in caplog.text
+
+
+def test_missing_xrandr_fails_loudly_never_a_wrong_frame(monkeypatch):
+    calls = _install_fake_x11(monkeypatch, root=(2560, 1600), heads=[(0, 0, 2560, 1600)], xrandr_installed=False)
+    (snapshot_error,) = server.Snapshot()
+    assert snapshot_error.startswith("Snapshot error: xrandr not installed")
+    assert server.Click(640, 400).startswith("Click error: xrandr not installed")
+    assert _mousemoves(calls) == []  # no click at an unmapped / guessed point
+
+
+def test_unknown_monitor_index_is_an_error(dual_x11):
+    assert server.Click(1, 1, monitor=3) == "Click error: Monitor 3 not found (have 2)"
+    assert _mousemoves(dual_x11) == []
+
+
+def test_headless_input_tool_returns_the_exact_provider_stub(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
+    assert server.Click(10, 10) == "Not available on headless Linux (no display)"
+    assert server.Move(10, 10) == "Not available on headless Linux (no display)"
+
+
+def test_annotated_snapshot_states_contract(fake_x11):
+    parts = server.AnnotatedSnapshot()
+    assert _image_size(parts) == (1280, 800)
+    assert "Image 1280x800 = screen 2560x1600 at origin (0,0), scale 2.000" in _text(parts)
+
+
+def test_snapshot_then_click_round_trip(fake_x11):
+    # the model reads (50,25) off the Snapshot listing and clicks it → native (100,50)
+    server.Snapshot()
+    server.Click(50, 25)
+    assert _mousemoves(fake_x11) == [["100", "50"]]
