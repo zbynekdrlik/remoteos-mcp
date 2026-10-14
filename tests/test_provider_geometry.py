@@ -21,6 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
+from fastmcp.exceptions import ToolError
 from PIL import Image, ImageGrab
 
 from remoteos.coords import image_to_screen
@@ -42,6 +43,13 @@ class _Recorder:
     def __call__(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return self.result
+
+
+def _tool_error(call) -> str:
+    """The text of the ToolError a failing tool raises (#32: a failure is never a success string)."""
+    with pytest.raises(ToolError) as exc:
+        call()
+    return str(exc.value)
 
 
 def _purge(name: str) -> None:
@@ -299,7 +307,7 @@ def test_windows_scroll_direction_wins_over_sign_and_horizontal(pyautogui_branch
 
 def test_windows_scroll_unknown_direction_sends_nothing(pyautogui_branch):
     server, _ = pyautogui_branch
-    out = server.Scroll(3, direction="sideways")
+    out = _tool_error(lambda: server.Scroll(3, direction="sideways"))
     assert out == "Scroll error: direction must be one of up, down, left, right (got 'sideways')"
     assert ctypes.windll.input.log == []
 
@@ -392,7 +400,7 @@ def test_windows_type_tool_sends_every_slovak_character(pyautogui_branch):
 def test_windows_type_tool_reports_blocked_input_as_an_error_not_typed(pyautogui_branch):
     server, _ = pyautogui_branch
     ctypes.windll.input.inserted = 0
-    out = server.Type("ab")
+    out = _tool_error(lambda: server.Type("ab"))
     assert out.startswith("Type error: SendInput inserted 0 of 2 key events after 0 of 2 chars")
     assert "Typed" not in out
 
@@ -409,7 +417,7 @@ def test_windows_type_tool_clicks_clears_types_and_presses_enter(pyautogui_branc
 
 def test_type_tool_unknown_method_is_an_error_and_does_nothing(pyautogui_branch):
     server, fake = pyautogui_branch
-    out = server.Type("x", x=640, y=228, method="clipboard")
+    out = _tool_error(lambda: server.Type("x", x=640, y=228, method="clipboard"))
     assert out == "Type error: method must be 'keys' or 'paste' (got 'clipboard')"
     assert fake.click.calls == [] and ctypes.windll.input.raw == []
 
@@ -478,8 +486,8 @@ def test_windows_paste_method_refused_clipboard_is_an_error_before_the_paste_key
         raise OSError("OpenClipboard failed")
 
     monkeypatch.setattr(sys.modules["win32clipboard"], "SetClipboardText", _refuse)
-    out = server.Type("x", method="paste")
-    assert out == "Type error: could not put the text on the clipboard: Error: OpenClipboard failed"
+    out = _tool_error(lambda: server.Type("x", method="paste"))
+    assert out == "Type error: could not put the text on the clipboard: OpenClipboard failed"
     assert pressed == []
 
 
@@ -495,7 +503,7 @@ def test_windows_paste_reports_a_failed_restore(win_clipboard, monkeypatch):
     monkeypatch.setattr(sys.modules["win32clipboard"], "SetClipboardText", _second_write_refused)
     out = server.Type("ďakujem", method="paste")
     assert pressed == [(("ctrl", "v"), "ďakujem")]
-    assert out == "Pasted 7 chars, but restoring the clipboard failed: Error: OpenClipboard failed"
+    assert out == "Pasted 7 chars, but restoring the clipboard failed: OpenClipboard failed"
 
 
 def test_windows_paste_restores_the_clipboard_when_the_paste_keys_fail(win_clipboard, pyautogui_branch):
@@ -506,7 +514,7 @@ def test_windows_paste_restores_the_clipboard_when_the_paste_keys_fail(win_clipb
         raise OSError("keyboard is gone")
 
     fake.hotkey = _broken_keyboard
-    out = server.Type("ďakujem", method="paste")
+    out = _tool_error(lambda: server.Type("ďakujem", method="paste"))
     assert out == "Type error: keyboard is gone"
     assert clip.writes == ["ďakujem", "old clip"] and clip.text == "old clip"
 
@@ -907,7 +915,7 @@ def test_mac_paste_without_the_posting_permission_is_an_error_and_touches_nothin
     board = _mac_pasteboard(monkeypatch, server, fake, "old clip")
     monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
     # pyautogui's Command+V is a CGEventPost too: macOS would drop it silently behind "Pasted 4 chars"
-    out = server.Type("Žltý", x=640, y=400, clear=True, method="paste")
+    out = _tool_error(lambda: server.Type("Žltý", x=640, y=400, clear=True, method="paste"))
     assert out.startswith("Type error: macOS does not let this process post keyboard events")
     assert board["writes"] == [] and board["pressed"] == []
     assert fake.click.calls == [] and fake.press.calls == []
@@ -916,7 +924,7 @@ def test_mac_paste_without_the_posting_permission_is_an_error_and_touches_nothin
 def test_mac_keys_without_the_posting_permission_clicks_and_clears_nothing(mac_tool_layer, monkeypatch):
     server, fake, quartz = mac_tool_layer
     monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
-    out = server.Type("Žltý", x=640, y=400, clear=True, press_enter=True)
+    out = _tool_error(lambda: server.Type("Žltý", x=640, y=400, clear=True, press_enter=True))
     assert out.startswith("Type error: macOS does not let this process post keyboard events")
     assert fake.click.calls == [] and fake.hotkey.calls == [] and fake.press.calls == []
     assert quartz.posted == []

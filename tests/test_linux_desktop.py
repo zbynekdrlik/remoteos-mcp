@@ -4,7 +4,8 @@ Three concerns:
 
 1. Pure session-detection logic (env matrix, loginctl parsing, session choice).
 2. Headless regression contract — on a box with no display EVERY desktop function
-   still returns the stub message / empty result and NEVER crashes (protects the
+   raises the exact stub message (the tool layer turns it into an MCP error with that
+   text, #32) or returns an empty result, and NEVER shells out (protects the
    headless cam1..4 boxes from regression).
 3. X11 command construction — the right ``xdotool`` / ``wmctrl`` / ``xclip`` argv
    is built, without needing a real display (``_run_x`` is stubbed).
@@ -184,9 +185,11 @@ def test_headless_screenshot_raises_stub_message(headless):
         lambda m: m.shortcut("ctrl+c"),
     ],
 )
-def test_headless_all_functions_return_stub(headless, call):
-    result = call(headless)
-    assert result == _MSG  # exact stub message, no crash
+def test_headless_all_functions_raise_the_stub(headless, call):
+    # a failure is never a success string (#32): the exact stub text is the error message
+    with pytest.raises(RuntimeError) as exc:
+        call(headless)
+    assert str(exc.value) == _MSG
 
 
 def test_headless_never_shells_out(headless, monkeypatch):
@@ -196,8 +199,10 @@ def test_headless_never_shells_out(headless, monkeypatch):
 
     monkeypatch.setattr(d, "_run_x", _boom)
     monkeypatch.setattr(d, "_run_capture", _boom)
-    assert headless.click(1, 1) == _MSG
-    assert headless.get_clipboard() == _MSG
+    for call in (lambda: headless.click(1, 1), headless.get_clipboard):
+        with pytest.raises(RuntimeError) as exc:
+            call()
+        assert str(exc.value) == _MSG
     assert headless.enumerate_windows() == []
 
 
@@ -709,7 +714,9 @@ def test_click_surfaces_timeout_via_runtimeerror(monkeypatch):
         raise subprocess.TimeoutExpired(cmd="xdotool", timeout=15)
 
     monkeypatch.setattr(d.subprocess, "run", _timeout)
-    msg = d.click(10, 10)
+    with pytest.raises(RuntimeError) as exc:  # a failed click raises (#32)
+        d.click(10, 10)
+    msg = str(exc.value)
     assert "timed out" in msg and "xdotool" in msg
 
 

@@ -9,8 +9,16 @@ the tool hands it are what is checked.
 from __future__ import annotations
 
 import pytest
+from fastmcp.exceptions import ToolError
 
 import remoteos.__main__ as server
+
+
+def _tool_error(call) -> str:
+    """The text of the ToolError a failing tool raises (#32: a failure is never a success string)."""
+    with pytest.raises(ToolError) as exc:
+        call()
+    return str(exc.value)
 
 
 def test_command_without_cwd_runs_and_returns_its_output():
@@ -32,7 +40,7 @@ def test_cwd_with_a_quote_runs_the_command_in_that_directory(tmp_path):
 def test_missing_cwd_is_a_clear_error_and_the_command_never_runs(tmp_path):
     marker = tmp_path / "ran"
     missing = tmp_path / "nope"
-    out = server.Shell(f"touch '{marker}'", cwd=str(missing))
+    out = _tool_error(lambda: server.Shell(f"touch '{marker}'", cwd=str(missing)))
     assert out == f"Shell error: working directory not found: {missing}"
     assert not marker.exists()
 
@@ -41,14 +49,14 @@ def test_cwd_that_is_a_file_is_an_error_and_the_command_never_runs(tmp_path):
     marker = tmp_path / "ran"
     a_file = tmp_path / "file.txt"
     a_file.write_text("x")
-    out = server.Shell(f"touch '{marker}'", cwd=str(a_file))
+    out = _tool_error(lambda: server.Shell(f"touch '{marker}'", cwd=str(a_file)))
     assert out == f"Shell error: working directory is not a directory: {a_file}"
     assert not marker.exists()
 
 
 def test_cwd_text_is_never_executed_as_a_command(tmp_path):
     pwned = tmp_path / "pwned"
-    out = server.Shell("true", cwd=f"{tmp_path}/x; touch {pwned}")
+    out = _tool_error(lambda: server.Shell("true", cwd=f"{tmp_path}/x; touch {pwned}"))
     assert out.startswith("Shell error: working directory not found: ")
     assert not pwned.exists()
 

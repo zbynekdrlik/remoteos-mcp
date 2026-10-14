@@ -86,7 +86,10 @@ def test_a_cancel_racing_the_completion_never_leaves_a_cancelled_reply_on_a_comp
         probe.armed = True
         return "ok"
 
-    out = tm.wrap_sync_tool("Shell", tool)()
+    try:
+        out = tm.wrap_sync_tool("Shell", tool)()
+    except ToolError as e:  # a cancelled task is an error result (#32)
+        out = str(e)
     probe.thread.join(timeout=5)
     task = tm._tasks[probe.task_id]
     # cancel_task's reply and the task's final state must tell the same story
