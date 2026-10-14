@@ -309,12 +309,11 @@ def Type(
     Any Unicode text is typed exactly — diacritics (e.g. Slovak "Žltý kôň
     ďakuje"), symbols (€, –) and emoji — whatever the machine's keyboard layout.
     "\\n" (also "\\r\\n") presses Enter and "\\t" presses Tab. The reply "Typed N
-    chars" counts the characters handed to the OS. On Windows, input the OS
-    refuses part-way (e.g. a locked session) is an error saying how many got
-    through, never a success; macOS refuses up front when this process may not
-    post keyboard events. Neither macOS nor Linux can confirm delivery to a locked
-    console. x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = type at
-    the current focus without clicking.
+    chars" counts the characters handed to the OS. A locked screen, a secure
+    desktop or a missing permission is an error before anything is typed; on
+    Windows, input the OS refuses part-way is an error saying how many got
+    through, never a success. x/y are IMAGE pixels of the last Snapshot (see
+    Click); 0/0 = type at the current focus without clicking.
 
     Args:
         text: Text to type.

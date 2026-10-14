@@ -50,7 +50,9 @@ paths:
     `CGPreflightPostEventAccess()` (macOS 10.15+) BEFORE the click, clear or paste, and
     `type_unicode` checks again for direct callers. When it is false they raise and nothing
     is clicked, typed or pasted.
-  - A locked console still drops events unseen. That diagnosis is #32.
+  - A locked console still drops events unseen. Since #32 the Type tool's preflight
+    (`diagnose()`: `CGSSessionScreenIsLocked`, `AXIsProcessTrusted`) refuses it first; see
+    `.claude/rules/tool-errors.md`.
   - Every event is built before any is posted, as in the scroll code.
   - The edit-shortcut modifier is **Command** (`_SHORTCUT_MODIFIER`). Ctrl+A in Cocoa moves
     the caret to the paragraph start, so the old `clear` deleted one character.

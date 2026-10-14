@@ -18,6 +18,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | Mouse wheel / Scroll: clicks + direction, Windows SendInput, Quartz wheel2 sign, xdotool 4-7 | `.claude/rules/scroll.md` (auto-loads on its `paths:`) + README "Scroll units" |
 | Typing text / Type: Unicode keystrokes (SendInput `KEYEVENTF_UNICODE`, Quartz Unicode string), delivered count, `method="paste"` | `.claude/rules/typing.md` (auto-loads on its `paths:`) + README "Typing text (Unicode)" |
 | Server start flags (`uvicorn_config`, payload-free `--debug`, stdio stdout), Shell `cwd`, FileUpload, task states | `.claude/rules/server-startup.md` (auto-loads on its `paths:`) |
+| Tool failures as MCP errors (`ToolError`, `@reports_errors`, `[task:<id>]`), desktop `diagnose()` preflight (locked / secure desktop / session 0 / macOS permissions) | `.claude/rules/tool-errors.md` (auto-loads on its `paths:`) + README "Tool errors and desktop diagnoses" |
 | Which MCP server belongs to which project | memory: `reference_mcp_project_mapping.md` |
 | SSH credentials for managed machines | memory: `reference_ssh_credentials.md` |
 
