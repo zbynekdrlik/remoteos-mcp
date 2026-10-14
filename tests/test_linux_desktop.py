@@ -13,6 +13,7 @@ Three concerns:
 from __future__ import annotations
 
 import base64
+import logging
 import subprocess
 import sys
 import time
@@ -435,6 +436,34 @@ def test_set_clipboard_uses_discard_output(monkeypatch):
     assert captured["cmd"] == ["xclip", "-selection", "clipboard"]
     assert captured["discard"] is True
     assert captured["input"] == b"hi"
+
+
+def test_typed_text_never_reaches_the_debug_log(monkeypatch, caplog):
+    # --debug turns the remoteos loggers to DEBUG (#31): the x-run line logs the argv,
+    # and for `xdotool type -- <text>` that argv carries the typed text (typing.md: never log it).
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    ran: list[list[str]] = []
+
+    def _run(argv, **kwargs):
+        ran.append(list(argv))
+        return _FakeProc()
+
+    monkeypatch.setattr(d.subprocess, "run", _run)
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
+        assert d.type_unicode("tajné heslo") == 11
+    assert ran and ran[-1][-1] == "tajné heslo"  # xdotool itself still gets the text
+    assert "x-run:" in caplog.text
+    assert "tajné" not in caplog.text and "heslo" not in caplog.text
+    assert "<11 chars>" in caplog.text
+
+
+def test_typed_text_that_is_a_double_dash_is_redacted_too(monkeypatch, caplog):
+    # the text comes after the FIRST "--" following "type", even when the text is "--" itself
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(d.subprocess, "run", lambda argv, **kwargs: _FakeProc())
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
+        assert d.type_unicode("--") == 2
+    assert "'--', '<2 chars>'" in caplog.text
 
 
 def test_build_invocation_same_user_injects_env(monkeypatch):

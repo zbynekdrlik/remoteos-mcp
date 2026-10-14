@@ -51,6 +51,12 @@ paths:
   back black.
 - **pyautogui does not clamp to the screen**: the clamp is commented out in 0.9.54. Negative
   virtual-screen coordinates reach `SetCursorPos` as they are. Our clamp is the only guard.
+- **Optional points (Type, Scroll, drag start) go through `_optional_point(x, y)` (#31).**
+  - The rule is `x or y`: a point is given unless BOTH are 0, the tools' default.
+  - x=0 alone and y=0 alone are a real column and row. The point (0,0) itself cannot be
+    targeted by these three; that is the documented trade-off.
+  - Never write `if x and y`. Below the tool, a provider gets `None` for "no point" and
+    checks `is not None`.
 - **Tests:**
   - Tool-level tests run the real MCP tool functions on a fake X11 display, stubbing only
     `_run_x` and `_load_atspi`.

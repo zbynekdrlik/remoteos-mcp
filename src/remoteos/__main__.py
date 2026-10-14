@@ -101,78 +101,6 @@ def _check_win32(tool_name: str = "This tool") -> str | None:
     return None
 
 
-def _ensure_session_connected() -> str | None:
-    """Reconnect disconnected Windows session to console if needed.
-
-    Returns None on success, error string on failure.
-    """
-    if not is_windows():
-        return None
-    try:
-        # Query current sessions
-        result = subprocess.run(
-            ["query", "session"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-        if result.returncode != 0:
-            return f"Failed to query sessions: {result.stderr}"
-
-        session_lines = result.stdout.strip().split("\n")
-        user_session_id = None
-        session_status = None
-
-        # Parse session output to find user session
-        for line in session_lines[1:]:  # Skip header
-            if not line.strip():
-                continue
-            parts = line.split()
-            if len(parts) >= 3:
-                session_name = parts[0]
-                username = parts[1] if parts[1] != ">" else parts[2]
-                session_id = parts[2] if parts[1] != ">" else parts[1]
-                state = parts[3] if parts[1] != ">" else parts[2]
-
-                # Look for a user session (not services or console without user)
-                if (
-                    username
-                    and username.lower() not in ["", "services"]
-                    and session_name.lower() not in ["services", "console"]
-                    and session_id.isdigit()
-                ):
-                    user_session_id = int(session_id)
-                    session_status = state.lower()
-                    break
-
-        if user_session_id is None:
-            return "No user session found to reconnect"
-
-        # If session is already active, no need to reconnect
-        if session_status == "active":
-            return None
-
-        # Reconnect session to console
-        result = subprocess.run(
-            ["tscon", str(user_session_id), "/dest:console"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-        if result.returncode == 0:
-            return None  # Success
-        else:
-            error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
-            return f"Failed to reconnect session {user_session_id}: {error_msg}"
-
-    except subprocess.TimeoutExpired:
-        return "Session reconnect operation timed out"
-    except Exception as e:
-        return f"Session reconnect error: {e}"
-
-
 # ============================= DESKTOP CONTROL =============================
 #
 # Coordinate contract (#28): Snapshot / AnnotatedSnapshot return an image that is
@@ -204,6 +132,15 @@ def _capture_snapshot_frame(monitor: int, max_width: int):
             raise RuntimeError(f"after session reconnect: {retry_error}") from retry_error
     log.debug("snapshot frame: %s", contract_line(frame))
     return img, frame
+
+
+def _optional_point(x: int, y: int) -> list[tuple[int, int]]:
+    """``[(x, y)]``, or ``[]`` when BOTH are 0 — the input tools' documented "no point" default.
+
+    x=0 alone or y=0 alone is a real column/row of the frame (#31), so the test is
+    ``x or y`` (upstream winremote c3a675174c), never ``x and y``.
+    """
+    return [(x, y)] if (x or y) else []
 
 
 def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coords: str):
@@ -358,8 +295,9 @@ def Type(
 
     Args:
         text: Text to type.
-        x: X in Snapshot image pixels (0 = current position).
-        y: Y in Snapshot image pixels (0 = current position).
+        x: X in Snapshot image pixels. x=0 with y=0 = no click (type at the current
+            focus); x=0 alone is the left column.
+        y: Y in Snapshot image pixels. y=0 alone is the top row.
         clear: Clear existing content first (select all, Delete).
         press_enter: Press Enter after typing.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
@@ -374,7 +312,7 @@ def Type(
     """
     try:
         how = check_method(method)
-        points, note = _to_screen([(x, y)] if x and y else [], monitor, max_width, coords)
+        points, note = _to_screen(_optional_point(x, y), monitor, max_width, coords)
         sx, sy = points[0] if points else (None, None)
         log.debug("Type %d chars by %s at %s (clear=%s, enter=%s)", len(text), how, points, clear, press_enter)
         reply = get_desktop().type_text(
@@ -415,8 +353,9 @@ def Scroll(
             sign picks the direction — positive = up/right, negative = down/left.
         direction: 'up', 'down', 'left' or 'right'. When given it wins over the
             sign of amount and over horizontal.
-        x: X in Snapshot image pixels (0 = current).
-        y: Y in Snapshot image pixels (0 = current).
+        x: X in Snapshot image pixels. x=0 with y=0 = where the mouse already is;
+            x=0 alone is the left column.
+        y: Y in Snapshot image pixels. y=0 alone is the top row.
         horizontal: Legacy, only without direction: scroll left/right instead of up/down.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
@@ -424,7 +363,7 @@ def Scroll(
     """
     try:
         steps = normalize_request(amount, direction, _tobool(horizontal))
-        points, note = _to_screen([(x, y)] if x and y else [], monitor, max_width, coords)
+        points, note = _to_screen(_optional_point(x, y), monitor, max_width, coords)
         sx, sy = points[0] if points else (None, None)
         log.debug("Scroll %s x%d (requested %d) at %s", steps.direction, steps.clicks, steps.requested, points)
         return get_desktop().scroll(steps.direction, steps.requested, x=sx, y=sy) + note
@@ -458,8 +397,9 @@ def Move(
         x: Target X in Snapshot image pixels.
         y: Target Y in Snapshot image pixels.
         drag: If true, drag from start position to target.
-        start_x: Drag start X in image pixels (0 = from the current position).
-        start_y: Drag start Y in image pixels (0 = from the current position).
+        start_x: Drag start X in image pixels. start_x=0 with start_y=0 = drag from
+            the current position; start_x=0 alone is the left column.
+        start_y: Drag start Y in image pixels. start_y=0 alone is the top row.
         duration: Movement duration in seconds.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
@@ -467,16 +407,15 @@ def Move(
     """
     try:
         drag = _tobool(drag)
-        has_start = bool(drag and start_x and start_y)
-        points = [(start_x, start_y), (x, y)] if has_start else [(x, y)]
-        mapped, note = _to_screen(points, monitor, max_width, coords)
+        start = _optional_point(start_x, start_y) if drag else []
+        mapped, note = _to_screen([*start, (x, y)], monitor, max_width, coords)
         x, y = mapped[-1]
-        start_x, start_y = mapped[0] if has_start else (0, 0)
+        start_x, start_y = mapped[0] if start else (None, None)
         if is_linux():
             msg = get_desktop().move(x, y, drag=drag, start_x=start_x, start_y=start_y, duration=duration)
             return msg + note
         if drag:
-            if has_start:
+            if start:
                 pyautogui.moveTo(start_x, start_y)
             pyautogui.drag(x - pyautogui.position()[0], y - pyautogui.position()[1], duration=duration)
             return f"Dragged to ({x},{y}){note}"
@@ -630,20 +569,26 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     Args:
         command: Command to execute.
         timeout: Timeout in seconds (default 30).
-        cwd: Working directory. If provided, the command runs inside that directory.
+        cwd: Working directory (spaces and quotes are fine; ~ and $VAR, or %VAR%
+            on Windows, are expanded). If provided, the command runs inside that
+            directory; a path that is not an existing directory is an error and
+            the command does not run.
     """
     try:
+        # The directory goes to the process itself (#31): pasting it into the
+        # command as ``cd {cwd}`` broke on spaces/quotes and ran ``; <cmd>`` in it.
+        workdir = None
+        if cwd:
+            workdir = os.path.expandvars(os.path.expanduser(cwd))
+            if not os.path.isdir(workdir):
+                problem = "is not a directory" if os.path.exists(workdir) else "not found"
+                log.warning("Shell refused: working directory %s: %r", problem, cwd)
+                return f"Shell error: working directory {problem}: {cwd}"
         if is_windows():
-            if cwd:
-                command = f"cd {cwd}; {command}"
             shell_cmd = ["powershell", "-NoProfile", "-Command", command]
         elif is_macos():
-            if cwd:
-                command = f"cd {cwd} && {command}"
             shell_cmd = ["/bin/zsh", "-c", command]
         else:
-            if cwd:
-                command = f"cd {cwd} && {command}"
             shell_cmd = ["/bin/bash", "-c", command]
 
         proc = subprocess.Popen(
@@ -651,6 +596,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            cwd=workdir,
             start_new_session=not is_windows(),
         )
         try:
@@ -1121,6 +1067,11 @@ def FileDownload(path: str) -> str:
         return f"FileDownload error: {e}"
 
 
+# FileUpload cap on the base64 TEXT (~75 MB of file), checked before decoding (#31).
+FILE_UPLOAD_MAX_BASE64 = 100 * 1024 * 1024
+_B64_WHITESPACE = str.maketrans("", "", " \t\r\n")  # line-wrapped base64 (e.g. `base64` output) is fine
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="FileUpload",
@@ -1133,13 +1084,28 @@ def FileUpload(path: str, data_base64: str) -> str:
 
     Args:
         path: Destination file path.
-        data_base64: Base64-encoded file content.
+        data_base64: Base64-encoded file content, at most 100 MB of base64 text
+            (about 75 MB of file). Line breaks are allowed; any other character
+            outside the base64 alphabet is an error and nothing is written.
     """
     try:
+        # Both checks run before the directory is created or the file opened (#31):
+        # lax decoding dropped junk characters, so "!!!!" truncated a file to 0 bytes.
+        if len(data_base64) > FILE_UPLOAD_MAX_BASE64:
+            log.warning("FileUpload refused %s: %d base64 characters over the cap", path, len(data_base64))
+            return (
+                f"FileUpload error: data_base64 is {len(data_base64)} characters; "
+                f"the limit is {FILE_UPLOAD_MAX_BASE64} (100 MB of base64)"
+            )
+        try:
+            data = base64.b64decode(data_base64.translate(_B64_WHITESPACE), validate=True)
+        except ValueError as e:  # binascii.Error is one; non-ASCII text raises a plain ValueError
+            log.warning("FileUpload refused %s: invalid base64 (%s)", path, e)
+            return f"FileUpload error: data_base64 is not valid base64 ({e})"
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        data = base64.b64decode(data_base64)
         p.write_bytes(data)
+        log.info("FileUpload wrote %d bytes to %s", len(data), path)
         return f"Written {len(data)} bytes to {path}"
     except Exception as e:
         return f"FileUpload error: {e}"
@@ -1711,6 +1677,22 @@ def _apply_tool_filter(enabled_tools: set[str]) -> None:
             _remove_tool(tool_name)
 
 
+def _enable_debug_logging() -> None:
+    """``--debug`` (upstream winremote pull 65): the ``remoteos`` loggers at DEBUG on stderr.
+
+    Only our own logger tree. The root logger and FastMCP stay at their levels:
+    at DEBUG, FastMCP and sse_starlette log every tool call's arguments and reply
+    (typed text, clipboard, Shell commands, FileUpload data) — #31 review. stderr,
+    because in stdio mode stdout is the JSON-RPC stream.
+    """
+    handler = logging.StreamHandler(_sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    ours = logging.getLogger("remoteos")
+    ours.addHandler(handler)
+    ours.setLevel(logging.DEBUG)
+    log.debug("debug logging on")
+
+
 # ================================== CLI ====================================
 
 
@@ -1718,7 +1700,21 @@ def _apply_tool_filter(enabled_tools: set[str]) -> None:
 @click.option("--transport", default="streamable-http", type=click.Choice(["stdio", "streamable-http"]))
 @click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1; use 0.0.0.0 for remote access)")
 @click.option("--port", default=8092, type=int)
-@click.option("--reload", is_flag=True, default=False, help="Enable hot reload (streamable-http only)")
+@click.option(
+    "--reload",
+    is_flag=True,
+    default=False,
+    help="No effect, kept so existing command lines still start: uvicorn cannot hot-reload the in-process server",
+)
+@click.option(
+    "--debug",
+    is_flag=True,
+    default=False,
+    help=(
+        "Debug logging on stderr for remoteos and uvicorn "
+        "(never typed text, clipboard, Shell commands, file data or tool replies)"
+    ),
+)
 @click.option("--auth-key", default=None, envvar="REMOTEOS_AUTH_KEY", help="API key for authentication")
 @click.option("--config", default=None, help="Path to remoteos.toml config file")
 @click.option(
@@ -1743,6 +1739,7 @@ def cli(
     host: str,
     port: int,
     reload: bool,
+    debug: bool,
     auth_key: str | None,
     config: str | None,
     enable_all: bool,
@@ -1760,6 +1757,17 @@ def cli(
     if ctx.invoked_subcommand is not None:
         return  # subcommand will handle it
 
+    if debug:
+        _enable_debug_logging()
+    if reload:
+        # FastMCP serves an app OBJECT through uvicorn.Server; uvicorn reloads only an
+        # import-string app via uvicorn.run (#31), so passing reload would do nothing.
+        click.echo(
+            "  WARNING: --reload has no effect: uvicorn cannot hot-reload the in-process server. "
+            "Restart the service to load new code.",
+            err=True,
+        )
+
     config_path = discover_config_path(config)
     cfg = load_config(config_path)
 
@@ -1768,6 +1776,9 @@ def cli(
     auth_key = _choose_value(ctx, "auth_key", auth_key, cfg.server.auth_key, None)
     ssl_certfile = _choose_value(ctx, "ssl_certfile", ssl_certfile, cfg.server.ssl_certfile, None)
     ssl_keyfile = _choose_value(ctx, "ssl_keyfile", ssl_keyfile, cfg.server.ssl_keyfile, None)
+    if bool(ssl_certfile) != bool(ssl_keyfile):
+        # one of the pair used to drop TLS silently and serve plain HTTP (#31)
+        raise click.UsageError("--ssl-certfile and --ssl-keyfile must be given together (CLI or remoteos.toml)")
     oauth_client_id = _choose_value(ctx, "oauth_client_id", oauth_client_id, cfg.security.oauth_client_id, None)
     oauth_client_secret = _choose_value(
         ctx,
@@ -1791,9 +1802,10 @@ def cli(
     # On Linux, gate the display-dependent tools on a runtime session check:
     # a machine with an active X11 session (e.g. imag-nb) gets the full desktop
     # tool set; a headless box (cam1..4) keeps them excluded — zero regression.
+    # Status lines go to stderr: in stdio mode stdout is the JSON-RPC stream (#31 review).
     platform_excludes = None
     if is_windows():
-        print(f"  Windows DPI awareness: {_WIN_DPI_MODE}")
+        click.echo(f"  Windows DPI awareness: {_WIN_DPI_MODE}", err=True)
     if is_linux():
         platform_excludes = set(LINUX_ALWAYS_EXCLUDED_TOOLS)
         try:
@@ -1802,11 +1814,12 @@ def cli(
             session = _linux_desktop.get_session()
             if session.mode != "x11":
                 platform_excludes |= LINUX_DISPLAY_TOOLS
-            print(
-                f"  Linux session: {session.mode}" + (f" (display={session.display})" if session.mode == "x11" else "")
+            click.echo(
+                f"  Linux session: {session.mode}" + (f" (display={session.display})" if session.mode == "x11" else ""),
+                err=True,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            print(f"  Linux session detection failed ({exc}); excluding display tools")
+            click.echo(f"  Linux session detection failed ({exc}); excluding display tools", err=True)
             platform_excludes = set(LINUX_EXCLUDED_TOOLS)
     enabled_tools = resolve_enabled_tools(
         enable_tier3=enable_tier3,
@@ -1858,8 +1871,6 @@ def cli(
 
         middleware.append(Middleware(OAuthOnlyMiddleware, oauth_validator=oauth_validator))
 
-    import logging
-
     class BannerFilter(logging.Filter):
         """Inject our banner after uvicorn's 'Application startup complete' log."""
 
@@ -1905,14 +1916,16 @@ def cli(
             run_kwargs["middleware"] = middleware
         if platform.system() == "Windows":
             os.environ.setdefault("NO_COLOR", "1")
-        uvicorn_args = {}
-        if reload:
-            uvicorn_args["reload"] = True
+        # FastMCP 4.0.3 run_http_async takes uvicorn_config, never uvicorn_args (#31).
+        # Debug goes to uvicorn only, not run_http_async(log_level=...): that would
+        # also turn FastMCP to DEBUG, which logs every tool call's arguments.
+        uvicorn_config: dict[str, object] = {}
+        if debug:
+            uvicorn_config["log_level"] = "debug"
         if ssl_certfile and ssl_keyfile:
-            uvicorn_args["ssl_certfile"] = ssl_certfile
-            uvicorn_args["ssl_keyfile"] = ssl_keyfile
-        if uvicorn_args:
-            run_kwargs["uvicorn_args"] = uvicorn_args
+            uvicorn_config.update(ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+        if uvicorn_config:
+            run_kwargs["uvicorn_config"] = uvicorn_config
         mcp.run(**run_kwargs)
 
 
