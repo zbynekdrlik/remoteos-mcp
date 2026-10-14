@@ -135,6 +135,35 @@ def test_scroll_and_type_points_are_mapped(fake_x11):
     assert _mousemoves(fake_x11) == [["600", "400"], ["600", "400"]]
 
 
+def _wheel_clicks(calls):
+    return [c[2:] for c in calls if c[:2] == ["xdotool", "click"]]
+
+
+def test_scroll_direction_and_clicks_at_a_mapped_point(fake_x11):
+    out = server.Scroll(4, direction="left", x=300, y=200)
+    assert _mousemoves(fake_x11) == [["600", "400"]]
+    assert _wheel_clicks(fake_x11) == [["--repeat", "4", "6"]]  # 6 = wheel left
+    assert out.startswith("Scrolled 4 clicks left [image (300,200) → screen (600,400)")
+
+
+def test_scroll_legacy_horizontal_routes_to_the_horizontal_buttons(fake_x11):
+    assert server.Scroll(3, horizontal=True) == "Scrolled 3 clicks right"
+    assert server.Scroll(-2, horizontal="true") == "Scrolled 2 clicks left"
+    assert _wheel_clicks(fake_x11) == [["--repeat", "3", "7"], ["--repeat", "2", "6"]]
+
+
+def test_scroll_legacy_signed_amount_and_direction_wins(fake_x11):
+    server.Scroll(-5)
+    server.Scroll(-5, direction="up", horizontal=True)
+    assert _wheel_clicks(fake_x11) == [["--repeat", "5", "5"], ["--repeat", "5", "4"]]
+
+
+def test_scroll_unknown_direction_is_an_error_and_sends_nothing(fake_x11):
+    out = server.Scroll(1, direction="sideways")
+    assert out == "Scroll error: direction must be one of up, down, left, right (got 'sideways')"
+    assert _wheel_clicks(fake_x11) == []
+
+
 def test_type_and_scroll_without_point_do_not_move(fake_x11):
     server.Type("hi")
     server.Scroll(2)
@@ -246,6 +275,8 @@ def test_headless_input_tool_returns_the_exact_provider_stub(monkeypatch):
     monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
     assert server.Click(10, 10) == "Not available on headless Linux (no display)"
     assert server.Move(10, 10) == "Not available on headless Linux (no display)"
+    assert server.Scroll(3, direction="down", x=10, y=10) == "Not available on headless Linux (no display)"
+    assert server.Scroll(-3) == "Not available on headless Linux (no display)"
 
 
 def test_annotated_snapshot_states_contract(fake_x11):

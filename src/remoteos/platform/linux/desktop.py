@@ -34,6 +34,7 @@ from typing import Optional
 
 from remoteos.coords import CaptureGeometry, frame_for
 from remoteos.platform.linux.display import query_geometry
+from remoteos.scroll import wheel_steps
 from remoteos.snapshot import fit_to_frame
 
 log = logging.getLogger("remoteos.platform.linux.desktop")
@@ -1130,21 +1131,19 @@ def type_text(text: str, x: int = 0, y: int = 0, clear: bool = False, press_ente
         return f"Type error: {e}"
 
 
-def scroll(amount: int, x: int = 0, y: int = 0, horizontal: bool = False) -> str:
-    """Scroll at a position. Positive = up/right, negative = down/left."""
+_WHEEL_BUTTONS = {"up": "4", "down": "5", "left": "6", "right": "7"}  # X11 wheel buttons
+
+
+def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = None) -> str:
+    """Turn the wheel ``clicks`` notches toward ``direction`` (#29): X11 button 4/5/6/7 × clicks."""
     if get_session().mode != "x11":
         return _unavailable()
+    steps = wheel_steps(direction, clicks)
     try:
-        if x and y:
+        if x is not None and y is not None:
             _xdotool(["mousemove", str(x), str(y)])
-        steps = min(abs(int(amount)), 100) or 1
-        if horizontal:
-            btn = 7 if amount > 0 else 6  # 6=left, 7=right
-        else:
-            btn = 4 if amount > 0 else 5  # 4=up, 5=down
-        _xdotool(["click", "--repeat", str(steps), str(btn)])
-        direction = "horizontally" if horizontal else "vertically"
-        return f"Scrolled {amount} {direction}"
+        _xdotool(["click", "--repeat", str(steps.clicks), _WHEEL_BUTTONS[steps.direction]])
+        return steps.summary()
     except RuntimeError as e:
         return f"Scroll error: {e}"
 
