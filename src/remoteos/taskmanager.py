@@ -180,14 +180,19 @@ class TaskManager:
         return task
 
     def cancel_task(self, task_id: str) -> dict:
-        """Cancel a task by ID."""
+        """Cancel a task by ID.
+
+        The lookup and the cancel stay under the lock (#31), so the status
+        check-and-set cannot race ``_cleanup_old``'s stale-task auto-cancel.
+        """
         with self._lock:
             task = self._tasks.get(task_id)
-        if task is None:
-            return {"error": f"Task {task_id} not found"}
-        if task.cancel():
-            return {"status": "cancelled", "task_id": task_id, "tool_name": task.tool_name}
-        return {"error": f"Task {task_id} is already {task.status.value}"}
+            if task is None:
+                return {"error": f"Task {task_id} not found"}
+            if task.cancel():
+                logger.info("Cancelled task %s (%s)", task_id, task.tool_name)
+                return {"status": "cancelled", "task_id": task_id, "tool_name": task.tool_name}
+            return {"error": f"Task {task_id} is already {task.status.value}"}
 
     def list_tasks(self, status: str | None = None) -> list[dict]:
         """List tasks, optionally filtered by status."""
