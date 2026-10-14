@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import logging
 import os
 import platform
@@ -1065,6 +1066,10 @@ def FileDownload(path: str) -> str:
         return f"FileDownload error: {e}"
 
 
+# FileUpload cap on the base64 TEXT (~75 MB of file), checked before decoding (#31).
+FILE_UPLOAD_MAX_BASE64 = 100 * 1024 * 1024
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="FileUpload",
@@ -1077,13 +1082,28 @@ def FileUpload(path: str, data_base64: str) -> str:
 
     Args:
         path: Destination file path.
-        data_base64: Base64-encoded file content.
+        data_base64: Base64-encoded file content, at most 100 MB of base64 text
+            (about 75 MB of file). Line breaks are allowed; any other character
+            outside the base64 alphabet is an error and nothing is written.
     """
     try:
+        # Both checks run before the directory is created or the file opened (#31):
+        # lax decoding dropped junk characters, so "!!!!" truncated a file to 0 bytes.
+        if len(data_base64) > FILE_UPLOAD_MAX_BASE64:
+            log.warning("FileUpload refused %s: %d base64 characters over the cap", path, len(data_base64))
+            return (
+                f"FileUpload error: data_base64 is {len(data_base64)} characters; "
+                f"the limit is {FILE_UPLOAD_MAX_BASE64} (100 MB of base64)"
+            )
+        try:
+            data = base64.b64decode("".join(data_base64.split()), validate=True)
+        except binascii.Error as e:
+            log.warning("FileUpload refused %s: invalid base64 (%s)", path, e)
+            return f"FileUpload error: data_base64 is not valid base64 ({e})"
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        data = base64.b64decode(data_base64)
         p.write_bytes(data)
+        log.info("FileUpload wrote %d bytes to %s", len(data), path)
         return f"Written {len(data)} bytes to {path}"
     except Exception as e:
         return f"FileUpload error: {e}"
