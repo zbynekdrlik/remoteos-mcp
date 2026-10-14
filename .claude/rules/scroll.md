@@ -26,8 +26,9 @@ paths:
     is 100.
   - The ctypes `INPUT` uses fixed-width fields. `mouseData` is declared `c_int32` (the same bits as
     the DWORD), because a wheel delta is signed.
-  - The union holds only `MOUSEINPUT`, the largest member, so `sizeof(INPUT)` is 40 on x64 and 28
-    on x86. SendInput rejects any other `cbSize`, and a test locks it.
+  - The union holds `MOUSEINPUT` and `KEYBDINPUT` (#30). `MOUSEINPUT` is the largest member, so
+    `sizeof(INPUT)` is 40 on x64 and 28 on x86. SendInput rejects any other `cbSize`, and a
+    test locks it.
   - `SetCursorPos` runs first. The wheel goes to the window under the cursor.
   - SendInput returning 0 (a locked or disconnected session) is raised as an error, never ignored.
   - A UIPI block is SILENT: when a higher-integrity window is under the cursor, SendInput still

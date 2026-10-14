@@ -169,3 +169,32 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Tests (RED→GREEN):** `test_windows_legacy_horizontal_scroll_is_horizontal`, `test_windows_scroll_sends_one_wheel_event[*]`, `test_windows_scroll_tool_maps_the_point_and_sends_the_wheel`, `test_mac_scroll_posts_line_events[*]`, `test_mac_legacy_horizontal_scroll_is_horizontal`, `test_x11_scroll_direction_picks_the_wheel_button[*]`, `test_scroll_legacy_horizontal_routes_to_the_horizontal_buttons`, `test_wheel_steps_table[*]`.
   - Result: 363 pass, ruff clean.
 - **Not done here:** the live Windows check (a `WH_MOUSE_LL` hook expects −360 for down 3 and +240 for right 2). The supervisor deploys and verifies. No macOS box was reachable; the mac sign is source-evidenced.
+
+## #30 — Unicode / Slovak diacritics typing on Windows and macOS; no false Typed-N-chars success (0.7.0.dev26)
+
+- **Root cause:** Windows/macOS `Type` used pyautogui 0.9.54 `typewrite`/`write` (the same function). Its key map covers only `chr(32..127)` and SILENTLY skips the rest (`_pyautogui_win.py:246-264`, `_pyautogui_osx.py:219-221`), while the tool replied `Typed {len(text)} chars`.
+- **Fix (Approach 1 of the main session's design):**
+  - Pure `src/remoteos/typing_input.py`: `plan()` gives UTF-16 code units or Enter/Tab, `check_method`, `typed_reply`.
+  - Windows `type_unicode`: one `SendInput` per character, `KEYEVENTF_UNICODE` with wScan = code unit, `VK_RETURN`/`VK_TAB`; a short return raises.
+  - macOS `type_unicode`: Quartz keyboard events with `CGEventKeyboardSetUnicodeString`, ≤20 units per event, `kVK_Return`/`kVK_Tab`; `CGPreflightPostEventAccess` is checked first.
+  - Linux `type_unicode`: `xdotool type`.
+  - Shared `src/remoteos/text_entry.py`: `enter_text` (keys) and `paste_text` (save → set → paste keys → 0.3 s → restore).
+  - Every provider has `type_text(text, x, y, clear, press_enter, method)`. The tool is one provider call.
+- **Decisions (ROZHODNUTÉ on #30):**
+  - `\r\n`/`\r` = one Enter.
+  - paste works on every OS, and an empty clipboard counts as "nothing to restore".
+  - macOS select-all/paste use Command: Ctrl+A only moved the caret, so `clear` deleted one character.
+  - the macOS preflight runs before the click/clear/paste.
+  - points are used when they are `is not None`.
+- **Commits:** `917cde5` bump; `ee00184` [red] (24 fail + 1 collection error); `6f38e81` [green]; `bc52547` docs.
+  - Review round 1 (0🔴 3🟡 7🔵): `09c0440` [red] (10 fail), `9a62359` [green].
+  - Review round 2 (0🔴 1🟡 3🔵): `d355753` [red] (2 fail), `297fc3b` [green].
+- **Tests (RED→GREEN):**
+  - `test_windows_type_tool_sends_every_slovak_character`, `test_windows_type_tool_reports_blocked_input_as_an_error_not_typed`, `test_windows_type_unicode_*`
+  - `test_mac_type_tool_types_slovak_text_through_quartz`, `test_mac_clear_selects_all_with_command_not_ctrl`, `test_mac_*_without_the_posting_permission_*`
+  - `test_*paste*`, `tests/test_typing_input.py`
+  - Result: 437 pass, ruff clean.
+- **Not done here:**
+  - The live Windows check (Notepad + `WM_GETTEXT` read-back). The supervisor deploys and verifies.
+  - No macOS box was reachable, so the macOS path is fake-tested and source-evidenced (pynput passes the UTF-16 length the same way).
+  - Round-2 🔵 follow-up candidates: Linux `xdotool type` argv exposure, `Error: `-prefixed clipboard text, and a split ticket for the over-budget `__main__.py`/`linux/desktop.py`.
