@@ -170,6 +170,21 @@ def test_type_and_scroll_without_point_do_not_move(fake_x11):
     assert _mousemoves(fake_x11) == []
 
 
+def test_type_paste_method_clicks_the_mapped_point_then_pastes(fake_x11, monkeypatch):
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)  # the paste settle wait
+    out = server.Type("Žltý", x=300, y=200, method="paste")
+    assert _mousemoves(fake_x11) == [["600", "400"]]
+    assert ["xdotool", "key", "--clearmodifiers", "ctrl+v"] in fake_x11
+    assert not [c for c in fake_x11 if c[:2] == ["xdotool", "type"]]
+    assert out.startswith("Pasted 4 chars (clipboard restored) [image (300,200) → screen (600,400)")
+
+
+def test_type_unknown_method_is_an_error_and_sends_nothing(fake_x11):
+    out = server.Type("x", x=300, y=200, method="clipboard")
+    assert out == "Type error: method must be 'keys' or 'paste' (got 'clipboard')"
+    assert [c for c in fake_x11 if c[:1] == ["xdotool"]] == []
+
+
 def test_click_clamps_to_frame(fake_x11):
     server.Click(5000, 5000)
     assert _mousemoves(fake_x11) == [["2559", "1599"]]
