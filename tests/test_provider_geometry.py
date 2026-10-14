@@ -191,6 +191,15 @@ def test_pyautogui_drag_maps_start_and_target(pyautogui_branch):
     assert fake.drag.calls == [((220, 698), {"duration": 0.3})]
 
 
+def test_pyautogui_type_and_drag_start_on_column_zero(pyautogui_branch):
+    # x=0 is the frame's left column, not "no point" (#31): image (0,y) → screen (-1920, …)
+    server, fake = pyautogui_branch
+    server.Type("hi", x=0, y=228)
+    server.Move(640, 228, drag=True, start_x=0, start_y=2)
+    assert fake.click.calls == [((-1920, 798), {})]
+    assert fake.moveTo.calls == [((-1920, 7), {})]
+
+
 def test_pyautogui_type_point(pyautogui_branch):
     server, fake = pyautogui_branch
     server.Type("hi", x=640, y=228)
