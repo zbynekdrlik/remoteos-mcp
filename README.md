@@ -65,6 +65,40 @@ Create `.mcp.json` in your project directory:
 
 Claude Code only loads MCP servers from the current project's `.mcp.json`, so different projects = different Windows machines.
 
+## Screen coordinates (Snapshot → Click)
+
+Snapshot and AnnotatedSnapshot shrink the screenshot to `max_width` (default 1280 px). The
+input tools use the **same pixels as that image**, so a point read off the screenshot can be
+passed straight to Click / Move / Scroll / Type.
+
+- **The text starts with the coordinate contract**, for example:
+
+  ```
+  **Coordinates:** Image 1280x800 = screen 2560x1600 at origin (0,0), scale 2.000; input tools take IMAGE pixels of this frame (monitor=0, max_width=1280)
+  ```
+
+  All window rects and element centers in the text are in image pixels too.
+- **The server maps every point back to the screen:** `screen = origin + round(image × scale)`,
+  clamped to the captured area. The mapping is stateless: it is recomputed from `monitor` +
+  `max_width` at click time. If you used a non-default `monitor` / `max_width` for the
+  Snapshot, pass the same values to the input tool. The tool's reply shows the mapping:
+  `[image (640,400) → screen (1280,800); scale 2.000]`.
+- **`coords="screen"`** passes raw OS coordinates through unchanged. Those are physical pixels
+  on Windows and Linux, and points on macOS.
+- **`monitor=0`** means different things per OS:
+  - Windows: the whole virtual screen. Its origin is negative when a monitor sits left of
+    or above the primary.
+  - Linux: the X root, all heads, sized by `xrandr --current`. Needs `x11-xserver-utils`; the
+    installer adds it.
+  - macOS: the main display.
+
+  `monitor=N` is one display: `EnumDisplayMonitors` on Windows, `xrandr --listmonitors`
+  on Linux, `screencapture -D N` on macOS.
+- **Windows runs per-monitor-v2 DPI aware**, set before pyautogui loads. That way screenshots,
+  window rects and the cursor all use physical pixels. The startup log prints
+  `Windows DPI awareness: …`.
+- **OCR and ScreenRecord regions are still in screen coordinates.**
+
 ## MCP gateway (dev1)
 
 The machines are reachable only from boxes with a LAN route to them. `remoteos-gateway`

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import platform
 import subprocess
@@ -14,6 +15,14 @@ from pathlib import Path
 import click
 from click.core import ParameterSource
 
+if _sys.platform == "win32":
+    # Per-monitor-v2 DPI awareness MUST be set before pyautogui is imported (#28):
+    # pyautogui's import calls SetProcessDPIAware() (system-aware), after which the
+    # process can no longer become per-monitor aware and screenshots (physical
+    # pixels), window rects and SetCursorPos disagree on mixed-DPI setups.
+    from remoteos.platform.win.dpi import enable_per_monitor_dpi_awareness
+
+    _WIN_DPI_MODE = enable_per_monitor_dpi_awareness()
 if _sys.platform != "linux":
     import pyautogui
 
@@ -33,8 +42,10 @@ from starlette.responses import JSONResponse
 
 from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
+from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
+from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, window_lines
 from remoteos.taskmanager import manager as task_manager
 from remoteos.tiers import (
     ALL_TOOLS,
@@ -47,6 +58,8 @@ from remoteos.tiers import (
 )
 
 load_dotenv()
+
+log = logging.getLogger("remoteos.mcp")
 
 mcp = FastMCP(
     "remoteos-mcp",
@@ -159,6 +172,49 @@ def _ensure_session_connected() -> str | None:
 
 
 # ============================= DESKTOP CONTROL =============================
+#
+# Coordinate contract (#28): Snapshot / AnnotatedSnapshot return an image that is
+# a FRAME of the screen (``remoteos.coords``) and print it as one contract line.
+# Every input tool takes IMAGE pixels of that frame by default and maps them back
+# to the screen here, recomputing the frame from (monitor, max_width) + the live
+# display geometry — no per-session state. ``coords="screen"`` is the escape hatch.
+
+
+def _current_frame(monitor: int, max_width: int):
+    return frame_for(monitor, max_width, get_desktop().capture_geometry(monitor))
+
+
+def _capture_snapshot_frame(monitor: int, max_width: int):
+    """``(image, frame)`` for Snapshot/AnnotatedSnapshot.
+
+    On Windows a failed grab is retried once after reconnecting a disconnected RDP
+    session to the console (a disconnected session has no desktop to capture).
+    """
+    try:
+        img, frame = get_desktop().capture_frame(monitor=monitor, max_width=max_width)
+    except Exception as first_error:
+        if not is_windows() or _ensure_session_connected() is not None:
+            raise
+        log.warning("capture failed (%s) — retrying after session reconnect", first_error)
+        try:
+            img, frame = get_desktop().capture_frame(monitor=monitor, max_width=max_width)
+        except Exception as retry_error:
+            raise RuntimeError(f"after session reconnect: {retry_error}") from retry_error
+    log.debug("snapshot frame: %s", contract_line(frame))
+    return img, frame
+
+
+def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coords: str):
+    """Map input-tool points to screen coordinates; returns ``(screen_points, reply_note)``."""
+    if check_space(coords) == "screen" or not points:
+        return points, ""
+    if is_linux() and get_desktop().get_session().mode != "x11":
+        return points, ""  # no display: the provider answers with its exact headless/Wayland stub
+    frame = _current_frame(monitor, max_width)
+    mapped = [image_to_screen(frame, x, y) for x, y in points]
+    note = mapping_note(frame, points, mapped)
+    log.debug("input mapped%s (monitor=%s, max_width=%s)", note, monitor, max_width)
+    return mapped, note
 
 
 @mcp.tool(
@@ -176,58 +232,43 @@ def Snapshot(
 ) -> list:
     """Capture desktop screenshot, window list, and interactive UI elements.
 
+    The text starts with the coordinate contract, e.g. ``Image 1280x800 = screen
+    2560x1600 at origin (0,0), scale 2.000; input tools take IMAGE pixels of this
+    frame (monitor=0, max_width=1280)``. Every window rect and element center in
+    the text is in IMAGE pixels of the returned image, and Click / Move / Scroll /
+    Type take IMAGE pixels by default — read a point off the image (or the list)
+    and pass it as-is, with the same monitor/max_width; the server scales it back.
+
     Args:
         use_vision: Include screenshot image (default True).
         quality: JPEG quality 1-100 (default 65). Lower = smaller.
         max_width: Max image width in pixels. 0=native resolution. Default 1280 to keep images compact.
-        monitor: Monitor to capture. 0=all monitors (default), 1/2/3=specific monitor.
+        monitor: Monitor to capture. 0=all monitors (default; on macOS the main display), 1/2/3=specific monitor.
 
     Returns a list containing:
     - Screenshot image as JPEG (if use_vision=True)
-    - Text summary of windows and UI elements
+    - Text: coordinate contract, windows and interactive UI elements (image pixels)
     """
     try:
         parts = []
-        use_vision = _tobool(use_vision)
+        if _tobool(use_vision):
+            img, frame = _capture_snapshot_frame(monitor, max_width)
+            parts.append(ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"))
+        else:
+            frame = _current_frame(monitor, max_width)
 
-        # Screenshot (auto-reconnect session if grab fails)
-        if use_vision:
-            try:
-                b64 = get_desktop().take_screenshot(quality=quality, max_width=max_width, monitor=monitor)
-            except Exception as screenshot_error:
-                # Check if a disconnected session is the cause
-                reconnect_result = _ensure_session_connected()
-                if reconnect_result is not None:
-                    # Session wasn't disconnected (or reconnect failed) — not a session issue
-                    return [f"Snapshot error: {screenshot_error}"]
-                # Session was disconnected and reconnected, retry
-                try:
-                    b64 = get_desktop().take_screenshot(quality=quality, max_width=max_width, monitor=monitor)
-                except Exception as retry_error:
-                    return [f"Snapshot error (after session reconnect): {retry_error}"]
-            parts.append(ImageContent(type="image", data=b64, mimeType="image/jpeg"))
-
-        # Window list
-        windows = get_desktop().enumerate_windows()
         _desktop = get_desktop()
+        windows = _desktop.enumerate_windows()
         sys_lang = _desktop._get_system_language() if hasattr(_desktop, "_get_system_language") else "N/A"
-        win_lines = [f"**System Language:** {sys_lang}", "", "**Windows:**"]
-        for w in windows:
-            win_lines.append(f"  [{w.handle}] {w.title} ({w.width}x{w.height} at {w.rect[0]},{w.rect[1]})")
+        lines = [f"**Coordinates:** {contract_line(frame)}", "", f"**System Language:** {sys_lang}", ""]
+        lines += ["**Windows:**", *window_lines(frame, windows)]
 
         # Interactive elements from foreground window
-        elements = get_desktop().get_interactive_elements()
+        elements = _desktop.get_interactive_elements()
         if elements:
-            win_lines.append("")
-            win_lines.append("**Interactive Elements (foreground window):**")
-            for el in elements[:50]:  # limit
-                r = el["rect"]
-                cx = (r["left"] + r["right"]) // 2
-                cy = (r["top"] + r["bottom"]) // 2
-                label = el["text"] or el["class"]
-                win_lines.append(f"  [{el['index']}] {label} — center ({cx},{cy})")
+            lines += ["", "**Interactive Elements (foreground window):**", *element_lines(frame, elements[:50])]
 
-        parts.append(TextContent(type="text", text="\n".join(win_lines)))
+        parts.append(TextContent(type="text", text="\n".join(lines)))
         return parts
     except Exception as e:
         return [f"Snapshot error: {e}"]
@@ -245,27 +286,40 @@ def Click(
     y: int,
     button: str = "left",
     action: str = "click",
+    monitor: int = 0,
+    max_width: int = 1280,
+    coords: str = "image",
 ) -> str:
-    """Mouse click at screen coordinates.
+    """Mouse click at a point of the Snapshot image.
+
+    x/y are IMAGE pixels of the last Snapshot / AnnotatedSnapshot (read them off
+    the image or its element list); the server maps them to the screen
+    (screen = origin + round(image * scale), clamped to the frame). Pass the same
+    monitor/max_width the Snapshot used — the defaults are Snapshot's defaults.
 
     Args:
-        x: X coordinate.
-        y: Y coordinate.
+        x: X in Snapshot image pixels (screen coordinates if coords="screen").
+        y: Y in Snapshot image pixels (screen coordinates if coords="screen").
         button: 'left', 'right', or 'middle'.
         action: 'click', 'double', or 'hover'.
+        monitor: monitor of the Snapshot frame (default 0, as Snapshot).
+        max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
+        coords: 'image' (default) or 'screen' = raw OS coordinates, passed through
+            unchanged (physical pixels on Windows/Linux, points on macOS).
     """
     try:
+        [(x, y)], note = _to_screen([(x, y)], monitor, max_width, coords)
         if is_linux():
-            return get_desktop().click(x, y, button=button, action=action)
+            return get_desktop().click(x, y, button=button, action=action) + note
         if action == "hover":
             pyautogui.moveTo(x, y)
-            return f"Hovered at ({x},{y})"
+            return f"Hovered at ({x},{y}){note}"
         elif action == "double":
             pyautogui.doubleClick(x, y, button=button)
-            return f"Double-clicked {button} at ({x},{y})"
+            return f"Double-clicked {button} at ({x},{y}){note}"
         else:
             pyautogui.click(x, y, button=button)
-            return f"Clicked {button} at ({x},{y})"
+            return f"Clicked {button} at ({x},{y}){note}"
     except Exception as e:
         return f"Click error: {e}"
 
@@ -283,21 +337,33 @@ def Type(
     y: int = 0,
     clear: bool | str = False,
     press_enter: bool | str = False,
+    monitor: int = 0,
+    max_width: int = 1280,
+    coords: str = "image",
 ) -> str:
-    """Type text, optionally at specific coordinates.
+    """Type text, optionally clicking a point of the Snapshot image first.
+
+    x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = type at the
+    current focus without clicking.
 
     Args:
         text: Text to type.
-        x: X coordinate (0 = current position).
-        y: Y coordinate (0 = current position).
+        x: X in Snapshot image pixels (0 = current position).
+        y: Y in Snapshot image pixels (0 = current position).
         clear: Clear existing content first (Ctrl+A, Delete).
         press_enter: Press Enter after typing.
+        monitor: monitor of the Snapshot frame (default 0, as Snapshot).
+        max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
+        coords: 'image' (default) or 'screen' = raw OS coordinates.
     """
     try:
+        points, note = _to_screen([(x, y)] if x and y else [], monitor, max_width, coords)
         if is_linux():
-            return get_desktop().type_text(text, x=x, y=y, clear=_tobool(clear), press_enter=_tobool(press_enter))
-        if x and y:
-            pyautogui.click(x, y)
+            sx, sy = points[0] if points else (0, 0)
+            msg = get_desktop().type_text(text, x=sx, y=sy, clear=_tobool(clear), press_enter=_tobool(press_enter))
+            return msg + note
+        if points:
+            pyautogui.click(*points[0])
             time.sleep(0.1)
         if _tobool(clear):
             pyautogui.hotkey("ctrl", "a")
@@ -306,7 +372,7 @@ def Type(
         pyautogui.typewrite(text, interval=0.02) if text.isascii() else pyautogui.write(text)
         if _tobool(press_enter):
             pyautogui.press("enter")
-        return f"Typed {len(text)} chars"
+        return f"Typed {len(text)} chars{note}"
     except Exception as e:
         return f"Type error: {e}"
 
@@ -323,26 +389,37 @@ def Scroll(
     x: int = 0,
     y: int = 0,
     horizontal: bool | str = False,
+    monitor: int = 0,
+    max_width: int = 1280,
+    coords: str = "image",
 ) -> str:
-    """Scroll at a position.
+    """Scroll at a point of the Snapshot image.
+
+    x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = scroll where the
+    mouse already is.
 
     Args:
         amount: Scroll amount (positive=up/right, negative=down/left).
-        x: X coordinate (0 = current).
-        y: Y coordinate (0 = current).
+        x: X in Snapshot image pixels (0 = current).
+        y: Y in Snapshot image pixels (0 = current).
         horizontal: Horizontal scroll instead of vertical.
+        monitor: monitor of the Snapshot frame (default 0, as Snapshot).
+        max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
+        coords: 'image' (default) or 'screen' = raw OS coordinates.
     """
     try:
+        points, note = _to_screen([(x, y)] if x and y else [], monitor, max_width, coords)
         if is_linux():
-            return get_desktop().scroll(amount, x=x, y=y, horizontal=_tobool(horizontal))
-        if x and y:
-            pyautogui.moveTo(x, y)
+            sx, sy = points[0] if points else (0, 0)
+            return get_desktop().scroll(amount, x=sx, y=sy, horizontal=_tobool(horizontal)) + note
+        if points:
+            pyautogui.moveTo(*points[0])
         if _tobool(horizontal):
             pyautogui.hscroll(amount)
         else:
             pyautogui.scroll(amount)
         direction = "horizontally" if _tobool(horizontal) else "vertically"
-        return f"Scrolled {amount} {direction}"
+        return f"Scrolled {amount} {direction}{note}"
     except Exception as e:
         return f"Scroll error: {e}"
 
@@ -361,28 +438,43 @@ def Move(
     start_x: int = 0,
     start_y: int = 0,
     duration: float = 0.3,
+    monitor: int = 0,
+    max_width: int = 1280,
+    coords: str = "image",
 ) -> str:
-    """Move mouse or drag to position.
+    """Move the mouse, or drag, to a point of the Snapshot image.
+
+    x/y and start_x/start_y are IMAGE pixels of the last Snapshot (see Click).
 
     Args:
-        x: Target X.
-        y: Target Y.
+        x: Target X in Snapshot image pixels.
+        y: Target Y in Snapshot image pixels.
         drag: If true, drag from start position to target.
-        start_x: Drag start X.
-        start_y: Drag start Y.
+        start_x: Drag start X in image pixels (0 = from the current position).
+        start_y: Drag start Y in image pixels (0 = from the current position).
         duration: Movement duration in seconds.
+        monitor: monitor of the Snapshot frame (default 0, as Snapshot).
+        max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
+        coords: 'image' (default) or 'screen' = raw OS coordinates.
     """
     try:
+        drag = _tobool(drag)
+        has_start = bool(drag and start_x and start_y)
+        points = [(start_x, start_y), (x, y)] if has_start else [(x, y)]
+        mapped, note = _to_screen(points, monitor, max_width, coords)
+        x, y = mapped[-1]
+        start_x, start_y = mapped[0] if has_start else (0, 0)
         if is_linux():
-            return get_desktop().move(x, y, drag=_tobool(drag), start_x=start_x, start_y=start_y, duration=duration)
-        if _tobool(drag):
-            if start_x and start_y:
+            msg = get_desktop().move(x, y, drag=drag, start_x=start_x, start_y=start_y, duration=duration)
+            return msg + note
+        if drag:
+            if has_start:
                 pyautogui.moveTo(start_x, start_y)
             pyautogui.drag(x - pyautogui.position()[0], y - pyautogui.position()[1], duration=duration)
-            return f"Dragged to ({x},{y})"
+            return f"Dragged to ({x},{y}){note}"
         else:
             pyautogui.moveTo(x, y, duration=duration)
-            return f"Moved to ({x},{y})"
+            return f"Moved to ({x},{y}){note}"
     except Exception as e:
         return f"Move error: {e}"
 
@@ -490,8 +582,9 @@ def App(
         name: Application name or path (for launch/switch).
         args: Arguments (for launch).
         handle: Window handle (for resize/switch).
-        width: New width (for resize).
-        height: New height (for resize).
+        width: New width (for resize), in raw screen units (the coords="screen" space:
+            physical pixels on Windows/Linux, points on macOS) — not Snapshot image pixels.
+        height: New height (for resize), in the same raw screen units as width.
     """
     try:
         if action == "launch":
@@ -1320,6 +1413,9 @@ def OCR(
 
     Uses pytesseract if available, falls back to platform-specific OCR engine.
 
+    The region is in SCREEN coordinates (physical pixels on Windows/Linux, points
+    on macOS) — NOT Snapshot image pixels.
+
     Args:
         left: Left edge of region (0 = full screen).
         top: Top edge of region.
@@ -1362,6 +1458,9 @@ def ScreenRecord(
 ) -> list:
     """Record the screen and return an animated GIF.
 
+    The region is in SCREEN coordinates (physical pixels on Windows/Linux, points
+    on macOS) — NOT Snapshot image pixels.
+
     Args:
         duration: Recording length in seconds (default 3, max 10).
         fps: Frames per second (default 5, max 10).
@@ -1396,109 +1495,6 @@ def ScreenRecord(
 # ======================== ANNOTATED SNAPSHOT ===============================
 
 
-def _draw_annotations(img, elements: list, scale: float, max_elements: int) -> list[str]:
-    """Draw numbered red boxes on ``img`` in place; return the text-summary lines.
-
-    Shared by the Windows and Linux ``AnnotatedSnapshot`` paths so the drawing +
-    labelling is identical on every platform. ``scale`` maps native element
-    coordinates to the (possibly resized) image. ``elements`` are the shared
-    ``{index, class, text, rect}`` dicts.
-    """
-    from PIL import ImageDraw, ImageFont
-
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("arial.ttf", 14)
-    except Exception:
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 14)  # present on Linux
-        except Exception:
-            font = ImageFont.load_default()
-
-    lines: list[str] = []
-    for el in elements[:max_elements]:
-        idx = el["index"]
-        r = el["rect"]
-        x1 = int(r["left"] * scale)
-        y1 = int(r["top"] * scale)
-        x2 = int(r["right"] * scale)
-        y2 = int(r["bottom"] * scale)
-
-        draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
-
-        label = str(idx)
-        bbox = font.getbbox(label)
-        lw = bbox[2] - bbox[0] + 6
-        lh = bbox[3] - bbox[1] + 4
-        draw.rectangle([x1, y1 - lh - 2, x1 + lw, y1 - 2], fill="red")
-        draw.text((x1 + 3, y1 - lh - 1), label, fill="white", font=font)
-
-        cx = (r["left"] + r["right"]) // 2
-        cy = (r["top"] + r["bottom"]) // 2
-        name = el["text"] or el["class"]
-        lines.append(f"  [{idx}] {name} — center ({cx},{cy})")
-    return lines
-
-
-def _annotated_snapshot_linux(max_elements: int, quality: int, max_width: int) -> list:
-    """AnnotatedSnapshot on Linux: base image via the provider (scrot, NOT
-    ``ImageGrab.grab()``), interactive elements via the AT-SPI accessibility tree.
-
-    Degrades gracefully: when AT-SPI exposes no elements for the focused app
-    (common for Qt/Electron/legacy apps) it returns the plain screenshot with an
-    honest note rather than failing (issue #7).
-    """
-    import io
-
-    from PIL import Image
-
-    d = get_desktop()
-    session = d.get_session()
-    if session.mode != "x11":
-        return [TextContent(type="text", text=d._unavailable())]
-
-    try:
-        png = d.capture_png()
-        img = Image.open(io.BytesIO(png))
-        if img.mode in ("RGBA", "LA", "P"):
-            img = img.convert("RGB")
-    except Exception as e:
-        return [TextContent(type="text", text=f"AnnotatedSnapshot error: {e}")]
-
-    native_width = img.width
-    if max_width and max_width > 0 and img.width > max_width:
-        ratio = max_width / img.width
-        img = img.resize((max_width, int(img.height * ratio)))
-    scale = (img.width / native_width) if native_width else 1.0
-
-    try:
-        elements = d.get_interactive_elements()
-    except Exception:
-        elements = []
-
-    if not elements:
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
-        b64 = base64.b64encode(buf.getvalue()).decode()
-        return [
-            ImageContent(type="image", data=b64, mimeType="image/jpeg"),
-            TextContent(
-                type="text",
-                text="No interactive elements found (AT-SPI exposed none for the focused app).",
-            ),
-        ]
-
-    element_lines = _draw_annotations(img, elements, scale, max_elements)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    text_summary = f"**Annotated {len(element_lines)} elements:**\n" + "\n".join(element_lines)
-    return [
-        ImageContent(type="image", data=b64, mimeType="image/jpeg"),
-        TextContent(type="text", text=text_summary),
-    ]
-
-
 @mcp.tool(
     annotations=ToolAnnotations(
         title="AnnotatedSnapshot",
@@ -1510,69 +1506,50 @@ def AnnotatedSnapshot(
     max_elements: int = 30,
     quality: int = 65,
     max_width: int = 1280,
+    monitor: int = 0,
 ) -> list:
     """Take a screenshot with numbered labels on interactive UI elements.
 
     Draws red rectangles and white numbered labels on each interactive element,
-    making it easy for AI agents to identify click targets visually.
+    making it easy for AI agents to identify click targets visually. Same frame and
+    coordinate contract as Snapshot: the text starts with the contract line, element
+    centers are IMAGE pixels, and Click / Move / Scroll / Type take them as-is.
+
+    Uses the platform accessibility tree for the foreground window (Win32 child
+    windows on Windows, AT-SPI on Linux X11); returns the plain screenshot with a
+    note when the focused app exposes no elements.
 
     Args:
         max_elements: Maximum number of elements to annotate (default 30).
-        quality: JPEG quality 1-100 (default 75).
-        max_width: Max image width in pixels. 0=native resolution (default).
+        quality: JPEG quality 1-100 (default 65).
+        max_width: Max image width in pixels. 0=native resolution. Default 1280 (same as Snapshot).
+        monitor: Monitor to capture. 0=all monitors (default; on macOS the main display), 1/2/3=specific monitor.
     """
     try:
         if is_linux():
-            return _annotated_snapshot_linux(max_elements, quality, max_width)
-
-        import io
-
-        from PIL import ImageGrab
-
-        # Take screenshot (auto-reconnect session if grab fails)
+            d = get_desktop()
+            if d.get_session().mode != "x11":
+                return [TextContent(type="text", text=d._unavailable())]
         try:
-            img = ImageGrab.grab()
-        except Exception as screenshot_error:
-            reconnect_result = _ensure_session_connected()
-            if reconnect_result is not None:
-                return [TextContent(type="text", text=f"AnnotatedSnapshot error: {screenshot_error}")]
-            try:
-                img = ImageGrab.grab()
-            except Exception as retry_error:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"AnnotatedSnapshot error (after session reconnect): {retry_error}",
-                    )
-                ]
-        if max_width > 0 and img.width > max_width:
-            ratio = max_width / img.width
-            img = img.resize((max_width, int(img.height * ratio)))
+            img, frame = _capture_snapshot_frame(monitor, max_width)
+        except Exception as e:
+            return [TextContent(type="text", text=f"AnnotatedSnapshot error: {e}")]
+        coordinates = f"**Coordinates:** {contract_line(frame)}"
 
-        # Get interactive elements
         elements = get_desktop().get_interactive_elements()
         if not elements:
-            # Return screenshot with no annotations
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=quality)
-            b64 = base64.b64encode(buf.getvalue()).decode()
+            note = "No interactive elements found"
+            if is_linux():
+                note += " (AT-SPI exposed none for the focused app)"
             return [
-                ImageContent(type="image", data=b64, mimeType="image/jpeg"),
-                TextContent(type="text", text="No interactive elements found."),
+                ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"),
+                TextContent(type="text", text=f"{coordinates}\n\n{note}."),
             ]
 
-        # Scale factor if image was resized
-        scale = img.width / ImageGrab.grab().width if img.width != ImageGrab.grab().width else 1.0
-
-        element_lines = _draw_annotations(img, elements, scale, max_elements)
-
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
-        b64 = base64.b64encode(buf.getvalue()).decode()
-
-        text_summary = f"**Annotated {len(element_lines)} elements:**\n" + "\n".join(element_lines)
+        annotated = draw_annotations(img, elements, frame, max_elements)
+        text_summary = f"{coordinates}\n\n**Annotated {len(annotated)} elements:**\n" + "\n".join(annotated)
         return [
-            ImageContent(type="image", data=b64, mimeType="image/jpeg"),
+            ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"),
             TextContent(type="text", text=text_summary),
         ]
     except Exception as e:
@@ -1807,6 +1784,8 @@ def cli(
     # a machine with an active X11 session (e.g. imag-nb) gets the full desktop
     # tool set; a headless box (cam1..4) keeps them excluded — zero regression.
     platform_excludes = None
+    if is_windows():
+        print(f"  Windows DPI awareness: {_WIN_DPI_MODE}")
     if is_linux():
         platform_excludes = set(LINUX_ALWAYS_EXCLUDED_TOOLS)
         try:

@@ -32,6 +32,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from remoteos.coords import CaptureGeometry, frame_for
+from remoteos.platform.linux.display import query_geometry
+from remoteos.snapshot import fit_to_frame
+
 log = logging.getLogger("remoteos.platform.linux.desktop")
 
 HAS_WIN32 = False  # compatibility flag — always False on Linux
@@ -503,33 +507,27 @@ def capture_png(bbox: Optional[tuple[int, int, int, int]] = None) -> bytes:
             pass
 
 
-def take_screenshot(quality: int = 65, max_width: int = 1280, monitor: int = 0) -> str:
-    """Capture screen, return base64 JPEG. Resizes if wider than ``max_width``.
-
-    Mirrors the Windows/macOS providers. Raises :class:`RuntimeError` (which the
-    ``Snapshot`` tool catches) when there is no usable X11 session — preserving
-    the headless contract exactly.
-    """
-    s = get_session()
-    if s.mode != "x11":
+def capture_geometry(monitor: int = 0) -> CaptureGeometry:
+    """Capture geometry (#28, see ``platform/linux/display.py``). Raises the stub
+    message on a non-X11 session without shelling out (the headless contract)."""
+    if get_session().mode != "x11":
         raise RuntimeError(_unavailable())
+    return query_geometry(monitor, lambda cmd: (_run_x(cmd).stdout or b"").decode("utf-8", "replace"))
 
-    import base64
+
+def capture_frame(monitor: int = 0, max_width: int = 1280):
+    """Capture ``monitor`` (scrot) fitted to its frame → ``(PIL image, Frame)``."""
     import io
 
     from PIL import Image
 
-    png = capture_png()
-    img = Image.open(io.BytesIO(png))
-    if max_width > 0 and img.width > max_width:
-        ratio = max_width / img.width
-        new_height = int(img.height * ratio)
-        img = img.resize((max_width, new_height), resample=Image.LANCZOS)
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
-    return base64.b64encode(buf.getvalue()).decode()
+    geometry = capture_geometry(monitor)
+    bbox = None
+    if monitor > 0:
+        bbox = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height)
+    img = Image.open(io.BytesIO(capture_png(bbox)))
+    frame = frame_for(monitor, max_width, geometry)
+    return fit_to_frame(img, frame, geometry), frame
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +599,7 @@ def record_screen(
     same as every other X command.
 
     Raises :class:`RuntimeError` with the headless stub message on a non-X11 box
-    — the same contract as :func:`take_screenshot`, so the headless cam1..4 boxes
+    — the same contract as :func:`capture_frame`, so the headless cam1..4 boxes
     never shell out and never crash (the tool is display-gated off there anyway).
     """
     s = get_session()

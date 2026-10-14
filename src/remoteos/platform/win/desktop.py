@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-import base64
 import ctypes
-import io
 import locale
 from dataclasses import dataclass
 from typing import Optional
 
-import pyautogui
+from remoteos.platform.win.dpi import enable_per_monitor_dpi_awareness
+
+# Per-monitor-v2 DPI awareness MUST be in effect before pyautogui is imported:
+# pyautogui's import calls SetProcessDPIAware() (system-aware), after which the
+# process can no longer become per-monitor aware (#28). __main__ already did this
+# before its own pyautogui import; this idempotent call covers any other importer.
+enable_per_monitor_dpi_awareness()
+
+import pyautogui  # noqa: E402
 
 # Win32 imports (will fail on non-Windows — caught at tool level)
 try:
@@ -23,16 +29,10 @@ try:
 except ImportError:
     HAS_WIN32 = False
 
-from PIL import ImageGrab
+from PIL import ImageGrab  # noqa: E402
 
-# Enable DPI awareness so screenshots capture native resolution (e.g. 4K)
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
+from remoteos.snapshot import fit_to_frame  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -159,30 +159,41 @@ def _get_monitor_bbox(monitor: int) -> tuple[int, int, int, int] | None:
         raise
 
 
-def take_screenshot(quality: int = 65, max_width: int = 1280, monitor: int = 0) -> str:
-    """Capture screen, return base64 JPEG. Resizes if wider than max_width.
+# GetSystemMetrics indices of the virtual screen (the union of all monitors).
+_SM_XVIRTUALSCREEN, _SM_YVIRTUALSCREEN, _SM_CXVIRTUALSCREEN, _SM_CYVIRTUALSCREEN = 76, 77, 78, 79
 
-    Args:
-        quality: JPEG quality 1-100.
-        max_width: Max width in pixels. 0=no resize (native resolution).
-        monitor: 0=all monitors, 1/2/3=specific monitor.
+
+def capture_geometry(monitor: int = 0) -> CaptureGeometry:
+    """Screen bounds of a capture target for the coordinate contract (#28).
+
+    ``monitor=0`` is the virtual screen (all monitors — its origin is negative
+    when a monitor sits left of / above the primary); ``monitor=N`` is the N-th
+    ``EnumDisplayMonitors`` rect. With per-monitor-v2 DPI awareness these are
+    physical pixels — the same space ``ImageGrab``, window rects and
+    ``SetCursorPos`` (pyautogui) use, so the capture size equals the bounds.
     """
-    if monitor == 0:
+    if monitor <= 0:
+        metric = ctypes.windll.user32.GetSystemMetrics
+        x, y = metric(_SM_XVIRTUALSCREEN), metric(_SM_YVIRTUALSCREEN)
+        width, height = metric(_SM_CXVIRTUALSCREEN), metric(_SM_CYVIRTUALSCREEN)
+    else:
+        left, top, right, bottom = _get_monitor_bbox(monitor)
+        x, y, width, height = left, top, right - left, bottom - top
+    return CaptureGeometry(x=x, y=y, width=width, height=height, pixel_width=width, pixel_height=height)
+
+
+def capture_frame(monitor: int = 0, max_width: int = 1280):
+    """Capture ``monitor`` and fit it to its frame → ``(PIL image, Frame)``."""
+    geometry = capture_geometry(monitor)
+    frame = frame_for(monitor, max_width, geometry)
+    if monitor <= 0:
         img = ImageGrab.grab(all_screens=True)
     else:
-        bbox = _get_monitor_bbox(monitor)
-        img = ImageGrab.grab(bbox=bbox)
-    # Resize if needed
-    if max_width > 0 and img.width > max_width:
-        ratio = max_width / img.width
-        new_height = int(img.height * ratio)
-        img = img.resize((max_width, new_height), resample=3)  # LANCZOS
-    # Convert to JPEG
-    if img.mode in ("RGBA", "LA"):
-        img = img.convert("RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality, optimize=True)
-    return base64.b64encode(buf.getvalue()).decode()
+        # all_screens=True: PIL crops the bbox out of the whole virtual screen. Without
+        # it the grab is primary-only and a non-primary monitor's bbox comes back black.
+        bbox = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height)
+        img = ImageGrab.grab(bbox=bbox, all_screens=True)
+    return fit_to_frame(img, frame, geometry), frame
 
 
 # ---------------------------------------------------------------------------

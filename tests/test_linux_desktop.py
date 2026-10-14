@@ -160,7 +160,7 @@ def test_headless_interactive_elements_empty(headless):
 
 def test_headless_screenshot_raises_stub_message(headless):
     with pytest.raises(RuntimeError) as exc:
-        headless.take_screenshot()
+        headless.capture_frame()
     assert str(exc.value) == _MSG
 
 
