@@ -148,3 +148,18 @@ def test_reload_flag_warns_instead_of_crashing(start_server):
     out = srv.output()
     assert "--reload has no effect" in out
     assert "TypeError" not in out
+
+
+@pytest.mark.parametrize("given", ["--ssl-certfile", "--ssl-keyfile"])
+def test_one_ssl_flag_alone_is_a_usage_error_never_a_plain_http_start(tmp_path, start_server, given):
+    certfile, keyfile = _self_signed_cert(tmp_path)
+    srv = start_server(given, str(certfile if given == "--ssl-certfile" else keyfile))
+    deadline = time.monotonic() + _START_TIMEOUT
+    while srv.proc.poll() is None and time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/health", timeout=2):
+                pytest.fail(f"{given} alone silently started a plain-HTTP server:\n{srv.output()[-2000:]}")
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            time.sleep(0.2)
+    assert srv.proc.returncode == 2, srv.output()[-2000:]
+    assert "--ssl-certfile and --ssl-keyfile must be given together" in srv.output()
