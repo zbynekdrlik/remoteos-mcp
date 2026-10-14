@@ -12,10 +12,10 @@ is wrong and what to do.
   passes a ``ToolError`` through unchanged.
 - :class:`DesktopUnavailable` is a diagnosis: the screen cannot be seen or
   driven. Its message is complete and reaches the client verbatim, without the
-  tool prefix. The Linux headless/Wayland stub texts (the cam1..4 contract)
-  travel this way.
+  tool prefix. The Linux headless/Wayland stub texts (the cam1..4 contract) and
+  the platform providers' ``diagnose()`` messages below travel this way.
 
-Pure: no OS calls.
+Pure: no OS calls. The providers' ``diagnose()`` and the tools' preflight do the I/O.
 """
 
 from __future__ import annotations
@@ -27,7 +27,22 @@ from typing import Callable, Optional
 
 from fastmcp.exceptions import ToolError
 
-__all__ = ["DesktopUnavailable", "ToolError", "reports_errors", "stack_frames", "tool_error"]
+__all__ = [
+    "DISCONNECTED",
+    "LOCKED",
+    "MAC_NOT_ON_CONSOLE",
+    "MAC_NO_GUI_SESSION",
+    "SESSION_ZERO",
+    "DesktopUnavailable",
+    "ToolError",
+    "mac_accessibility",
+    "mac_screen_recording",
+    "non_interactive_window_station",
+    "reports_errors",
+    "secure_desktop",
+    "stack_frames",
+    "tool_error",
+]
 
 log = logging.getLogger("remoteos.errors")
 
@@ -39,6 +54,71 @@ class DesktopUnavailable(RuntimeError):
     client as is. A ``RuntimeError``, so a provider's existing ``except
     RuntimeError`` callers keep working.
     """
+
+
+# ---------------------------------------------------------------------------
+# Diagnoses: what a provider's diagnose(capture) returns (None = the desktop is usable)
+# ---------------------------------------------------------------------------
+
+LOCKED = (
+    "The screen is locked: screenshots show the lock screen and mouse/keyboard input goes nowhere. "
+    "Someone has to unlock it (at the machine or over remote desktop), then retry."
+)
+
+SESSION_ZERO = (
+    "No interactive desktop: the server runs in session 0 (as a service), which has no screen or input. "
+    "Start it in the logged-in user's session with `schtasks /Run /TN RemoteOSMCP`, then retry."
+)
+
+DISCONNECTED = (
+    "The desktop session is disconnected (no console or remote desktop client attached), so there is no "
+    "screen to capture and input goes nowhere. Run ReconnectSession to attach it to the console, then retry."
+)
+
+MAC_NO_GUI_SESSION = (
+    "No macOS GUI session: the server does not run inside a logged-in user's desktop session (e.g. it was "
+    "started over ssh or as a LaunchDaemon), so screenshots and input cannot work. Run it as the logged-in "
+    "user's LaunchAgent, then retry."
+)
+
+MAC_NOT_ON_CONSOLE = (
+    "This macOS user session is not on the screen (another user has it, via fast user switching), so "
+    "screenshots and input cannot reach it. Switch back to this user, then retry."
+)
+
+
+def non_interactive_window_station(name: str) -> str:
+    """Windows: the process runs in a window station that is not the user's interactive ``WinSta0``."""
+    return (
+        f"No interactive desktop: the server runs in window station '{name}', not the user's interactive "
+        "'WinSta0' (e.g. a scheduled task set to run whether the user is logged on or not), which has no "
+        "screen or input. Run it in the logged-in user's session, then retry."
+    )
+
+
+def secure_desktop(name: Optional[str]) -> str:
+    """Windows: the input desktop is not the user's: a UAC prompt, Ctrl+Alt+Del or the sign-in screen."""
+    which = f"the '{name}' desktop" if name else "a secure desktop"
+    return (
+        f"The screen shows {which} (a UAC prompt, Ctrl+Alt+Del or the sign-in screen), which this process "
+        "cannot capture or send input to. Someone has to answer it at the machine, then retry."
+    )
+
+
+def mac_accessibility(binary: str) -> str:
+    """macOS refuses this process the mouse and keyboard (Privacy & Security › Accessibility)."""
+    return (
+        "macOS does not let this process control the mouse and keyboard (input would be dropped silently). "
+        f"Allow {binary} in System Settings › Privacy & Security › Accessibility, then restart remoteos-mcp."
+    )
+
+
+def mac_screen_recording(binary: str) -> str:
+    """macOS refuses this process the screen contents (Privacy & Security › Screen Recording)."""
+    return (
+        "macOS does not let this process record the screen (screenshots would show only the wallpaper). "
+        f"Allow {binary} in System Settings › Privacy & Security › Screen Recording, then restart remoteos-mcp."
+    )
 
 
 def stack_frames(exc: BaseException) -> str:

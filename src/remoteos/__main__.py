@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import logging
 import os
 import platform
@@ -43,7 +44,7 @@ from starlette.responses import JSONResponse
 from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
-from remoteos.errors import ToolError, reports_errors
+from remoteos.errors import DISCONNECTED, DesktopUnavailable, ToolError, reports_errors
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
@@ -154,6 +155,33 @@ def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coor
     return mapped, note
 
 
+def _desktop_preflight(capture: bool) -> None:
+    """Stop a desktop tool before it touches a desktop that cannot be used (#32).
+
+    The provider's ``diagnose(capture)`` is cheap and read-only and fails open,
+    so only a positive finding raises (as :class:`DesktopUnavailable`, its text
+    verbatim to the client). A disconnected Windows session is reconnected for a
+    capture (Snapshot's self-heal through ``_ensure_session_connected`` from
+    before #32); input tools report it and never move the session themselves.
+    """
+    kind = "capture" if capture else "input"
+    provider = get_desktop()
+    reason = provider.diagnose(capture=capture)
+    if reason == DISCONNECTED and capture:
+        log.warning("desktop session disconnected: reconnecting it to the console before the capture")
+        failure = _ensure_session_connected()
+        reason = provider.diagnose(capture=capture) if failure is None else f"{reason} (reconnect failed: {failure})"
+    if reason:
+        log.warning("desktop unavailable (%s): %s", kind, reason)
+        raise DesktopUnavailable(reason)
+    log.debug("desktop preflight (%s): usable", kind)
+
+
+# A tool that reads the screen / one that sends input: @reports_errors with the matching preflight.
+_capture_tool = reports_errors(preflight=functools.partial(_desktop_preflight, True))
+_input_tool = reports_errors(preflight=functools.partial(_desktop_preflight, False))
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Snapshot",
@@ -161,7 +189,7 @@ def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coor
         openWorldHint=False,
     )
 )
-@reports_errors
+@_capture_tool
 def Snapshot(
     use_vision: bool | str = True,
     quality: int = 65,
@@ -216,7 +244,7 @@ def Snapshot(
         openWorldHint=False,
     )
 )
-@reports_errors
+@_input_tool
 def Click(
     x: int,
     y: int,
@@ -264,7 +292,7 @@ def Click(
         openWorldHint=False,
     )
 )
-@reports_errors
+@_input_tool
 def Type(
     text: str,
     x: int = 0,
@@ -322,7 +350,7 @@ def Type(
         openWorldHint=False,
     )
 )
-@reports_errors
+@_input_tool
 def Scroll(
     amount: int,
     direction: str = "",
@@ -368,7 +396,7 @@ def Scroll(
         openWorldHint=False,
     )
 )
-@reports_errors
+@_input_tool
 def Move(
     x: int,
     y: int,
@@ -421,7 +449,7 @@ def Move(
         openWorldHint=False,
     )
 )
-@reports_errors
+@_input_tool
 def Shortcut(keys: str) -> str:
     """Execute keyboard shortcut.
 
@@ -482,7 +510,7 @@ def FocusWindow(title: str = "", handle: int = 0) -> str:
         openWorldHint=False,
     )
 )
-@reports_errors
+@_input_tool
 def MinimizeAll() -> str:
     """Minimize all windows (Win+D — show desktop)."""
     return get_desktop().minimize_all()
@@ -1295,7 +1323,7 @@ def EventLog(log_name: str = "System", count: int = 20, level: str = "") -> str:
         openWorldHint=False,
     )
 )
-@reports_errors
+@_capture_tool
 def OCR(
     left: int = 0,
     top: int = 0,
@@ -1336,7 +1364,7 @@ def OCR(
         openWorldHint=False,
     )
 )
-@reports_errors
+@_capture_tool
 def ScreenRecord(
     duration: float = 3.0,
     fps: int = 5,
@@ -1389,7 +1417,7 @@ def ScreenRecord(
         openWorldHint=False,
     )
 )
-@reports_errors
+@_capture_tool
 def AnnotatedSnapshot(
     max_elements: int = 30,
     quality: int = 65,
