@@ -93,3 +93,9 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Decisions (on #25):** HTTP client = `httpx2==2.12.0` (fastmcp/mcp's own runtime client; plain httpx is test-only); `starlette==1.6.0` + `uvicorn==0.52.4` pinned directly; constraints.txt regenerated (only `# via` comments changed).
 - **Commits:** `4cb648b` version bump 0.7.0.dev21; `840e39e` feat + 32 hermetic tests (in-process fake machine; chunk-by-chunk SSE proof; disconnect cleanup; SIGHUP forced reload). Mutation probe: 8/8 mutants killed.
 - **Not done here:** install on dev1 + `expose win-pjsnvs-pokladna` + consumer hand-off (airuleset#1243) — supervisor rollout; #25 stays open until then.
+
+### 2026-10-14 — #28 coordinate contract on all platforms (0.7.0.dev22)
+- **What:** one stateless frame contract: `src/remoteos/coords.py` (pure Frame math, round-half-up, clamp), `src/remoteos/snapshot.py` (fit/encode/listings/annotations in image px), providers' `capture_geometry` + `capture_frame` (Win virtual screen + all_screens bbox, Linux X root + xrandr, macOS points vs mode pixels), Snapshot/AnnotatedSnapshot contract line, Click/Move/drag/Scroll/Type take image px (`monitor`/`max_width`/`coords`), Windows per-monitor-v2 DPI before pyautogui (`platform/win/dpi.py`), installer adds `x11-xserver-utils`.
+- **Decisions (on #28):** AnnotatedSnapshot shares Snapshot's frame + gains `monitor`; macOS monitor=0 = main display; image size from geometry, not capture; replies carry `[image → screen; scale]`; off-frame entries marked.
+- **Commits:** `cd51b7d` bump 0.7.0.dev22; `9af95dd` [red] tool-level fake-X11 + pure tables; `c2b024e` [green] fix; `f116623` provider geometry tests on fake Win32/Quartz.
+- **Tests:** 229 pass, ruff clean. Live check (Move + GetCursorPos on a >1280 px Windows box) = supervisor after canonical install.

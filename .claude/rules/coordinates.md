@@ -1,0 +1,47 @@
+---
+paths:
+  - "src/remoteos/coords.py"
+  - "src/remoteos/snapshot.py"
+  - "src/remoteos/platform/*/desktop.py"
+  - "src/remoteos/platform/win/dpi.py"
+  - "src/remoteos/platform/linux/display.py"
+  - "tests/test_coords.py"
+  - "tests/test_coordinate_contract_tools.py"
+  - "tests/test_snapshot_render.py"
+  - "tests/test_provider_geometry.py"
+  - "tests/test_win_dpi.py"
+---
+
+# Coordinate contract (Snapshot image ↔ screen, #28) — gotchas
+
+- **One frame per `(monitor, max_width)` plus the live geometry.** Each provider has
+  `capture_geometry(monitor)`, which returns a `CaptureGeometry`, and `capture_frame()`.
+  `coords.frame_for` turns the geometry into a `Frame`. Input tools recompute the frame at call
+  time. Nothing is cached between Snapshot and Click, because the transport is stateless.
+- **The image size comes from the geometry, never from the capture.** `snapshot.fit_to_frame`
+  always resizes to `frame.image_size`. If you size the image from the raw capture instead, the
+  click-time frame stops matching what the model saw. This bites on macOS Retina, where the
+  capture is in pixels and the bounds are in points.
+- **Screen space differs per OS:**
+  - Windows (per-monitor-v2) and X11: physical pixels.
+  - macOS: points (`CGDisplayBounds`, the same space as pyautogui). The capture pixel size
+    comes from `CGDisplayModeGetPixelWidth`.
+- **Rounding is `floor(v + 0.5)` everywhere.** Never use the built-in `round()`. It does
+  banker's rounding (4.5 → 4), and then the resize height and the two mapping directions
+  disagree.
+- **Clamp only in `image_to_screen`.** `screen_to_image` is unclamped on purpose: listings mark
+  points outside the frame `(off-frame)` instead of moving them.
+- **Windows DPI:** pyautogui's import calls `SetProcessDPIAware()`. After that, per-monitor
+  awareness is refused. So `__main__.py` and `platform/win/desktop.py` call
+  `enable_per_monitor_dpi_awareness()` BEFORE `import pyautogui`. `tests/test_win_dpi.py`
+  locks that order on the AST.
+- **Windows `monitor=N`** must grab with `ImageGrab.grab(bbox=…, all_screens=True)`. Without
+  `all_screens`, PIL crops the bbox out of a primary-only grab, and a non-primary monitor comes
+  back black.
+- **pyautogui does not clamp to the screen**: the clamp is commented out in 0.9.54. Negative
+  virtual-screen coordinates reach `SetCursorPos` as they are. Our clamp is the only guard.
+- **Tests:**
+  - Tool-level tests run the real MCP tool functions on a fake X11 display, stubbing only
+    `_run_x` and `_load_atspi`.
+  - Windows/macOS providers are imported against fake `ctypes.windll` / pywin32 / `Quartz`
+    modules. See `tests/test_provider_geometry.py` (`_purge` re-imports the provider fresh).
