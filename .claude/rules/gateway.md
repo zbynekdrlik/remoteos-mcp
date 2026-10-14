@@ -36,10 +36,17 @@ paths:
 - **Test fixtures:** `block-sensitive-staging.sh` flags `TOKEN = ...` in tests even though the
   values come from `secrets.token_hex`. Append `# airuleset:secret-ok <reason>` to BOTH the
   `git add` and the `git commit`.
-- **Rollout (dev1, owner account):**
-  1. `python3 -m pip install --user --break-system-packages git+…@main`. This puts the script
-     in `~/.local/bin/remoteos-gateway`, which is the unit's `ExecStart`.
-  2. Copy `deploy/remoteos-gateway.service` to `~/.config/systemd/user/`.
-  3. `systemctl --user enable --now remoteos-gateway`.
-  4. `remoteos-gateway expose <machine>`.
-  5. Verify from another tailnet node: 200 tools/list, 401 wrong token, 403 not allowed.
+- **Rollout (dev1, owner account):** follow the README section "MCP gateway (dev1)".
+  - Install into a DEDICATED venv, `~/.local/share/remoteos-gateway/venv`, with
+    `-c constraints.txt`. That venv is the unit's `ExecStart`.
+  - NEVER `pip install --user`: it would upgrade `fastmcp`/`mcp` in the account's shared user
+    site, which is the #12 fastmcp-slim collision class.
+  - Upgrade = the same `pip install` line with `--force-reinstall`, then
+    `systemctl --user restart remoteos-gateway`, then check the version on `/healthz`.
+  - After install: `remoteos-gateway expose <machine>`, then verify from another tailnet node:
+    200 tools/list, 401 wrong token, 403 not allowed.
+- **Unit hardening:** only `NoNewPrivileges`, `RestrictAddressFamilies` and `MemoryMax` are
+  enforced for a `--user` unit on dev1.
+  - `ProtectSystem`/`ProtectHome`/`PrivateTmp` are VERIFIED-INERT there:
+    `apparmor_restrict_unprivileged_userns=1` blocks the mount namespace they need.
+  - Never claim them as isolation the gateway has.

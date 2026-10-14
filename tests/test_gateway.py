@@ -9,6 +9,7 @@ and every file lives under ``tmp_path`` — the real registry / ~/.claude are ne
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import json
 import os
@@ -32,6 +33,7 @@ from remoteos.gateway.accesslog import AccessLog, read_access_log
 from remoteos.gateway.app import create_app
 from remoteos.gateway.registry import (
     LiveConfig,
+    MachineSourceError,
     Registry,
     RegistryError,
     edit_registry,
@@ -88,6 +90,13 @@ class FakeMachine:
                 }
             )
             message = json.loads(body) if body else {}
+            if message.get("method") == "test/reject-key":  # a machine whose key was rotated
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            if message.get("method") == "test/hop-headers":
+                return JSONResponse(
+                    {"ok": True},
+                    headers={"keep-alive": "timeout=5", "connection": "x-upstream-hop", "x-upstream-hop": "1"},
+                )
             if message.get("method") == "tools/call":
                 return StreamingResponse(
                     _chunks(SSE_BODY, 40),
@@ -214,6 +223,15 @@ def test_consumer_not_allowed_that_machine_is_403(gw):
     assert gw.machine.received == []
 
 
+def test_not_allowed_wins_over_unexposed_so_exposure_cannot_be_probed(gw):
+    with edit_registry(gw.registry_path) as reg:
+        reg.unexpose(MACHINE)
+    # OTHER_CONSUMER may not use MACHINE: it must get 403 whether or not MACHINE is exposed.
+    resp = gw.call("POST", f"/{MACHINE}/mcp", token=OTHER_TOKEN, json_body=_tools_list())
+
+    assert resp.status_code == 403
+
+
 def test_unexposed_machine_is_404(gw):
     with edit_registry(gw.registry_path) as reg:
         reg.unexpose(MACHINE)  # CONSUMER is still allowed MACHINE — the kill switch wins
@@ -226,6 +244,26 @@ def test_unexposed_machine_is_404(gw):
 
 def test_unknown_path_is_404_without_auth(gw):
     assert gw.call("GET", "/nope", token=None).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "raw_machine",
+    ["x%0A2026-10-14%20FORGED%20INFO%20status%3D200", "%1B%5B31mRED", f"{MACHINE}%0A", ".hidden"],
+    ids=["newline-forgery", "ansi-escape", "trailing-newline", "leading-dot"],
+)
+def test_malformed_machine_name_is_404_and_never_logged_raw(gw, caplog, raw_machine):
+    caplog.set_level("DEBUG", logger="remoteos.gateway")
+
+    resp = gw.call("POST", f"/{raw_machine}/mcp", token=None, json_body=_tools_list())
+
+    assert resp.status_code == 404
+    assert gw.machine.received == []
+    for record in caplog.records:
+        message = record.getMessage()
+        assert "\n" not in message and "\x1b" not in message, message
+    [entry] = read_access_log(gw.access_log_path)
+    assert entry["outcome"] == "denied_bad_machine_name"
+    assert "\n" not in gw.access_log_path.read_text(encoding="utf-8").rstrip("\n")
 
 
 # -- pass-through ---------------------------------------------------------------------
@@ -251,6 +289,84 @@ def test_pass_through_injects_machine_key_and_never_forwards_consumer_token(gw):
     assert "x-forwarded-for" not in headers
     assert seen["query"] == "trace=1"
     assert json.loads(seen["body"]) == _tools_list(request_id=5)
+
+
+def test_connection_listed_request_headers_are_not_forwarded(gw):
+    resp = gw.call(
+        "POST",
+        f"/{MACHINE}/mcp",
+        json_body=_tools_list(),
+        headers={"Connection": "keep-alive, X-Hop-Secret", "X-Hop-Secret": "1", "TE": "trailers", "X-Keep": "yes"},
+    )
+
+    assert resp.status_code == 200
+    [seen] = gw.machine.received
+    names = {name for name, _ in seen["headers"]}
+    assert "x-hop-secret" not in names
+    assert "te" not in names
+    assert "connection" not in names
+    assert ("x-keep", "yes") in seen["headers"]  # an end-to-end header still passes
+
+
+def test_upstream_hop_by_hop_headers_are_not_relayed(gw):
+    resp = gw.call("POST", f"/{MACHINE}/mcp", json_body={"jsonrpc": "2.0", "id": 1, "method": "test/hop-headers"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert "keep-alive" not in resp.headers
+    assert "x-upstream-hop" not in resp.headers
+    assert "connection" not in resp.headers
+
+
+def test_oversized_body_is_413_and_nothing_reaches_the_machine(gw, monkeypatch):
+    from remoteos.gateway import app as gateway_app
+
+    monkeypatch.setattr(gateway_app, "MAX_BODY_BYTES", 1024)
+    big = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "FileUpload", "arguments": {"data_base64": "A" * 4096}},
+    }
+
+    resp = gw.call("POST", f"/{MACHINE}/mcp", json_body=big)
+
+    assert resp.status_code == 413
+    assert gw.machine.received == []
+    [entry] = read_access_log(gw.access_log_path)
+    assert (entry["consumer"], entry["outcome"]) == (CONSUMER, "payload_too_large")
+
+
+def test_oversized_chunked_body_without_content_length_is_413(gw, monkeypatch):
+    """No Content-Length to check up front: the cap must hold while the body streams in."""
+    from remoteos.gateway import app as gateway_app
+
+    monkeypatch.setattr(gateway_app, "MAX_BODY_BYTES", 1024)
+
+    async def chunked_body():
+        for _ in range(8):
+            yield b"A" * 512
+
+    async def go():
+        app, upstream = gw.build()
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://gateway.test") as c:
+            resp = await c.post(f"/{MACHINE}/mcp", content=chunked_body(), headers={"Authorization": f"Bearer {TOKEN}"})
+            sent_headers = resp.request.headers
+        await upstream.aclose()
+        return resp.status_code, sent_headers
+
+    status, sent_headers = asyncio.run(go())
+    assert "content-length" not in sent_headers  # really chunked
+    assert status == 413
+    assert gw.machine.received == []
+
+
+def test_machine_rejecting_its_key_is_relayed_and_flagged_in_the_log(gw):
+    resp = gw.call("POST", f"/{MACHINE}/mcp", json_body={"jsonrpc": "2.0", "id": 1, "method": "test/reject-key"})
+
+    assert resp.status_code == 401  # relayed unchanged — the proxy stays transparent
+    [entry] = read_access_log(gw.access_log_path)
+    assert (entry["consumer"], entry["status"], entry["outcome"]) == (CONSUMER, 401, "upstream_denied")
 
 
 def test_sse_response_is_relayed_intact_with_session_id(gw):
@@ -331,25 +447,32 @@ def test_sse_is_streamed_chunk_by_chunk_not_buffered(gw):
         gw.upstream_transport = _GatedTransport(stream)
         app, upstream = gw.build()
         sent: list[dict] = []
+        first_sent_at: list[datetime.datetime] = []
 
         async def send(message):
             sent.append(message)
             if message["type"] == "http.response.body" and message.get("body") == b"data: one\n\n":
-                gate.set()  # only now may the machine produce part two
+                first_sent_at.append(datetime.datetime.now(datetime.timezone.utc))
+                # only now may the machine produce part two (a little later, so the stream
+                # demonstrably spans time — and the log must stamp its START, not its end)
+                asyncio.get_running_loop().call_later(0.3, gate.set)
 
         # A buffering proxy would wait for the whole upstream body before sending part one,
         # so the gate would never open and this would time out.
         await asyncio.wait_for(_drive_asgi(app, json.dumps(_tools_list()).encode(), send, asyncio.Event()), 5)
         await upstream.aclose()
-        return sent, stream
+        return sent, stream, first_sent_at[0]
 
-    sent, stream = asyncio.run(go())
+    sent, stream, first_sent_at = asyncio.run(go())
     start = sent[0]
     assert start["type"] == "http.response.start" and start["status"] == 200
     assert (b"mcp-session-id", b"sess-live") in start["headers"]
     bodies = [m["body"] for m in sent if m["type"] == "http.response.body"]
     assert bodies == [b"data: one\n\n", b"data: two\n\n", b""]
     assert stream.closed
+    [entry] = read_access_log(gw.access_log_path)
+    assert datetime.datetime.fromisoformat(entry["ts"]) <= first_sent_at
+    assert entry["duration_ms"] >= 300
 
 
 def test_client_disconnect_closes_the_upstream_stream_and_is_logged(gw):
@@ -395,6 +518,41 @@ def test_upstream_is_closed_even_when_the_consumer_vanishes_before_headers(gw):
     assert asyncio.run(go()).closed
     [record] = read_access_log(gw.access_log_path)
     assert record["consumer"] == CONSUMER
+
+
+class _BreakingStream(httpx2.AsyncByteStream):
+    """Upstream body that sends one event and then the machine's connection drops."""
+
+    async def __aiter__(self):
+        yield b"data: one\n\n"
+        raise httpx2.ReadError("connection reset by machine")
+
+
+class _BreakingTransport(httpx2.AsyncBaseTransport):
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, headers={"content-type": "text/event-stream"}, stream=_BreakingStream())
+
+
+def test_mid_stream_machine_failure_aborts_the_response_instead_of_a_clean_end(gw):
+    async def go():
+        gw.upstream_transport = _BreakingTransport()
+        app, upstream = gw.build()
+        sent: list[dict] = []
+
+        async def send(message):
+            sent.append(message)
+
+        with pytest.raises(httpx2.ReadError):  # propagates, so the server aborts the connection
+            await asyncio.wait_for(_drive_asgi(app, json.dumps(_tools_list()).encode(), send, asyncio.Event()), 5)
+        await upstream.aclose()
+        return sent
+
+    sent = asyncio.run(go())
+    bodies = [m for m in sent if m["type"] == "http.response.body"]
+    assert [m["body"] for m in bodies] == [b"data: one\n\n"]
+    assert all(m.get("more_body") for m in bodies), "a clean end-of-stream was sent for a broken upstream"
+    [record] = read_access_log(gw.access_log_path)
+    assert record["outcome"] == "upstream_stream_error"
 
 
 # -- failure handling -----------------------------------------------------------------
@@ -503,12 +661,29 @@ def test_invalid_registry_at_reload_keeps_the_last_good_one(gw):
             auth = {"Authorization": f"Bearer {TOKEN}"}
             gw.registry_path.write_text('{"exposed": "not-a-list"', encoding="utf-8")
             broken = await c.post(f"/{MACHINE}/mcp", json=_tools_list(), headers=auth)
+            gw.registry_path.write_bytes(b"\xff\xfe not utf-8")
+            undecodable = await c.post(f"/{MACHINE}/mcp", json=_tools_list(), headers=auth)
+            gw.registry_path.write_text("[" * 100_000, encoding="utf-8")  # pathologically nested
+            nested = await c.post(f"/{MACHINE}/mcp", json=_tools_list(), headers=auth)
+            gw.machines_path.write_bytes(b"\xff not utf-8 either")
+            machines_broken = await c.post(f"/{MACHINE}/mcp", json=_tools_list(), headers=auth)
             gw.registry_path.unlink()  # deleted registry = empty = deny all (never allow all)
             deleted = await c.post(f"/{MACHINE}/mcp", json=_tools_list(), headers=auth)
         await upstream.aclose()
-        return broken.status_code, deleted.status_code
+        return [r.status_code for r in (broken, undecodable, nested, machines_broken, deleted)]
 
-    assert asyncio.run(go()) == (200, 401)
+    assert asyncio.run(go()) == [200, 200, 200, 200, 401]
+
+
+def test_undecodable_files_refuse_startup_with_a_clear_error(gw):
+    gw.registry_path.write_bytes(b"\xff\xfe")
+    with pytest.raises(RegistryError, match="cannot read registry"):
+        LiveConfig(gw.registry_path, gw.machines_path)
+
+    _write_json(gw.registry_path, _default_registry())
+    gw.machines_path.write_bytes(b"\xff\xfe")
+    with pytest.raises(MachineSourceError, match="cannot read machine source"):
+        LiveConfig(gw.registry_path, gw.machines_path)
 
 
 def test_sighup_forces_a_reload_even_when_the_file_signature_is_unchanged(gw):
@@ -608,7 +783,7 @@ def test_cli_full_management_flow(tmp_path):
     assert listing.exit_code == 0
     assert f"{MACHINE}  ->  {UPSTREAM_URL}" in listing.output
     assert digest[:12] in listing.output and digest not in listing.output
-    assert "machine-key" not in listing.output
+    assert MACHINE_KEY_VALUE not in listing.output
 
     assert _cli(tmp_path, "deny", CONSUMER, MACHINE).exit_code == 0
     assert load_registry(registry_path).consumers[CONSUMER].machines == []
@@ -617,6 +792,19 @@ def test_cli_full_management_flow(tmp_path):
     revoke = _cli(tmp_path, "consumer", "revoke", CONSUMER, "--sha256", digest)
     assert revoke.exit_code == 0
     assert load_registry(registry_path).consumers[CONSUMER].sha256 == []
+
+
+def test_cli_log_never_echoes_raw_control_characters(tmp_path):
+    AccessLog(tmp_path / "state" / "access.jsonl").write(
+        {"ts": "t1", "consumer": None, "machine": "x\x1b[31mRED\nFORGED", "http_method": "POST", "status": 404}
+    )
+
+    result = _cli(tmp_path, "log")
+
+    assert result.exit_code == 0
+    assert "\x1b" not in result.output
+    assert "RED\nFORGED" not in result.output
+    assert "RED\\nFORGED" in result.output  # shown escaped, still readable
 
 
 def test_cli_log_filters_by_consumer(tmp_path):
@@ -655,7 +843,7 @@ def test_cli_log_filters_by_consumer(tmp_path):
     assert OTHER_CONSUMER not in result.output
 
 
-@pytest.mark.parametrize("host", ["0.0.0.0", "::", "[::]", "0"])
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "[::]", "0", "::ffff:0.0.0.0"])
 def test_serve_refuses_a_wildcard_bind(tmp_path, monkeypatch, host):
     import uvicorn
 

@@ -91,13 +91,25 @@ leaves dev1.
 
 ### Run it
 
+Install into a **dedicated venv** with the pinned `constraints.txt`. Never install into the
+user's shared site-packages: that would move `fastmcp` / `mcp` for every other tool of that
+account.
+
 ```bash
-python3 -m pip install --user --break-system-packages "git+https://github.com/zbynekdrlik/remoteos-mcp.git@main"
+python3 -m venv ~/.local/share/remoteos-gateway/venv
+~/.local/share/remoteos-gateway/venv/bin/pip install \
+  -c https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt \
+  "git+https://github.com/zbynekdrlik/remoteos-mcp.git@main"
+ln -sf ~/.local/share/remoteos-gateway/venv/bin/remoteos-gateway ~/.local/bin/remoteos-gateway
 cp deploy/remoteos-gateway.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now remoteos-gateway
 loginctl enable-linger "$USER"
 curl -s http://100.104.8.125:8796/healthz      # {"status":"ok","version":"..."}
 ```
+
+To upgrade, re-run the `pip install` line with `--force-reinstall` added. pip does not
+re-fetch a git URL whose version is already installed. Then run
+`systemctl --user restart remoteos-gateway` and check that `/healthz` shows the new version.
 
 ### Add a consumer
 

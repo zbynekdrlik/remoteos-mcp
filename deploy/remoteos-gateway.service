@@ -1,50 +1,62 @@
 # remoteos MCP gateway — systemd --user unit for dev1 (#25).
 #
-# Install (as the account that owns ~/.claude/mcp-configs/remoteos-mcp.mcp.json):
-#   cp deploy/remoteos-gateway.service ~/.config/systemd/user/
-#   systemctl --user daemon-reload
-#   systemctl --user enable --now remoteos-gateway.service
-#   loginctl enable-linger "$USER"        # keep it running without a login session
+# Install it as the account that owns ~/.claude/mcp-configs/remoteos-mcp.mcp.json. The steps are
+# in the README section "MCP gateway (dev1)": a DEDICATED venv installed with constraints.txt,
+# never the user's shared site-packages. ExecStart below points into that venv.
 #
-# Registry edits (`remoteos-gateway allow/deny/revoke/...`) apply on the next request; no
-# restart needed. `systemctl --user reload remoteos-gateway` forces a re-read (SIGHUP).
-# Logs: `journalctl --user -u remoteos-gateway` (operational) and
-#       `remoteos-gateway log` (per-request access log).
+# Registry edits (`remoteos-gateway allow/deny/revoke/...`) apply on the next request, so no
+# restart is needed. `systemctl --user reload remoteos-gateway` forces a re-read (SIGHUP).
+#
+# Logs:
+#   journalctl --user -u remoteos-gateway    operational log
+#   remoteos-gateway log                     per-request access log
 
 [Unit]
 Description=remoteos MCP gateway — per-consumer access to managed machines (tailscale only)
 Documentation=https://github.com/zbynekdrlik/remoteos-mcp#mcp-gateway-dev1
 After=network-online.target
 Wants=network-online.target
-# A user unit cannot order itself after tailscaled (a system unit): when the tailscale
-# address is not up yet the bind fails and Restart= retries until it is.
-StartLimitIntervalSec=300
-StartLimitBurst=30
+# A user unit cannot order itself after tailscaled (a system unit). When the tailscale address
+# is not up yet, the bind fails and Restart= retries. Retries never stop (no start limit); they
+# back off from 5 s to at most 60 s, so a persistent fault (e.g. an invalid registry, which
+# `serve` refuses to start on) logs once a minute, not in a tight loop.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# Binds 100.104.8.125:8796 (dev1's tailscale address) by default; it refuses 0.0.0.0 / ::.
-ExecStart=%h/.local/bin/remoteos-gateway serve
+# Binds 100.104.8.125:8796 (dev1's tailscale address) by default. It refuses 0.0.0.0 / ::.
+ExecStart=%h/.local/share/remoteos-gateway/venv/bin/remoteos-gateway serve
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=60
 
-# ~/.config/remoteos-gateway (registry, read here; written only by the CLI) and
-# ~/.local/state/remoteos-gateway (access log, written here), both 0700.
+# Creates ~/.config/remoteos-gateway (the registry: read here, written only by the CLI) and
+# ~/.local/state/remoteos-gateway (the access log, written here), both 0700.
 ConfigurationDirectory=remoteos-gateway
 ConfigurationDirectoryMode=0700
 StateDirectory=remoteos-gateway
 StateDirectoryMode=0700
 
-# --- Hardening: the gateway only reads two config files and appends one log ---
+# --- Directives that are ENFORCED for a --user unit on dev1 ---
 NoNewPrivileges=yes
+# TCP to consumers and machines; AF_UNIX for the resolver (machine names like stream.lan).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# The memory controller is delegated to user units on dev1, so this limit is enforced. The
+# request body cap (16 MiB, held once + parsed once) keeps many concurrent uploads well inside it.
+MemoryMax=512M
+TasksMax=64
+
+# --- Declared intent only: VERIFIED-INERT on dev1 today ---
+# dev1 runs kernel.apparmor_restrict_unprivileged_userns=1 with systemd 255. Under that policy an
+# unprivileged user manager cannot create the mount namespace these directives need, and systemd
+# silently SKIPS them instead of failing the unit. A live check under a transient user unit still
+# saw the real home and the host /tmp. They are kept so they apply if the unit ever runs under a
+# manager that can honour them. Do NOT count them as isolation the gateway has now.
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
-# TCP to consumers + machines; AF_UNIX for the resolver (machine names like stream.lan).
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-MemoryMax=256M
-TasksMax=64
 
 [Install]
 WantedBy=default.target

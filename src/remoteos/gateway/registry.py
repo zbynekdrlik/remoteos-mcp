@@ -46,9 +46,9 @@ logger = logging.getLogger("remoteos.gateway.registry")
 DEFAULT_REGISTRY_PATH = Path.home() / ".config" / "remoteos-gateway" / "registry.json"
 DEFAULT_MACHINES_PATH = Path.home() / ".claude" / "mcp-configs" / "remoteos-mcp.mcp.json"
 
-_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_CONSUMER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
-_MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_HASH_RE = re.compile(r"[0-9a-f]{64}")
+_CONSUMER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,127}")
+_MACHINE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 _REGISTRY_KEYS = frozenset({"exposed", "consumers"})
 _CONSUMER_KEYS = frozenset({"sha256", "machines", "added"})
@@ -69,7 +69,7 @@ def normalize_hash(value: str) -> str:
     something that already looks like a sha256 hex digest is accepted.
     """
     candidate = value.strip().lower()
-    if not _HASH_RE.match(candidate):
+    if not _HASH_RE.fullmatch(candidate):
         raise RegistryError(
             "--sha256 must be a sha256 hex digest (exactly 64 hex characters), "
             f"got {len(value.strip())} characters. Register the HASH of the token "
@@ -79,13 +79,18 @@ def normalize_hash(value: str) -> str:
 
 
 def validate_consumer_name(name: str) -> str:
-    if not _CONSUMER_RE.match(name):
+    if not _CONSUMER_RE.fullmatch(name):
         raise RegistryError(f"invalid consumer name {name!r}: use letters, digits and . _ @ - (e.g. david3@subdev)")
     return name
 
 
+def is_valid_machine_name(name: str) -> bool:
+    """Letters, digits and ``. _ -`` only — so a machine name is always safe to log and route."""
+    return _MACHINE_RE.fullmatch(name) is not None
+
+
 def validate_machine_name(name: str) -> str:
-    if not _MACHINE_RE.match(name):
+    if not is_valid_machine_name(name):
         raise RegistryError(f"invalid machine name {name!r}: use letters, digits and . _ -")
     return name
 
@@ -144,7 +149,7 @@ class Registry:
             if not isinstance(hashes, list) or not all(isinstance(h, str) for h in hashes):
                 raise RegistryError(f"consumer {name!r}: 'sha256' must be a list of hex digests")
             for digest in hashes:
-                if not _HASH_RE.match(digest):
+                if not _HASH_RE.fullmatch(digest):
                     raise RegistryError(f"consumer {name!r}: {digest[:12]!r}... is not a lowercase sha256 hex digest")
                 if digest in hash_owner:
                     raise RegistryError(
@@ -263,11 +268,11 @@ def load_registry(path: Path) -> Registry:
     except FileNotFoundError:
         logger.warning("registry %s does not exist — empty registry, every request is denied", path)
         return Registry()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise RegistryError(f"cannot read registry {path}: {exc}") from exc
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise RegistryError(f"registry {path} is not valid JSON: {exc}") from exc
     registry = Registry.from_json(data)
     _warn_if_loose_permissions(path)
@@ -355,11 +360,11 @@ def load_machines(path: Path) -> dict[str, Upstream]:
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise MachineSourceError(f"cannot read machine source {path}: {exc}") from exc
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise MachineSourceError(f"machine source {path} is not valid JSON: {exc}") from exc
     servers = data.get("mcpServers") if isinstance(data, dict) else None
     if not isinstance(servers, dict):

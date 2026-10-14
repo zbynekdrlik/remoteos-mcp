@@ -53,7 +53,9 @@ def check_bind_host(host: str) -> str:
     """Refuse a wildcard bind: the gateway must listen on the tailscale address only."""
     candidate = host.strip().strip("[]")
     try:
-        unspecified = ipaddress.ip_address(candidate).is_unspecified
+        address = ipaddress.ip_address(candidate)
+        mapped = getattr(address, "ipv4_mapped", None)  # ::ffff:0.0.0.0 is a wildcard too
+        unspecified = address.is_unspecified or (mapped is not None and mapped.is_unspecified)
     except ValueError:
         # Not a canonical literal: also catch the wildcard spellings the resolver accepts
         # ("", "*", and inet_aton shorthands such as "0" or "0.0").
@@ -336,14 +338,23 @@ def log_cmd(paths: _Paths, consumer_name: str | None, tail: int) -> None:
         click.echo(f"no matching records in {paths.access_log}")
         return
     for r in records:
-        rpc = r.get("rpc_method") or "-"
+        rpc = _printable(r.get("rpc_method") or "-")
         if r.get("tool"):
-            rpc = f"{rpc}({r['tool']})"
+            rpc = f"{rpc}({_printable(r['tool'])})"
         click.echo(
-            f"{r.get('ts', '?')}  {r.get('consumer') or '-'}  {r.get('machine', '?')}  "
-            f"{r.get('http_method', '?')} {rpc}  status={r.get('status')}  {r.get('outcome', '?')}  "
-            f"{r.get('duration_ms', '?')}ms"
+            f"{_printable(r.get('ts', '?'))}  {_printable(r.get('consumer') or '-')}  "
+            f"{_printable(r.get('machine', '?'))}  {_printable(r.get('http_method', '?'))} {rpc}  "
+            f"status={_printable(r.get('status'))}  {_printable(r.get('outcome', '?'))}  "
+            f"{_printable(r.get('duration_ms', '?'))}ms"
         )
+
+
+def _printable(value: object) -> str:
+    """Log fields may hold consumer-supplied text: never echo raw control characters."""
+    text = str(value)
+    if text.isprintable():
+        return text
+    return "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in text)
 
 
 if __name__ == "__main__":  # pragma: no cover
