@@ -457,6 +457,15 @@ def test_typed_text_never_reaches_the_debug_log(monkeypatch, caplog):
     assert "<11 chars>" in caplog.text
 
 
+def test_typed_text_that_is_a_double_dash_is_redacted_too(monkeypatch, caplog):
+    # the text comes after the FIRST "--" following "type", even when the text is "--" itself
+    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(d.subprocess, "run", lambda argv, **kwargs: _FakeProc())
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
+        assert d.type_unicode("--") == 2
+    assert "'--', '<2 chars>'" in caplog.text
+
+
 def test_build_invocation_same_user_injects_env(monkeypatch):
     monkeypatch.setattr(d.os, "geteuid", lambda: 1000)
     argv, env = d._build_invocation(_x11_session(), ["xdotool", "key", "a"])
