@@ -150,3 +150,22 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - Result: 304 pass, 59/59 shell tests pass under bash 3.2.57.
   - Left for follow-up: a CI job for the bash-3.2/shellcheck checks, the skill recovery section, the Windows rollback, venv migration, `PYTHONNOUSERSITE` in the unit.
 - **Not done here:** running the installer on strih-pp and stream-pp (26.04). The supervisor deploys and verifies.
+
+## #29 — Scroll = wheel clicks + direction on every OS; native wheel events, no pyautogui (0.7.0.dev25)
+
+- **Root cause:** Windows and macOS `Scroll` called `pyautogui.scroll`/`hscroll`.
+  - On Windows, 0.9.54 sends the raw count as the wheel delta (`_pyautogui_win.py:539`): 3 = 3/120 of a notch.
+  - Its `_hscroll` calls the vertical `_scroll` (`:544-557`).
+  - Each OS used a different unit.
+- **Fix (Approach 1 of the main session's design):** a pure `src/remoteos/scroll.py` (`wheel_steps`, `normalize_request`, `chunks`). Every provider has `scroll(direction, clicks, x=None, y=None)`.
+  - Windows: one `SendInput`, `MOUSEEVENTF_WHEEL`/`HWHEEL`, ±clicks×120, `SetCursorPos` first.
+  - macOS: Quartz line events, ≤10 per event. wheel2 positive = LEFT, so `right` is negative.
+  - Linux: xdotool 4/5/6/7, unchanged.
+  - The tool keeps the #28 mapping and the legacy signed `amount` + `horizontal`. An explicit `direction` wins. Clamped to 1..100.
+- **Decisions (on #29):** the three Anchors-confirmed ROZHODNUTÉ items: macOS wheel2 sign (Hammerspoon/SFML evidence), ≤10 lines per Quartz event (Apple doc), the provider `is not None` point check.
+- **Commits:** `b28bb97` bump; `ba8b96a` [red] (30 fail); `618e589` [green].
+  - Review round 1 (0🔴 1🟡 7🔵): `be93035` [red] (4 fail), `d5e5437` [green]. No GetLastError/UIPI claims in errors; macOS builds all events before posting; unused dy/dx dropped; headless Scroll test.
+  - Not changed, deliberately: one ±clicks×120 event (the design + the live `WH_MOUSE_LL` check expect −360 as one event), and the tool-level `0 = no point` convention (shared with Type).
+- **Tests (RED→GREEN):** `test_windows_legacy_horizontal_scroll_is_horizontal`, `test_windows_scroll_sends_one_wheel_event[*]`, `test_windows_scroll_tool_maps_the_point_and_sends_the_wheel`, `test_mac_scroll_posts_line_events[*]`, `test_mac_legacy_horizontal_scroll_is_horizontal`, `test_x11_scroll_direction_picks_the_wheel_button[*]`, `test_scroll_legacy_horizontal_routes_to_the_horizontal_buttons`, `test_wheel_steps_table[*]`.
+  - Result: 363 pass, ruff clean.
+- **Not done here:** the live Windows check (a `WH_MOUSE_LL` hook expects −360 for down 3 and +240 for right 2). The supervisor deploys and verifies. No macOS box was reachable; the mac sign is source-evidenced.
