@@ -32,7 +32,7 @@ except ImportError:
 from PIL import ImageGrab  # noqa: E402
 
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
-from remoteos.snapshot import encode_jpeg, fit_to_frame  # noqa: E402
+from remoteos.snapshot import fit_to_frame  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -193,19 +193,7 @@ def capture_frame(monitor: int = 0, max_width: int = 1280):
         # it the grab is primary-only and a non-primary monitor's bbox comes back black.
         bbox = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height)
         img = ImageGrab.grab(bbox=bbox, all_screens=True)
-    return fit_to_frame(img, frame), frame
-
-
-def take_screenshot(quality: int = 65, max_width: int = 1280, monitor: int = 0) -> str:
-    """Capture screen, return base64 JPEG sized to the Snapshot frame.
-
-    Args:
-        quality: JPEG quality 1-100.
-        max_width: Max width in pixels. 0=no resize (native resolution).
-        monitor: 0=all monitors, 1/2/3=specific monitor.
-    """
-    img, _frame = capture_frame(monitor=monitor, max_width=max_width)
-    return encode_jpeg(img, quality)
+    return fit_to_frame(img, frame, geometry), frame
 
 
 # ---------------------------------------------------------------------------

@@ -208,6 +208,8 @@ def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coor
     """Map input-tool points to screen coordinates; returns ``(screen_points, reply_note)``."""
     if check_space(coords) == "screen" or not points:
         return points, ""
+    if is_linux() and get_desktop().get_session().mode != "x11":
+        return points, ""  # no display: the provider answers with its exact headless/Wayland stub
     frame = _current_frame(monitor, max_width)
     mapped = [image_to_screen(frame, x, y) for x, y in points]
     note = mapping_note(frame, points, mapped)
@@ -580,8 +582,8 @@ def App(
         name: Application name or path (for launch/switch).
         args: Arguments (for launch).
         handle: Window handle (for resize/switch).
-        width: New width (for resize).
-        height: New height (for resize).
+        width: New width (for resize), in SCREEN pixels — not Snapshot image pixels.
+        height: New height (for resize), in SCREEN pixels — not Snapshot image pixels.
     """
     try:
         if action == "launch":

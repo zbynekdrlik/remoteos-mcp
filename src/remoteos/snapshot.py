@@ -11,23 +11,36 @@ from __future__ import annotations
 
 import base64
 import io
-from typing import Iterable
+import logging
+from typing import Iterable, Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
-from remoteos.coords import Frame, in_image, screen_to_image
+from remoteos.coords import CaptureGeometry, Frame, in_image, screen_to_image
+
+log = logging.getLogger("remoteos.snapshot")
 
 _OFF_FRAME = " (off-frame)"
 
 
-def fit_to_frame(img: Image.Image, frame: Frame) -> Image.Image:
+def fit_to_frame(img: Image.Image, frame: Frame, geometry: Optional[CaptureGeometry] = None) -> Image.Image:
     """Return ``img`` as RGB at exactly ``frame.image_size``.
 
     The size always comes from the frame (computed from display geometry), never
     from the raw capture, so the image the model sees matches the frame the input
     tools recompute at click time — even on macOS Retina (capture in pixels,
-    frame in points) or when a capture comes back a few pixels off.
+    frame in points). A capture whose size differs from ``geometry``'s pixel size
+    is unexpected (the geometry query and the grabber disagree about the screen),
+    so it is still fitted but logged as a warning, never silently.
     """
+    if geometry is not None and img.size != (geometry.pixel_width, geometry.pixel_height):
+        log.warning(
+            "capture is %dx%d but the display geometry says %dx%d — fitting it to the frame anyway",
+            img.width,
+            img.height,
+            geometry.pixel_width,
+            geometry.pixel_height,
+        )
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     if img.size != frame.image_size:

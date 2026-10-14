@@ -28,7 +28,39 @@ _S_OK = 0
 _MODE: str | None = None
 
 
+_AWARENESS_NAMES = {0: "unaware", 1: "system", 2: "per-monitor"}  # DPI_AWARENESS enum
+
+
+def _read_back(user32) -> str | None:
+    """The process's ACTUAL awareness (Windows 10 1607+), or ``None`` if unknowable."""
+    get_context = getattr(user32, "GetThreadDpiAwarenessContext", None)
+    get_awareness = getattr(user32, "GetAwarenessFromDpiAwarenessContext", None)
+    if get_context is None or get_awareness is None:
+        return None
+    try:
+        # DPI_AWARENESS_CONTEXT is a handle: keep it pointer-sized, never a truncated int.
+        get_context.restype = ctypes.c_void_p
+        get_awareness.argtypes = [ctypes.c_void_p]
+        return _AWARENESS_NAMES.get(get_awareness(get_context()))
+    except OSError as e:
+        log.warning("DPI awareness read-back failed: %s", e)
+        return None
+
+
 def _apply(windll) -> str:
+    """Try per-monitor-v2 → v1 → system; report the awareness actually in effect.
+
+    Below v2 the result is read back when the OS can tell, because a refused
+    call (awareness already set, e.g. by a manifest) or a no-op success says
+    nothing about what the process really is.
+    """
+    requested = _request(windll)
+    if requested == "per-monitor-v2":
+        return requested
+    return _read_back(windll.user32) or requested
+
+
+def _request(windll) -> str:
     user32 = windll.user32
     set_context = getattr(user32, "SetProcessDpiAwarenessContext", None)
     if set_context is not None:

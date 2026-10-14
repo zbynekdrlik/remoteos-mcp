@@ -1,5 +1,6 @@
 ---
 paths:
+  - "src/remoteos/__main__.py"
   - "src/remoteos/coords.py"
   - "src/remoteos/snapshot.py"
   - "src/remoteos/platform/*/desktop.py"
@@ -22,6 +23,10 @@ paths:
   always resizes to `frame.image_size`. If you size the image from the raw capture instead, the
   click-time frame stops matching what the model saw. This bites on macOS Retina, where the
   capture is in pixels and the bounds are in points.
+  - Providers pass the `geometry` along, so when a capture's size does not match the
+    geometry's pixel size, `fit_to_frame` logs a WARNING.
+  - Such a mismatch means the geometry query and the grabber disagree about the screen. It
+    is never fitted silently: the silent fit is what hid the Xinerama bug.
 - **Screen space differs per OS:**
   - Windows (per-monitor-v2) and X11: physical pixels.
   - macOS: points (`CGDisplayBounds`, the same space as pyautogui). The capture pixel size
@@ -35,6 +40,12 @@ paths:
   awareness is refused. So `__main__.py` and `platform/win/desktop.py` call
   `enable_per_monitor_dpi_awareness()` BEFORE `import pyautogui`. `tests/test_win_dpi.py`
   locks that order on the AST.
+- **Linux `monitor=0` = the X ROOT, sized by `xrandr --current` (`current W x H`).** NEVER size
+  it with `xdotool getdisplaygeometry`. libxdo answers that from `XineramaQueryScreens()[0]`,
+  which is only the FIRST head. On Xorg, Xinerama is always on through RandR emulation, so on a
+  multi-head box the frame would be head 1 while scrot captures the whole root. xrandr
+  (`x11-xserver-utils`) is therefore required for every Linux frame. A missing xrandr fails
+  loudly; it never falls back to a wrong frame.
 - **Windows `monitor=N`** must grab with `ImageGrab.grab(bbox=…, all_screens=True)`. Without
   `all_screens`, PIL crops the bbox out of a primary-only grab, and a non-primary monitor comes
   back black.

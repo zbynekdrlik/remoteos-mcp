@@ -88,7 +88,8 @@ passed straight to Click / Move / Scroll / Type.
 - **`monitor=0`** means different things per OS:
   - Windows: the whole virtual screen. Its origin is negative when a monitor sits left of
     or above the primary.
-  - Linux: the X root.
+  - Linux: the X root, all heads, sized by `xrandr --current`. Needs `x11-xserver-utils`; the
+    installer adds it.
   - macOS: the main display.
 
   `monitor=N` is one display: `EnumDisplayMonitors` on Windows, `xrandr --listmonitors`

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from remoteos.coords import CaptureGeometry, frame_for
-from remoteos.snapshot import encode_jpeg, fit_to_frame
+from remoteos.snapshot import fit_to_frame
 
 # Quartz imports (will fail on non-macOS — caught at tool level)
 try:
@@ -151,7 +151,8 @@ def capture_frame(monitor: int = 0, max_width: int = 1280):
     """Capture ``monitor`` and fit it to its frame → ``(PIL image, Frame)``."""
     if Image is None:
         raise RuntimeError("Pillow not installed — run `pip install Pillow`")
-    frame = frame_for(monitor, max_width, capture_geometry(monitor))
+    geometry = capture_geometry(monitor)
+    frame = frame_for(monitor, max_width, geometry)
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp_path = tmp.name
@@ -171,24 +172,12 @@ def capture_frame(monitor: int = 0, max_width: int = 1280):
             raise RuntimeError(f"screencapture failed: {e.stderr.decode().strip()}")
         img = Image.open(tmp_path)
         img.load()  # read the pixels before the temp file is unlinked
-        return fit_to_frame(img, frame), frame
+        return fit_to_frame(img, frame, geometry), frame
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
-
-
-def take_screenshot(quality: int = 65, max_width: int = 1280, monitor: int = 0) -> str:
-    """Capture screen, return base64 JPEG sized to the Snapshot frame.
-
-    Args:
-        quality: JPEG quality 1-100.
-        max_width: Max width in pixels. 0=no resize (native resolution).
-        monitor: 0=main display, 1/2/3=specific display.
-    """
-    img, _frame = capture_frame(monitor=monitor, max_width=max_width)
-    return encode_jpeg(img, quality)
 
 
 # ---------------------------------------------------------------------------
