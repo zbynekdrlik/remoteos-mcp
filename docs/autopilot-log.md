@@ -117,6 +117,17 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - `install.ps1`: the install output is captured and printed on failure (error-output parity only).
 - **Decision (on #12, ROZHODNUTÉ):** the rollback restores local files. A networked reinstall of the old commit or tag would re-resolve and rebuild everything, so it would fail the same way the install just did.
 - **Commits:** `e999e4c` bump; `e147d68` retire the dev14 no-`--ignore-installed` static test (the design reverses it); `71fd468` move shims to `tests/installer_harness.py`; `306674b` [red] 9 tests + `tests/fake_pip.py` (stateful Debian-pip fake); `7cc8be3` [green].
-- **Tests (RED→GREEN):** `test_upgrade_over_debian_owned_dependencies_succeeds_with_ignore_installed`, `test_failed_dry_run_aborts_before_any_uninstall_and_prints_the_full_error` (Linux + macOS), `test_failed_install_after_pre_uninstall_restores_the_recorded_version`, `test_failed_install_prints_the_full_pip_output`, `test_failed_install_on_a_fresh_box_exits_nonzero_with_the_full_error`, `test_upgrade_runs_preflight_then_pre_uninstall_then_install`, `test_failed_install_restores_the_recorded_version_and_prints_the_full_error`, `test_main_pip_install_output_is_kept_and_printed_on_failure`. Result: 269 pass, ruff and shellcheck clean.
+- **Tests (RED→GREEN):** `test_upgrade_over_debian_owned_dependencies_succeeds_with_ignore_installed`, `test_failed_dry_run_aborts_before_any_uninstall_and_prints_the_full_error` (Linux + macOS), `test_failed_install_after_pre_uninstall_restores_the_recorded_version`, `test_failed_install_prints_the_full_pip_output`, `test_failed_install_on_a_fresh_box_exits_nonzero_with_the_full_error`, `test_upgrade_runs_preflight_then_pre_uninstall_then_install`, `test_failed_install_restores_the_recorded_version_and_prints_the_full_error`, `test_main_pip_install_output_is_kept_and_printed_on_failure`. Result: 269 pass, ruff clean, shellcheck clean at `-S warning`. Three SC2004 style notes on main were outside the diff; round 2 cleared them.
 - **Real-pip check:** in a pip 24.0 venv, snapshot → uninstall → restore of tabulate gave byte-identical files. The console script stayed +x, and pip show, import and `pip check` were all OK.
+- **Review round 1:** 0🔴 3🟡 9🔵, all fixed in this branch except Windows rollback (out of scope; follow-up candidate).
+  - Commits: `75a051d` [red] (16 fail), `a9f08ba` + `5b3a6e7` harness fixes (no `__pycache__` in the fake site; stateless shims answer the import check), `0c85cca` [green].
+  - One shared, byte-identical install block in install-linux.sh and install.sh (drift-guarded).
+  - One commit of main from `git ls-remote` for the preflight, the install `@<sha>` and the constraints.
+  - Changed pip-owned deps join the pre-uninstall and the snapshot. `--ignore-installed` otherwise leaves stale dist-info.
+  - An installed remoteos without RECORD aborts the run.
+  - A HUP/INT/TERM trap rolls back.
+  - A post-install import check, which the rollback also runs.
+  - A failed rollback keeps the snapshot.
+  - `install.ps1` checks `$LASTEXITCODE`.
+  - Result: 285 pass, shellcheck clean at default severity. All 42 installer tests also pass under bash 3.2.57 (`bash:3.2` container, uid 1000). Real pip 24.0 check of `names`/`plan`/`snapshot`/`restore` OK.
 - **Not done here:** running the installer on strih-pp and stream-pp (26.04). The supervisor deploys and verifies.
