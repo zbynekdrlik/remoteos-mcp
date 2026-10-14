@@ -1752,6 +1752,9 @@ def cli(
     auth_key = _choose_value(ctx, "auth_key", auth_key, cfg.server.auth_key, None)
     ssl_certfile = _choose_value(ctx, "ssl_certfile", ssl_certfile, cfg.server.ssl_certfile, None)
     ssl_keyfile = _choose_value(ctx, "ssl_keyfile", ssl_keyfile, cfg.server.ssl_keyfile, None)
+    if bool(ssl_certfile) != bool(ssl_keyfile):
+        # one of the pair used to drop TLS silently and serve plain HTTP (#31)
+        raise click.UsageError("--ssl-certfile and --ssl-keyfile must be given together (CLI or remoteos.toml)")
     oauth_client_id = _choose_value(ctx, "oauth_client_id", oauth_client_id, cfg.security.oauth_client_id, None)
     oauth_client_secret = _choose_value(
         ctx,
