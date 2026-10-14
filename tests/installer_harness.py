@@ -480,7 +480,8 @@ case "$1" in
         ;;
     -c)
         if [[ "$2" == *"import remoteos"* ]]; then
-            exec "{real_py}" -S -c "import sys; sys.path.insert(0, sys.argv[1]); exec(sys.argv[2])" "{box.site}" "$2"
+            # -B: no __pycache__ in the fake site, so file comparisons stay exact.
+            exec "{real_py}" -S -B -c "import sys; sys.path.insert(0, sys.argv[1]); exec(sys.argv[2])" "{box.site}" "$2"
         fi
         exec "{real_py}" "$@"
         ;;
