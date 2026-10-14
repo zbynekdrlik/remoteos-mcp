@@ -598,6 +598,18 @@ def test_windows_capture_reports_failed_retry(monkeypatch, windows_tool_layer):
         server._capture_snapshot_frame(0, 1280)
 
 
+def test_session_reconnect_helper_is_defined_once():
+    # A second module-level def silently replaced the first, leaving a dead copy (#31).
+    import ast
+
+    import remoteos.__main__ as server
+
+    tree = ast.parse(Path(server.__file__).read_text(encoding="utf-8"))
+    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_ensure_session_connected"]
+    assert len(defs) == 1
+    assert [a.arg for a in defs[0].args.args] == ["force"]  # the effective copy (ReconnectSession's force)
+
+
 # ---------------------------------------------------------------------------
 # macOS
 # ---------------------------------------------------------------------------
