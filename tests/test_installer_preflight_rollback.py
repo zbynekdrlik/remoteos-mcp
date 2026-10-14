@@ -347,8 +347,20 @@ class TestLinuxRollback:
         assert box.files() == before
         assert "systemctl restart" not in _invocations(invocations)
 
-    def test_failed_rollback_is_loud_keeps_the_snapshot_and_does_not_restart(self, tmp_path: Path) -> None:
-        script, shim_dir, box, invocations = _linux_box(tmp_path, install_fail=True, block_restore=True)
+    @pytest.mark.parametrize(
+        "block",
+        [
+            "file",  # a plain file where the remoteos/ package dir must go
+            "dir",  # a directory where remoteos/server.py must go (copy2 would copy INTO it)
+            "partial",  # a RECORD-less half-written dist-info nothing can remove
+        ],
+    )
+    def test_failed_rollback_is_loud_keeps_the_snapshot_and_does_not_restart(
+        self, tmp_path: Path, block: str
+    ) -> None:
+        script, shim_dir, box, invocations = _linux_box(
+            tmp_path, install_fail=True, block_restore=block, resolved=[["newdep", "1.0"]]
+        )
 
         result = _run_installer(script, shim_dir, tmp_path)
         out = _output(result)
@@ -396,6 +408,9 @@ class TestMacosPreflightRollback:
         assert box.calls("dry-run")[0]["PIP_CONSTRAINT"] == PINNED_CONSTRAINTS
         assert GIT_URL in box.calls("install")[0]["argv"]
         assert box.work_dirs() == []
+        # A fresh mac (no config yet) gets a new 32-char key — the real key line runs.
+        key = json.loads((tmp_path / "dot-remoteos-mcp" / "config.json").read_text())["auth_key"]
+        assert re.fullmatch(r"[A-Za-z0-9]{32}", key), key
 
     def test_failed_dry_run_aborts_before_any_uninstall_and_prints_the_full_error(self, tmp_path: Path) -> None:
         script, shim_dir, box, invocations = _macos_box(tmp_path, dry_run_fail=True)
@@ -454,19 +469,23 @@ class TestMacosPreflightRollback:
 def _run_and_drop_console(script: Path, shim_dir: Path, tmp_path: Path) -> int:
     """Run the installer and close its console (stdout+stderr pipe) right after
     the snapshot line — a dropped `ssh box 'curl … | sudo bash'` has no tty and
-    sends no SIGHUP, the installer just writes into a dead pipe."""
+    sends no SIGHUP, the installer just writes into a dead pipe.  The fake pip's
+    real install waits for the `console-closed` marker (no timing race)."""
     proc = start_installer(script, shim_dir, tmp_path)
     assert proc.stdout is not None
     for line in proc.stdout:
         if b"for rollback" in line:
             break
     proc.stdout.close()
+    (tmp_path / "console-closed").touch()
     return proc.wait(timeout=60)
 
 
 class TestLinuxLostConsole:
     def test_console_lost_during_a_failing_install_still_rolls_back(self, tmp_path: Path) -> None:
-        script, shim_dir, box, invocations = _linux_box(tmp_path, install_fail=True, install_delay=1)
+        script, shim_dir, box, invocations = _linux_box(
+            tmp_path, install_fail=True, wait_for_file=str(tmp_path / "console-closed")
+        )
         before = box.files()
 
         returncode = _run_and_drop_console(script, shim_dir, tmp_path)
@@ -482,7 +501,7 @@ class TestLinuxLostConsole:
         """The install itself works, but the run cannot finish (verify, report):
         an unfinished upgrade is no upgrade — the old version stays, consistent
         with the still-running service."""
-        script, shim_dir, box, invocations = _linux_box(tmp_path, install_delay=1)
+        script, shim_dir, box, invocations = _linux_box(tmp_path, wait_for_file=str(tmp_path / "console-closed"))
         before = box.files()
 
         returncode = _run_and_drop_console(script, shim_dir, tmp_path)
@@ -491,21 +510,57 @@ class TestLinuxLostConsole:
         assert box.files() == before
         assert "systemctl restart" not in _invocations(invocations)
 
-    def test_installer_cut_off_right_after_the_pre_uninstall_rolls_back(self, tmp_path: Path) -> None:
-        """A truncated `curl | bash` download that ends inside the window."""
+    @pytest.mark.parametrize("signal_name", ["HUP", "INT", "TERM"])
+    def test_group_signal_while_pip_writes_a_wheel_rolls_back_cleanly(self, tmp_path: Path, signal_name: str) -> None:
+        """Ctrl-C (SIGINT), a tty hang-up (SIGHUP) or a killpg timeout (SIGTERM)
+        hit pip itself, not only the installer.  A pip killed mid-wheel leaves
+        RECORD-less files nothing can remove; shielded, it finishes the wheel and
+        the installer rolls back over complete RECORDs."""
+        script, shim_dir, box, invocations = _linux_box(tmp_path, partial_signal=signal_name)
+        before = box.files()
+
+        result = _run_installer(script, shim_dir, tmp_path)
+        out = _output(result)
+
+        assert result.returncode != 0, out
+        assert "Interrupted" in out, out
+        assert box.files() == before, "a half-written wheel survived the rollback"
+        assert "systemctl restart" not in _invocations(invocations)
+
+
+# ---------------------------------------------------------------------------
+# Linux: a truncated `curl | bash` download never half-runs
+# ---------------------------------------------------------------------------
+
+
+def _truncate_after(script: Path, predicate) -> None:
+    lines = script.read_text().split("\n")
+    cut = next(i for i, line in enumerate(lines) if predicate(line)) + 1
+    script.write_text("\n".join(lines[:cut]) + "\n")
+
+
+class TestLinuxTruncatedDownload:
+    def test_cut_off_right_after_the_pre_uninstall_changes_nothing(self, tmp_path: Path) -> None:
         script, shim_dir, box, _ = _linux_box(tmp_path)
-        lines = script.read_text().split("\n")
         # The top-level call (unindented), not the definition or the rollback's call.
-        cut = next(
-            i for i, line in enumerate(lines) if line.startswith("uninstall_overlapping") and "()" not in line
-        ) + 1
-        script.write_text("\n".join(lines[:cut]) + "\n")
+        _truncate_after(script, lambda line: line.startswith("uninstall_overlapping") and "()" not in line)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
 
         assert result.returncode != 0, _output(result)
         assert box.files() == before, _output(result)
+
+    def test_cut_off_after_the_install_does_not_report_success(self, tmp_path: Path) -> None:
+        """Ending after a verified install but before config/restart/health: an
+        unattended deploy must not read exit 0 as a finished install."""
+        script, shim_dir, box, invocations = _linux_box(tmp_path)
+        _truncate_after(script, lambda line: line.startswith("# <<< shared install block"))
+
+        result = _run_installer(script, shim_dir, tmp_path)
+
+        assert result.returncode != 0, _output(result)
+        assert "systemctl restart" not in _invocations(invocations)
 
 
 # ---------------------------------------------------------------------------
@@ -549,14 +604,35 @@ class TestLinuxRollbackSet:
         assert box.versions("cryptography") == ["41.0.7"]
         assert box.files() == before
 
-    def test_dependency_installed_by_another_installer_is_never_pre_uninstalled(self, tmp_path: Path) -> None:
+    def test_changed_dependency_owned_by_another_installer_aborts_before_anything_changes(
+        self, tmp_path: Path
+    ) -> None:
+        """A uv/conda-installed dep with a RECORD whose pin changes: the overlay
+        would overwrite it, and neither the pre-uninstall nor the snapshot may
+        touch another installer's package — so refuse, untouched."""
         script, shim_dir, box, _ = _linux_box(tmp_path, resolved=[["uvdep", "2.0"]])
         install_dep(box, "uvdep", "1.0", installer="uv")
+        before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
+        out = _output(result)
 
-        assert result.returncode == 0, _output(result)
-        assert "uvdep" not in _uninstalled_names(box), box.entries()
+        assert result.returncode != 0, out
+        assert "uvdep" in out and "uv" in out, out
+        assert box.calls("uninstall") == [] and box.calls("install") == [], box.entries()
+        assert box.files() == before
+
+    def test_failed_pre_uninstall_rolls_back_instead_of_installing_over_stale_files(self, tmp_path: Path) -> None:
+        script, shim_dir, box, _ = _linux_box(tmp_path, uninstall_fail_multi=True)
+        before = box.files()
+
+        result = _run_installer(script, shim_dir, tmp_path)
+        out = _output(result)
+
+        assert result.returncode != 0, out
+        assert "Input/output error" in out, out
+        assert box.calls("install") == [], "the install ran although the pre-uninstall failed"
+        assert box.files() == before
 
     @pytest.mark.parametrize("damage", ["import", "version"])
     def test_rollback_that_does_not_bring_back_a_working_version_is_a_failure(

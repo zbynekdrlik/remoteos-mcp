@@ -27,9 +27,15 @@ Behaviour comes from the JSON file named by $FAKE_PIP_CONFIG:
   fail_after      install_fail stops after this many packages of the resolution
   install_noop    the real install exits 0 but installs nothing
   install_broken  the real install exits 0 but fastmcp has no FastMCP
-  install_delay   seconds the real install takes (to cut the console mid-run)
-  block_restore   a failed install leaves a plain FILE where the remoteos/
-                  package dir must be restored (the restore cannot succeed)
+  wait_for_file   the real install waits until this file exists (the test
+                  creates it once it has closed the installer's console)
+  partial_signal  "HUP" / "INT" / "TERM": half-write the first dependency, then
+                  send this signal to the whole process group (then, if still
+                  alive, finish the install)
+  block_restore   "file" / "dir" / "partial": a failed install leaves something
+                  the rollback cannot undo (a file where a dir must go, a dir
+                  where a file must go, a RECORD-less half-written dependency)
+  uninstall_fail_multi  a multi-name `pip uninstall` (the pre-uninstall) fails
   corrupt_snapshot  "import" / "version": a failed install damages the
                   installer's rollback copy, so the restore "works" but the
                   old version is not back in a working state
@@ -111,12 +117,14 @@ def dist_field(info: Path, key: str) -> str:
 
 
 def find_dists(sites: list[Path], name: str) -> list[Path]:
-    """The dists of `name` in sys.path order — the first one is what pip sees."""
+    """The dists of `name` in sys.path order — the first one is what pip sees.
+    Within one dir: os.listdir order, as importlib.metadata (and so the
+    installer's helper) walks it."""
     return [
-        d
+        base / entry
         for base in sites
-        for d in sorted(base.glob("*.dist-info"))
-        if norm(dist_field(d, "Name")) == norm(name)
+        for entry in os.listdir(base)
+        if entry.endswith(".dist-info") and norm(dist_field(base / entry, "Name")) == norm(name)
     ]
 
 
@@ -202,7 +210,11 @@ def cmd_show(cfg: dict, sites: list[Path], args: list[str]) -> int:
 def cmd_uninstall(cfg: dict, sites: list[Path], args: list[str]) -> int:
     """Like real pip: the names in order, the visible dist of each; the FIRST
     one that cannot be uninstalled aborts the rest of the list."""
-    for name in [a for a in args if not a.startswith("-")]:
+    names = [a for a in args if not a.startswith("-")]
+    if cfg.get("uninstall_fail_multi") and len(names) > 1:
+        print("ERROR: Exception: [Errno 5] Input/output error", file=sys.stderr)
+        return 2
+    for name in names:
         dists = find_dists(sites, name)
         if not dists:
             print(f"WARNING: Skipping {name} as it is not installed.", file=sys.stderr)
@@ -250,6 +262,18 @@ def _install(cfg: dict, sites: list[Path], *, ignore_installed: bool, deps_only:
         write_dist(target, name, version, dist_files(name, version, importable=not cfg.get("install_broken")))
 
 
+def _block_restore(cfg: dict, sites: list[Path], mode: str) -> None:
+    """Leave something behind that the rollback cannot undo."""
+    if mode == "file":  # a plain file where the remoteos/ package dir must go
+        (sites[0] / "remoteos").write_text("a plain file where the remoteos package dir must go\n")
+    elif mode == "dir":  # a directory where the file remoteos/server.py must go
+        (sites[0] / "remoteos" / "server.py").mkdir(parents=True)
+    elif mode == "partial":  # the last dependency stays half-written: no RECORD
+        name = [n for n, _ in _resolved(cfg) if norm(n) != "remoteos_mcp"][-1]
+        for info in find_dists(sites[:1], name):
+            (info / "RECORD").unlink(missing_ok=True)
+
+
 def _corrupt_snapshot(mode: str) -> None:
     """Damage the installer's rollback copy (it lives next to pip's TMPDIR), so
     the restore 'succeeds' but the old version is not back in a working state."""
@@ -262,6 +286,26 @@ def _corrupt_snapshot(mode: str) -> None:
             path.write_text("Metadata-Version: 2.1\nName: remoteos-mcp\nVersion: 0.0.0\n")
 
 
+def _wait_for(path: str) -> None:
+    """Block until the test has done its part (e.g. closed the console)."""
+    deadline = time.monotonic() + 30
+    while not os.path.exists(path):
+        if time.monotonic() > deadline:
+            raise SystemExit(f"fake pip: {path} never appeared")
+        time.sleep(0.02)
+
+
+def _partial_wheel_then_signal(cfg: dict, sites: list[Path]) -> None:
+    """Real pip writes a wheel's files first, then INSTALLER, then RECORD last.
+    Signal the WHOLE process group (Ctrl-C, a tty hang-up, a killpg timeout)
+    while the first dependency is half-written: an unshielded pip dies here and
+    leaves RECORD-less files behind; a shielded one finishes the wheel."""
+    name, version = _resolved(cfg)[0]
+    write_dist(sites[0], name, version, dist_files(name, version), record=False)
+    os.killpg(os.getpgrp(), getattr(signal, f"SIG{cfg['partial_signal']}"))
+    time.sleep(0.2)  # a default-disposition signal kills us right here
+
+
 def cmd_install(cfg: dict, sites: list[Path], args: list[str]) -> int:
     ignore_installed = "--ignore-installed" in args or "-I" in args
     if "--dry-run" in args:
@@ -272,7 +316,10 @@ def cmd_install(cfg: dict, sites: list[Path], args: list[str]) -> int:
         print("Would install " + " ".join(f"{n}-{v}" for n, v in _resolved(cfg)))
         return 0
     print("Collecting remoteos-mcp")
-    time.sleep(float(cfg.get("install_delay", 0)))
+    if cfg.get("wait_for_file"):
+        _wait_for(str(cfg["wait_for_file"]))
+    if cfg.get("partial_signal"):
+        _partial_wheel_then_signal(cfg, sites)
     if not ignore_installed:
         for pkg in cfg.get("debian_owned", []):
             print(f"Attempting uninstall: {pkg}", file=sys.stderr)
@@ -285,8 +332,7 @@ def cmd_install(cfg: dict, sites: list[Path], args: list[str]) -> int:
         return 128 + int(sig)
     if cfg.get("install_fail"):
         _install(cfg, sites, ignore_installed=ignore_installed, deps_only=True)
-        if cfg.get("block_restore"):
-            (sites[0] / "remoteos").write_text("a plain file where the remoteos package dir must go\n")
+        _block_restore(cfg, sites, str(cfg.get("block_restore") or ""))
         if cfg.get("corrupt_snapshot"):
             _corrupt_snapshot(str(cfg["corrupt_snapshot"]))
         _error(cfg, "install")

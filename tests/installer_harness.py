@@ -98,15 +98,9 @@ def _prepare_macos_installer(tmp_path: Path) -> Path:
         'PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"',
         f'PLIST_PATH="{launch_dir}/com.remoteos-mcp.plist"',
     )
-    # The macOS auth-key generation uses `tr -dc ... | head -c 32` which
-    # causes SIGPIPE+pipefail on Linux (works on macOS).  Replace with the
-    # Python approach the Linux installer already uses.
-    content = content.replace(
-        "AUTH_KEY=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)",
-        'AUTH_KEY=$("$PYTHON" -c "import secrets,string; '
-        "print(''.join(secrets.choice(string.ascii_letters+string.digits) "
-        'for _ in range(32)))")',
-    )
+    # The auth-key line is NOT patched: it used to be swapped for a python
+    # one-liner here, which hid that `tr … | head -c 32` dies of SIGPIPE under
+    # pipefail on macOS just as on Linux (a fresh mac aborted at [3/5], #12).
     # mkdir for LaunchAgents — ensure directory exists under tmp HOME
     content = content.replace(
         'mkdir -p "$HOME/Library/LaunchAgents"',
@@ -349,13 +343,16 @@ def _run_installer(
     *,
     timeout: int = 60,
 ) -> subprocess.CompletedProcess:
-    """Run an installer script with controlled PATH (see `_installer_env`)."""
+    """Run an installer script with controlled PATH (see `_installer_env`), in
+    its own session: a fake pip may signal the installer's whole process group
+    (as Ctrl-C / a tty hang-up / a killpg timeout do) without hitting pytest."""
     return subprocess.run(
         _installer_argv(script),
         capture_output=True,
         text=True,
         env=_installer_env(shim_dir, tmp_path),
         timeout=timeout,
+        start_new_session=True,
     )
 
 
@@ -367,6 +364,7 @@ def start_installer(script: Path, shim_dir: Path, tmp_path: Path) -> subprocess.
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         env=_installer_env(shim_dir, tmp_path),
+        start_new_session=True,
     )
 
 
