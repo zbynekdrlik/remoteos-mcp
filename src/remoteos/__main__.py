@@ -1682,7 +1682,13 @@ def _apply_tool_filter(enabled_tools: set[str]) -> None:
 @click.option("--transport", default="streamable-http", type=click.Choice(["stdio", "streamable-http"]))
 @click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1; use 0.0.0.0 for remote access)")
 @click.option("--port", default=8092, type=int)
-@click.option("--reload", is_flag=True, default=False, help="Enable hot reload (streamable-http only)")
+@click.option(
+    "--reload",
+    is_flag=True,
+    default=False,
+    help="No effect, kept so existing command lines still start: uvicorn cannot hot-reload the in-process server",
+)
+@click.option("--debug", is_flag=True, default=False, help="Debug logging: remoteos, FastMCP and uvicorn at DEBUG")
 @click.option("--auth-key", default=None, envvar="REMOTEOS_AUTH_KEY", help="API key for authentication")
 @click.option("--config", default=None, help="Path to remoteos.toml config file")
 @click.option(
@@ -1707,6 +1713,7 @@ def cli(
     host: str,
     port: int,
     reload: bool,
+    debug: bool,
     auth_key: str | None,
     config: str | None,
     enable_all: bool,
@@ -1723,6 +1730,19 @@ def cli(
     """Start the remoteos MCP server."""
     if ctx.invoked_subcommand is not None:
         return  # subcommand will handle it
+
+    if debug:  # upstream winremote pull 65: basicConfig at DEBUG + our loggers at DEBUG
+        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+        logging.getLogger("remoteos").setLevel(logging.DEBUG)
+        log.debug("debug logging on")
+    if reload:
+        # FastMCP serves an app OBJECT through uvicorn.Server; uvicorn reloads only an
+        # import-string app via uvicorn.run (#31), so passing reload would do nothing.
+        click.echo(
+            "  WARNING: --reload has no effect: uvicorn cannot hot-reload the in-process server. "
+            "Restart the service to load new code.",
+            err=True,
+        )
 
     config_path = discover_config_path(config)
     cfg = load_config(config_path)
@@ -1822,8 +1842,6 @@ def cli(
 
         middleware.append(Middleware(OAuthOnlyMiddleware, oauth_validator=oauth_validator))
 
-    import logging
-
     class BannerFilter(logging.Filter):
         """Inject our banner after uvicorn's 'Application startup complete' log."""
 
@@ -1861,7 +1879,7 @@ def cli(
             return True
 
     if transport == "stdio":
-        mcp.run(transport="stdio")
+        mcp.run(transport="stdio", **({"log_level": "debug"} if debug else {}))
     else:
         logging.getLogger("uvicorn.error").addFilter(BannerFilter())
         run_kwargs = dict(transport="streamable-http", host=host, port=port, stateless_http=True)
@@ -1869,14 +1887,12 @@ def cli(
             run_kwargs["middleware"] = middleware
         if platform.system() == "Windows":
             os.environ.setdefault("NO_COLOR", "1")
-        uvicorn_args = {}
-        if reload:
-            uvicorn_args["reload"] = True
+        # FastMCP 4.0.3 run_http_async takes uvicorn_config (never uvicorn_args, #31) and
+        # its own log_level, which sets both uvicorn's level and FastMCP's logger.
+        if debug:
+            run_kwargs["log_level"] = "debug"
         if ssl_certfile and ssl_keyfile:
-            uvicorn_args["ssl_certfile"] = ssl_certfile
-            uvicorn_args["ssl_keyfile"] = ssl_keyfile
-        if uvicorn_args:
-            run_kwargs["uvicorn_args"] = uvicorn_args
+            run_kwargs["uvicorn_config"] = {"ssl_certfile": ssl_certfile, "ssl_keyfile": ssl_keyfile}
         mcp.run(**run_kwargs)
 
 
