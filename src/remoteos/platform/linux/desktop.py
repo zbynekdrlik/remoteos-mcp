@@ -394,6 +394,18 @@ def _subprocess_run(argv, env, input_bytes, timeout, discard_output):
     return subprocess.run(argv, input=input_bytes, capture_output=True, env=env, timeout=timeout)
 
 
+def _loggable(argv: list[str]) -> list[str]:
+    """``argv`` for a log line: the text of ``xdotool type … -- <text>`` becomes ``<N chars>``.
+
+    The typed text can be a password; it is never logged (typing.md), and ``--debug``
+    makes these DEBUG lines visible (#31).
+    """
+    if "xdotool" in argv and "type" in argv and "--" in argv:
+        cut = len(argv) - argv[::-1].index("--")  # just after the LAST "--"
+        return [*argv[:cut], *(f"<{len(a)} chars>" for a in argv[cut:])]
+    return argv
+
+
 def _run_x(
     cmd: list[str],
     *,
@@ -409,7 +421,7 @@ def _run_x(
     """
     s = get_session()
     argv, env = _build_invocation(s, cmd)
-    log.debug("x-run: %s", argv)
+    log.debug("x-run: %s", _loggable(argv))
     try:
         r = _subprocess_run(argv, env, input_bytes, timeout, discard_output)
     except FileNotFoundError as e:
@@ -424,7 +436,7 @@ def _run_x(
         s2 = get_session(force=True)
         if s2.mode == "x11":
             argv2, env2 = _build_invocation(s2, cmd)
-            log.debug("x-run retry: %s", argv2)
+            log.debug("x-run retry: %s", _loggable(argv2))
             try:
                 r = _subprocess_run(argv2, env2, input_bytes, timeout, discard_output)
             except FileNotFoundError as e:

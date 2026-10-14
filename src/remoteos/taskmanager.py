@@ -182,8 +182,9 @@ class TaskManager:
     def cancel_task(self, task_id: str) -> dict:
         """Cancel a task by ID.
 
-        The lookup and the cancel stay under the lock (#31), so the status
-        check-and-set cannot race ``_cleanup_old``'s stale-task auto-cancel.
+        The lookup and the cancel run under the manager lock (#31), the same lock
+        the tool wrapper's status writes (``_transition``) and ``_cleanup_old``'s
+        stale-task auto-cancel take, so the reply always matches the final status.
         """
         with self._lock:
             task = self._tasks.get(task_id)
@@ -230,6 +231,24 @@ class TaskManager:
             for t in completed[: len(completed) - self._max_history]:
                 self._tasks.pop(t.task_id, None)
 
+    def _transition(self, task: TaskInfo, status: TaskStatus, error: str | None = None) -> bool:
+        """Move ``task`` to ``status`` unless it was cancelled; False = it was cancelled.
+
+        The "was it cancelled?" check and the status write are one step under the
+        manager lock (#31): a ``cancel_task`` landing between them used to reply
+        "cancelled" while the wrapper then wrote COMPLETED over it.
+        """
+        with self._lock:
+            if task.is_cancelled:
+                return False
+            task.status = status
+            if status is TaskStatus.RUNNING:
+                task.started_at = time.time()
+            else:
+                task.completed_at = time.time()
+                task.error = error
+            return True
+
     def wrap_sync_tool(self, tool_name: str, func: Callable) -> Callable:
         """Wrap a synchronous tool function with error handling + concurrency control."""
         category = TOOL_CATEGORIES.get(tool_name, ToolCategory.QUERY)
@@ -241,25 +260,19 @@ class TaskManager:
 
             # Try to acquire semaphore — wait up to 60s
             if sem and not sem.acquire(timeout=60):
-                task.status = TaskStatus.FAILED
-                task.error = f"Timeout waiting for {category.value} lock (another {category.value} task is running)"
-                task.completed_at = time.time()
-                return f"[task:{task.task_id}] Error: {task.error}"
+                error = f"Timeout waiting for {category.value} lock (another {category.value} task is running)"
+                if not self._transition(task, TaskStatus.FAILED, error):
+                    return f"[task:{task.task_id}] Cancelled before execution"
+                return f"[task:{task.task_id}] Error: {error}"
 
             try:
-                if task.is_cancelled:
+                if not self._transition(task, TaskStatus.RUNNING):
                     return f"[task:{task.task_id}] Cancelled before execution"
-
-                task.status = TaskStatus.RUNNING
-                task.started_at = time.time()
 
                 result = func(*args, **kwargs)
 
-                if task.is_cancelled:
+                if not self._transition(task, TaskStatus.COMPLETED):
                     return f"[task:{task.task_id}] Cancelled during execution"
-
-                task.status = TaskStatus.COMPLETED
-                task.completed_at = time.time()
 
                 # Prepend task_id to text results
                 if isinstance(result, str):
@@ -280,9 +293,7 @@ class TaskManager:
                 return result
 
             except Exception as e:
-                task.status = TaskStatus.FAILED
-                task.error = str(e)
-                task.completed_at = time.time()
+                self._transition(task, TaskStatus.FAILED, str(e))
                 logger.error("Tool %s failed: %s\n%s", tool_name, e, traceback.format_exc())
                 return f"[task:{task.task_id}] Error in {tool_name}: {e}"
 

@@ -570,19 +570,21 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     Args:
         command: Command to execute.
         timeout: Timeout in seconds (default 30).
-        cwd: Working directory (spaces and quotes are fine, ~ is expanded). If
-            provided, the command runs inside that directory; a directory that
-            does not exist is an error and the command does not run.
+        cwd: Working directory (spaces and quotes are fine; ~ and $VAR, or %VAR%
+            on Windows, are expanded). If provided, the command runs inside that
+            directory; a path that is not an existing directory is an error and
+            the command does not run.
     """
     try:
         # The directory goes to the process itself (#31): pasting it into the
         # command as ``cd {cwd}`` broke on spaces/quotes and ran ``; <cmd>`` in it.
         workdir = None
         if cwd:
-            workdir = os.path.expanduser(cwd)
+            workdir = os.path.expandvars(os.path.expanduser(cwd))
             if not os.path.isdir(workdir):
-                log.warning("Shell refused: working directory not found: %r", cwd)
-                return f"Shell error: working directory not found: {cwd}"
+                problem = "is not a directory" if os.path.exists(workdir) else "not found"
+                log.warning("Shell refused: working directory %s: %r", problem, cwd)
+                return f"Shell error: working directory {problem}: {cwd}"
         if is_windows():
             shell_cmd = ["powershell", "-NoProfile", "-Command", command]
         elif is_macos():
@@ -1068,6 +1070,7 @@ def FileDownload(path: str) -> str:
 
 # FileUpload cap on the base64 TEXT (~75 MB of file), checked before decoding (#31).
 FILE_UPLOAD_MAX_BASE64 = 100 * 1024 * 1024
+_B64_WHITESPACE = str.maketrans("", "", " \t\r\n")  # line-wrapped base64 (e.g. `base64` output) is fine
 
 
 @mcp.tool(
@@ -1096,7 +1099,7 @@ def FileUpload(path: str, data_base64: str) -> str:
                 f"the limit is {FILE_UPLOAD_MAX_BASE64} (100 MB of base64)"
             )
         try:
-            data = base64.b64decode("".join(data_base64.split()), validate=True)
+            data = base64.b64decode(data_base64.translate(_B64_WHITESPACE), validate=True)
         except binascii.Error as e:
             log.warning("FileUpload refused %s: invalid base64 (%s)", path, e)
             return f"FileUpload error: data_base64 is not valid base64 ({e})"
@@ -1675,6 +1678,22 @@ def _apply_tool_filter(enabled_tools: set[str]) -> None:
             _remove_tool(tool_name)
 
 
+def _enable_debug_logging() -> None:
+    """``--debug`` (upstream winremote pull 65): the ``remoteos`` loggers at DEBUG on stderr.
+
+    Only our own logger tree. The root logger and FastMCP stay at their levels:
+    at DEBUG, FastMCP and sse_starlette log every tool call's arguments and reply
+    (typed text, clipboard, Shell commands, FileUpload data) — #31 review. stderr,
+    because in stdio mode stdout is the JSON-RPC stream.
+    """
+    handler = logging.StreamHandler(_sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    ours = logging.getLogger("remoteos")
+    ours.addHandler(handler)
+    ours.setLevel(logging.DEBUG)
+    log.debug("debug logging on")
+
+
 # ================================== CLI ====================================
 
 
@@ -1688,7 +1707,12 @@ def _apply_tool_filter(enabled_tools: set[str]) -> None:
     default=False,
     help="No effect, kept so existing command lines still start: uvicorn cannot hot-reload the in-process server",
 )
-@click.option("--debug", is_flag=True, default=False, help="Debug logging: remoteos, FastMCP and uvicorn at DEBUG")
+@click.option(
+    "--debug",
+    is_flag=True,
+    default=False,
+    help="Debug logging on stderr for remoteos and uvicorn (never tool arguments or replies)",
+)
 @click.option("--auth-key", default=None, envvar="REMOTEOS_AUTH_KEY", help="API key for authentication")
 @click.option("--config", default=None, help="Path to remoteos.toml config file")
 @click.option(
@@ -1731,10 +1755,8 @@ def cli(
     if ctx.invoked_subcommand is not None:
         return  # subcommand will handle it
 
-    if debug:  # upstream winremote pull 65: basicConfig at DEBUG + our loggers at DEBUG
-        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-        logging.getLogger("remoteos").setLevel(logging.DEBUG)
-        log.debug("debug logging on")
+    if debug:
+        _enable_debug_logging()
     if reload:
         # FastMCP serves an app OBJECT through uvicorn.Server; uvicorn reloads only an
         # import-string app via uvicorn.run (#31), so passing reload would do nothing.
@@ -1778,9 +1800,10 @@ def cli(
     # On Linux, gate the display-dependent tools on a runtime session check:
     # a machine with an active X11 session (e.g. imag-nb) gets the full desktop
     # tool set; a headless box (cam1..4) keeps them excluded — zero regression.
+    # Status lines go to stderr: in stdio mode stdout is the JSON-RPC stream (#31 review).
     platform_excludes = None
     if is_windows():
-        print(f"  Windows DPI awareness: {_WIN_DPI_MODE}")
+        click.echo(f"  Windows DPI awareness: {_WIN_DPI_MODE}", err=True)
     if is_linux():
         platform_excludes = set(LINUX_ALWAYS_EXCLUDED_TOOLS)
         try:
@@ -1789,11 +1812,12 @@ def cli(
             session = _linux_desktop.get_session()
             if session.mode != "x11":
                 platform_excludes |= LINUX_DISPLAY_TOOLS
-            print(
-                f"  Linux session: {session.mode}" + (f" (display={session.display})" if session.mode == "x11" else "")
+            click.echo(
+                f"  Linux session: {session.mode}" + (f" (display={session.display})" if session.mode == "x11" else ""),
+                err=True,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            print(f"  Linux session detection failed ({exc}); excluding display tools")
+            click.echo(f"  Linux session detection failed ({exc}); excluding display tools", err=True)
             platform_excludes = set(LINUX_EXCLUDED_TOOLS)
     enabled_tools = resolve_enabled_tools(
         enable_tier3=enable_tier3,
@@ -1882,7 +1906,7 @@ def cli(
             return True
 
     if transport == "stdio":
-        mcp.run(transport="stdio", **({"log_level": "debug"} if debug else {}))
+        mcp.run(transport="stdio")
     else:
         logging.getLogger("uvicorn.error").addFilter(BannerFilter())
         run_kwargs = dict(transport="streamable-http", host=host, port=port, stateless_http=True)
@@ -1890,12 +1914,16 @@ def cli(
             run_kwargs["middleware"] = middleware
         if platform.system() == "Windows":
             os.environ.setdefault("NO_COLOR", "1")
-        # FastMCP 4.0.3 run_http_async takes uvicorn_config (never uvicorn_args, #31) and
-        # its own log_level, which sets both uvicorn's level and FastMCP's logger.
+        # FastMCP 4.0.3 run_http_async takes uvicorn_config, never uvicorn_args (#31).
+        # Debug goes to uvicorn only, not run_http_async(log_level=...): that would
+        # also turn FastMCP to DEBUG, which logs every tool call's arguments.
+        uvicorn_config: dict[str, object] = {}
         if debug:
-            run_kwargs["log_level"] = "debug"
+            uvicorn_config["log_level"] = "debug"
         if ssl_certfile and ssl_keyfile:
-            run_kwargs["uvicorn_config"] = {"ssl_certfile": ssl_certfile, "ssl_keyfile": ssl_keyfile}
+            uvicorn_config.update(ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+        if uvicorn_config:
+            run_kwargs["uvicorn_config"] = uvicorn_config
         mcp.run(**run_kwargs)
 
 
