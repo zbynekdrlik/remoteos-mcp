@@ -5,12 +5,16 @@ Routes:
 - ``GET /healthz`` — unauthenticated, ``{"status": "ok", "version": ...}`` only.
 - ``GET|POST|DELETE /{machine}/mcp`` — the MCP streamable-HTTP endpoint of *machine*.
 
-Decision order for ``/{machine}/mcp`` (the design's numbered order):
+Decision order for ``/{machine}/mcp`` (the design's numbered order, plus two guards):
 
+0. *machine* is not a syntactically valid name (``[A-Za-z0-9][A-Za-z0-9._-]*``) → **404**,
+   before auth — a pure function of the URL, so it leaks nothing, and the raw value never
+   reaches a log line
 1. bearer token missing, or its sha256 matches no registered consumer → **401**
 2. consumer known, *machine* not in its allow-list                    → **403**
 3. machine allowed but not exposed (the ``unexpose`` kill switch)      → **404**
-4. otherwise proxy: the consumer's ``Authorization`` is REPLACED by the machine key from the
+4. request body over ``MAX_BODY_BYTES``                                → **413**
+5. otherwise proxy: the consumer's ``Authorization`` is REPLACED by the machine key from the
    master MCP config and the upstream response (JSON or ``text/event-stream``) is streamed
    back byte-for-byte with its headers (``Mcp-Session-Id`` included).
 

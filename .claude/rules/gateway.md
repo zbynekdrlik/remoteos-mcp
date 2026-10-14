@@ -23,9 +23,14 @@ paths:
   - Its `background=` task does NOT run when the stream raises. That is why
     `_UpstreamResponse.__call__` closes the upstream and writes the log line in a `finally`.
   - `test_upstream_is_closed_even_when_the_consumer_vanishes_before_headers` locks this in.
-- **Decision order is 401 → 403 → 404**, the design order. An authenticated consumer must not
-  be able to probe which other machines are exposed. The body is read only after the
-  allow-list and exposure checks pass.
+- **Decision order:** malformed machine name → 404 (before auth, so the raw value never
+  reaches a log), then 401 → 403 → 404 (the design order), then 413 (body over the cap).
+  - The 403 comes before the 404 so an authenticated consumer cannot probe which other
+    machines are exposed.
+  - The body is read only after the allow-list and exposure checks pass.
+- **Consumer-supplied strings** (`rpc_method`, `tool`) go into operational log lines only via
+  `%r`. Machine and consumer names are `fullmatch`-validated: `$` would accept a trailing
+  `\n`.
 - **Never log or forward the consumer token, the machine key, or tool arguments.**
   - `Upstream.authorization` is `repr=False`.
   - The access log keeps only `rpc_method` and the `tools/call` `params.name`.

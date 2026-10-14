@@ -12,6 +12,7 @@ import asyncio
 import datetime
 import hashlib
 import json
+import logging
 import os
 import secrets
 import signal
@@ -367,6 +368,37 @@ def test_machine_rejecting_its_key_is_relayed_and_flagged_in_the_log(gw):
     assert resp.status_code == 401  # relayed unchanged — the proxy stays transparent
     [entry] = read_access_log(gw.access_log_path)
     assert (entry["consumer"], entry["status"], entry["outcome"]) == (CONSUMER, 401, "upstream_denied")
+
+
+def test_non_ok_outcomes_are_warnings_and_ok_is_info(gw, caplog):
+    caplog.set_level("INFO", logger="remoteos.gateway")
+
+    gw.call("POST", f"/{MACHINE}/mcp", json_body={"jsonrpc": "2.0", "id": 1, "method": "test/reject-key"})
+    gw.call("POST", f"/{MACHINE}/mcp", json_body=_tools_list())
+
+    levels = {
+        outcome: r.levelno
+        for r in caplog.records
+        if r.name == "remoteos.gateway"
+        for outcome in ("upstream_denied", "outcome=ok")
+        if outcome in r.getMessage()
+    }
+    assert levels == {"upstream_denied": logging.WARNING, "outcome=ok": logging.INFO}
+
+
+def test_consumer_supplied_rpc_and_tool_strings_never_reach_a_log_line_raw(gw, caplog):
+    caplog.set_level("DEBUG", logger="remoteos.gateway")
+    evil_method = {"jsonrpc": "2.0", "id": 1, "method": "x\n2026-10-14 FORGED INFO\x1b[31m"}
+    evil_tool = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "Snap\nshot\x1b[0m"}}
+
+    assert gw.call("POST", f"/{MACHINE}/mcp", json_body=evil_method).status_code == 200
+    assert gw.call("POST", f"/{MACHINE}/mcp", json_body=evil_tool).status_code == 200
+
+    gateway_records = [r for r in caplog.records if r.name == "remoteos.gateway"]
+    assert len(gateway_records) >= 2
+    for record in gateway_records:
+        message = record.getMessage()
+        assert "\n" not in message and "\x1b" not in message, message
 
 
 def test_sse_response_is_relayed_intact_with_session_id(gw):
@@ -731,6 +763,14 @@ def test_registry_rejects_unknown_keys_and_uppercase_hashes():
         Registry.from_json({"exposd": []})
     with pytest.raises(RegistryError, match="sha256"):
         Registry.from_json({"consumers": {"a": {"sha256": ["A" * 64]}}})
+
+
+@pytest.mark.parametrize("name", ["a\n", "a\nb", "", "-lead", "has space"])
+def test_registry_rejects_consumer_names_that_are_not_a_full_match(name):
+    with pytest.raises(RegistryError, match="invalid consumer name"):
+        Registry.from_json({"consumers": {name: {"sha256": [], "machines": []}}})
+    with pytest.raises(RegistryError, match="invalid consumer name"):
+        Registry().add_consumer(name, token_sha256(TOKEN))
 
 
 # -- CLI ------------------------------------------------------------------------------
