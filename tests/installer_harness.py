@@ -172,6 +172,11 @@ case "$1" in
         fi
         ;;
     -c)
+        # The installer's post-install import check: this stateless box's
+        # package always imports (never the test interpreter's own packages).
+        if [[ "$2" == *"import remoteos"* ]]; then
+            exit 0
+        fi
         exec "{real_py}" "$@"
         ;;
     *)
@@ -274,6 +279,11 @@ case "$1" in
         fi
         ;;
     -c)
+        # The installer's post-install import check: this stateless box's
+        # package always imports (never the test interpreter's own packages).
+        if [[ "$2" == *"import remoteos"* ]]; then
+            exit 0
+        fi
         exec "{real_py}" "$@"
         ;;
     *)
