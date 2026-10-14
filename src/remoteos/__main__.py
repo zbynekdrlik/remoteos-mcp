@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import binascii
 import logging
 import os
 import platform
@@ -1100,7 +1099,7 @@ def FileUpload(path: str, data_base64: str) -> str:
             )
         try:
             data = base64.b64decode(data_base64.translate(_B64_WHITESPACE), validate=True)
-        except binascii.Error as e:
+        except ValueError as e:  # binascii.Error is one; non-ASCII text raises a plain ValueError
             log.warning("FileUpload refused %s: invalid base64 (%s)", path, e)
             return f"FileUpload error: data_base64 is not valid base64 ({e})"
         p = Path(path)
@@ -1711,7 +1710,10 @@ def _enable_debug_logging() -> None:
     "--debug",
     is_flag=True,
     default=False,
-    help="Debug logging on stderr for remoteos and uvicorn (never tool arguments or replies)",
+    help=(
+        "Debug logging on stderr for remoteos and uvicorn "
+        "(never typed text, clipboard, Shell commands, file data or tool replies)"
+    ),
 )
 @click.option("--auth-key", default=None, envvar="REMOTEOS_AUTH_KEY", help="API key for authentication")
 @click.option("--config", default=None, help="Path to remoteos.toml config file")

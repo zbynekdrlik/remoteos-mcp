@@ -400,9 +400,11 @@ def _loggable(argv: list[str]) -> list[str]:
     The typed text can be a password; it is never logged (typing.md), and ``--debug``
     makes these DEBUG lines visible (#31).
     """
-    if "xdotool" in argv and "type" in argv and "--" in argv:
-        cut = len(argv) - argv[::-1].index("--")  # just after the LAST "--"
-        return [*argv[:cut], *(f"<{len(a)} chars>" for a in argv[cut:])]
+    if "xdotool" in argv:
+        x = argv.index("xdotool")
+        if argv[x + 1 : x + 2] == ["type"] and "--" in argv[x + 2 :]:
+            cut = argv.index("--", x + 2) + 1  # the text follows the FIRST "--" after "type"
+            return [*argv[:cut], *(f"<{len(a)} chars>" for a in argv[cut:])]
     return argv
 
 
