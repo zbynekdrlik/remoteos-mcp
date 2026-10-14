@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -52,6 +53,21 @@ def test_a_service_helper_failure_is_an_mcp_error(monkeypatch):
     monkeypatch.setattr(linux_services, "_run", _no_systemctl)
     _, text = _error_text("ServiceList")
     assert text == "ServiceList error: systemctl unavailable"
+
+
+def test_a_failure_is_logged_without_its_message(monkeypatch, caplog):
+    # The error text can echo a tool argument (a path, a title, a process name); logs never
+    # carry tool arguments or replies (#31), so a failure logs the tool and the error type only.
+    def _fails(cmd, timeout=30):
+        raise RuntimeError("secret-marker-32")
+
+    monkeypatch.setattr(linux_services, "_run", _fails)
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
+        _, text = _error_text("ServiceList")
+    assert text == "ServiceList error: secret-marker-32"  # the client gets the whole message
+    assert "ServiceList" in caplog.text and "RuntimeError" in caplog.text
+    assert "Traceback" in caplog.text  # where it broke stays in the log
+    assert "secret-marker-32" not in caplog.text
 
 
 def test_shell_with_a_missing_cwd_is_an_mcp_error(tmp_path):

@@ -124,17 +124,20 @@ def test_an_unexpected_exception_becomes_a_tool_error_and_a_failed_task(caplog):
     tm = TaskManager()
 
     def tool():
-        raise RuntimeError("boom")
+        raise RuntimeError("boom-secret")
 
-    with caplog.at_level(logging.ERROR, logger="remoteos.taskmanager"):
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
         with pytest.raises(ToolError) as exc:
             tm.wrap_sync_tool("Shell", tool)()
     task = _only_task(tm)
-    assert str(exc.value) == f"[task:{task.task_id}] Error in Shell: boom"
+    assert str(exc.value) == f"[task:{task.task_id}] Error in Shell: boom-secret"
     assert isinstance(exc.value.__cause__, RuntimeError)
     assert task.status is TaskStatus.FAILED
-    assert task.error == "boom"
-    assert "Traceback" in caplog.text  # an unexpected failure is logged with its traceback
+    assert task.error == "boom-secret"
+    # an unexpected failure is logged with its traceback (where it broke) and its type,
+    # never its message, which can echo a tool argument (#31)
+    assert "Traceback" in caplog.text and "in tool" in caplog.text and "RuntimeError" in caplog.text
+    assert "boom-secret" not in caplog.text
 
 
 def test_a_tool_error_keeps_its_text_behind_the_task_prefix(caplog):
@@ -143,15 +146,17 @@ def test_a_tool_error_keeps_its_text_behind_the_task_prefix(caplog):
     def tool():
         raise ToolError("Click error: no such window")
 
-    with caplog.at_level(logging.WARNING, logger="remoteos.taskmanager"):
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
         with pytest.raises(ToolError) as exc:
             tm.wrap_sync_tool("Click", tool)()
     task = _only_task(tm)
     assert str(exc.value) == f"[task:{task.task_id}] Click error: no such window"
     assert task.status is TaskStatus.FAILED
     assert task.error == "Click error: no such window"
-    assert "Click error: no such window" in caplog.text
-    assert "Traceback" not in caplog.text  # an expected failure is one log line
+    # one payload-free line: the error text can echo a tool argument (#31: logs never carry those)
+    assert f"Tool Click [{task.task_id}] failed" in caplog.text
+    assert "no such window" not in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 class _NeverAvailable:
