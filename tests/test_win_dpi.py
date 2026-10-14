@@ -134,8 +134,10 @@ def test_reports_preset_per_monitor_v2():
     assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "per-monitor-v2"
     ((ctx, v2),) = lib.user32.AreDpiAwarenessContextsEqual.args
     assert ctx == _CTX
+    # both handles pointer-sized: an int-typed -4 would reach Win64 as a 32-bit value
+    assert lib.user32.AreDpiAwarenessContextsEqual.argtypes == [ctypes.c_void_p, ctypes.c_void_p]
     v2 = v2.value if isinstance(v2, ctypes.c_void_p) else ctypes.c_void_p(v2).value
-    assert v2 & 0xFFFFFFFF == 0xFFFFFFFC  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    assert v2 == ctypes.c_void_p(-4).value  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, sign-extended
 
 
 def test_reports_per_monitor_v1_when_contexts_differ():

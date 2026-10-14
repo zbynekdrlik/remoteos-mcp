@@ -224,7 +224,8 @@ def test_capture_size_mismatch_is_logged(monkeypatch, caplog):
 
 def test_matching_capture_logs_no_mismatch_warning(fake_x11, caplog):
     with caplog.at_level("WARNING"):
-        server.Snapshot()
+        parts = server.Snapshot()
+    assert _image_size(parts) == (1280, 800)  # the capture really happened
     assert "capture is" not in caplog.text
 
 
