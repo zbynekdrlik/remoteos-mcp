@@ -44,6 +44,7 @@ from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
+from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, window_lines
 from remoteos.taskmanager import manager as task_manager
@@ -386,6 +387,7 @@ def Type(
 )
 def Scroll(
     amount: int,
+    direction: str = "",
     x: int = 0,
     y: int = 0,
     horizontal: bool | str = False,
@@ -393,33 +395,32 @@ def Scroll(
     max_width: int = 1280,
     coords: str = "image",
 ) -> str:
-    """Scroll at a point of the Snapshot image.
+    """Turn the mouse wheel at a point of the Snapshot image.
 
+    amount = mouse-wheel CLICKS (notches), the same unit on Windows, macOS and
+    Linux; direction = 'up' | 'down' | 'left' | 'right'. Example:
+    Scroll(amount=3, direction="down") scrolls down by three wheel notches.
     x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = scroll where the
     mouse already is.
 
     Args:
-        amount: Scroll amount (positive=up/right, negative=down/left).
+        amount: Wheel clicks, clamped to 1..100. Legacy form (no direction): the
+            sign picks the direction — positive = up/right, negative = down/left.
+        direction: 'up', 'down', 'left' or 'right'. When given it wins over the
+            sign of amount and over horizontal.
         x: X in Snapshot image pixels (0 = current).
         y: Y in Snapshot image pixels (0 = current).
-        horizontal: Horizontal scroll instead of vertical.
+        horizontal: Legacy, only without direction: scroll left/right instead of up/down.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
         coords: 'image' (default) or 'screen' = raw OS coordinates.
     """
     try:
+        steps = normalize_request(amount, direction, _tobool(horizontal))
         points, note = _to_screen([(x, y)] if x and y else [], monitor, max_width, coords)
-        if is_linux():
-            sx, sy = points[0] if points else (0, 0)
-            return get_desktop().scroll(amount, x=sx, y=sy, horizontal=_tobool(horizontal)) + note
-        if points:
-            pyautogui.moveTo(*points[0])
-        if _tobool(horizontal):
-            pyautogui.hscroll(amount)
-        else:
-            pyautogui.scroll(amount)
-        direction = "horizontally" if _tobool(horizontal) else "vertically"
-        return f"Scrolled {amount} {direction}{note}"
+        sx, sy = points[0] if points else (None, None)
+        log.debug("Scroll %s x%d (requested %d) at %s", steps.direction, steps.clicks, steps.requested, points)
+        return get_desktop().scroll(steps.direction, steps.requested, x=sx, y=sy) + note
     except Exception as e:
         return f"Scroll error: {e}"
 

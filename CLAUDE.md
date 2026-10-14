@@ -15,6 +15,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | Linux X11 desktop provider (session detection, xdotool/scrot backends, deploy/test) | `.claude/skills/linux-desktop` |
 | MCP gateway on dev1 (`remoteos-gateway`, per-consumer tokens, streaming proxy, rollout) | `.claude/rules/gateway.md` (auto-loads on its `paths:`) + README "MCP gateway (dev1)" |
 | Screen coordinates: Snapshot frame, scale/origin, image→screen input mapping, Windows DPI order, Retina | `.claude/rules/coordinates.md` (auto-loads on its `paths:`) + README "Screen coordinates" |
+| Mouse wheel / Scroll: clicks + direction, Windows SendInput, Quartz wheel2 sign, xdotool 4-7 | `.claude/rules/scroll.md` (auto-loads on its `paths:`) + README "Scroll units" |
 | Which MCP server belongs to which project | memory: `reference_mcp_project_mapping.md` |
 | SSH credentials for managed machines | memory: `reference_ssh_credentials.md` |
 
