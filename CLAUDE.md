@@ -10,6 +10,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | Topic | Where to look |
 |---|---|
 | Install / upgrade / redeploy on any machine | `/remoteos-install` skill |
+| Installer code (preflight, rollback, `--ignore-installed` on Debian, fake-pip tests) | `.claude/rules/installers.md` (auto-loads on its `paths:`) |
 | `.mcp.json` setup, restore after clone, add new machine | `/remoteos-mcp-config` skill |
 | Linux X11 desktop provider (session detection, xdotool/scrot backends, deploy/test) | `.claude/skills/linux-desktop` |
 | MCP gateway on dev1 (`remoteos-gateway`, per-consumer tokens, streaming proxy, rollout) | `.claude/rules/gateway.md` (auto-loads on its `paths:`) + README "MCP gateway (dev1)" |

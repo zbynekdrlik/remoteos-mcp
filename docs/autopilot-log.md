@@ -107,3 +107,46 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Commits:** `61bc08b` bump; `2e1ab54` [red]; `f01a11c` [green]; `c84faa8` test split (test_gateway.py was 1179 lines); review fixes (fresh-connection retry client, invariants documented, rule paths) after one review pass (0🔴 2🟡 3🔵).
 - **Tests (RED→GREEN):** `test_machine_closing_a_pooled_connection_as_the_request_arrives_is_retried_not_503`, `test_one_stale_connection_failure_before_the_response_is_retried_once[*]`, `test_two_consecutive_stale_connection_failures_are_503_after_exactly_one_retry`, `test_idle_pooled_connections_expire_well_before_the_machines_keep_alive`, `test_the_production_client_drops_a_pooled_connection_after_2s_idle`.
 - **Loopback sweep:** real uvicorn + 60 ms latency proxy. Pre-fix: 503 at 4.88 s / 4.92 s idle. Retry alone: 4 retries, all 200. Production fix: 0 retries, all 200.
+
+## #12 — installers on Ubuntu 26.04 / Debian-owned deps: preflight, rollback, full pip error (0.7.0.dev24)
+
+- **Root cause (strih-pp, Python 3.14, Debian pip 25.1.1):** the pinned set must replace apt `python3-*` packages (cryptography, PyJWT, psutil, …). Debian's pip refuses ("installed by debian"). `| tail -3 || true` hid the error, and the pre-uninstall had already removed remoteos, so the box was left without a package.
+- **Fix:**
+  - Linux: `--ignore-installed`, safe because the pre-uninstall of remoteos-mcp, fastmcp and fastmcp-slim stays.
+  - Linux and macOS: a `pip install --dry-run` preflight with the same flags and `PIP_CONSTRAINT`, run before any uninstall. A RECORD-file snapshot of the three dists. On failure, `rollback_install` restores the old version byte for byte, offline, and the installer still exits non-zero. Full pip output on failure.
+  - `install.ps1`: the install output is captured and printed on failure (error-output parity only).
+- **Decision (on #12, ROZHODNUTÉ):** the rollback restores local files. A networked reinstall of the old commit or tag would re-resolve and rebuild everything, so it would fail the same way the install just did.
+- **Commits:** `e999e4c` bump; `e147d68` retire the dev14 no-`--ignore-installed` static test (the design reverses it); `71fd468` move shims to `tests/installer_harness.py`; `306674b` [red] 9 tests + `tests/fake_pip.py` (stateful Debian-pip fake); `7cc8be3` [green].
+- **Tests (RED→GREEN):** `test_upgrade_over_debian_owned_dependencies_succeeds_with_ignore_installed`, `test_failed_dry_run_aborts_before_any_uninstall_and_prints_the_full_error` (Linux + macOS), `test_failed_install_after_pre_uninstall_restores_the_recorded_version`, `test_failed_install_prints_the_full_pip_output`, `test_failed_install_on_a_fresh_box_exits_nonzero_with_the_full_error`, `test_upgrade_runs_preflight_then_pre_uninstall_then_install`, `test_failed_install_restores_the_recorded_version_and_prints_the_full_error`, `test_main_pip_install_output_is_kept_and_printed_on_failure`. Result: 269 pass, ruff clean, shellcheck clean at `-S warning`. Three SC2004 style notes on main were outside the diff; round 2 cleared them.
+- **Real-pip check:** in a pip 24.0 venv, snapshot → uninstall → restore of tabulate gave byte-identical files. The console script stayed +x, and pip show, import and `pip check` were all OK.
+- **Review round 1:** 0🔴 3🟡 9🔵, all fixed in this branch except Windows rollback (out of scope; follow-up candidate).
+  - Commits: `75a051d` [red] (16 fail), `a9f08ba` + `5b3a6e7` harness fixes (no `__pycache__` in the fake site; stateless shims answer the import check), `0c85cca` [green].
+  - One shared, byte-identical install block in install-linux.sh and install.sh (drift-guarded).
+  - One commit of main from `git ls-remote` for the preflight, the install `@<sha>` and the constraints.
+  - Changed pip-owned deps join the pre-uninstall and the snapshot. `--ignore-installed` otherwise leaves stale dist-info.
+  - An installed remoteos without RECORD aborts the run.
+  - A HUP/INT/TERM trap rolls back.
+  - A post-install import check, which the rollback also runs.
+  - A failed rollback keeps the snapshot.
+  - `install.ps1` checks `$LASTEXITCODE`.
+  - Result: 285 pass, shellcheck clean at default severity. All 42 installer tests also pass under bash 3.2.57 (`bash:3.2` container, uid 1000). Real pip 24.0 check of `names`/`plan`/`snapshot`/`restore` OK.
+- **Review round 2:** 0🔴 2🟡 8🔵, all fixed in this branch except the Windows rollback (follow-up candidate).
+  - Commits: `d053f84` [red] (9 fail), `54fdbd8` [green].
+  - The rollback is armed by state (EXIT trap + `ROLLBACK_ARMED`, SIGPIPE ignored while armed). A lost console (no-tty ssh drop) or a truncated download now rolls back. Before, bash died on SIGPIPE and the snapshot was deleted.
+  - The helper reads `importlib.metadata` (RECORD + INSTALLER) instead of parsing `pip show`. Real pip prints a multi-line License with a raw `---` and a `Name:` line.
+  - The rollback removes every visible pip-owned copy of the three, the changed and the added deps, one per pip call, so an apt refusal cannot skip the rest.
+  - plan and snapshot abort when a RECORD is missing or does not list its own METADATA.
+  - The fake box got two site dirs (pip over apt).
+  - Result: 297 pass. 52/52 shell-dependent installer tests pass under bash 3.2.57. Real pip 24.0 check of plan/pipowned/snapshot/restore OK.
+- **Review round 3:** 0🔴 1🟡 10🔵.
+  - Commits: `4500cab` [red] (10 fail), `238f760` [green].
+  - pip is shielded from group signals while armed (it no longer dies mid-wheel).
+  - A `leftovers` check runs after the rollback.
+  - A pre-uninstall failure is fatal.
+  - restore refuses a directory in the way.
+  - Deps owned by another installer abort the upgrade.
+  - Both installers run inside `main()`, so a truncated download fails to parse.
+  - macOS auth key fixed: `tr | head` died of SIGPIPE, so a fresh mac aborted at [3/5]. The harness had hidden it.
+  - Result: 304 pass, 59/59 shell tests pass under bash 3.2.57.
+  - Left for follow-up: a CI job for the bash-3.2/shellcheck checks, the skill recovery section, the Windows rollback, venv migration, `PYTHONNOUSERSITE` in the unit.
+- **Not done here:** running the installer on strih-pp and stream-pp (26.04). The supervisor deploys and verifies.
