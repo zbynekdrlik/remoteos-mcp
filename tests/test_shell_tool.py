@@ -42,7 +42,7 @@ def test_cwd_that_is_a_file_is_an_error_and_the_command_never_runs(tmp_path):
     a_file = tmp_path / "file.txt"
     a_file.write_text("x")
     out = server.Shell(f"touch '{marker}'", cwd=str(a_file))
-    assert out == f"Shell error: working directory not found: {a_file}"
+    assert out == f"Shell error: working directory is not a directory: {a_file}"
     assert not marker.exists()
 
 
@@ -51,6 +51,12 @@ def test_cwd_text_is_never_executed_as_a_command(tmp_path):
     out = server.Shell("true", cwd=f"{tmp_path}/x; touch {pwned}")
     assert out.startswith("Shell error: working directory not found: ")
     assert not pwned.exists()
+
+
+def test_cwd_environment_variables_are_expanded_like_cd_did(tmp_path, monkeypatch):
+    monkeypatch.setenv("REMOTEOS_TEST_WORK", str(tmp_path))
+    (tmp_path / "proj").mkdir()
+    assert server.Shell("pwd -P", cwd="$REMOTEOS_TEST_WORK/proj") == str((tmp_path / "proj").resolve())
 
 
 def test_cwd_tilde_is_expanded_like_cd_did(tmp_path, monkeypatch):

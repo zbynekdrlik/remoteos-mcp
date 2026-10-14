@@ -58,7 +58,9 @@ def test_over_the_cap_is_rejected_before_decoding(tmp_path):
 
 def test_exactly_the_cap_is_accepted(tmp_path):
     dest = tmp_path / "max.bin"
-    out = server.FileUpload(str(dest), "A" * _CAP)
-    assert out == f"Written {_CAP // 4 * 3} bytes to {dest}"
-    assert dest.stat().st_size == _CAP // 4 * 3
-    dest.unlink()
+    try:
+        out = server.FileUpload(str(dest), "A" * _CAP)
+        assert out == f"Written {_CAP // 4 * 3} bytes to {dest}"
+        assert dest.stat().st_size == _CAP // 4 * 3
+    finally:
+        dest.unlink(missing_ok=True)  # ~78 MB: never leave it in pytest's kept temp dirs

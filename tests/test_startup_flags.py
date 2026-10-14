@@ -3,10 +3,12 @@
 FastMCP 4.0.3's ``run_http_async`` takes ``uvicorn_config``; the CLI passed
 ``uvicorn_args``, so every TLS or reload start died with a TypeError before the
 port was bound. These tests start the REAL server — ``python -m remoteos`` in a
-subprocess, FastMCP + uvicorn included — on a free loopback port, with an empty
-config file, no ``REMOTEOS_*`` environment and a temp working directory, and
-then read ``/health`` from it. The TLS certificate is a throwaway self-signed one
-made with ``cryptography`` (already installed: authlib and pyjwt depend on it).
+subprocess, FastMCP + uvicorn included — on a free loopback port and talk to it
+over HTTP or stdio. The child is hermetic: an empty config file, no ``REMOTEOS_*``
+/ ``FASTMCP_*`` variables from the runner, a temp HOME / XDG_DATA_HOME / working
+directory, FastMCP's PyPI update check and banner off, and this checkout's
+``src`` first on PYTHONPATH. The TLS certificate is a throwaway self-signed one
+made with ``cryptography`` (a ``test`` extra).
 """
 
 from __future__ import annotations
@@ -22,18 +24,40 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
+import remoteos
 from remoteos import __version__
 
 _START_TIMEOUT = 60.0  # a cold interpreter imports fastmcp + uvicorn + PIL before it binds
+_SRC = str(Path(remoteos.__file__).resolve().parents[1])  # this checkout's src/, not whatever is installed
 
 
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _child_env(tmp_path) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("REMOTEOS_", "FASTMCP_"))}
+    env.update(
+        PYTHONUNBUFFERED="1",
+        PYTHONPATH=os.pathsep.join(p for p in (_SRC, env.get("PYTHONPATH", "")) if p),
+        HOME=str(tmp_path),
+        XDG_DATA_HOME=str(tmp_path / "xdg-data"),
+        FASTMCP_CHECK_FOR_UPDATES="off",  # no call to pypi.org, no version cache written
+        FASTMCP_SHOW_SERVER_BANNER="false",
+    )
+    return env
+
+
+def _empty_config(tmp_path) -> Path:
+    config = tmp_path / "remoteos.toml"
+    config.write_text("")
+    return config
 
 
 def _self_signed_cert(tmp_path):
@@ -59,9 +83,7 @@ def _self_signed_cert(tmp_path):
     certfile, keyfile = tmp_path / "cert.pem", tmp_path / "key.pem"
     certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
     keyfile.write_bytes(
-        key.private_bytes(
-            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
-        )
+        key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
     )
     return certfile, keyfile
 
@@ -69,22 +91,20 @@ def _self_signed_cert(tmp_path):
 class _Server:
     def __init__(self, tmp_path, args: list[str]):
         self.port = _free_port()
-        config = tmp_path / "remoteos.toml"
-        config.write_text("")
-        env = {k: v for k, v in os.environ.items() if not k.startswith("REMOTEOS_")}
-        env["PYTHONUNBUFFERED"] = "1"
         self.log_path = tmp_path / "server.log"
         self._log = open(self.log_path, "wb")
+        config = _empty_config(tmp_path)
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "remoteos", "--port", str(self.port), "--config", str(config), *args],
             cwd=tmp_path,
-            env=env,
+            env=_child_env(tmp_path),
             stdout=self._log,
             stderr=subprocess.STDOUT,
         )
 
     def output(self) -> str:
-        self._log.flush()
+        if not self._log.closed:
+            self._log.flush()
         return self.log_path.read_text(encoding="utf-8", errors="replace")
 
     def health(self, scheme: str = "http", context: ssl.SSLContext | None = None) -> dict:
@@ -100,6 +120,19 @@ class _Server:
             except (urllib.error.URLError, ConnectionError, TimeoutError):
                 time.sleep(0.2)
         pytest.fail(f"server did not answer {url} within {_START_TIMEOUT}s:\n{self.output()[-3000:]}")
+
+    def call_tool(self, name: str, arguments: dict) -> str:
+        """One stateless MCP ``tools/call`` over streamable HTTP; returns the raw (SSE) response body."""
+        body = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+        ).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/mcp",
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read().decode("utf-8", "replace")
 
     def stop(self) -> None:
         if self.proc.poll() is None:
@@ -142,6 +175,20 @@ def test_debug_flag_starts_the_server_with_debug_logging(start_server):
     assert "TypeError" not in out
 
 
+def test_debug_log_never_carries_tool_arguments_or_replies(start_server):
+    # Tool arguments and replies are typed text, clipboard, Shell commands, FileUpload
+    # data: --debug must not put them in the log (#31 review).
+    marker = "secret-marker-7f3a9c"
+    srv = start_server("--debug")
+    srv.health()
+    reply = srv.call_tool("FileList", {"path": f"/nonexistent-{marker}"})
+    assert f"Not a directory: /nonexistent-{marker}" in reply  # the call really ran
+    srv.stop()
+    out = srv.output()
+    assert "DEBUG remoteos.mcp: debug logging on" in out
+    assert marker not in out
+
+
 def test_reload_flag_warns_instead_of_crashing(start_server):
     srv = start_server("--reload")
     assert srv.health() == {"status": "ok", "version": __version__}
@@ -163,3 +210,29 @@ def test_one_ssl_flag_alone_is_a_usage_error_never_a_plain_http_start(tmp_path, 
             time.sleep(0.2)
     assert srv.proc.returncode == 2, srv.output()[-2000:]
     assert "--ssl-certfile and --ssl-keyfile must be given together" in srv.output()
+
+
+def test_stdio_stdout_carries_only_json_rpc(tmp_path):
+    # In stdio mode stdout IS the JSON-RPC stream: a status print there corrupts it (#31 review).
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}},
+    }
+    done = subprocess.run(
+        [sys.executable, "-m", "remoteos", "--transport", "stdio", "--config", str(_empty_config(tmp_path))],
+        input=json.dumps(initialize).encode() + b"\n",
+        cwd=tmp_path,
+        env=_child_env(tmp_path),
+        capture_output=True,
+        timeout=_START_TIMEOUT,
+    )
+    lines = [line for line in done.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+    assert lines, done.stderr.decode("utf-8", "replace")[-2000:]
+    for line in lines:
+        try:
+            json.loads(line)
+        except ValueError:
+            pytest.fail(f"non-JSON line on the stdio stdout: {line!r}")
+    assert json.loads(lines[-1])["id"] == 1
