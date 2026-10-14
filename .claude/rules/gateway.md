@@ -1,7 +1,9 @@
 ---
 paths:
   - "src/remoteos/gateway/**"
-  - "tests/test_gateway.py"
+  - "tests/test_gateway*.py"
+  - "tests/gateway_harness.py"
+  - "tests/conftest.py"
   - "deploy/remoteos-gateway.service"
 ---
 
@@ -23,6 +25,22 @@ paths:
   - Its `background=` task does NOT run when the stream raises. That is why
     `_UpstreamResponse.__call__` closes the upstream and writes the log line in a `finally`.
   - `test_upstream_is_closed_even_when_the_consumer_vanishes_before_headers` locks this in.
+- **Upstream keep-alive (#25 reopened).** `UPSTREAM_LIMITS.keepalive_expiry` (2.0 s) MUST stay
+  well below the machines' uvicorn `timeout_keep_alive` (5 s). With equal values, a call after
+  ~4.9 s idle reused a connection the machine was closing, and the consumer got 503
+  `RemoteProtocolError: Server disconnected without sending a response`.
+  - `Gateway._send_upstream` retries ONCE, only for `RemoteProtocolError`/`ReadError`/`WriteError`
+    raised by `send()` (pre-headers), and only when that attempt REUSED a pooled connection
+    (httpcore `trace` extension: no `connection.connect_*` event). Never timeouts, connect errors,
+    a freshly dialled connection, or mid-stream.
+  - The retry goes through `retry_client` (`max_keepalive_connections=0`), so it always dials. The
+    main pool would hand it the next stale connection after a machine restart.
+  - Double-run safety rests on two machine properties: uvicorn discards bytes racing its
+    keep-alive close, and machines answer `tools/call` as SSE (headers before the tool runs).
+    Never start a machine with fastmcp `json_response` on (`FASTMCP_JSON_RESPONSE`).
+  - Pool tests run a REAL loopback server against the production clients
+    (`tests/test_gateway_upstream_pool.py`). Pin a long expiry (`long_keepalive`) in tests that
+    are about the retry, so a stalled runner cannot expire a connection between calls.
 - **Decision order:** malformed machine name → 404 (before auth, so the raw value never
   reaches a log), then 401 → 403 → 404 (the design order), then 413 (body over the cap).
   - The 403 comes before the 404 so an authenticated consumer cannot probe which other
