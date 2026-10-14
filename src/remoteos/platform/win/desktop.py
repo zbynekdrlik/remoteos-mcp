@@ -32,6 +32,7 @@ except ImportError:
 from PIL import ImageGrab  # noqa: E402
 
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
+from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -194,6 +195,66 @@ def capture_frame(monitor: int = 0, max_width: int = 1280):
         bbox = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height)
         img = ImageGrab.grab(bbox=bbox, all_screens=True)
     return fit_to_frame(img, frame, geometry), frame
+
+
+# ---------------------------------------------------------------------------
+# Mouse wheel (#29)
+# ---------------------------------------------------------------------------
+
+_INPUT_MOUSE = 0
+_MOUSEEVENTF_WHEEL = 0x0800
+_MOUSEEVENTF_HWHEEL = 0x1000
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    # Fixed-width fields = the Win32 layout on x86 and x64 (and importable off Windows for
+    # the tests). mouseData is a DWORD in the header; c_int32 is the same 32 bits, and a
+    # wheel delta is signed.
+    _fields_ = [
+        ("dx", ctypes.c_int32),
+        ("dy", ctypes.c_int32),
+        ("mouseData", ctypes.c_int32),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_size_t),  # ULONG_PTR
+    ]
+
+
+class _INPUTUNION(ctypes.Union):
+    # MOUSEINPUT is the largest member of INPUT's union, so sizeof(_INPUT) is the real
+    # sizeof(INPUT) (40 on x64, 28 on x86) — SendInput rejects any other cbSize.
+    _fields_ = [("mi", _MOUSEINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_uint32), ("u", _INPUTUNION)]
+
+
+def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = None) -> str:
+    """Turn the wheel ``clicks`` notches toward ``direction``, at screen point (x, y) if given.
+
+    One ``SendInput`` event of ``±clicks × WHEEL_DELTA`` (120): ``MOUSEEVENTF_WHEEL``
+    for up/down (positive = up), ``MOUSEEVENTF_HWHEEL`` for left/right (positive =
+    right). Not pyautogui: 0.9.54 sends the raw count as the delta (1/120 of a notch)
+    and routes hscroll into the vertical wheel. With a point, the cursor is put there
+    first (``SetCursorPos``, physical pixels under per-monitor-v2) — the wheel goes to
+    the window under it.
+    """
+    steps = wheel_steps(direction, clicks)
+    user32 = ctypes.windll.user32
+    if x is not None and y is not None and not user32.SetCursorPos(int(x), int(y)):
+        raise RuntimeError(f"SetCursorPos({x},{y}) failed (error {ctypes.windll.kernel32.GetLastError()})")
+    events = (_INPUT * 1)()
+    events[0].type = _INPUT_MOUSE
+    events[0].u.mi.dwFlags = _MOUSEEVENTF_HWHEEL if steps.horizontal else _MOUSEEVENTF_WHEEL
+    events[0].u.mi.mouseData = steps.delta
+    sent = user32.SendInput(1, events, ctypes.sizeof(_INPUT))
+    if sent != 1:
+        raise RuntimeError(
+            f"SendInput inserted {sent} of 1 wheel events (error {ctypes.windll.kernel32.GetLastError()})"
+            " — input blocked: a locked/disconnected session or a higher-integrity window (UIPI)"
+        )
+    return steps.summary()
 
 
 # ---------------------------------------------------------------------------

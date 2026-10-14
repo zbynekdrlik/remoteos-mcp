@@ -99,6 +99,19 @@ passed straight to Click / Move / Scroll / Type.
   `Windows DPI awareness: …`.
 - **OCR and ScreenRecord regions are still in screen coordinates.**
 
+## Scroll units
+
+`Scroll(amount=3, direction="down")` turns the mouse wheel 3 **clicks** (notches), with the
+same unit on every OS. `direction` is `up` / `down` / `left` / `right`, and `amount` is
+clamped to 1..100.
+
+- **Windows:** one `SendInput` wheel event of `clicks × 120`. Vertical uses
+  `MOUSEEVENTF_WHEEL`, horizontal uses `MOUSEEVENTF_HWHEEL`.
+- **macOS:** Quartz line events, one line per click, in events of at most 10 lines.
+- **Linux:** xdotool wheel buttons 4/5/6/7, once per click.
+- **Legacy calls still work:** a signed `amount` (positive = up/right, negative = down/left)
+  with `horizontal=true` for left/right. An explicit `direction` wins over both.
+
 ## MCP gateway (dev1)
 
 The machines are reachable only from boxes with a LAN route to them. `remoteos-gateway`

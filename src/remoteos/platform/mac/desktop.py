@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from remoteos.coords import CaptureGeometry, frame_for
+from remoteos.scroll import chunks, wheel_steps
 from remoteos.snapshot import fit_to_frame
 
 # Quartz imports (will fail on non-macOS — caught at tool level)
@@ -178,6 +179,43 @@ def capture_frame(monitor: int = 0, max_width: int = 1280):
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Mouse wheel (#29)
+# ---------------------------------------------------------------------------
+
+# Apple (CGEventCreateScrollWheelEvent): deltas are "typically in a range from -10 to +10.
+# Large values may have unexpected results" — so a scroll is posted in events of <= 10 lines.
+_MAX_LINES_PER_EVENT = 10
+
+
+def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = None) -> str:
+    """Turn the wheel ``clicks`` lines toward ``direction``, at screen point (x, y) if given.
+
+    Quartz line events, one line per click: wheel1 = vertical (positive = up),
+    wheel2 = horizontal with POSITIVE = LEFT (Quartz's sign — Hammerspoon's
+    scrollWheel passes its offsets straight through and documents "positive values
+    scroll up or left"), so ``right`` posts a negative wheel2. With a point (points,
+    the ``CGDisplayBounds`` space), a mouse-moved event puts the cursor there first
+    and every scroll event is located at it.
+    """
+    if not HAS_QUARTZ:
+        raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
+    steps = wheel_steps(direction, clicks)
+    point = (float(x), float(y)) if x is not None and y is not None else None
+    if point is not None:
+        move = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, point, Quartz.kCGMouseButtonLeft)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
+    for lines in chunks(steps.signed_clicks, _MAX_LINES_PER_EVENT):
+        wheel1, wheel2 = (0, -lines) if steps.horizontal else (lines, 0)
+        event = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 2, wheel1, wheel2)
+        if event is None:
+            raise RuntimeError("CGEventCreateScrollWheelEvent returned no event")
+        if point is not None:
+            Quartz.CGEventSetLocation(event, point)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    return steps.summary()
 
 
 # ---------------------------------------------------------------------------
