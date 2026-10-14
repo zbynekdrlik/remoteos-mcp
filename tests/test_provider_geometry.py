@@ -168,6 +168,76 @@ def test_pyautogui_screen_coords_pass_through(pyautogui_branch):
     assert fake.moveTo.calls == [((-1500, 20), {"duration": 0.3})]
 
 
+# --- Windows: a failed grab is retried once after reconnecting the RDP session ---
+
+
+def _flaky_grab(monkeypatch, failures: int):
+    real = ImageGrab.grab  # the fixture's fake grab
+    state = {"left": failures}
+
+    def _grab(*args, **kwargs):
+        if state["left"]:
+            state["left"] -= 1
+            raise OSError("screen grab failed")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ImageGrab, "grab", _grab)
+
+
+@pytest.fixture
+def windows_tool_layer(monkeypatch, win):
+    import remoteos.__main__ as server
+
+    mod, _ = win
+    monkeypatch.setattr(server, "is_windows", lambda: True)
+    monkeypatch.setattr(server, "is_linux", lambda: False)
+    monkeypatch.setattr(server, "get_desktop", lambda: mod)
+    commands: list[list[str]] = []
+    return server, commands
+
+
+def _session_tools(monkeypatch, server, commands, query_rc=0):
+    """Fake ``query session`` (one disconnected RDP session, id 2) and ``tscon``."""
+    query_out = (
+        " SESSIONNAME       USERNAME                 ID  STATE   TYPE        DEVICE\n"
+        " rdp-tcp#5         newlevel                  2  Disc\n"
+    )
+
+    def _run(cmd, **kwargs):
+        commands.append(list(cmd))
+        if cmd[:2] == ["query", "session"]:
+            return types.SimpleNamespace(returncode=query_rc, stdout=query_out, stderr="boom")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")  # tscon
+
+    monkeypatch.setattr(server.subprocess, "run", _run)
+
+
+def test_windows_capture_retries_after_session_reconnect(monkeypatch, windows_tool_layer):
+    server, commands = windows_tool_layer
+    _session_tools(monkeypatch, server, commands)
+    _flaky_grab(monkeypatch, failures=1)
+    img, frame = server._capture_snapshot_frame(0, 1280)
+    assert img.size == frame.image_size == (1280, 457)
+    assert ["tscon", "2", "/dest:console"] in commands
+
+
+def test_windows_capture_error_surfaces_when_not_a_session_issue(monkeypatch, windows_tool_layer):
+    server, commands = windows_tool_layer
+    _session_tools(monkeypatch, server, commands, query_rc=1)  # query fails → no reconnect
+    _flaky_grab(monkeypatch, failures=1)
+    with pytest.raises(OSError, match="screen grab failed"):
+        server._capture_snapshot_frame(0, 1280)
+    assert not [c for c in commands if c[:1] == ["tscon"]]
+
+
+def test_windows_capture_reports_failed_retry(monkeypatch, windows_tool_layer):
+    server, commands = windows_tool_layer
+    _session_tools(monkeypatch, server, commands)
+    _flaky_grab(monkeypatch, failures=2)
+    with pytest.raises(RuntimeError, match="after session reconnect: screen grab failed"):
+        server._capture_snapshot_frame(0, 1280)
+
+
 # ---------------------------------------------------------------------------
 # macOS
 # ---------------------------------------------------------------------------

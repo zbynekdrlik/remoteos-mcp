@@ -101,6 +101,31 @@ def test_reports_unchanged_when_everything_fails():
     assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "unchanged"
 
 
+def _with_read_back(lib, awareness: int):
+    """Add the Win10 1607+ read-back API, reporting process awareness ``awareness``."""
+    lib.user32.GetThreadDpiAwarenessContext = _Fn(0x7FFF0011)
+    lib.user32.GetAwarenessFromDpiAwarenessContext = _Fn(awareness)
+    return lib
+
+
+def test_reports_actual_awareness_when_already_set():
+    # e.g. an application manifest made the process per-monitor aware before we ran:
+    # every set call is refused or a no-op, so report what the process really IS.
+    lib = _with_read_back(_windll(ctx_result=0, shcore_result=-2147024891, system_result=1), awareness=2)
+    assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "per-monitor"
+
+
+def test_reports_system_aware_from_read_back():
+    lib = _with_read_back(_windll(ctx_result=0, shcore_result=-2147024891, system_result=0), awareness=1)
+    assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "system"
+
+
+def test_v2_success_does_not_need_read_back():
+    lib = _with_read_back(_windll(), awareness=2)
+    assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "per-monitor-v2"
+    assert lib.user32.GetAwarenessFromDpiAwarenessContext.args == []
+
+
 def test_unavailable_off_windows(monkeypatch):
     # No ctypes.windll on Linux/macOS → nothing to set, never raises.
     monkeypatch.delattr(ctypes, "windll", raising=False)

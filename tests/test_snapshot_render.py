@@ -10,12 +10,11 @@ from __future__ import annotations
 import base64
 import io
 
-import pytest
 from PIL import Image
 
 from remoteos.coords import CaptureGeometry, frame_for
 from remoteos.platform.linux.desktop import WindowInfo
-from remoteos.platform.linux.display import parse_display_geometry, parse_xrandr_monitors
+from remoteos.platform.linux.display import parse_xrandr_monitors
 from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, fit_to_frame, window_lines
 
 
@@ -103,16 +102,6 @@ def test_draw_annotations_respects_max_elements():
 # ---------------------------------------------------------------------------
 # Linux display geometry parsing (pure)
 # ---------------------------------------------------------------------------
-
-
-def test_parse_display_geometry():
-    assert parse_display_geometry("2560 1600\n") == (2560, 1600)
-
-
-@pytest.mark.parametrize("text", ["", "garbage", "2560\n", "0 1600"])
-def test_parse_display_geometry_rejects_bad_output(text):
-    with pytest.raises(ValueError):
-        parse_display_geometry(text)
 
 
 def test_parse_xrandr_monitors():

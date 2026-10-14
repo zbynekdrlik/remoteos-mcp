@@ -29,36 +29,42 @@ class _Proc:
         self.stderr = b""
 
 
-_XRANDR = (
-    b"Monitors: 2\n"
-    b" 0: +*eDP-1 2560/344x1600/215+0+0  eDP-1\n"
-    b" 1: +HDMI-1 1920/527x1080/296+2560+0  HDMI-1\n"
-)
+def _install_fake_x11(monkeypatch, root, heads, capture_size=None):
+    """Fake X11 world: ``root`` = (W, H) of the X screen, ``heads`` = [(x, y, w, h), ...].
 
-
-@pytest.fixture
-def fake_x11(monkeypatch):
-    """A 2560x1600 X11 root with a second 1920x1080 monitor at +2560+0."""
+    Mirrors the real tools: ``xrandr --current`` reports the ROOT size, ``xrandr
+    --listmonitors`` the heads, and ``xdotool getdisplaygeometry`` only the FIRST
+    head (libxdo's Xinerama viewport — the trap a root-size query must avoid). A
+    full-screen scrot captures the whole root (``capture_size`` overrides that).
+    """
     monkeypatch.setattr(
         d,
         "_SESSION",
         d.SessionInfo(mode="x11", display=":0", uid=1000, user="newlevel", session_id="1"),
     )
     calls: list[list[str]] = []
+    listing = f"Monitors: {len(heads)}\n" + "".join(
+        f" {i}: +HEAD-{i} {w}/500x{h}/300+{x}+{y}  HEAD-{i}\n" for i, (x, y, w, h) in enumerate(heads)
+    )
 
     def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
         calls.append(list(cmd))
         if cmd[:2] == ["xdotool", "getdisplaygeometry"]:
-            return _Proc(b"2560 1600\n")
+            return _Proc(f"{heads[0][2]} {heads[0][3]}\n".encode())
+        if cmd[:2] == ["xrandr", "--current"]:
+            return _Proc(
+                f"Screen 0: minimum 8 x 8, current {root[0]} x {root[1]}, maximum 32767 x 32767\n"
+                f"HEAD-0 connected primary {heads[0][2]}x{heads[0][3]}+0+0\n".encode()
+            )
         if cmd[:2] == ["xrandr", "--listmonitors"]:
-            return _Proc(_XRANDR)
+            return _Proc(listing.encode())
         if cmd[:1] == ["wmctrl"]:
             return _Proc(b"0x0400000a 0 3210 100 50 800 600 host Editor\n")
         if cmd[:1] == ["scrot"]:
             if "-a" in cmd:
                 _x, _y, w, h = (int(v) for v in cmd[cmd.index("-a") + 1].split(","))
             else:
-                w, h = 2560, 1600
+                w, h = capture_size or root
             Image.new("RGB", (w, h), (255, 255, 255)).save(Path(cmd[-1]), format="PNG")
             return _Proc()
         return _Proc()
@@ -69,6 +75,18 @@ def fake_x11(monkeypatch):
     monkeypatch.setattr(d, "_run_x", _fake_run_x)
     monkeypatch.setattr(d, "_load_atspi", _no_atspi)
     return calls
+
+
+@pytest.fixture
+def fake_x11(monkeypatch):
+    """The issue's acceptance case: one 2560x1600 display."""
+    return _install_fake_x11(monkeypatch, root=(2560, 1600), heads=[(0, 0, 2560, 1600)])
+
+
+@pytest.fixture
+def dual_x11(monkeypatch):
+    """Two heads side by side: 2560x1600 at +0+0 and 1920x1080 at +2560+0 → root 4480x1600."""
+    return _install_fake_x11(monkeypatch, root=(4480, 1600), heads=[(0, 0, 2560, 1600), (2560, 0, 1920, 1080)])
 
 
 def _mousemoves(calls):
@@ -127,7 +145,8 @@ def test_click_clamps_to_frame(fake_x11):
 def test_click_coords_screen_passes_through(fake_x11):
     out = server.Click(1280, 800, coords="screen")
     assert _mousemoves(fake_x11) == [["1280", "800"]]
-    assert ["xdotool", "getdisplaygeometry"] not in fake_x11  # no frame needed for screen coords
+    geometry_queries = [c for c in fake_x11 if c[:1] == ["xrandr"] or c[:2] == ["xdotool", "getdisplaygeometry"]]
+    assert geometry_queries == []  # no frame needed for screen coords
     assert "image (" not in out
 
 
@@ -137,9 +156,9 @@ def test_click_rejects_unknown_coords(fake_x11):
     assert _mousemoves(fake_x11) == []
 
 
-def test_click_on_second_monitor_frame(fake_x11):
+def test_click_on_second_monitor_frame(dual_x11):
     server.Click(640, 360, monitor=2)  # 1920x1080 at +2560+0 → image 1280x720, scale 1.5
-    assert _mousemoves(fake_x11) == [["3520", "540"]]
+    assert _mousemoves(dual_x11) == [["3520", "540"]]
 
 
 def test_click_native_frame_max_width_0(fake_x11):
@@ -170,11 +189,39 @@ def test_snapshot_without_vision_still_states_contract(fake_x11):
     assert "scale 2.000" in _text(parts)
 
 
-def test_snapshot_second_monitor_reports_origin(fake_x11):
+def test_snapshot_second_monitor_reports_origin(dual_x11):
     parts = server.Snapshot(monitor=2)
     assert _image_size(parts) == (1280, 720)
     assert "screen 1920x1080 at origin (2560,0), scale 1.500" in _text(parts)
-    assert ["scrot", "--overwrite", "-a", "2560,0,1920,1080"] == [c for c in fake_x11 if c[:1] == ["scrot"]][0][:4]
+    assert ["scrot", "--overwrite", "-a", "2560,0,1920,1080"] == [c for c in dual_x11 if c[:1] == ["scrot"]][0][:4]
+
+
+def test_snapshot_all_monitors_covers_the_whole_x_root(dual_x11):
+    # monitor=0 is the X ROOT (both heads), not the first Xinerama head
+    parts = server.Snapshot()
+    assert _image_size(parts) == (1280, 457)
+    assert "Image 1280x457 = screen 4480x1600 at origin (0,0), scale 3.500" in _text(parts)
+
+
+def test_click_all_monitors_reaches_the_second_head(dual_x11):
+    server.Click(1000, 100)  # image x 1000 * 3.5 = 3500 → on the 1920 head at +2560
+    assert _mousemoves(dual_x11) == [["3500", "350"]]
+
+
+def test_capture_size_mismatch_is_logged(monkeypatch, caplog):
+    # A capture that does not match the reported geometry is unexpected: it is
+    # still fitted to the frame, but never silently.
+    _install_fake_x11(monkeypatch, root=(2560, 1600), heads=[(0, 0, 2560, 1600)], capture_size=(2000, 1000))
+    with caplog.at_level("WARNING"):
+        parts = server.Snapshot()
+    assert _image_size(parts) == (1280, 800)
+    assert "capture is 2000x1000 but the display geometry says 2560x1600" in caplog.text
+
+
+def test_headless_input_tool_returns_the_exact_provider_stub(monkeypatch):
+    monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
+    assert server.Click(10, 10) == "Not available on headless Linux (no display)"
+    assert server.Move(10, 10) == "Not available on headless Linux (no display)"
 
 
 def test_annotated_snapshot_states_contract(fake_x11):
