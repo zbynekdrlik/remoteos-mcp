@@ -112,6 +112,22 @@ clamped to 1..100.
 - **Legacy calls still work:** a signed `amount` (positive = up/right, negative = down/left)
   with `horizontal=true` for left/right. An explicit `direction` wins over both.
 
+## Typing text (Unicode)
+
+`Type("Žltý kôň ďakuje – €")` types any Unicode text exactly, whatever the keyboard layout:
+diacritics, symbols and emoji. `\n` (also `\r\n`) presses Enter and `\t` presses Tab.
+
+- **Windows:** `SendInput` Unicode packets (`KEYEVENTF_UNICODE`), one down/up per UTF-16
+  code unit, so emoji go as surrogate pairs.
+- **macOS:** Quartz keyboard events that carry the text, at most 20 UTF-16 units per event.
+- **Linux:** `xdotool type`.
+- **The reply counts what was delivered.** `Typed N chars` means N characters reached the
+  OS. If the OS refuses input part-way (a locked session), the reply is an error that says
+  how many got through.
+- **`method="paste"` (opt-in):** for an app that ignores typed keystrokes. It saves the
+  clipboard text, pastes with Ctrl+V (Command+V on macOS), then restores the clipboard. Only
+  text can be restored; the reply says so when the clipboard held none.
+
 ## MCP gateway (dev1)
 
 The machines are reachable only from boxes with a LAN route to them. `remoteos-gateway`
