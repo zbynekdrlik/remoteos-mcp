@@ -8,15 +8,26 @@ changes.
 from __future__ import annotations
 
 import json
+import os
 import stat
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from fake_pip import dist_field, find_dists, write_dist
+from fake_pip import dist_field, dist_files, find_dists, write_dist
 
 ROOT = Path(__file__).resolve().parent.parent
+FAKE_SHA = "0123456789abcdef0123456789abcdef01234567"
+# git shim: `ls-remote` answers like GitHub does for refs/heads/main; anything
+# else prints a version line.
+_FAKE_GIT = f"""\
+if [[ "$1" == "ls-remote" ]]; then
+    printf '%s\\trefs/heads/main\\n' "{FAKE_SHA}"
+    exit 0
+fi
+echo "git version 2.43.0"
+"""
 INSTALLER_LINUX = ROOT / "install-linux.sh"
 INSTALLER_MACOS = ROOT / "install.sh"
 INSTALLER_WINDOWS = ROOT / "install.ps1"
@@ -136,6 +147,12 @@ case "$1" in
                     exit 0
                     ;;
                 install)
+                    # --dry-run --report <file>: an empty resolution report
+                    prev=""
+                    for arg in "$@"; do
+                        if [[ "$prev" == "--report" ]]; then echo '{{"version": "1", "install": []}}' > "$arg"; fi
+                        prev="$arg"
+                    done
                     echo "Successfully installed remoteos-mcp-{installed_version}"
                     exit 0
                     ;;
@@ -165,7 +182,7 @@ esac
     )
 
     # git
-    _make_shim(shim_dir / "git", 'echo "git version 2.43.0"')
+    _make_shim(shim_dir / "git", _FAKE_GIT)
 
     # apt-get — logs all invocations
     _make_shim(shim_dir / "apt-get", f'echo "apt-get $*" >> "{invocations}"\nexit 0')
@@ -234,6 +251,12 @@ case "$1" in
                     exit 0
                     ;;
                 install)
+                    # --dry-run --report <file>: an empty resolution report
+                    prev=""
+                    for arg in "$@"; do
+                        if [[ "$prev" == "--report" ]]; then echo '{{"version": "1", "install": []}}' > "$arg"; fi
+                        prev="$arg"
+                    done
                     echo "Successfully installed remoteos-mcp-{installed_version}"
                     exit 0
                     ;;
@@ -286,6 +309,9 @@ fi
     # brew — not available
     _make_shim(shim_dir / "brew", "exit 1")
 
+    # git — never the real one (it would ls-remote GitHub)
+    _make_shim(shim_dir / "git", _FAKE_GIT)
+
 
 def _run_installer(
     script: Path,
@@ -294,16 +320,21 @@ def _run_installer(
     *,
     timeout: int = 60,
 ) -> subprocess.CompletedProcess:
-    """Run an installer script with controlled PATH."""
+    """Run an installer script with controlled PATH.  Its `mktemp -d` work dir
+    lands in `tmp_path/tmp` (see `work_dirs`).  $INSTALLER_TEST_BASH picks the
+    bash binary (e.g. a bash 3.2, the macOS /bin/bash)."""
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir(exist_ok=True)
     env = {
         "PATH": f"{shim_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
         "HOME": str(tmp_path),
         "TERM": "dumb",
         "LANG": "C",
+        "TMPDIR": str(tmpdir),
     }
 
     return subprocess.run(
-        ["bash", str(script)],
+        [os.environ.get("INSTALLER_TEST_BASH", "bash"), str(script)],
         capture_output=True,
         text=True,
         env=env,
@@ -330,12 +361,15 @@ def _find_first_code_line(content: str, *keywords: str, exclude: str | None = No
 # fake site-packages, for the preflight / rollback tests
 # ---------------------------------------------------------------------------
 
+
 FAKE_PIP = Path(__file__).resolve().parent / "fake_pip.py"
 OLD_VERSION = "0.7.0.dev20"
 OLD_FASTMCP_SLIM = "4.0.2"
 NEW_VERSION = "0.7.0.dev24"
-MAIN_CONSTRAINTS = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
-GIT_URL = "git+https://github.com/zbynekdrlik/remoteos-mcp.git@main"
+# The installers pin one run to ONE commit of main (git ls-remote): the code
+# and the constraints file both come from that commit.
+PINNED_CONSTRAINTS = f"https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/{FAKE_SHA}/constraints.txt"
+GIT_URL = f"git+https://github.com/zbynekdrlik/remoteos-mcp.git@{FAKE_SHA}"
 
 
 @dataclass
@@ -345,6 +379,7 @@ class FakePipBox:
     site: Path
     bin_dir: Path
     log: Path
+    tmp: Path
 
     def entries(self) -> list[dict]:
         """Every pip call: {"argv": [...], "PIP_CONSTRAINT": ..., "TMPDIR": ...}."""
@@ -374,6 +409,10 @@ class FakePipBox:
                     result[str(path)] = (path.read_bytes(), path.stat().st_mode & 0o777)
         return result
 
+    def work_dirs(self) -> list[Path]:
+        """The installer's `mktemp -d` work dirs still present after the run."""
+        return sorted(self.tmp.iterdir()) if self.tmp.exists() else []
+
 
 def _verb(argv: list[str]) -> str:
     if argv[:1] == ["install"]:
@@ -384,32 +423,38 @@ def _verb(argv: list[str]) -> str:
 def install_old_remoteos(box: FakePipBox) -> None:
     """The box before the upgrade: remoteos-mcp OLD_VERSION (with its console
     script outside site-packages, as RECORD lists it) + fastmcp-slim
-    OLD_FASTMCP_SLIM."""
+    OLD_FASTMCP_SLIM — both importable."""
     write_dist(
         box.site,
         "remoteos-mcp",
         OLD_VERSION,
         {
-            "remoteos/__init__.py": f"# remoteos {OLD_VERSION}\n",
+            **dist_files("remoteos-mcp", OLD_VERSION),
             "remoteos/server.py": "def main():\n    return 'old server'\n",
             "../../../bin/remoteos-mcp": "#!/usr/bin/python3\nfrom remoteos.__main__ import cli\ncli()\n",
         },
         executable=("../../../bin/remoteos-mcp",),
     )
-    write_dist(
-        box.site, "fastmcp-slim", OLD_FASTMCP_SLIM, {"fastmcp/__init__.py": f"# fastmcp-slim {OLD_FASTMCP_SLIM}\n"}
-    )
+    write_dist(box.site, "fastmcp-slim", OLD_FASTMCP_SLIM, dist_files("fastmcp-slim", OLD_FASTMCP_SLIM))
+
+
+def install_dep(box: FakePipBox, name: str, version: str, *, installer: str = "pip") -> None:
+    """A dependency already on the box: pip-owned (RECORD) by default,
+    apt-owned with `installer="debian"` (no RECORD, as Debian ships it)."""
+    write_dist(box.site, name, version, dist_files(name, version), installer=installer, record=installer != "debian")
 
 
 def setup_fake_pip(tmp_path: Path, shim_dir: Path, **config: object) -> FakePipBox:
     """Route the python3 shim's `-m pip` to fake_pip.py with `config` (keys:
-    see fake_pip.py).  Call AFTER _create_*_shims: it replaces their
-    stateless python3 shim."""
+    see fake_pip.py), and run the installer's `-c "import remoteos..."` check
+    against the fake site-packages only (`-S`: no real site-packages).  Call
+    AFTER _create_*_shims: it replaces their stateless python3 shim."""
     prefix = tmp_path / "prefix"
     box = FakePipBox(
         site=prefix / "lib" / "python3.14" / "dist-packages",
         bin_dir=prefix / "bin",
         log=tmp_path / "pip-calls.jsonl",
+        tmp=tmp_path / "tmp",
     )
     box.site.mkdir(parents=True)
     box.bin_dir.mkdir(parents=True)
@@ -430,6 +475,12 @@ case "$1" in
             FAKE_PIP_CONFIG="{cfg_path}" exec "{real_py}" "{FAKE_PIP}" "$@"
         elif [[ "$2" == "ensurepip" ]]; then
             exit 0
+        fi
+        exec "{real_py}" "$@"
+        ;;
+    -c)
+        if [[ "$2" == *"import remoteos"* ]]; then
+            exec "{real_py}" -S -c "import sys; sys.path.insert(0, sys.argv[1]); exec(sys.argv[2])" "{box.site}" "$2"
         fi
         exec "{real_py}" "$@"
         ;;
