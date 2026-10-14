@@ -191,6 +191,15 @@ def test_pyautogui_drag_maps_start_and_target(pyautogui_branch):
     assert fake.drag.calls == [((220, 698), {"duration": 0.3})]
 
 
+def test_pyautogui_type_and_drag_start_on_column_zero(pyautogui_branch):
+    # x=0 is the frame's left column, not "no point" (#31): image (0,y) → screen (-1920, …)
+    server, fake = pyautogui_branch
+    server.Type("hi", x=0, y=228)
+    server.Move(640, 228, drag=True, start_x=0, start_y=2)
+    assert fake.click.calls == [((-1920, 798), {})]
+    assert fake.moveTo.calls == [((-1920, 7), {})]
+
+
 def test_pyautogui_type_point(pyautogui_branch):
     server, fake = pyautogui_branch
     server.Type("hi", x=640, y=228)
@@ -587,6 +596,18 @@ def test_windows_capture_reports_failed_retry(monkeypatch, windows_tool_layer):
     _flaky_grab(monkeypatch, failures=2)
     with pytest.raises(RuntimeError, match="after session reconnect: screen grab failed"):
         server._capture_snapshot_frame(0, 1280)
+
+
+def test_session_reconnect_helper_is_defined_once():
+    # A second module-level def silently replaced the first, leaving a dead copy (#31).
+    import ast
+
+    import remoteos.__main__ as server
+
+    tree = ast.parse(Path(server.__file__).read_text(encoding="utf-8"))
+    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_ensure_session_connected"]
+    assert len(defs) == 1
+    assert [a.arg for a in defs[0].args.args] == ["force"]  # the effective copy (ReconnectSession's force)
 
 
 # ---------------------------------------------------------------------------

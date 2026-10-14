@@ -170,6 +170,21 @@ def test_type_and_scroll_without_point_do_not_move(fake_x11):
     assert _mousemoves(fake_x11) == []
 
 
+def test_type_scroll_and_drag_start_reach_column_and_row_zero(fake_x11):
+    # x=0 alone / y=0 alone is the frame's left column / top row, never "no point" (#31)
+    server.Type("hi", x=0, y=200)
+    server.Scroll(-3, x=300, y=0)
+    server.Move(640, 400, drag=True, start_x=0, start_y=20)
+    assert _mousemoves(fake_x11) == [["0", "400"], ["600", "0"], ["0", "40"], ["1280", "800"]]
+
+
+def test_drag_without_start_point_drags_from_the_current_position(fake_x11):
+    # only 0/0 (the default) means "no start point"
+    server.Move(640, 400, drag=True)
+    assert _mousemoves(fake_x11) == [["1280", "800"]]
+    assert ["xdotool", "mousedown", "1"] in fake_x11
+
+
 def test_type_paste_method_clicks_the_mapped_point_then_pastes(fake_x11, monkeypatch):
     monkeypatch.setattr(server.time, "sleep", lambda s: None)  # the paste settle wait
     out = server.Type("Žltý", x=300, y=200, method="paste")
