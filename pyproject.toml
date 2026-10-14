@@ -21,6 +21,11 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp==4.0.3",
+    # remoteos-gateway (#25): imported directly, so pinned directly — same versions
+    # fastmcp already resolves (httpx2 is fastmcp/mcp's own runtime HTTP client).
+    "httpx2==2.12.0",
+    "starlette==1.6.0",
+    "uvicorn==0.52.4",
     "pyautogui==0.9.54; sys_platform != 'linux'",
     "psutil==7.2.2",
     "pywin32==312; sys_platform == 'win32'",
@@ -36,6 +41,7 @@ dependencies = [
 
 [project.scripts]
 remoteos-mcp = "remoteos.__main__:cli"
+remoteos-gateway = "remoteos.gateway.cli:main"
 
 [project.optional-dependencies]
 ocr = ["pytesseract>=0.3.10"]
