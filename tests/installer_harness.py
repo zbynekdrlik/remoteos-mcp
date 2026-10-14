@@ -7,10 +7,14 @@ changes.
 
 from __future__ import annotations
 
+import json
 import stat
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+
+from fake_pip import dist_field, find_dists, write_dist
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER_LINUX = ROOT / "install-linux.sh"
@@ -319,3 +323,133 @@ def _find_first_code_line(content: str, *keywords: str, exclude: str | None = No
                 continue
             return i
     return None
+
+
+# ---------------------------------------------------------------------------
+# Stateful fake pip (tests/fake_pip.py): a Debian-pip stand-in with a real
+# fake site-packages, for the preflight / rollback tests
+# ---------------------------------------------------------------------------
+
+FAKE_PIP = Path(__file__).resolve().parent / "fake_pip.py"
+OLD_VERSION = "0.7.0.dev20"
+OLD_FASTMCP_SLIM = "4.0.2"
+NEW_VERSION = "0.7.0.dev24"
+MAIN_CONSTRAINTS = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
+GIT_URL = "git+https://github.com/zbynekdrlik/remoteos-mcp.git@main"
+
+
+@dataclass
+class FakePipBox:
+    """A fake box: site-packages + console-script dir + the fake pip's call log."""
+
+    site: Path
+    bin_dir: Path
+    log: Path
+
+    def entries(self) -> list[dict]:
+        """Every pip call: {"argv": [...], "PIP_CONSTRAINT": ..., "TMPDIR": ...}."""
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text().splitlines() if line]
+
+    def calls(self, verb: str) -> list[dict]:
+        """The calls of one verb: show / dry-run / install / uninstall."""
+        return [e for e in self.entries() if _verb(e["argv"]) == verb]
+
+    def verbs(self) -> list[str]:
+        """The state-relevant pip call sequence as verbs (`show` / `--version`
+        queries left out)."""
+        return [v for v in (_verb(e["argv"]) for e in self.entries()) if v not in ("show", "--version")]
+
+    def versions(self, name: str) -> list[str]:
+        """Versions of every dist-info installed for `name` (stale ones too)."""
+        return [dist_field(d, "Version") for d in find_dists(self.site, name)]
+
+    def files(self) -> dict[str, tuple[bytes, int]]:
+        """Every file under site-packages + bin, with its bytes and mode bits."""
+        result = {}
+        for root in (self.site, self.bin_dir):
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    result[str(path)] = (path.read_bytes(), path.stat().st_mode & 0o777)
+        return result
+
+
+def _verb(argv: list[str]) -> str:
+    if argv[:1] == ["install"]:
+        return "dry-run" if "--dry-run" in argv else "install"
+    return argv[0] if argv else ""
+
+
+def install_old_remoteos(box: FakePipBox) -> None:
+    """The box before the upgrade: remoteos-mcp OLD_VERSION (with its console
+    script outside site-packages, as RECORD lists it) + fastmcp-slim
+    OLD_FASTMCP_SLIM."""
+    write_dist(
+        box.site,
+        "remoteos-mcp",
+        OLD_VERSION,
+        {
+            "remoteos/__init__.py": f"# remoteos {OLD_VERSION}\n",
+            "remoteos/server.py": "def main():\n    return 'old server'\n",
+            "../../../bin/remoteos-mcp": "#!/usr/bin/python3\nfrom remoteos.__main__ import cli\ncli()\n",
+        },
+        executable=("../../../bin/remoteos-mcp",),
+    )
+    write_dist(
+        box.site, "fastmcp-slim", OLD_FASTMCP_SLIM, {"fastmcp/__init__.py": f"# fastmcp-slim {OLD_FASTMCP_SLIM}\n"}
+    )
+
+
+def setup_fake_pip(tmp_path: Path, shim_dir: Path, **config: object) -> FakePipBox:
+    """Route the python3 shim's `-m pip` to fake_pip.py with `config` (keys:
+    see fake_pip.py).  Call AFTER _create_*_shims: it replaces their
+    stateless python3 shim."""
+    prefix = tmp_path / "prefix"
+    box = FakePipBox(
+        site=prefix / "lib" / "python3.14" / "dist-packages",
+        bin_dir=prefix / "bin",
+        log=tmp_path / "pip-calls.jsonl",
+    )
+    box.site.mkdir(parents=True)
+    box.bin_dir.mkdir(parents=True)
+    cfg_path = tmp_path / "fake-pip.json"
+    cfg_path.write_text(json.dumps({"site": str(box.site), "log": str(box.log), "new_version": NEW_VERSION, **config}))
+    real_py = _real_python()
+    _make_shim(
+        shim_dir / "python3",
+        f"""\
+case "$1" in
+    --version)
+        echo "Python 3.14.4"
+        exit 0
+        ;;
+    -m)
+        if [[ "$2" == "pip" ]]; then
+            shift 2
+            FAKE_PIP_CONFIG="{cfg_path}" exec "{real_py}" "{FAKE_PIP}" "$@"
+        elif [[ "$2" == "ensurepip" ]]; then
+            exit 0
+        fi
+        exec "{real_py}" "$@"
+        ;;
+    *)
+        exec "{real_py}" "$@"
+        ;;
+esac
+""",
+    )
+    return box
+
+
+def health_shim(shim_dir: Path, version: str) -> None:
+    """curl answering /health with `version` (the post-install self-check)."""
+    _make_shim(
+        shim_dir / "curl",
+        f"""\
+if [[ "$*" == *"health"* ]]; then
+    echo '{{"status":"ok","version":"{version}"}}'
+fi
+exit 0
+""",
+    )
