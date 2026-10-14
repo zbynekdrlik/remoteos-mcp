@@ -1,0 +1,50 @@
+# remoteos MCP gateway — systemd --user unit for dev1 (#25).
+#
+# Install (as the account that owns ~/.claude/mcp-configs/remoteos-mcp.mcp.json):
+#   cp deploy/remoteos-gateway.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now remoteos-gateway.service
+#   loginctl enable-linger "$USER"        # keep it running without a login session
+#
+# Registry edits (`remoteos-gateway allow/deny/revoke/...`) apply on the next request; no
+# restart needed. `systemctl --user reload remoteos-gateway` forces a re-read (SIGHUP).
+# Logs: `journalctl --user -u remoteos-gateway` (operational) and
+#       `remoteos-gateway log` (per-request access log).
+
+[Unit]
+Description=remoteos MCP gateway — per-consumer access to managed machines (tailscale only)
+Documentation=https://github.com/zbynekdrlik/remoteos-mcp#mcp-gateway-dev1
+After=network-online.target
+Wants=network-online.target
+# A user unit cannot order itself after tailscaled (a system unit): when the tailscale
+# address is not up yet the bind fails and Restart= retries until it is.
+StartLimitIntervalSec=300
+StartLimitBurst=30
+
+[Service]
+Type=simple
+# Binds 100.104.8.125:8796 (dev1's tailscale address) by default; it refuses 0.0.0.0 / ::.
+ExecStart=%h/.local/bin/remoteos-gateway serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+
+# ~/.config/remoteos-gateway (registry, read here; written only by the CLI) and
+# ~/.local/state/remoteos-gateway (access log, written here), both 0700.
+ConfigurationDirectory=remoteos-gateway
+ConfigurationDirectoryMode=0700
+StateDirectory=remoteos-gateway
+StateDirectoryMode=0700
+
+# --- Hardening: the gateway only reads two config files and appends one log ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+# TCP to consumers + machines; AF_UNIX for the resolver (machine names like stream.lan).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=default.target
