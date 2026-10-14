@@ -29,13 +29,15 @@ class _Proc:
         self.stderr = b""
 
 
-def _install_fake_x11(monkeypatch, root, heads, capture_size=None):
+def _install_fake_x11(monkeypatch, root, heads, capture_size=None, xrandr_installed=True):
     """Fake X11 world: ``root`` = (W, H) of the X screen, ``heads`` = [(x, y, w, h), ...].
 
     Mirrors the real tools: ``xrandr --current`` reports the ROOT size, ``xrandr
     --listmonitors`` the heads, and ``xdotool getdisplaygeometry`` only the FIRST
     head (libxdo's Xinerama viewport — the trap a root-size query must avoid). A
     full-screen scrot captures the whole root (``capture_size`` overrides that).
+    ``xrandr_installed=False`` makes xrandr fail the way ``_run_x`` reports a
+    missing binary.
     """
     monkeypatch.setattr(
         d,
@@ -49,6 +51,8 @@ def _install_fake_x11(monkeypatch, root, heads, capture_size=None):
 
     def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
         calls.append(list(cmd))
+        if cmd[:1] == ["xrandr"] and not xrandr_installed:
+            raise RuntimeError("xrandr not installed: [Errno 2] No such file or directory: 'xrandr'")
         if cmd[:2] == ["xdotool", "getdisplaygeometry"]:
             return _Proc(f"{heads[0][2]} {heads[0][3]}\n".encode())
         if cmd[:2] == ["xrandr", "--current"]:
@@ -216,6 +220,25 @@ def test_capture_size_mismatch_is_logged(monkeypatch, caplog):
         parts = server.Snapshot()
     assert _image_size(parts) == (1280, 800)
     assert "capture is 2000x1000 but the display geometry says 2560x1600" in caplog.text
+
+
+def test_matching_capture_logs_no_mismatch_warning(fake_x11, caplog):
+    with caplog.at_level("WARNING"):
+        server.Snapshot()
+    assert "capture is" not in caplog.text
+
+
+def test_missing_xrandr_fails_loudly_never_a_wrong_frame(monkeypatch):
+    calls = _install_fake_x11(monkeypatch, root=(2560, 1600), heads=[(0, 0, 2560, 1600)], xrandr_installed=False)
+    (snapshot_error,) = server.Snapshot()
+    assert snapshot_error.startswith("Snapshot error: xrandr not installed")
+    assert server.Click(640, 400).startswith("Click error: xrandr not installed")
+    assert _mousemoves(calls) == []  # no click at an unmapped / guessed point
+
+
+def test_unknown_monitor_index_is_an_error(dual_x11):
+    assert server.Click(1, 1, monitor=3) == "Click error: Monitor 3 not found (have 2)"
+    assert _mousemoves(dual_x11) == []
 
 
 def test_headless_input_tool_returns_the_exact_provider_stub(monkeypatch):

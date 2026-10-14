@@ -192,6 +192,7 @@ def windows_tool_layer(monkeypatch, win):
     monkeypatch.setattr(server, "is_windows", lambda: True)
     monkeypatch.setattr(server, "is_linux", lambda: False)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)  # tscon's 1 s settle wait
     commands: list[list[str]] = []
     return server, commands
 

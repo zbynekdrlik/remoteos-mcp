@@ -101,10 +101,18 @@ def test_reports_unchanged_when_everything_fails():
     assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "unchanged"
 
 
-def _with_read_back(lib, awareness: int):
-    """Add the Win10 1607+ read-back API, reporting process awareness ``awareness``."""
-    lib.user32.GetThreadDpiAwarenessContext = _Fn(0x7FFF0011)
+_CTX = 0x7FFF0011  # an opaque DPI_AWARENESS_CONTEXT handle
+
+
+def _with_read_back(lib, awareness: int, is_v2: int | None = None):
+    """Add the Win10 1607+ read-back API, reporting process awareness ``awareness``.
+
+    ``is_v2`` (when given) is what ``AreDpiAwarenessContextsEqual(ctx, V2)`` returns.
+    """
+    lib.user32.GetThreadDpiAwarenessContext = _Fn(_CTX)
     lib.user32.GetAwarenessFromDpiAwarenessContext = _Fn(awareness)
+    if is_v2 is not None:
+        lib.user32.AreDpiAwarenessContextsEqual = _Fn(is_v2)
     return lib
 
 
@@ -113,6 +121,31 @@ def test_reports_actual_awareness_when_already_set():
     # every set call is refused or a no-op, so report what the process really IS.
     lib = _with_read_back(_windll(ctx_result=0, shcore_result=-2147024891, system_result=1), awareness=2)
     assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "per-monitor"
+    # the context is a HANDLE: pointer-sized both ways, and handed on unchanged
+    assert lib.user32.GetThreadDpiAwarenessContext.restype is ctypes.c_void_p
+    assert lib.user32.GetAwarenessFromDpiAwarenessContext.argtypes == [ctypes.c_void_p]
+    assert lib.user32.GetAwarenessFromDpiAwarenessContext.args == [(_CTX,)]
+
+
+def test_reports_preset_per_monitor_v2():
+    # a manifest already made the process per-monitor-v2: the read-back must say v2,
+    # not v1 (DPI_AWARENESS alone cannot tell them apart).
+    lib = _with_read_back(_windll(ctx_result=0, shcore_result=-2147024891, system_result=1), awareness=2, is_v2=1)
+    assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "per-monitor-v2"
+    ((ctx, v2),) = lib.user32.AreDpiAwarenessContextsEqual.args
+    assert ctx == _CTX
+    v2 = v2.value if isinstance(v2, ctypes.c_void_p) else ctypes.c_void_p(v2).value
+    assert v2 & 0xFFFFFFFF == 0xFFFFFFFC  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+
+
+def test_reports_per_monitor_v1_when_contexts_differ():
+    lib = _with_read_back(_windll(ctx_result=0, shcore_result=0), awareness=2, is_v2=0)
+    assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "per-monitor"
+
+
+def test_reports_unaware_from_read_back():
+    lib = _with_read_back(_windll(ctx_result=0, shcore_result=-2147024891, system_result=0), awareness=0)
+    assert dpi.enable_per_monitor_dpi_awareness(windll=lib) == "unaware"
 
 
 def test_reports_system_aware_from_read_back():
