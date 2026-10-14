@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ctypes
 import importlib
+import logging
 import struct
 import sys
 import types
@@ -168,6 +169,7 @@ def pyautogui_branch(monkeypatch, win):
         hscroll=_Recorder(),
     )
     monkeypatch.setattr(server, "pyautogui", fake, raising=False)
+    monkeypatch.setattr(mod, "pyautogui", fake, raising=False)  # the provider's own typing path (#30)
     monkeypatch.setattr(server, "is_linux", lambda: False)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
@@ -472,6 +474,50 @@ def test_windows_paste_method_refused_clipboard_is_an_error_before_the_paste_key
     assert pressed == []
 
 
+def test_windows_paste_reports_a_failed_restore(win_clipboard, monkeypatch):
+    server, clip, pressed = win_clipboard
+    write = clip.SetClipboardText
+
+    def _second_write_refused(text, fmt):
+        if clip.writes:  # the restore is the second write
+            raise OSError("OpenClipboard failed")
+        write(text, fmt)
+
+    monkeypatch.setattr(sys.modules["win32clipboard"], "SetClipboardText", _second_write_refused)
+    out = server.Type("ďakujem", method="paste")
+    assert pressed == [(("ctrl", "v"), "ďakujem")]
+    assert out == "Pasted 7 chars, but restoring the clipboard failed: Error: OpenClipboard failed"
+
+
+def test_windows_paste_restores_the_clipboard_when_the_paste_keys_fail(win_clipboard, pyautogui_branch):
+    server, clip, _ = win_clipboard
+    _, fake = pyautogui_branch
+
+    def _broken_keyboard(*keys):
+        raise OSError("keyboard is gone")
+
+    fake.hotkey = _broken_keyboard
+    out = server.Type("ďakujem", method="paste")
+    assert out == "Type error: keyboard is gone"
+    assert clip.writes == ["ďakujem", "old clip"] and clip.text == "old clip"
+
+
+def test_windows_provider_type_text_clicks_a_point_on_row_zero(pyautogui_branch):
+    server, fake = pyautogui_branch
+    mod = server.get_desktop()
+    assert mod.type_text("ď", x=-1500, y=0) == "Typed 1 chars"
+    assert fake.click.calls == [((-1500, 0), {})]  # y=0 is a real screen row, not "no point"
+    assert _key_calls(ctypes.windll.input) == [_packet(0x010F)]
+
+
+def test_type_tool_logs_the_count_never_the_text(pyautogui_branch, caplog):
+    server, _ = pyautogui_branch
+    with caplog.at_level(logging.DEBUG, logger="remoteos.mcp"):
+        assert server.Type("tajné heslo 123") == "Typed 15 chars"
+    assert "Type 15 chars by keys" in caplog.text
+    assert "tajné" not in caplog.text and "heslo" not in caplog.text
+
+
 # --- Windows: a failed grab is retried once after reconnecting the RDP session ---
 
 
@@ -580,8 +626,10 @@ def mac(monkeypatch):
     # Keyboard events (#30): (keycode, key down?) and the Unicode string set on the event.
     quartz.CGEventCreateKeyboardEvent = lambda src, keycode, down: {"key": (keycode, down), "unicode": None}
     quartz.CGEventKeyboardSetUnicodeString = lambda event, length, text: event.update(unicode=(length, text))
+    quartz.CGPreflightPostEventAccess = lambda: True  # the process may post events (Privacy & Security)
     quartz.CGEventPost = lambda tap, event: quartz.posted.append((tap, event))
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    monkeypatch.setitem(sys.modules, "pyautogui", types.ModuleType("pyautogui"))
     _purge("remoteos.platform.mac.desktop")
     mod = importlib.import_module("remoteos.platform.mac.desktop")
 
@@ -733,6 +781,16 @@ def test_mac_failed_keyboard_event_is_an_error_and_posts_nothing(mac, monkeypatc
     assert quartz.posted == []
 
 
+def test_mac_type_unicode_without_the_posting_permission_is_an_error_and_posts_nothing(mac, monkeypatch):
+    mod, _ = mac
+    quartz = sys.modules["Quartz"]
+    # CGEventPost returns nothing: without this permission macOS drops the events silently
+    monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
+    with pytest.raises(RuntimeError, match=r"^macOS does not let this process post keyboard events"):
+        mod.type_unicode("Žltý")
+    assert quartz.posted == []
+
+
 @pytest.fixture
 def mac_tool_layer(monkeypatch, mac):
     import remoteos.__main__ as server
@@ -749,6 +807,7 @@ def mac_tool_layer(monkeypatch, mac):
         write=_Recorder(),
     )
     monkeypatch.setattr(server, "pyautogui", fake, raising=False)
+    monkeypatch.setattr(mod, "pyautogui", fake, raising=False)  # the provider's own typing path (#30)
     monkeypatch.setattr(server, "is_linux", lambda: False)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
@@ -785,9 +844,9 @@ def test_mac_clear_selects_all_with_command_not_ctrl(mac_tool_layer):
     assert fake.press.calls == [(("delete",), {})]
 
 
-def test_mac_paste_method_uses_command_v_and_restores_the_clipboard(mac_tool_layer, monkeypatch):
-    server, fake, quartz = mac_tool_layer
-    board = {"text": "old clip", "writes": []}
+def _mac_pasteboard(monkeypatch, server, fake, text):
+    """``pbpaste`` / ``pbcopy`` over one text slot; the paste keys record what it holds when pressed."""
+    board = {"text": text, "writes": [], "pressed": []}
 
     def _run(cmd, **kwargs):
         if cmd == ["pbpaste"]:
@@ -799,10 +858,32 @@ def test_mac_paste_method_uses_command_v_and_restores_the_clipboard(mac_tool_lay
         raise AssertionError(f"unexpected command {cmd}")
 
     monkeypatch.setattr(server.get_desktop().subprocess, "run", _run)
-    pressed = []
-    fake.hotkey = lambda *keys: pressed.append((keys, board["text"]))
+    fake.hotkey = lambda *keys: board["pressed"].append((keys, board["text"]))
+    return board
+
+
+def test_mac_paste_method_uses_command_v_and_restores_the_clipboard(mac_tool_layer, monkeypatch):
+    server, fake, quartz = mac_tool_layer
+    board = _mac_pasteboard(monkeypatch, server, fake, "old clip")
     out = server.Type("Žltý kôň", method="paste")
-    assert pressed == [(("command", "v"), "Žltý kôň")]
+    assert board["pressed"] == [(("command", "v"), "Žltý kôň")]
     assert board["writes"] == ["Žltý kôň", "old clip"]
     assert out == "Pasted 8 chars (clipboard restored)"
     assert _keys_posted(quartz) == []
+
+
+def test_mac_paste_with_an_empty_or_non_text_clipboard_says_it_was_not_restored(mac_tool_layer, monkeypatch):
+    server, fake, _ = mac_tool_layer
+    # pbpaste prints "" for an empty clipboard AND for an image: there is no text to put back
+    board = _mac_pasteboard(monkeypatch, server, fake, "")
+    out = server.Type("Žltý", method="paste")
+    assert board["writes"] == ["Žltý"]  # no "restore" that would only wipe the clipboard
+    assert out == "Pasted 4 chars (the clipboard held no text, so it was not restored)"
+
+
+def test_mac_provider_type_text_clicks_a_point_on_column_zero(mac_tool_layer):
+    server, fake, quartz = mac_tool_layer
+    mod = server.get_desktop()
+    assert mod.type_text("ď", x=0, y=10) == "Typed 1 chars"
+    assert fake.click.calls == [((0, 10), {})]  # x=0 is a real screen column, not "no point"
+    assert _typed_strings(quartz) == [(1, "ď")]

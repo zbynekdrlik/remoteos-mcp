@@ -299,6 +299,35 @@ def test_x11_type_text_paste_method_pastes_then_restores_the_clipboard(x11_clipb
     assert out == "Pasted 8 chars (clipboard restored)"
 
 
+def test_x11_paste_with_an_empty_clipboard_does_not_restore_it(x11_clipboard):
+    mod, board, log = x11_clipboard
+    board["text"] = ""
+    out = mod.type_text("ž", method="paste")
+    assert [cmd for cmd, _ in log] == [
+        ["xclip", "-selection", "clipboard"],
+        ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
+    ]
+    assert out == "Pasted 1 chars (the clipboard held no text, so it was not restored)"
+
+
+def test_x11_type_text_point_on_column_zero_is_a_real_point(x11):
+    mod, calls = x11
+    mod.type_text("a", x=0, y=5)
+    assert ["xdotool", "mousemove", "0", "5", "click", "1"] in calls
+
+
+def test_x11_type_unicode_types_with_xdotool_and_returns_the_count(x11):
+    mod, calls = x11
+    assert mod.type_unicode("Žltý kôň") == 8
+    assert calls[-1] == ["xdotool", "type", "--delay", "20", "--", "Žltý kôň"]
+
+
+def test_headless_type_unicode_raises_the_stub_message(headless):
+    with pytest.raises(RuntimeError) as exc:
+        headless.type_unicode("x")
+    assert str(exc.value) == _MSG
+
+
 def test_x11_type_text_paste_with_clear_and_enter_keeps_their_order(x11_clipboard):
     mod, _, log = x11_clipboard
     mod.type_text("ďakujem", clear=True, press_enter=True, method="paste")

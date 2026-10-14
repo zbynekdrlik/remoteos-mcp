@@ -176,7 +176,10 @@ def test_type_paste_method_clicks_the_mapped_point_then_pastes(fake_x11, monkeyp
     assert _mousemoves(fake_x11) == [["600", "400"]]
     assert ["xdotool", "key", "--clearmodifiers", "ctrl+v"] in fake_x11
     assert not [c for c in fake_x11 if c[:2] == ["xdotool", "type"]]
-    assert out.startswith("Pasted 4 chars (clipboard restored) [image (300,200) → screen (600,400)")
+    # the fake X11 clipboard is empty: there is no text to put back (#30 review round 1)
+    assert out.startswith(
+        "Pasted 4 chars (the clipboard held no text, so it was not restored) [image (300,200) → screen (600,400)"
+    )
 
 
 def test_type_unknown_method_is_an_error_and_sends_nothing(fake_x11):
