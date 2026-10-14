@@ -77,7 +77,14 @@ def _install_fake_x11(monkeypatch, root, heads, capture_size=None, xrandr_instal
     def _no_atspi():
         raise ImportError("no AT-SPI bus in unit tests")
 
+    def _fake_run_capture(cmd, timeout=10):
+        # the desktop tools' preflight asks logind whether the session is locked (#32)
+        if cmd[:2] == ["loginctl", "show-session"]:
+            return 0, "no\n", ""
+        raise AssertionError(f"unexpected helper command {cmd}")
+
     monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(d, "_run_capture", _fake_run_capture)
     monkeypatch.setattr(d, "_load_atspi", _no_atspi)
     return calls
 
