@@ -881,6 +881,44 @@ def test_mac_paste_with_an_empty_or_non_text_clipboard_says_it_was_not_restored(
     assert out == "Pasted 4 chars (the clipboard held no text, so it was not restored)"
 
 
+def test_mac_paste_without_the_posting_permission_is_an_error_and_touches_nothing(mac_tool_layer, monkeypatch):
+    server, fake, quartz = mac_tool_layer
+    board = _mac_pasteboard(monkeypatch, server, fake, "old clip")
+    monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
+    # pyautogui's Command+V is a CGEventPost too: macOS would drop it silently behind "Pasted 4 chars"
+    out = server.Type("Žltý", x=640, y=400, clear=True, method="paste")
+    assert out.startswith("Type error: macOS does not let this process post keyboard events")
+    assert board["writes"] == [] and board["pressed"] == []
+    assert fake.click.calls == [] and fake.press.calls == []
+
+
+def test_mac_keys_without_the_posting_permission_clicks_and_clears_nothing(mac_tool_layer, monkeypatch):
+    server, fake, quartz = mac_tool_layer
+    monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
+    out = server.Type("Žltý", x=640, y=400, clear=True, press_enter=True)
+    assert out.startswith("Type error: macOS does not let this process post keyboard events")
+    assert fake.click.calls == [] and fake.hotkey.calls == [] and fake.press.calls == []
+    assert quartz.posted == []
+
+
+def test_mac_type_tool_clicks_clears_pastes_and_presses_enter_in_order(mac_tool_layer, monkeypatch):
+    server, fake, _ = mac_tool_layer
+    board = _mac_pasteboard(monkeypatch, server, fake, "old clip")
+    order = []
+    fake.click = lambda *point: order.append(("click", point))
+    fake.hotkey = lambda *keys: order.append(("hotkey", keys, board["text"]))
+    fake.press = lambda *keys: order.append(("press", keys))
+    server.Type("ď", x=640, y=400, clear=True, press_enter=True, method="paste")
+    assert order == [
+        ("click", (720, 450)),  # image (640,400) on the 1440x900-point main display
+        ("hotkey", ("command", "a"), "old clip"),
+        ("press", ("delete",)),
+        ("hotkey", ("command", "v"), "ď"),
+        ("press", ("enter",)),
+    ]
+    assert board["text"] == "old clip"
+
+
 def test_mac_provider_type_text_clicks_a_point_on_column_zero(mac_tool_layer):
     server, fake, quartz = mac_tool_layer
     mod = server.get_desktop()
