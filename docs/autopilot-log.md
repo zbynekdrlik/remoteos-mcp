@@ -198,3 +198,28 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - The live Windows check (Notepad + `WM_GETTEXT` read-back). The supervisor deploys and verifies.
   - No macOS box was reachable, so the macOS path is fake-tested and source-evidenced (pynput passes the UTF-16 length the same way).
   - Round-2 🔵 follow-up candidates: Linux `xdotool type` argv exposure, `Error: `-prefixed clipboard text, and a split ticket for the over-budget `__main__.py`/`linux/desktop.py`.
+
+## #31 — Upstream quick fixes: x/y=0, Shell cwd, dead duplicate, FileUpload, cancel_task, uvicorn_config, --debug (0.7.0.dev27)
+
+- **Re-derived after #28/#29/#30.** Every item was still live except AnnotatedSnapshot's triple grab: #28 (c2b024e) left one capture, and a fake-X11 probe shows 1 `scrot` call.
+- **Fixes (Approach 1 of the main's design, upstream winremote c3a675174c / pull 71 / pull 65):**
+  - `_optional_point` (`x or y`, 0/0 = no point) for Type/Scroll/drag start; the Linux `move()` start is `is not None`.
+  - Shell → `Popen(cwd=expandvars(expanduser(cwd)))`, and a path that is not a directory is refused.
+  - The dead first `_ensure_session_connected` is deleted.
+  - FileUpload: a 100 MB base64 cap + `validate=True` before any write.
+  - TaskManager: `_transition` puts every status write under `_lock`, together with `cancel_task`.
+  - `uvicorn_config` for TLS; `--debug` = the `remoteos` logger + uvicorn; `--reload` warns; a lone TLS flag is a usage error; stdio status lines go to stderr.
+- **Decisions:**
+  - `x or y`, not `is not None`: the 0 defaults would otherwise click the origin on every call.
+  - `--reload` cannot work in-process: uvicorn reloads only an import-string app.
+  - `--debug` keeps FastMCP at INFO, because at DEBUG FastMCP logs tool arguments and replies.
+- **Commits:**
+  - `b5eb85d` bump.
+  - Item 1: `41f328e` [red] → `2bbcdc1` [green].
+  - Item 2: `0f27b57` → `0cf4098`.
+  - Item 4: `8ff5c90` → `3af9dc0`.
+  - Item 5: `f01883f` → `8a9c8db`, and `4dc4dd3` → `bde9677`.
+  - Item 6: `9d2c06f` → `bc31d29`, and the TLS pair `400e5ee` → `3d3e4cb`.
+  - Review round 1 (0🔴 2🟡 6🔵): `ad9ff07` → `d1a0234`.
+  - Review round 2 (0🔴 0🟡 4🔵): `8d0d949` → `fd8dc00`.
+- **Tests:** `tests/test_shell_tool.py`, `tests/test_file_upload.py`, `tests/test_taskmanager.py`, `tests/test_startup_flags.py` (the real server in a subprocess, hermetic env), plus additions to `test_coordinate_contract_tools.py`, `test_provider_geometry.py` and `test_linux_desktop.py`. Result: 474 pass, ruff clean.
