@@ -48,14 +48,19 @@ class _LoopbackMachine:
     response. That is what a client sees when uvicorn's keep-alive deadline fires as a request
     arrives on an idle connection. A dropped request was never answered, i.e. never handed to
     a tool, so it is not counted in ``answered``.
+
+    ``hold_until_connections``: no request is answered before that many connections are open,
+    so concurrent calls deterministically end up on separate pooled connections.
     """
 
-    def __init__(self, drop: str = "never") -> None:
+    def __init__(self, drop: str = "never", hold_until_connections: int = 0) -> None:
         assert drop in ("never", "on_reuse", "always")
         self.drop = drop
+        self.hold_until_connections = hold_until_connections
         self.connections = 0
         self.dropped = 0
         self.answered: list[dict] = []
+        self._enough_connections = asyncio.Event()
 
     def _should_drop(self, served_on_this_connection: int) -> bool:
         if self.drop == "always":
@@ -64,6 +69,8 @@ class _LoopbackMachine:
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connections += 1
+        if self.connections >= self.hold_until_connections:
+            self._enough_connections.set()
         served = 0
         try:
             while True:
@@ -77,6 +84,7 @@ class _LoopbackMachine:
                 if self._should_drop(served):
                     self.dropped += 1
                     return  # close without a response (the whole request was read: FIN, not RST)
+                await asyncio.wait_for(self._enough_connections.wait(), 5)
                 served += 1
                 self.answered.append(message)
                 payload = json.dumps(
@@ -94,10 +102,10 @@ class _LoopbackMachine:
             writer.close()
 
 
-def _through_real_pool(gw, machine: _LoopbackMachine, idle_gaps: list[float]) -> list:
-    """One gateway built by ``create_app`` WITHOUT an injected client (the production client and
-    its connection pool), in front of *machine*; one call per entry in *idle_gaps*, each made
-    after that many seconds of idle."""
+def _through_real_pool(gw, machine: _LoopbackMachine, idle_gaps: list[float], *, first_batch: int = 1) -> list:
+    """One gateway built by ``create_app`` WITHOUT an injected client (the production clients
+    and their connection pools), in front of *machine*; one call per entry in *idle_gaps*, each
+    made after that many seconds of idle. The first entry sends *first_batch* calls at once."""
 
     async def go():
         server = await asyncio.start_server(machine.handle, "127.0.0.1", 0)
@@ -116,19 +124,25 @@ def _through_real_pool(gw, machine: _LoopbackMachine, idle_gaps: list[float]) ->
         )
         app = create_app(LiveConfig(gw.registry_path, gw.machines_path), AccessLog(gw.access_log_path))
         responses = []
+        request_ids = iter(range(1, 1000))
         try:
             async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://gateway.test") as c:
-                for i, idle in enumerate(idle_gaps):
-                    await asyncio.sleep(idle)
+
+                async def call():
                     resp = await c.post(
                         f"/{MACHINE}/mcp",
-                        json=_tools_list(request_id=i + 1),
+                        json=_tools_list(request_id=next(request_ids)),
                         headers={"Authorization": f"Bearer {TOKEN}"},
                     )
                     await resp.aread()
-                    responses.append(resp)
+                    return resp
+
+                for i, idle in enumerate(idle_gaps):
+                    await asyncio.sleep(idle)
+                    batch = first_batch if i == 0 else 1
+                    responses.extend(await asyncio.gather(*(call() for _ in range(batch))))
         finally:
-            await app.state.gateway.client.aclose()
+            await app.state.gateway.aclose()
             server.close()
             await asyncio.wait_for(server.wait_closed(), 5)
         return responses
@@ -136,7 +150,18 @@ def _through_real_pool(gw, machine: _LoopbackMachine, idle_gaps: list[float]) ->
     return asyncio.run(go())
 
 
-def test_machine_closing_a_pooled_connection_as_the_request_arrives_is_retried_not_503(gw, caplog):
+@pytest.fixture
+def long_keepalive(monkeypatch):
+    """Pin a long pool expiry so a stalled CI runner cannot expire a pooled connection between
+    two calls: these tests are about the retry, the 2 s production expiry has its own test."""
+    monkeypatch.setattr(
+        gateway_app,
+        "UPSTREAM_LIMITS",
+        httpx2.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=60.0),
+    )
+
+
+def test_machine_closing_a_pooled_connection_as_the_request_arrives_is_retried_not_503(gw, caplog, long_keepalive):
     """The reported bug: 503 upstream_unreachable after ~4.9 s idle (david3@subdev, 17:42:09)."""
     caplog.set_level("INFO", logger="remoteos.gateway")
     machine = _LoopbackMachine(drop="on_reuse")
@@ -154,6 +179,20 @@ def test_machine_closing_a_pooled_connection_as_the_request_arrives_is_retried_n
     assert [(e["status"], e["outcome"]) for e in entries] == [(200, "ok"), (200, "ok")]
     retries = [r for r in caplog.records if r.name == "remoteos.gateway" and "retrying" in r.getMessage()]
     assert len(retries) == 1 and retries[0].levelno == logging.INFO
+
+
+def test_the_retry_dials_a_fresh_connection_even_with_more_stale_ones_pooled(gw, long_keepalive):
+    """A restarted machine kills EVERY pooled connection at once. Through the main pool the
+    retry would be handed the next stale connection and fail too; it must dial instead."""
+    machine = _LoopbackMachine(drop="on_reuse", hold_until_connections=2)
+
+    responses = _through_real_pool(gw, machine, [0, 0], first_batch=2)  # 2 pooled, then 1 call
+
+    assert [r.status_code for r in responses] == [200, 200, 200], responses[-1].text
+    # two pooled connections from the concurrent pair; the third call dropped on one of them,
+    # and its retry opened connection #3 instead of taking the other stale one
+    assert (machine.connections, machine.dropped) == (3, 1)
+    assert sorted(m["id"] for m in machine.answered) == [1, 2, 3]
 
 
 def test_a_failure_on_a_freshly_opened_connection_is_not_retried(gw):
@@ -175,15 +214,17 @@ def test_idle_pooled_connections_expire_well_before_the_machines_keep_alive():
     # the other two limits stay at httpx2's defaults — only the expiry changes
     assert gateway_app.UPSTREAM_LIMITS.max_connections == 100
     assert gateway_app.UPSTREAM_LIMITS.max_keepalive_connections == 20
+    # the retry client keeps nothing idle, so a retry can never pick up a stale connection
+    assert gateway_app.UPSTREAM_RETRY_LIMITS.max_keepalive_connections == 0
 
 
 def test_the_production_client_drops_a_pooled_connection_after_2s_idle(gw):
     machine = _LoopbackMachine(drop="never")
 
-    responses = _through_real_pool(gw, machine, [0, 1.0, 2.4])
+    responses = _through_real_pool(gw, machine, [0, 0.5, 2.4])
 
     assert [r.status_code for r in responses] == [200, 200, 200]
-    # 1.0 s idle: still pooled (same connection); 2.4 s idle: expired, a new connection
+    # 0.5 s idle: still pooled (same connection); 2.4 s idle: expired, a new connection
     assert machine.connections == 2
     assert machine.dropped == 0
 

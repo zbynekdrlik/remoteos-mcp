@@ -62,6 +62,11 @@ UPSTREAM_TIMEOUT = httpx2.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.
 # are httpx2's defaults, spelled out because a bare Limits() would make them unlimited.
 UPSTREAM_LIMITS = httpx2.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=2.0)
 
+# The ONE retry goes through a second client that keeps no idle connection, so it always dials a
+# fresh one. Through the main pool it could be handed the NEXT stale connection to the same
+# machine: a machine that restarts kills every pooled connection to it at once.
+UPSTREAM_RETRY_LIMITS = httpx2.Limits(max_connections=100, max_keepalive_connections=0)
+
 # Failures that mean "the pooled connection was already dead" — see Gateway._send_upstream.
 # Timeouts are deliberately absent: a ReadTimeout means the machine may be RUNNING the call.
 _STALE_CONNECTION_ERRORS = (httpx2.RemoteProtocolError, httpx2.ReadError, httpx2.WriteError)
@@ -243,10 +248,24 @@ class _UpstreamResponse(StreamingResponse):
 
 
 class Gateway:
-    def __init__(self, config: LiveConfig, access_log: AccessLog, client: httpx2.AsyncClient) -> None:
+    def __init__(
+        self,
+        config: LiveConfig,
+        access_log: AccessLog,
+        client: httpx2.AsyncClient,
+        retry_client: httpx2.AsyncClient | None = None,
+    ) -> None:
         self.config = config
         self.access_log = access_log
         self.client = client
+        # Only for the one stale-connection retry. Defaults to *client* (an injected test client
+        # has no pool to be stale).
+        self.retry_client = retry_client or client
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+        if self.retry_client is not self.client:
+            await self.retry_client.aclose()
 
     async def handle(self, request: Request) -> Response:
         entry = _Entry(
@@ -350,16 +369,29 @@ class Gateway:
         """Send the request; if a stale pooled connection killed it, send it ONCE more.
 
         ``client.send(stream=True)`` returns as soon as the response headers are in, so anything
-        it raises happened before the machine answered. A machine whose keep-alive deadline fires
-        as a request arrives on an idle pooled connection closes that connection without ever
-        handing the request to MCP, so sending it again cannot run a tool twice. The retry is
-        therefore limited to that case: a stale-connection error class, on an attempt that
-        REUSED a pooled connection. A failure on a connection dialled for this very request (the
+        it raises happened before the machine answered. The retry is limited to the stale
+        keep-alive case: a stale-connection error class, on an attempt that REUSED a pooled
+        connection. Never retried: a failure on a connection dialled for this very request (the
         machine accepted the request and then dropped it — it may have run it), a connect error,
-        a timeout, or anything after the headers (mid-stream, see ``_relay``) is never retried.
+        a timeout, and anything after the headers (mid-stream, see ``_relay``).
 
-        httpcore closes the dead connection, and an idle one the machine already closed reads as
-        expired, so the retry goes out on a fresh connection.
+        Why the retry cannot run a tool twice rests on two properties of the machines (remoteos
+        on fastmcp/uvicorn), not on anything the gateway can observe:
+
+        1. uvicorn closes an idle connection when its ``timeout_keep_alive`` fires and discards
+           whatever request bytes race in, so the request never reached MCP.
+        2. A machine answers ``tools/call`` as SSE (``serve`` runs streamable-http with
+           ``stateless_http=True`` and fastmcp's ``json_response`` left at its default False),
+           so the 200 + headers go out while the tool runs. A failure DURING a tool call is
+           therefore post-headers and lands in ``_relay``, never here. A machine started with
+           ``json_response`` on (e.g. ``FASTMCP_JSON_RESPONSE=1``) would break this property:
+           a reset on a reused connection mid-tool could then run that tool twice.
+
+        h11 also maps a malformed response to ``RemoteProtocolError``; uvicorn does not produce
+        one, so on these machines that class before headers means the peer closed.
+
+        The retry goes through ``retry_client``, which keeps no idle connection: it always
+        dials, even when the main pool holds further stale connections to the same machine.
         """
         trace = _ConnectionTrace()
         try:
@@ -377,7 +409,7 @@ class Gateway:
                 type(exc).__name__,
                 exc,
             )
-        return await self.client.send(build_request(None), stream=True)
+        return await self.retry_client.send(build_request(None), stream=True)
 
     async def _relay(self, upstream_response: httpx2.Response, entry: _Entry) -> AsyncIterator[bytes]:
         try:
@@ -460,17 +492,27 @@ async def healthz(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "version": __version__})
 
 
+def _upstream_client(limits: httpx2.Limits) -> httpx2.AsyncClient:
+    return httpx2.AsyncClient(timeout=UPSTREAM_TIMEOUT, limits=limits, trust_env=False, follow_redirects=False)
+
+
 def create_app(
     config: LiveConfig,
     access_log: AccessLog,
     *,
     upstream_client: httpx2.AsyncClient | None = None,
 ) -> Starlette:
-    """Build the gateway app. Tests inject *upstream_client* (an in-process transport)."""
-    client = upstream_client or httpx2.AsyncClient(
-        timeout=UPSTREAM_TIMEOUT, limits=UPSTREAM_LIMITS, trust_env=False, follow_redirects=False
-    )
-    gateway = Gateway(config, access_log, client)
+    """Build the gateway app. Tests inject *upstream_client* (an in-process transport), which
+    then also carries the stale-connection retry."""
+    if upstream_client is not None:
+        gateway = Gateway(config, access_log, upstream_client)
+    else:
+        gateway = Gateway(
+            config,
+            access_log,
+            _upstream_client(UPSTREAM_LIMITS),
+            retry_client=_upstream_client(UPSTREAM_RETRY_LIMITS),
+        )
 
     @asynccontextmanager
     async def lifespan(app: Starlette):
@@ -489,7 +531,7 @@ def create_app(
         finally:
             if installed:
                 loop.remove_signal_handler(sighup)
-            await client.aclose()
+            await gateway.aclose()
             logger.info("remoteos-gateway stopped")
 
     routes = [
