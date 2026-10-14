@@ -38,7 +38,7 @@ PYTHON=""
 for cmd in python3 python /usr/bin/python3 /usr/local/bin/python3; do
     if command -v "$cmd" &>/dev/null || [[ -x "$cmd" ]]; then
         ver=$("$cmd" --version 2>&1 || true)
-        if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( ${BASH_REMATCH[1]} >= 10 )); then
+        if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 10 )); then
             PYTHON="$cmd"
             echo "        Found $ver ($cmd)"
             break
@@ -59,7 +59,7 @@ if [[ -z "$PYTHON" ]]; then
     for cmd in python3 python; do
         if command -v "$cmd" &>/dev/null; then
             ver=$("$cmd" --version 2>&1 || true)
-            if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( ${BASH_REMATCH[1]} >= 10 )); then
+            if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 10 )); then
                 PYTHON="$cmd"
                 echo "        Python installed: $ver"
                 break
@@ -109,44 +109,102 @@ fi
 
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
-export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
 # --ignore-installed: on Ubuntu 26.04+ / Debian 13 several pinned deps
 # (cryptography, cffi, PyJWT, psutil, ...) are apt python3-* packages that
 # Debian's pip refuses to uninstall ("installed by debian", #12 strih-pp).
 # Installing over them into /usr/local shadows the apt copies instead.  Safe
-# because the three packages that must never overlap (remoteos-mcp, fastmcp,
-# fastmcp-slim) are explicitly pre-uninstalled below.
+# because the shared block pre-uninstalls everything pip itself owns and is
+# about to replace (remoteos-mcp, fastmcp, fastmcp-slim, changed pip-owned deps).
 PIP_FLAGS=(--no-cache-dir --break-system-packages --ignore-installed)
-# Fresh work dir: pip's TMPDIR (so pip cannot reuse stale build artifacts from
-# a prior failed install — the cam1 incident), the pip logs, and the rollback
-# snapshot.  Removed on every exit.
-WORK_DIR=$(mktemp -d)
-trap 'rm -rf "$WORK_DIR"' EXIT
-mkdir -p "$WORK_DIR/pip-tmp"
+SERVICE_DESC="the ${SERVICE_NAME} service"
 
-# Snapshot / restore the files of the packages the pre-uninstall removes —
-# exactly the RECORD entries `pip show -f` lists — so a failed upgrade puts the
-# previous version back byte for byte, offline (pip's own uninstall rollback
-# works the same way).  Usage: snapshot <pip show -f output> <dir> | restore <dir>
+# >>> shared install block — byte-identical in install-linux.sh and install.sh
+# (tests/test_installer_preflight_rollback.py guards it).  Needs: PYTHON,
+# PIP_FLAGS, SERVICE_DESC.  Leaves: PKG_VER (the installed, importable version).
+#
+# Order: pin one commit of main → record the installed version → dry-run
+# preflight → plan + snapshot → pre-uninstall → install → verify (version +
+# import).  Any failure before the pre-uninstall changes nothing; any failure
+# (or SIGHUP/SIGINT/SIGTERM) after it rolls the snapshot back and exits non-zero
+# without touching the service.  Full pip output is printed on every failure.
+
+# Fresh work dir: pip's TMPDIR (so pip cannot reuse stale build artifacts from a
+# prior failed install — the cam1 incident), the pip logs and report, the
+# rollback helper and the snapshot.  Removed on exit unless a failed rollback
+# needs it kept.
+WORK_DIR=$(mktemp -d)
+KEEP_WORK_DIR=""
+# fd 3/4 = the console: the interrupt handler can fire inside a command whose
+# output is redirected to a log, and must still reach the operator.
+exec 3>&1 4>&2
+trap '[[ -n "$KEEP_WORK_DIR" ]] || rm -rf "$WORK_DIR"' EXIT
+mkdir -p "$WORK_DIR/pip-tmp"
+CHANGED_DEPS=()
+
+# Rollback helper (python: it ships with what we install).  It reads
+# `pip show -v -f` output, whose Files: section is exactly each dist's RECORD,
+# so the snapshot holds exactly what `pip uninstall` removes — pip's own
+# uninstall rollback works the same way.
+#   names    <report.json>                list the resolved packages
+#   plan     <report.json> <show>         pip-owned installed deps whose version
+#                                         changes; exit 3 = remoteos-mcp has no RECORD
+#   snapshot <show> <dir> <names...>      copy those dists' files (bytes + modes)
+#   restore  <dir>                        put them back
 ROLLBACK_PY="$WORK_DIR/rollback.py"
 cat >"$ROLLBACK_PY" <<'PY'
-import os, shutil, sys
-mode, args = sys.argv[1], sys.argv[2:]
-if mode == "snapshot":
-    show_file, snap = args
-    paths, loc, in_files = [], None, False
+import json, os, re, shutil, sys
+
+OVERLAPPING = ("remoteos-mcp", "fastmcp", "fastmcp-slim")
+
+
+def norm(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def resolved(report_file):
+    with open(report_file, encoding="utf-8") as f:
+        return {norm(i["metadata"]["name"]): i["metadata"]["version"] for i in json.load(f).get("install", [])}
+
+
+def dists(show_file):
+    found, cur, loc, in_files = {}, None, None, False
     with open(show_file, encoding="utf-8", errors="surrogateescape") as f:
         for line in f.read().splitlines():
             if line == "---":
-                loc, in_files = None, False
+                cur, loc, in_files = None, None, False
+            elif in_files and cur is not None:
+                if line.startswith("  ") and loc:
+                    cur["files"].append(os.path.normpath(os.path.join(loc, line[2:])))
+                elif line.startswith("Cannot locate RECORD"):
+                    cur["record"] = False
+            elif line.startswith("Name: "):
+                cur = {"version": "", "installer": "", "files": [], "record": True}
+                found[norm(line[6:].strip())] = cur
+            elif cur is not None and line.startswith("Version: "):
+                cur["version"] = line[9:].strip()
+            elif cur is not None and line.startswith("Installer: "):
+                cur["installer"] = line[11:].strip()
             elif line.startswith("Location: "):
-                loc = line[len("Location: "):].strip()
+                loc = line[10:].strip()
             elif line.startswith("Files:"):
                 in_files = True
-            elif in_files and loc and line.startswith("  "):
-                path = os.path.normpath(os.path.join(loc, line[2:]))
-                if os.path.isfile(path) or os.path.islink(path):
-                    paths.append(path)
+    return found
+
+
+mode, args = sys.argv[1], sys.argv[2:]
+if mode == "names":
+    print("\n".join(resolved(args[0])))
+elif mode == "plan":
+    want, have = resolved(args[0]), dists(args[1])
+    if "remoteos-mcp" in have and not have["remoteos-mcp"]["record"]:
+        sys.exit(3)
+    for name, info in sorted(have.items()):
+        if (name not in OVERLAPPING and name in want and info["version"] != want[name]
+                and info["installer"] == "pip" and info["record"] and info["files"]):
+            print(name)
+elif mode == "snapshot":
+    have, snap, names = dists(args[0]), args[1], [norm(n) for n in args[2:]]
+    paths = [p for n in names for p in have.get(n, {}).get("files", []) if os.path.isfile(p) or os.path.islink(p)]
     os.makedirs(snap)
     for path in paths:
         dst = snap + "/files" + path
@@ -156,7 +214,7 @@ if mode == "snapshot":
         f.write("\n".join(paths))
     print(len(paths))
 elif mode == "restore":
-    (snap,) = args
+    snap = args[0]
     with open(snap + "/manifest", encoding="utf-8", errors="surrogateescape") as f:
         paths = [p for p in f.read().split("\n") if p]
     for path in paths:
@@ -166,42 +224,80 @@ elif mode == "restore":
         shutil.copy2(snap + "/files" + path, path, follow_symlinks=False)
     print(len(paths))
 else:
-    sys.exit(f"unknown mode {mode}")
+    sys.exit("unknown mode " + mode)
 PY
 
 installed_version() {
     "$PYTHON" -m pip show remoteos-mcp 2>/dev/null | sed -n 's/^Version: //p' || true
 }
 
-# Pre-uninstall all three packages so no stale RECORD can delete files the new
+# What the service runs (`python -m remoteos`), minus starting it.
+import_check() {
+    "$PYTHON" -c 'import remoteos.__main__, fastmcp; from fastmcp import FastMCP' 2>&1
+}
+
+# Pre-uninstall the three packages so no stale RECORD can delete files the new
 # install writes.  Root cause (#12 wheel evidence): monolithic fastmcp 2.x
-# RECORD claims fastmcp/__init__.py — same file fastmcp-slim 4.x writes.
+# RECORD claims fastmcp/__init__.py — same file fastmcp-slim 4.x writes.  Plus
+# every pip-owned dep whose pinned version changes: --ignore-installed would
+# otherwise leave its old dist-info + RECORD behind next to the new files.
 uninstall_overlapping() {
-    "$PYTHON" -m pip uninstall -y --break-system-packages remoteos-mcp fastmcp fastmcp-slim 2>&1 | tail -1 || true
+    "$PYTHON" -m pip uninstall -y --break-system-packages remoteos-mcp fastmcp fastmcp-slim ${CHANGED_DEPS[@]+"${CHANGED_DEPS[@]}"} 2>&1 \
+        | sed 's/^/        /' || true
 }
 
-# The pinned install; extra pip args (--dry-run) go first.  The preflight and
-# the real install both run through here, so their flags are identical.
+# The pinned install; extra pip args (--dry-run ...) go first.  The preflight
+# and the real install both run through here, so their flags are identical.
 pip_install_remoteos() {
-    TMPDIR="$WORK_DIR/pip-tmp" "$PYTHON" -m pip install "${PIP_FLAGS[@]}" "$@" "git+https://github.com/zbynekdrlik/remoteos-mcp.git@main"
+    TMPDIR="$WORK_DIR/pip-tmp" "$PYTHON" -m pip install "${PIP_FLAGS[@]}" "$@" "git+https://github.com/zbynekdrlik/remoteos-mcp.git@${MAIN_SHA}"
 }
 
-# Put the recorded previous version back after a failed install.  Never exits:
-# the caller still exits non-zero — a rolled-back upgrade is a failed upgrade.
+# Put the snapshot back after a failed or interrupted install and check the
+# recorded version works again.  Never exits: a rolled-back upgrade is still a
+# failed upgrade, the caller exits non-zero.
 rollback_install() {
-    if [[ -z "$OLD_VER" ]]; then
+    trap '' HUP INT TERM
+    echo "        Rolling back (restoring the previous package files)..."
+    uninstall_overlapping >/dev/null  # clear what the failed install half-wrote
+    if ! "$PYTHON" "$ROLLBACK_PY" restore "$WORK_DIR/snapshot" >/dev/null; then
+        echo "        [X] Rollback FAILED — the previous files could not be restored; do NOT restart ${SERVICE_DESC}"
+    elif [[ -z "$OLD_VER" ]]; then
         echo "        [X] No previous version to roll back to — remoteos is NOT installed on this box"
         return
-    fi
-    echo "        Rolling back to v${OLD_VER} (restoring the previous package files)..."
-    uninstall_overlapping >/dev/null  # clear what the failed install half-wrote for the three packages
-    if "$PYTHON" "$ROLLBACK_PY" restore "$WORK_DIR/snapshot" >/dev/null \
-        && [[ "$(installed_version)" == "$OLD_VER" ]]; then
-        echo "        Rolled back: v${OLD_VER} is installed again; the running service was not restarted"
+    elif [[ "$(installed_version)" == "$OLD_VER" ]] && import_check >/dev/null; then
+        echo "        Rolled back: v${OLD_VER} is installed again and imports; ${SERVICE_DESC} was not restarted"
+        return
     else
-        echo "        [X] Rollback FAILED — v${OLD_VER} could not be restored; do NOT restart ${SERVICE_NAME}"
+        echo "        [X] Rollback FAILED — v${OLD_VER} is not back in a working state; do NOT restart ${SERVICE_DESC}"
     fi
+    KEEP_WORK_DIR=1
+    echo "        Snapshot kept for manual recovery: $PYTHON $ROLLBACK_PY restore $WORK_DIR/snapshot"
 }
+
+# An interrupt (ssh drop = SIGHUP, a timeout's SIGTERM, Ctrl-C) between the
+# pre-uninstall and a verified install must not leave the box without its
+# package.  The terminal may be gone: ignore SIGPIPE, keep going on errors.
+on_interrupt() {
+    trap '' PIPE
+    set +e
+    exec 1>&3 2>&4
+    echo "        [X] Interrupted during the upgrade"
+    rollback_install
+    exit 1
+}
+
+# Pin the whole run to ONE commit of main: preflight, install and constraints
+# all see the same tree (a merge between two fetches of @main would mix trees,
+# and raw.githubusercontent.com caches .../main/ for minutes).
+MAIN_SHA=$(git ls-remote https://github.com/zbynekdrlik/remoteos-mcp.git refs/heads/main 2>"$WORK_DIR/ls-remote.log" \
+    | awk '{print $1}' || true)
+if [[ ! "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "        [X] Could not resolve main on GitHub — nothing was changed on this box:"
+    cat "$WORK_DIR/ls-remote.log"
+    exit 1
+fi
+export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/${MAIN_SHA}/constraints.txt"
+echo "        Source: main @ ${MAIN_SHA:0:12}"
 
 OLD_VER=$(installed_version)
 if [[ -n "$OLD_VER" ]]; then
@@ -213,22 +309,49 @@ fi
 # Preflight: resolve the whole pinned set with the real install's flags and
 # constraints BEFORE anything is uninstalled.  A failure here changes nothing.
 echo "        Preflight: pip install --dry-run..."
-if ! pip_install_remoteos --dry-run >"$WORK_DIR/dry-run.log" 2>&1; then
+if ! pip_install_remoteos --dry-run --report "$WORK_DIR/report.json" >"$WORK_DIR/dry-run.log" 2>&1; then
     echo "        [X] Preflight failed — nothing was changed on this box. Full pip output:"
     cat "$WORK_DIR/dry-run.log"
     exit 1
 fi
 grep '^Would install' "$WORK_DIR/dry-run.log" | sed 's/^/        /' || true
 
-if [[ -n "$OLD_VER" ]]; then
-    "$PYTHON" -m pip show -f remoteos-mcp fastmcp fastmcp-slim >"$WORK_DIR/show-files.txt" 2>/dev/null || true
-    if ! SNAP_COUNT=$("$PYTHON" "$ROLLBACK_PY" snapshot "$WORK_DIR/show-files.txt" "$WORK_DIR/snapshot"); then
-        echo "        [X] Could not keep a rollback copy of v${OLD_VER} — nothing was changed on this box"
-        exit 1
-    fi
-    echo "        Kept ${SNAP_COUNT} files of v${OLD_VER} for rollback"
+# Plan + snapshot what the pre-uninstall will remove.
+if ! "$PYTHON" "$ROLLBACK_PY" names "$WORK_DIR/report.json" >"$WORK_DIR/resolved.txt"; then
+    echo "        [X] Could not read the preflight's resolution report — nothing was changed on this box"
+    exit 1
 fi
+RESOLVED=()
+while IFS= read -r name; do
+    if [[ -n "$name" ]]; then RESOLVED+=("$name"); fi
+done <"$WORK_DIR/resolved.txt"
+"$PYTHON" -m pip show -v -f remoteos-mcp fastmcp fastmcp-slim ${RESOLVED[@]+"${RESOLVED[@]}"} \
+    >"$WORK_DIR/show-files.txt" 2>/dev/null || true
+PLAN_RC=0
+"$PYTHON" "$ROLLBACK_PY" plan "$WORK_DIR/report.json" "$WORK_DIR/show-files.txt" >"$WORK_DIR/changed-deps.txt" \
+    || PLAN_RC=$?
+if [[ "$PLAN_RC" -eq 3 ]]; then
+    echo "        [X] v${OLD_VER} has no RECORD, so pip can neither replace nor roll it back — nothing was changed."
+    echo "            Remove it by hand (its files under: $("$PYTHON" -m pip show remoteos-mcp 2>/dev/null | sed -n 's/^Location: //p')), then rerun."
+    exit 1
+elif [[ "$PLAN_RC" -ne 0 ]]; then
+    echo "        [X] Could not plan the upgrade — nothing was changed on this box"
+    exit 1
+fi
+while IFS= read -r name; do
+    if [[ -n "$name" ]]; then CHANGED_DEPS+=("$name"); fi
+done <"$WORK_DIR/changed-deps.txt"
+if [[ ${#CHANGED_DEPS[@]} -gt 0 ]]; then
+    echo "        Pinned version changes for pip-installed deps: ${CHANGED_DEPS[*]}"
+fi
+if ! SNAP_COUNT=$("$PYTHON" "$ROLLBACK_PY" snapshot "$WORK_DIR/show-files.txt" "$WORK_DIR/snapshot" \
+    remoteos-mcp fastmcp fastmcp-slim ${CHANGED_DEPS[@]+"${CHANGED_DEPS[@]}"}); then
+    echo "        [X] Could not keep a rollback copy of the installed packages — nothing was changed on this box"
+    exit 1
+fi
+echo "        Kept ${SNAP_COUNT} files for rollback"
 
+trap on_interrupt HUP INT TERM
 uninstall_overlapping
 if pip_install_remoteos >"$WORK_DIR/install.log" 2>&1; then
     tail -3 "$WORK_DIR/install.log"
@@ -239,16 +362,22 @@ else
     exit 1
 fi
 
-# Verify installation
 PKG_VER=$(installed_version)
-if [[ -n "$PKG_VER" ]]; then
-    echo "        Installed v${PKG_VER}"
-else
+if [[ -z "$PKG_VER" ]]; then
     echo "        [X] pip reported success but no remoteos package is installed. Full pip output:"
     cat "$WORK_DIR/install.log"
     rollback_install
     exit 1
 fi
+if ! IMPORT_OUT=$(import_check); then
+    echo "        [X] v${PKG_VER} is installed but does not import:"
+    echo "$IMPORT_OUT"
+    rollback_install
+    exit 1
+fi
+trap - HUP INT TERM
+echo "        Installed v${PKG_VER}"
+# <<< shared install block
 
 # --- [2b] Install desktop-control tools (only when a graphical session exists) ---
 # Headless boxes (cam1..4) stay stub-only and skip these; a machine with an

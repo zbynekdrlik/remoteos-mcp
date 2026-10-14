@@ -177,9 +177,12 @@ $env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mc
 # Keep the full pip output: on failure it is printed whole (#12 — a discarded
 # or truncated pip error hides the real cause).
 $pipInstallOut = & $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" 2>&1 | Out-String
+$pipInstallExit = $LASTEXITCODE
 $pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-if ($pipShow -match "Version: (.+)") {
+# Success = pip exited 0 AND the package is there (an old dist left behind by a
+# failed install must not read as "Installed v<old>").
+if ($pipInstallExit -eq 0 -and $pipShow -match "Version: (.+)") {
     Write-Host "        Installed v$($Matches[1].Trim())" -ForegroundColor Green
 } else {
     Write-Host "        [X] pip install failed. Full pip output:" -ForegroundColor Red
