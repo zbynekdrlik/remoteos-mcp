@@ -58,8 +58,10 @@ def test_a_service_helper_failure_is_an_mcp_error(monkeypatch):
 def test_a_failure_is_logged_without_its_message(monkeypatch, caplog):
     # The error text can echo a tool argument (a path, a title, a process name); logs never
     # carry tool arguments or replies (#31), so a failure logs the tool and the error type only.
+    secret = "secret-" + "marker-32"  # built at run time: the logged frames show source lines, never values
+
     def _fails(cmd, timeout=30):
-        raise RuntimeError("secret-marker-32")
+        raise RuntimeError(secret)
 
     monkeypatch.setattr(linux_services, "_run", _fails)
     with caplog.at_level(logging.DEBUG, logger="remoteos"):

@@ -123,8 +123,10 @@ def _only_task(tm: TaskManager):
 def test_an_unexpected_exception_becomes_a_tool_error_and_a_failed_task(caplog):
     tm = TaskManager()
 
+    secret = "boom-" + "secret"  # built at run time: the logged frames show source lines, never values
+
     def tool():
-        raise RuntimeError("boom-secret")
+        raise RuntimeError(secret)
 
     with caplog.at_level(logging.DEBUG, logger="remoteos"):
         with pytest.raises(ToolError) as exc:
