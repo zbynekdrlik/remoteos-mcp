@@ -46,40 +46,35 @@ def _parse_key(key: str) -> tuple:
 
 
 def reg_read(key: str, value_name: str) -> str:
-    """Read a registry value."""
+    """Read a registry value; a missing key/value or a refused read raises (#32)."""
     if not HAS_WINREG:
-        return "Error: Registry operations only available on Windows."
+        raise NotImplementedError("Registry operations only available on Windows.")
+    root, subkey = _parse_key(key)
     try:
-        root, subkey = _parse_key(key)
         with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ) as k:
             data, reg_type = winreg.QueryValueEx(k, value_name)
-            return f"Value: {data!r} (type: {reg_type})"
     except FileNotFoundError:
-        return f"Error: Key or value not found: {key}\\{value_name}"
-    except Exception as e:
-        return f"RegRead error: {e}"
+        raise FileNotFoundError(f"Key or value not found: {key}\\{value_name}") from None
+    return f"Value: {data!r} (type: {reg_type})"
 
 
 def reg_write(key: str, value_name: str, data: str, reg_type: str = "REG_SZ") -> str:
-    """Write a registry value."""
+    """Write a registry value; an unknown type or a refused write raises (#32)."""
     if not HAS_WINREG:
-        return "Error: Registry operations only available on Windows."
-    try:
-        root, subkey = _parse_key(key)
-        rtype = _REG_TYPES.get(reg_type.upper())
-        if rtype is None:
-            return f"Error: Unknown type '{reg_type}'. Use: {', '.join(_REG_TYPES.keys())}"
+        raise NotImplementedError("Registry operations only available on Windows.")
+    root, subkey = _parse_key(key)
+    rtype = _REG_TYPES.get(reg_type.upper())
+    if rtype is None:
+        raise ValueError(f"Unknown type '{reg_type}'. Use: {', '.join(_REG_TYPES.keys())}")
 
-        # Convert data based on type
-        if reg_type.upper() == "REG_DWORD":
-            data = int(data)
-        elif reg_type.upper() == "REG_QWORD":
-            data = int(data)
-        elif reg_type.upper() == "REG_MULTI_SZ":
-            data = data.split("|")
+    # Convert data based on type
+    if reg_type.upper() == "REG_DWORD":
+        data = int(data)
+    elif reg_type.upper() == "REG_QWORD":
+        data = int(data)
+    elif reg_type.upper() == "REG_MULTI_SZ":
+        data = data.split("|")
 
-        with winreg.CreateKey(root, subkey) as k:
-            winreg.SetValueEx(k, value_name, 0, rtype, data)
-            return f"Written {value_name} = {data!r} to {key}"
-    except Exception as e:
-        return f"RegWrite error: {e}"
+    with winreg.CreateKey(root, subkey) as k:
+        winreg.SetValueEx(k, value_name, 0, rtype, data)
+    return f"Written {value_name} = {data!r} to {key}"

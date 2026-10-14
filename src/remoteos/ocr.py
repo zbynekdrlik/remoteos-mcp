@@ -110,9 +110,9 @@ Write-Output $result.Text
             text=True,
             timeout=30,
         )
+        if result.returncode != 0:  # empty stdout here is a failure, never "no text detected"
+            raise RuntimeError(f"Windows OCR failed: {result.stderr.strip() or f'exit code {result.returncode}'}")
         return result.stdout.strip()
-    except Exception as e:
-        return f"Windows OCR error: {e}"
     finally:
         try:
             Path(tmp_path).unlink(missing_ok=True)
@@ -184,11 +184,10 @@ def ocr_macos_shortcuts(
             ],
             capture_output=True, text=True, timeout=30,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-        return "macOS OCR: No text extracted (Shortcuts OCR not available)"
-    except Exception as e:
-        return f"macOS OCR error: {e}"
+        if result.returncode != 0:  # e.g. the "Extract Text from Image" shortcut is not installed
+            reason = result.stderr.strip() or f"exit code {result.returncode}"
+            raise RuntimeError(f"macOS Shortcuts OCR failed: {reason}")
+        return result.stdout.strip()
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -228,13 +227,9 @@ def run_ocr(
     # Fallback to Windows built-in OCR
     if sys.platform == "win32":
         try:
-            result = ocr_windows_builtin(left, top, right, bottom)
-            if result and "error" not in result.lower()[:20]:
-                return result
-            if result:
-                errors.append(f"Windows OCR: {result}")
+            return ocr_windows_builtin(left, top, right, bottom)
         except Exception as e:
             errors.append(f"Windows OCR error: {e}")
 
-    # All failed
-    return "OCR failed. Errors:\n" + "\n".join(errors)
+    # All failed: an error, never a successful "text" (#32)
+    raise RuntimeError("OCR failed. Errors:\n" + "\n".join(errors))

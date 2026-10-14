@@ -34,19 +34,13 @@ _TYPE_FLAGS = {
 
 def reg_read(key: str, value_name: str) -> str:
     """Read a macOS defaults value. Key is the domain (e.g. com.apple.finder)."""
-    try:
-        return _run(["defaults", "read", key, value_name])
-    except Exception as e:
-        return f"RegRead error: {e}"
+    return _run(["defaults", "read", key, value_name])
 
 
 def reg_write(key: str, value_name: str, data: str, reg_type: str = "string") -> str:
     """Write a macOS defaults value."""
-    try:
-        type_flag = _TYPE_FLAGS.get(reg_type.lower())
-        if type_flag is None:
-            return f"Error: Unknown type '{reg_type}'. Use: {', '.join(_TYPE_FLAGS.keys())}"
-        result = _run(["defaults", "write", key, value_name, type_flag, str(data)])
-        return f"Written {value_name} = {data!r} to {key}\n{result}"
-    except Exception as e:
-        return f"RegWrite error: {e}"
+    type_flag = _TYPE_FLAGS.get(reg_type.lower())
+    if type_flag is None:
+        raise ValueError(f"Unknown type '{reg_type}'. Use: {', '.join(_TYPE_FLAGS.keys())}")
+    result = _run(["defaults", "write", key, value_name, type_flag, str(data)])
+    return f"Written {value_name} = {data!r} to {key}\n{result}"

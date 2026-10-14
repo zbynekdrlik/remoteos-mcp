@@ -7,11 +7,12 @@ import functools
 import logging
 import threading
 import time
-import traceback
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
+
+from remoteos.errors import ToolError, stack_frames
 
 logger = logging.getLogger("remoteos.taskmanager")
 
@@ -250,52 +251,73 @@ class TaskManager:
             return True
 
     def wrap_sync_tool(self, tool_name: str, func: Callable) -> Callable:
-        """Wrap a synchronous tool function with error handling + concurrency control."""
+        """Wrap a synchronous tool function with error handling + concurrency control.
+
+        A successful text result gets the ``[task:<id>]`` prefix. Every failure
+        RAISES a ``ToolError`` with the same prefix (#32), which FastMCP returns
+        to the client as ``isError: true``: the tool's own ``ToolError`` keeps its
+        text, an unexpected exception becomes ``Error in <tool>: …`` (its
+        traceback is logged), and the lock-wait timeout and a cancel are errors
+        too. The task is FAILED or CANCELLED in each case.
+        """
         category = TOOL_CATEGORIES.get(tool_name, ToolCategory.QUERY)
         sem = self._thread_semaphores.get(category)
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             task = self.create_task(tool_name)
+            prefix = f"[task:{task.task_id}]"
 
             # Try to acquire semaphore — wait up to 60s
             if sem and not sem.acquire(timeout=60):
                 error = f"Timeout waiting for {category.value} lock (another {category.value} task is running)"
                 if not self._transition(task, TaskStatus.FAILED, error):
-                    return f"[task:{task.task_id}] Cancelled before execution"
-                return f"[task:{task.task_id}] Error: {error}"
+                    raise ToolError(f"{prefix} Cancelled before execution", log_level=logging.WARNING)
+                logger.warning("Tool %s [%s]: %s", tool_name, task.task_id, error)
+                raise ToolError(f"{prefix} {error}", log_level=logging.WARNING)
 
             try:
                 if not self._transition(task, TaskStatus.RUNNING):
-                    return f"[task:{task.task_id}] Cancelled before execution"
+                    raise ToolError(f"{prefix} Cancelled before execution", log_level=logging.WARNING)
 
-                result = func(*args, **kwargs)
+                # A failure is logged payload-free (#31): its text can echo a tool argument, so
+                # the log gets the tool, the task and the error type; the client and the task
+                # record get the text.
+                try:
+                    result = func(*args, **kwargs)
+                except ToolError as e:
+                    if self._transition(task, TaskStatus.FAILED, str(e)):
+                        logger.warning("Tool %s [%s] failed", tool_name, task.task_id)
+                        raise ToolError(f"{prefix} {e}", log_level=e.log_level) from e
+                    raise ToolError(f"{prefix} Cancelled during execution", log_level=logging.WARNING) from e
+                except Exception as e:
+                    if self._transition(task, TaskStatus.FAILED, str(e)):
+                        logger.error(
+                            "Tool %s [%s] failed: %s\n%s", tool_name, task.task_id, type(e).__name__, stack_frames(e)
+                        )
+                        raise ToolError(f"{prefix} Error in {tool_name}: {e}") from e
+                    raise ToolError(f"{prefix} Cancelled during execution", log_level=logging.WARNING) from e
 
                 if not self._transition(task, TaskStatus.COMPLETED):
-                    return f"[task:{task.task_id}] Cancelled during execution"
+                    raise ToolError(f"{prefix} Cancelled during execution", log_level=logging.WARNING)
 
                 # Prepend task_id to text results
                 if isinstance(result, str):
-                    return f"[task:{task.task_id}] {result}"
+                    return f"{prefix} {result}"
                 if isinstance(result, list):
                     # For multi-content results (images + text), prepend task_id to first text
                     injected = False
                     for item in result:
                         if hasattr(item, "text") and not injected:
-                            item.text = f"[task:{task.task_id}] {item.text}"
+                            item.text = f"{prefix} {item.text}"
                             injected = True
                     if not injected:
                         # Add task_id as first element
                         from mcp.types import TextContent
 
-                        result.insert(0, TextContent(type="text", text=f"[task:{task.task_id}]"))
+                        result.insert(0, TextContent(type="text", text=prefix))
                     return result
                 return result
-
-            except Exception as e:
-                self._transition(task, TaskStatus.FAILED, str(e))
-                logger.error("Tool %s failed: %s\n%s", tool_name, e, traceback.format_exc())
-                return f"[task:{task.task_id}] Error in {tool_name}: {e}"
 
             finally:
                 if sem:

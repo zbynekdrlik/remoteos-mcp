@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import ctypes
 import locale
+import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 from remoteos.platform.win.dpi import enable_per_monitor_dpi_awareness
+
+log = logging.getLogger("remoteos.platform.win.desktop")
 
 # Per-monitor-v2 DPI awareness MUST be in effect before pyautogui is imported:
 # pyautogui's import calls SetProcessDPIAware() (system-aware), after which the
@@ -373,10 +376,13 @@ def type_text(
 # ---------------------------------------------------------------------------
 
 
+_NO_PYWIN32 = "pywin32 not installed — run `pip install pywin32`"
+
+
 def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> str:
-    """Bring a window to the foreground. Fuzzy-match title if provided."""
+    """Bring a window to the foreground. Fuzzy-match title if provided; raises when it cannot (#32)."""
     if not HAS_WIN32:
-        return "Error: pywin32 not installed — run `pip install pywin32`"
+        raise RuntimeError(_NO_PYWIN32)
 
     hwnd = None
     if handle:
@@ -391,80 +397,76 @@ def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> s
                 best_score = score
                 hwnd = w.handle
         if best_score < 50:
-            return f"No window matching '{title}' (best score {best_score})"
+            raise LookupError(f"No window matching '{title}' (best score {best_score})")
 
     if not hwnd:
-        return "No window found"
+        raise LookupError("No window found")
 
     try:
         # Restore if minimized
         if win32gui.IsIconic(hwnd):
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         win32gui.SetForegroundWindow(hwnd)
-        return f"Focused window handle={hwnd} title='{win32gui.GetWindowText(hwnd)}'"
     except Exception as e:
-        return f"Failed to focus: {e}"
+        raise RuntimeError(f"Failed to focus: {e}") from e
+    return f"Focused window handle={hwnd} title='{win32gui.GetWindowText(hwnd)}'"
 
 
 def minimize_all() -> str:
     """Win+D — show desktop."""
-    try:
-        pyautogui.hotkey("win", "d")
-        return "Minimized all windows"
-    except Exception as e:
-        return f"Failed: {e}"
+    pyautogui.hotkey("win", "d")
+    return "Minimized all windows"
 
 
 def launch_app(name: str, args: str = "") -> str:
     """Launch application via PowerShell Start-Process."""
     import subprocess
 
-    try:
-        cmd = f'Start-Process "{name}"'
-        if args:
-            cmd += f' -ArgumentList "{args}"'
-        subprocess.run(["powershell", "-Command", cmd], timeout=10, capture_output=True)
-        return f"Launched {name}"
-    except Exception as e:
-        return f"Failed to launch {name}: {e}"
+    cmd = f'Start-Process "{name}"'
+    if args:
+        cmd += f' -ArgumentList "{args}"'
+    subprocess.run(["powershell", "-Command", cmd], timeout=10, capture_output=True)
+    return f"Launched {name}"
 
 
 def resize_window(handle: int, width: int, height: int) -> str:
     """Resize a window by handle."""
     if not HAS_WIN32:
-        return "Error: pywin32 not installed — run `pip install pywin32`"
+        raise RuntimeError(_NO_PYWIN32)
+    rect = win32gui.GetWindowRect(handle)
+    win32gui.MoveWindow(handle, rect[0], rect[1], width, height, True)
+    return f"Resized {handle} to {width}x{height}"
+
+
+# ---------------------------------------------------------------------------
+# Clipboard — a failure raises (#32); a clipboard without text raises too
+# ---------------------------------------------------------------------------
+
+
+def _close_clipboard_after(error: Exception) -> None:
+    """Close the clipboard after ``error``; a failed close is logged, ``error`` is what gets raised."""
     try:
-        rect = win32gui.GetWindowRect(handle)
-        win32gui.MoveWindow(handle, rect[0], rect[1], width, height, True)
-        return f"Resized {handle} to {width}x{height}"
+        win32clipboard.CloseClipboard()
     except Exception as e:
-        return f"Failed: {e}"
-
-
-# ---------------------------------------------------------------------------
-# Clipboard
-# ---------------------------------------------------------------------------
+        log.debug("CloseClipboard after %r failed: %s", error, e)
 
 
 def get_clipboard() -> str:
     if not HAS_WIN32:
-        return "Error: pywin32 not installed — run `pip install pywin32`"
+        raise RuntimeError(_NO_PYWIN32)
     try:
         win32clipboard.OpenClipboard()
         data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
         win32clipboard.CloseClipboard()
         return data
     except Exception as e:
-        try:
-            win32clipboard.CloseClipboard()
-        except Exception:
-            pass
-        return f"Error: {e}"
+        _close_clipboard_after(e)
+        raise
 
 
 def set_clipboard(text: str) -> str:
     if not HAS_WIN32:
-        return "Error: pywin32 not installed — run `pip install pywin32`"
+        raise RuntimeError(_NO_PYWIN32)
     try:
         win32clipboard.OpenClipboard()
         win32clipboard.EmptyClipboard()
@@ -472,11 +474,8 @@ def set_clipboard(text: str) -> str:
         win32clipboard.CloseClipboard()
         return "Clipboard set"
     except Exception as e:
-        try:
-            win32clipboard.CloseClipboard()
-        except Exception:
-            pass
-        return f"Error: {e}"
+        _close_clipboard_after(e)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -485,11 +484,9 @@ def set_clipboard(text: str) -> str:
 
 
 def lock_screen() -> str:
-    try:
-        ctypes.windll.user32.LockWorkStation()
-        return "Screen locked"
-    except Exception as e:
-        return f"Failed: {e}"
+    if not ctypes.windll.user32.LockWorkStation():
+        raise RuntimeError("LockWorkStation failed (no interactive desktop?)")
+    return "Screen locked"
 
 
 # ---------------------------------------------------------------------------
@@ -517,8 +514,5 @@ $xml.LoadXml($template)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("remoteos-mcp").Show($toast)
 """
-    try:
-        subprocess.run(["powershell", "-Command", ps], timeout=10, capture_output=True)
-        return "Notification shown"
-    except Exception as e:
-        return f"Failed: {e}"
+    subprocess.run(["powershell", "-Command", ps], timeout=10, capture_output=True)
+    return "Notification shown"
