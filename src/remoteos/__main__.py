@@ -43,6 +43,7 @@ from starlette.responses import JSONResponse
 from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
+from remoteos.paste import paste_text
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
@@ -57,6 +58,7 @@ from remoteos.tiers import (
     parse_tool_csv,
     resolve_enabled_tools,
 )
+from remoteos.typing_input import check_method, typed_reply
 
 load_dotenv()
 
@@ -341,39 +343,62 @@ def Type(
     monitor: int = 0,
     max_width: int = 1280,
     coords: str = "image",
+    method: str = "keys",
 ) -> str:
-    """Type text, optionally clicking a point of the Snapshot image first.
+    """Type text in any language, optionally clicking a point of the Snapshot image first.
 
-    x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = type at the
-    current focus without clicking.
+    Any Unicode text is typed exactly — diacritics (e.g. Slovak "Žltý kôň
+    ďakuje"), symbols (€, –) and emoji — whatever the machine's keyboard layout.
+    "\\n" (also "\\r\\n") presses Enter and "\\t" presses Tab. The reply "Typed N
+    chars" counts the characters actually delivered to the OS; if the OS refuses
+    input part-way (e.g. a locked session) the reply is an error saying how many
+    got through, never a success. x/y are IMAGE pixels of the last Snapshot (see
+    Click); 0/0 = type at the current focus without clicking.
 
     Args:
         text: Text to type.
         x: X in Snapshot image pixels (0 = current position).
         y: Y in Snapshot image pixels (0 = current position).
-        clear: Clear existing content first (Ctrl+A, Delete).
+        clear: Clear existing content first (select all, Delete).
         press_enter: Press Enter after typing.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
         coords: 'image' (default) or 'screen' = raw OS coordinates.
+        method: 'keys' (default) = Unicode keystrokes, the clipboard is not
+            touched. 'paste' = put the text on the clipboard, press Ctrl+V
+            (Command+V on macOS), then restore the previous clipboard text — only
+            for an app that ignores typed keystrokes (some games, nested remote
+            desktops).
     """
     try:
+        how = check_method(method)
         points, note = _to_screen([(x, y)] if x and y else [], monitor, max_width, coords)
         if is_linux():
             sx, sy = points[0] if points else (0, 0)
-            msg = get_desktop().type_text(text, x=sx, y=sy, clear=_tobool(clear), press_enter=_tobool(press_enter))
+            msg = get_desktop().type_text(
+                text, x=sx, y=sy, clear=_tobool(clear), press_enter=_tobool(press_enter), method=how
+            )
             return msg + note
+        _desktop = get_desktop()
         if points:
             pyautogui.click(*points[0])
             time.sleep(0.1)
         if _tobool(clear):
-            pyautogui.hotkey("ctrl", "a")
+            pyautogui.hotkey(_desktop.SHORTCUT_MODIFIER, "a")
             pyautogui.press("delete")
             time.sleep(0.05)
-        pyautogui.typewrite(text, interval=0.02) if text.isascii() else pyautogui.write(text)
+        if how == "paste":
+            reply = paste_text(
+                text,
+                get_clipboard=_desktop.get_clipboard,
+                set_clipboard=_desktop.set_clipboard,
+                press_paste=lambda: pyautogui.hotkey(_desktop.SHORTCUT_MODIFIER, "v"),
+            )
+        else:
+            reply = typed_reply(_desktop.type_unicode(text), len(text))
         if _tobool(press_enter):
             pyautogui.press("enter")
-        return f"Typed {len(text)} chars{note}"
+        return reply + note
     except Exception as e:
         return f"Type error: {e}"
 

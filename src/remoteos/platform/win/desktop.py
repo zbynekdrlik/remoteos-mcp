@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import locale
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -34,6 +35,10 @@ from PIL import ImageGrab  # noqa: E402
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
 from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
+from remoteos.typing_input import ENTER, TAB, Stroke, plan  # noqa: E402
+
+# The modifier of the edit shortcuts (select all, paste) the Type tool sends.
+SHORTCUT_MODIFIER = "ctrl"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -220,10 +225,22 @@ class _MOUSEINPUT(ctypes.Structure):
     ]
 
 
+class _KEYBDINPUT(ctypes.Structure):
+    # The Win32 layout with fixed-width fields: wVk / wScan are WORDs, dwFlags / time DWORDs.
+    _fields_ = [
+        ("wVk", ctypes.c_uint16),
+        ("wScan", ctypes.c_uint16),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_size_t),  # ULONG_PTR
+    ]
+
+
 class _INPUTUNION(ctypes.Union):
-    # MOUSEINPUT is the largest member of INPUT's union, so sizeof(_INPUT) is the real
-    # sizeof(INPUT) (40 on x64, 28 on x86) — SendInput rejects any other cbSize.
-    _fields_ = [("mi", _MOUSEINPUT)]
+    # MOUSEINPUT is the largest member of INPUT's union (KEYBDINPUT is smaller), so
+    # sizeof(_INPUT) is the real sizeof(INPUT) (40 on x64, 28 on x86) — SendInput
+    # rejects any other cbSize.
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
 
 
 class _INPUT(ctypes.Structure):
@@ -256,6 +273,64 @@ def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = No
             f"SendInput inserted {sent} of 1 wheel events — input is blocked (locked or disconnected session?)"
         )
     return steps.summary()
+
+
+# ---------------------------------------------------------------------------
+# Unicode typing (#30)
+# ---------------------------------------------------------------------------
+
+_INPUT_KEYBOARD = 1
+_KEYEVENTF_KEYUP = 0x0002
+_KEYEVENTF_UNICODE = 0x0004
+_VIRTUAL_KEYS = {ENTER: 0x0D, TAB: 0x09}  # VK_RETURN, VK_TAB
+_KEY_INTERVAL_S = 0.01  # between characters: apps that drain input slowly keep up
+
+
+def _key_events(stroke: Stroke):
+    """The INPUT array of one stroke: a down + up per UTF-16 code unit, or of its virtual key."""
+    if stroke.key is not None:
+        presses = [(_VIRTUAL_KEYS[stroke.key], 0, 0)]
+    else:
+        # KEYEVENTF_UNICODE: wVk = 0 and wScan = the code unit; Windows delivers it as a
+        # VK_PACKET → WM_CHAR, independent of the keyboard layout. A surrogate pair is two
+        # code units in the same call, so the pair always arrives whole.
+        presses = [(0, unit, _KEYEVENTF_UNICODE) for unit in stroke.units]
+    events = (_INPUT * (2 * len(presses)))()
+    for i, (vk, scan, flags) in enumerate(presses):
+        for j, up in enumerate((0, _KEYEVENTF_KEYUP)):
+            event = events[2 * i + j]
+            event.type = _INPUT_KEYBOARD
+            event.u.ki.wVk = vk
+            event.u.ki.wScan = scan
+            event.u.ki.dwFlags = flags | up
+    return events
+
+
+def type_unicode(text: str) -> int:
+    """Type ``text`` at the keyboard focus; returns the number of characters delivered.
+
+    One ``SendInput`` call per character (``remoteos.typing_input.plan``): Unicode
+    packets for text, ``VK_RETURN`` / ``VK_TAB`` for line breaks and tabs. Not
+    pyautogui: 0.9.54 maps only chr(32..127) and silently skips everything else.
+    A call that inserts fewer events than it was given (a locked or disconnected
+    session) raises, naming how many characters got through. A UIPI block (a
+    higher-integrity window has the focus) is silent: SendInput still succeeds.
+    """
+    user32 = ctypes.windll.user32
+    size = ctypes.sizeof(_INPUT)
+    delivered = 0
+    for index, stroke in enumerate(plan(text)):
+        if index:
+            time.sleep(_KEY_INTERVAL_S)
+        events = _key_events(stroke)
+        sent = user32.SendInput(len(events), events, size)
+        if sent != len(events):
+            raise RuntimeError(
+                f"SendInput inserted {sent} of {len(events)} key events after {delivered} of {len(text)} chars"
+                " — input is blocked (locked or disconnected session?)"
+            )
+        delivered += stroke.chars
+    return delivered
 
 
 # ---------------------------------------------------------------------------

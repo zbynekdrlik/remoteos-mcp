@@ -5,12 +5,18 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 from remoteos.coords import CaptureGeometry, frame_for
 from remoteos.scroll import chunks, wheel_steps
 from remoteos.snapshot import fit_to_frame
+from remoteos.typing_input import ENTER, TAB, Stroke, plan
+
+# The modifier of the edit shortcuts (select all, paste) the Type tool sends: Command.
+# Ctrl+A in a Cocoa text field moves the caret to the start of the paragraph instead.
+SHORTCUT_MODIFIER = "command"
 
 # Quartz imports (will fail on non-macOS — caught at tool level)
 try:
@@ -224,6 +230,51 @@ def _created(event, factory: str):
     if event is None:
         raise RuntimeError(f"{factory} returned no event")
     return event
+
+
+# ---------------------------------------------------------------------------
+# Unicode typing (#30)
+# ---------------------------------------------------------------------------
+
+# A keyboard event's Unicode string holds at most 20 UTF-16 units — Quartz truncates a
+# longer one — so text is posted in runs of <= 20 units (a character is never split).
+_MAX_UNITS_PER_EVENT = 20
+_KEYCODES = {ENTER: 0x24, TAB: 0x30}  # kVK_Return, kVK_Tab
+_RUN_INTERVAL_S = 0.01  # between runs: apps that drain input slowly keep up
+
+
+def _key_pair(stroke: Stroke) -> list:
+    """The key-down + key-up events of one stroke: the Return/Tab keycode, or a Unicode string."""
+    keycode = _KEYCODES[stroke.key] if stroke.key is not None else 0
+    events = []
+    for down in (True, False):
+        event = _created(Quartz.CGEventCreateKeyboardEvent(None, keycode, down), "CGEventCreateKeyboardEvent")
+        if stroke.key is None:
+            # The string replaces what the keycode would type, whatever the keyboard layout.
+            Quartz.CGEventKeyboardSetUnicodeString(event, len(stroke.units), stroke.source)
+        events.append(event)
+    return events
+
+
+def type_unicode(text: str) -> int:
+    """Type ``text`` at the keyboard focus; returns the number of characters delivered.
+
+    Quartz keyboard events carrying the text as a Unicode string, in runs of at
+    most 20 UTF-16 units (``remoteos.typing_input.plan``); line breaks and tabs are
+    the real Return / Tab keys. Not pyautogui: 0.9.54 maps only ASCII and silently
+    skips everything else. Every event is built before any is posted, so a failed
+    ``CGEventCreateKeyboardEvent`` types nothing.
+    """
+    if not HAS_QUARTZ:
+        raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
+    strokes = plan(text, max_units=_MAX_UNITS_PER_EVENT)
+    pairs = [_key_pair(stroke) for stroke in strokes]  # all or nothing
+    for index, pair in enumerate(pairs):
+        if index:
+            time.sleep(_RUN_INTERVAL_S)
+        for event in pair:
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+    return sum(stroke.chars for stroke in strokes)
 
 
 # ---------------------------------------------------------------------------
