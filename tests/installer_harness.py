@@ -119,6 +119,15 @@ def _prepare_macos_installer(tmp_path: Path) -> Path:
     return script
 
 
+def _stateless_site(shim_dir: Path, installed_version: str) -> Path:
+    """The stateless box's site dir: just the installed remoteos-mcp dist-info,
+    so the installer's rollback helper (importlib.metadata) finds the version
+    its `pip show` reports — never the test interpreter's own packages."""
+    site = shim_dir.parent / "stateless-site"
+    write_dist(site, "remoteos-mcp", installed_version, {})
+    return site
+
+
 def _create_linux_shims(
     shim_dir: Path,
     invocations: Path,
@@ -127,6 +136,7 @@ def _create_linux_shims(
 ) -> None:
     """Create the full set of shims for install-linux.sh testing."""
     real_py = _real_python()
+    stateless_site = _stateless_site(shim_dir, installed_version)
 
     # python3 — intercept pip calls, delegate -c to real python
     _make_shim(
@@ -178,6 +188,10 @@ case "$1" in
             exit 0
         fi
         exec "{real_py}" "$@"
+        ;;
+    */rollback.py)
+        # The installer's rollback helper sees only this box's site dir.
+        PYTHONPATH="{stateless_site}" exec "{real_py}" -S -B "$@"
         ;;
     *)
         exec "{real_py}" "$@"
@@ -236,6 +250,7 @@ def _create_macos_shims(
 ) -> None:
     """Create the full set of shims for install.sh (macOS) testing."""
     real_py = _real_python()
+    stateless_site = _stateless_site(shim_dir, installed_version)
 
     # python3 — same pattern as Linux
     _make_shim(
@@ -286,6 +301,10 @@ case "$1" in
         fi
         exec "{real_py}" "$@"
         ;;
+    */rollback.py)
+        # The installer's rollback helper sees only this box's site dir.
+        PYTHONPATH="{stateless_site}" exec "{real_py}" -S -B "$@"
+        ;;
     *)
         exec "{real_py}" "$@"
         ;;
@@ -330,26 +349,44 @@ def _run_installer(
     *,
     timeout: int = 60,
 ) -> subprocess.CompletedProcess:
-    """Run an installer script with controlled PATH.  Its `mktemp -d` work dir
-    lands in `tmp_path/tmp` (see `work_dirs`).  $INSTALLER_TEST_BASH picks the
-    bash binary (e.g. a bash 3.2, the macOS /bin/bash)."""
+    """Run an installer script with controlled PATH (see `_installer_env`)."""
+    return subprocess.run(
+        _installer_argv(script),
+        capture_output=True,
+        text=True,
+        env=_installer_env(shim_dir, tmp_path),
+        timeout=timeout,
+    )
+
+
+def start_installer(script: Path, shim_dir: Path, tmp_path: Path) -> subprocess.Popen:
+    """Start an installer with stdout+stderr on ONE pipe the test owns — close
+    it to simulate the console going away (ssh drop with no tty, a killed ssh)."""
+    return subprocess.Popen(
+        _installer_argv(script),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=_installer_env(shim_dir, tmp_path),
+    )
+
+
+def _installer_argv(script: Path) -> list[str]:
+    # $INSTALLER_TEST_BASH picks the bash binary (e.g. bash 3.2, the macOS /bin/bash).
+    return [os.environ.get("INSTALLER_TEST_BASH", "bash"), str(script)]
+
+
+def _installer_env(shim_dir: Path, tmp_path: Path) -> dict[str, str]:
+    """Controlled PATH (shims first); the `mktemp -d` work dir lands in
+    `tmp_path/tmp` (see `FakePipBox.work_dirs`)."""
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir(exist_ok=True)
-    env = {
+    return {
         "PATH": f"{shim_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
         "HOME": str(tmp_path),
         "TERM": "dumb",
         "LANG": "C",
         "TMPDIR": str(tmpdir),
     }
-
-    return subprocess.run(
-        [os.environ.get("INSTALLER_TEST_BASH", "bash"), str(script)],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout,
-    )
 
 
 def _find_first_code_line(content: str, *keywords: str, exclude: str | None = None) -> int | None:
@@ -372,6 +409,7 @@ def _find_first_code_line(content: str, *keywords: str, exclude: str | None = No
 # ---------------------------------------------------------------------------
 
 
+
 FAKE_PIP = Path(__file__).resolve().parent / "fake_pip.py"
 OLD_VERSION = "0.7.0.dev20"
 OLD_FASTMCP_SLIM = "4.0.2"
@@ -384,12 +422,19 @@ GIT_URL = f"git+https://github.com/zbynekdrlik/remoteos-mcp.git@{FAKE_SHA}"
 
 @dataclass
 class FakePipBox:
-    """A fake box: site-packages + console-script dir + the fake pip's call log."""
+    """A fake Debian-style box: pip's site dir (/usr/local/...), the apt site dir
+    after it on sys.path, the console-script dir, the fake pip's call log, and
+    the dir the installer's `mktemp -d` work dir lands in."""
 
     site: Path
+    apt_site: Path
     bin_dir: Path
     log: Path
     tmp: Path
+
+    @property
+    def sites(self) -> list[Path]:
+        return [self.site, self.apt_site]
 
     def entries(self) -> list[dict]:
         """Every pip call: {"argv": [...], "PIP_CONSTRAINT": ..., "TMPDIR": ...}."""
@@ -407,13 +452,14 @@ class FakePipBox:
         return [v for v in (_verb(e["argv"]) for e in self.entries()) if v not in ("show", "--version")]
 
     def versions(self, name: str) -> list[str]:
-        """Versions of every dist-info installed for `name` (stale ones too)."""
-        return [dist_field(d, "Version") for d in find_dists(self.site, name)]
+        """Versions of every dist-info installed for `name`, both site dirs, in
+        sys.path order (stale ones too)."""
+        return [dist_field(d, "Version") for d in find_dists(self.sites, name)]
 
     def files(self) -> dict[str, tuple[bytes, int]]:
-        """Every file under site-packages + bin, with its bytes and mode bits."""
+        """Every file under both site dirs + bin, with its bytes and mode bits."""
         result = {}
-        for root in (self.site, self.bin_dir):
+        for root in (self.site, self.apt_site, self.bin_dir):
             for path in sorted(root.rglob("*")):
                 if path.is_file():
                     result[str(path)] = (path.read_bytes(), path.stat().st_mode & 0o777)
@@ -433,7 +479,7 @@ def _verb(argv: list[str]) -> str:
 def install_old_remoteos(box: FakePipBox) -> None:
     """The box before the upgrade: remoteos-mcp OLD_VERSION (with its console
     script outside site-packages, as RECORD lists it) + fastmcp-slim
-    OLD_FASTMCP_SLIM — both importable."""
+    OLD_FASTMCP_SLIM — both pip-owned and importable."""
     write_dist(
         box.site,
         "remoteos-mcp",
@@ -449,28 +495,45 @@ def install_old_remoteos(box: FakePipBox) -> None:
 
 
 def install_dep(box: FakePipBox, name: str, version: str, *, installer: str = "pip") -> None:
-    """A dependency already on the box: pip-owned (RECORD) by default,
-    apt-owned with `installer="debian"` (no RECORD, as Debian ships it)."""
-    write_dist(box.site, name, version, dist_files(name, version), installer=installer, record=installer != "debian")
+    """A dependency already on the box.  `installer="debian"` = apt-owned: in
+    the apt site dir, no RECORD (as Debian ships it); anything else lands in
+    pip's site dir with a RECORD (pip, uv, ...)."""
+    if installer == "debian":
+        write_dist(box.apt_site, name, version, dist_files(name, version), installer="debian", record=False)
+    else:
+        write_dist(box.site, name, version, dist_files(name, version), installer=installer)
 
 
 def setup_fake_pip(tmp_path: Path, shim_dir: Path, **config: object) -> FakePipBox:
-    """Route the python3 shim's `-m pip` to fake_pip.py with `config` (keys:
-    see fake_pip.py), and run the installer's `-c "import remoteos..."` check
-    against the fake site-packages only (`-S`: no real site-packages).  Call
-    AFTER _create_*_shims: it replaces their stateless python3 shim."""
+    """Route the python3 shim at the fake box (call AFTER _create_*_shims: it
+    replaces their stateless python3 shim):
+
+    - `python3 -m pip ...`          → fake_pip.py with `config` (keys: see there)
+    - `python3 -c "import remoteos..."` (the installer's import check) and
+      `python3 .../rollback.py ...` (its rollback helper) → the real interpreter
+      with ONLY the box's two site dirs on sys.path (`-S`: no real site-packages;
+      `-B`: no __pycache__ in the fake site, so file comparisons stay exact).
+    """
     prefix = tmp_path / "prefix"
     box = FakePipBox(
         site=prefix / "lib" / "python3.14" / "dist-packages",
+        apt_site=tmp_path / "usr-lib-python3" / "dist-packages",
         bin_dir=prefix / "bin",
         log=tmp_path / "pip-calls.jsonl",
         tmp=tmp_path / "tmp",
     )
-    box.site.mkdir(parents=True)
-    box.bin_dir.mkdir(parents=True)
+    for path in (box.site, box.apt_site, box.bin_dir):
+        path.mkdir(parents=True)
     cfg_path = tmp_path / "fake-pip.json"
-    cfg_path.write_text(json.dumps({"site": str(box.site), "log": str(box.log), "new_version": NEW_VERSION, **config}))
+    cfg_path.write_text(json.dumps({
+        "site": str(box.site),
+        "apt_site": str(box.apt_site),
+        "log": str(box.log),
+        "new_version": NEW_VERSION,
+        **config,
+    }))
     real_py = _real_python()
+    box_path = f"{box.site}:{box.apt_site}"
     _make_shim(
         shim_dir / "python3",
         f"""\
@@ -490,10 +553,12 @@ case "$1" in
         ;;
     -c)
         if [[ "$2" == *"import remoteos"* ]]; then
-            # -B: no __pycache__ in the fake site, so file comparisons stay exact.
-            exec "{real_py}" -S -B -c "import sys; sys.path.insert(0, sys.argv[1]); exec(sys.argv[2])" "{box.site}" "$2"
+            PYTHONPATH="{box_path}" exec "{real_py}" -S -B -c "$2"
         fi
         exec "{real_py}" "$@"
+        ;;
+    */rollback.py)
+        PYTHONPATH="{box_path}" exec "{real_py}" -S -B "$@"
         ;;
     *)
         exec "{real_py}" "$@"
@@ -515,3 +580,12 @@ fi
 exit 0
 """,
     )
+
+
+def rollback_helper(path: Path, installer: Path = INSTALLER_LINUX) -> Path:
+    """Write the installer's embedded rollback helper (its `cat >"$ROLLBACK_PY"`
+    heredoc) to `path`, to run it directly against a real environment."""
+    text = installer.read_text()
+    start = text.index("<<'PY'\n", text.index('cat >"$ROLLBACK_PY"')) + len("<<'PY'\n")
+    path.write_text(text[start : text.index("\nPY\n", start) + 1])
+    return path

@@ -1,15 +1,20 @@
 """Fake pip for the installer tests — a stateful stand-in for Debian's pip.
 
-The python3 shim routes `python3 -m pip <args>` to `fake_pip.py <args>`.  State
-lives in a fake site-packages dir: each installed distribution is a
-`<name>-<version>.dist-info/` with METADATA + INSTALLER + RECORD — the same
-files real pip reads for `show` and `uninstall`, so the installer's
-snapshot/rollback works on it exactly as on a real box.  Apt-owned packages are
-dist-infos with INSTALLER "debian" and no RECORD, as Debian ships them.
+The python3 shim routes `python3 -m pip <args>` to `fake_pip.py <args>`.  A fake
+box has TWO site dirs, like a Debian/Ubuntu box:
+
+  site      pip's install target (/usr/local/lib/python3.X/dist-packages)
+  apt_site  apt-owned packages (/usr/lib/python3/dist-packages), after `site`
+            on sys.path, so a pip copy shadows an apt copy of the same name
+
+Each installed distribution is a `<name>-<version>.dist-info/` with METADATA +
+INSTALLER + RECORD — the same files real pip and importlib.metadata read, so the
+installer's snapshot/rollback helper works on it exactly as on a real box.  Apt
+dists carry INSTALLER "debian" and no RECORD, as Debian ships them.
 
 Behaviour comes from the JSON file named by $FAKE_PIP_CONFIG:
 
-  site            fake site-packages dir
+  site, apt_site  the two site dirs above
   log             JSON-lines log of every call (argv, PIP_CONSTRAINT, TMPDIR)
   new_version     the remoteos-mcp version a successful install lands
   resolved        extra [name, version] pairs the resolver picks besides
@@ -17,13 +22,19 @@ Behaviour comes from the JSON file named by $FAKE_PIP_CONFIG:
   debian_owned    names apt owns: a real install WITHOUT --ignore-installed
                   fails like Debian's pip ("installed by debian")
   dry_run_fail    the --dry-run preflight fails with a multi-line error
-  install_fail    the real install half-installs fastmcp-slim, then fails
+  install_fail    the real install installs the dependencies, then fails
+                  before remoteos-mcp
+  fail_after      install_fail stops after this many packages of the resolution
   install_noop    the real install exits 0 but installs nothing
   install_broken  the real install exits 0 but fastmcp has no FastMCP
+  install_delay   seconds the real install takes (to cut the console mid-run)
   block_restore   a failed install leaves a plain FILE where the remoteos/
-                  package dir must be restored (the rollback cannot succeed)
-  signal_parent   the real install half-installs, then sends this signal
-                  (TERM / HUP / INT) to the installer and dies
+                  package dir must be restored (the restore cannot succeed)
+  corrupt_snapshot  "import" / "version": a failed install damages the
+                  installer's rollback copy, so the restore "works" but the
+                  old version is not back in a working state
+  signal_parent   the real install installs the dependencies, then sends this
+                  signal (TERM / HUP / INT) to the installer and dies
   error_lines     how many numbered lines a failure prints
 """
 
@@ -34,10 +45,10 @@ import os
 import shutil
 import signal
 import sys
+import time
 from pathlib import Path
 
 NEW_FASTMCP_SLIM = "4.0.3"
-HALF_INSTALLED_FASTMCP_SLIM = "9.9.9"
 
 
 def norm(name: str) -> str:
@@ -59,7 +70,7 @@ def dist_files(name: str, version: str, *, importable: bool = True) -> dict[str,
 
 
 def write_dist(
-    site: Path,
+    base: Path,
     name: str,
     version: str,
     files: dict[str, str],
@@ -67,24 +78,27 @@ def write_dist(
     executable: tuple[str, ...] = (),
     installer: str = "pip",
     record: bool = True,
+    record_lists_dist_info: bool = True,
 ) -> Path:
-    """Install a fake distribution: its files (paths relative to `site`, may
-    start with `../`) plus a dist-info whose RECORD lists every one of them.
-    `record=False` + `installer="debian"` is an apt-owned package."""
-    info = site / f"{norm(name)}-{version}.dist-info"
+    """Install a fake distribution into the site dir `base`: its files (paths
+    relative to `base`, may start with `../`) plus a dist-info whose RECORD lists
+    every one of them.  `record=False` + `installer="debian"` is an apt package;
+    `record_lists_dist_info=False` is a truncated RECORD."""
+    info = base / f"{norm(name)}-{version}.dist-info"
     info.mkdir(parents=True, exist_ok=True)
     (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
     (info / "INSTALLER").write_text(f"{installer}\n")
     entries = []
     for rel, content in files.items():
-        path = Path(os.path.normpath(site / rel))
+        path = Path(os.path.normpath(base / rel))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
         if rel in executable:
             path.chmod(0o755)
         entries.append(f"{rel},,")
     if record:
-        entries += [f"{info.name}/{f},," for f in ("METADATA", "INSTALLER", "RECORD")]
+        if record_lists_dist_info:
+            entries += [f"{info.name}/{f},," for f in ("METADATA", "INSTALLER", "RECORD")]
         (info / "RECORD").write_text("\n".join(entries) + "\n")
     return info
 
@@ -96,8 +110,14 @@ def dist_field(info: Path, key: str) -> str:
     return ""
 
 
-def find_dists(site: Path, name: str) -> list[Path]:
-    return [d for d in sorted(site.glob("*.dist-info")) if norm(dist_field(d, "Name")) == norm(name)]
+def find_dists(sites: list[Path], name: str) -> list[Path]:
+    """The dists of `name` in sys.path order — the first one is what pip sees."""
+    return [
+        d
+        for base in sites
+        for d in sorted(base.glob("*.dist-info"))
+        if norm(dist_field(d, "Name")) == norm(name)
+    ]
 
 
 def _record_paths(info: Path) -> list[str] | None:
@@ -112,13 +132,14 @@ def _installer(info: Path) -> str:
     return path.read_text().strip() if path.exists() else ""
 
 
-def _remove_dist(site: Path, info: Path) -> None:
+def _remove_dist(info: Path) -> None:
+    base = info.parent
     for rel in _record_paths(info) or []:
-        path = Path(os.path.normpath(site / rel))
+        path = Path(os.path.normpath(base / rel))
         if path.is_file() or path.is_symlink():
             path.unlink()
             parent = path.parent
-            while parent != site and site in parent.parents and not any(parent.iterdir()):
+            while parent != base and base in parent.parents and not any(parent.iterdir()):
                 parent.rmdir()
                 parent = parent.parent
     shutil.rmtree(info, ignore_errors=True)
@@ -142,13 +163,13 @@ def _resolved(cfg: dict) -> list[tuple[str, str]]:
     return [("fastmcp-slim", NEW_FASTMCP_SLIM), *extra, ("remoteos-mcp", cfg["new_version"])]
 
 
-def cmd_show(cfg: dict, site: Path, args: list[str]) -> int:
+def cmd_show(cfg: dict, sites: list[Path], args: list[str]) -> int:
     with_files = "-f" in args or "--files" in args
     verbose = "-v" in args or "--verbose" in args
     names = [a for a in args if not a.startswith("-")]
     blocks, missing = [], []
     for name in names:
-        dists = find_dists(site, name)
+        dists = find_dists(sites, name)
         if not dists:
             missing.append(name)
             continue
@@ -157,7 +178,7 @@ def cmd_show(cfg: dict, site: Path, args: list[str]) -> int:
             f"Name: {dist_field(info, 'Name')}",
             f"Version: {dist_field(info, 'Version')}",
             "Summary: fake",
-            f"Location: {site}",
+            f"Location: {info.parent}",
             "Requires: ",
             "Required-by: ",
         ]
@@ -178,9 +199,11 @@ def cmd_show(cfg: dict, site: Path, args: list[str]) -> int:
     return 0 if blocks else 1
 
 
-def cmd_uninstall(cfg: dict, site: Path, args: list[str]) -> int:
+def cmd_uninstall(cfg: dict, sites: list[Path], args: list[str]) -> int:
+    """Like real pip: the names in order, the visible dist of each; the FIRST
+    one that cannot be uninstalled aborts the rest of the list."""
     for name in [a for a in args if not a.startswith("-")]:
-        dists = find_dists(site, name)
+        dists = find_dists(sites, name)
         if not dists:
             print(f"WARNING: Skipping {name} as it is not installed.", file=sys.stderr)
             continue
@@ -190,7 +213,7 @@ def cmd_uninstall(cfg: dict, site: Path, args: list[str]) -> int:
         if _record_paths(info) is None:
             _cannot_uninstall(name, version, _installer(info))
             return 1
-        _remove_dist(site, info)
+        _remove_dist(info)
         print(f"  Successfully uninstalled {name}-{version}")
     return 0
 
@@ -205,14 +228,41 @@ def _report(cfg: dict, args: list[str]) -> None:
     }))
 
 
-def _half_install(site: Path) -> None:
-    # pip installs dependencies one by one, so a mid-way failure leaves the
-    # earlier ones in place: fastmcp-slim lands, then the install dies.
-    version = HALF_INSTALLED_FASTMCP_SLIM
-    write_dist(site, "fastmcp-slim", version, dist_files("fastmcp-slim", version))
+def _install(cfg: dict, sites: list[Path], *, ignore_installed: bool, deps_only: bool) -> None:
+    """Install the resolution into `site` in order, remoteos-mcp last — or,
+    `deps_only`, the dependencies before it (only the first `fail_after` of the
+    resolution when set): a mid-way failure leaves what pip had already
+    installed in place."""
+    target = sites[0]
+    resolution = _resolved(cfg)
+    if deps_only and cfg.get("fail_after") is not None:
+        resolution = resolution[: int(cfg["fail_after"])]
+    for name, version in resolution:
+        if deps_only and norm(name) == "remoteos_mcp":
+            return
+        if not ignore_installed:
+            # A plain upgrade uninstalls the old pip-owned copy first, as real pip does.
+            for info in find_dists(sites, name):
+                if dist_field(info, "Version") != version and _record_paths(info) is not None:
+                    _remove_dist(info)
+        # With --ignore-installed real pip writes over the files and leaves any
+        # other-version dist-info of the same name in place (a stale RECORD).
+        write_dist(target, name, version, dist_files(name, version, importable=not cfg.get("install_broken")))
 
 
-def cmd_install(cfg: dict, site: Path, args: list[str]) -> int:
+def _corrupt_snapshot(mode: str) -> None:
+    """Damage the installer's rollback copy (it lives next to pip's TMPDIR), so
+    the restore 'succeeds' but the old version is not back in a working state."""
+    files = Path(os.environ["TMPDIR"]).parent / "snapshot" / "files"
+    if mode == "import":
+        for path in files.rglob("remoteos/__main__.py"):
+            path.write_text("raise ImportError('corrupted rollback copy')\n")
+    elif mode == "version":
+        for path in files.rglob("remoteos_mcp-*.dist-info/METADATA"):
+            path.write_text("Metadata-Version: 2.1\nName: remoteos-mcp\nVersion: 0.0.0\n")
+
+
+def cmd_install(cfg: dict, sites: list[Path], args: list[str]) -> int:
     ignore_installed = "--ignore-installed" in args or "-I" in args
     if "--dry-run" in args:
         if cfg.get("dry_run_fail"):
@@ -222,40 +272,36 @@ def cmd_install(cfg: dict, site: Path, args: list[str]) -> int:
         print("Would install " + " ".join(f"{n}-{v}" for n, v in _resolved(cfg)))
         return 0
     print("Collecting remoteos-mcp")
+    time.sleep(float(cfg.get("install_delay", 0)))
     if not ignore_installed:
         for pkg in cfg.get("debian_owned", []):
             print(f"Attempting uninstall: {pkg}", file=sys.stderr)
             _cannot_uninstall(pkg, "41.0.7", "debian")
             return 1
     if cfg.get("signal_parent"):
-        _half_install(site)
-        os.kill(os.getppid(), getattr(signal, f"SIG{cfg['signal_parent']}"))
-        return 128 + int(getattr(signal, f"SIG{cfg['signal_parent']}"))
+        _install(cfg, sites, ignore_installed=ignore_installed, deps_only=True)
+        sig = getattr(signal, f"SIG{cfg['signal_parent']}")
+        os.kill(os.getppid(), sig)
+        return 128 + int(sig)
     if cfg.get("install_fail"):
-        _half_install(site)
+        _install(cfg, sites, ignore_installed=ignore_installed, deps_only=True)
         if cfg.get("block_restore"):
-            (site / "remoteos").write_text("a plain file where the remoteos package dir must go\n")
+            (sites[0] / "remoteos").write_text("a plain file where the remoteos package dir must go\n")
+        if cfg.get("corrupt_snapshot"):
+            _corrupt_snapshot(str(cfg["corrupt_snapshot"]))
         _error(cfg, "install")
         return 1
     if cfg.get("install_noop"):
         print("Successfully installed nothing")
         return 0
-    for name, version in _resolved(cfg):
-        if not ignore_installed:
-            # A plain upgrade uninstalls the old pip-owned copy first, as real pip does.
-            for info in find_dists(site, name):
-                if dist_field(info, "Version") != version:
-                    _remove_dist(site, info)
-        # With --ignore-installed real pip writes over the files and leaves any
-        # other-version dist-info of the same name in place (a stale RECORD).
-        write_dist(site, name, version, dist_files(name, version, importable=not cfg.get("install_broken")))
+    _install(cfg, sites, ignore_installed=ignore_installed, deps_only=False)
     print("Successfully installed " + " ".join(f"{n}-{v}" for n, v in _resolved(cfg)))
     return 0
 
 
 def main(argv: list[str]) -> int:
     cfg = json.loads(Path(os.environ["FAKE_PIP_CONFIG"]).read_text())
-    site = Path(cfg["site"])
+    sites = [Path(cfg["site"]), Path(cfg["apt_site"])]
     with open(cfg["log"], "a") as log:
         log.write(json.dumps({
             "argv": argv,
@@ -269,7 +315,7 @@ def main(argv: list[str]) -> int:
         return 0
     handlers = {"show": cmd_show, "uninstall": cmd_uninstall, "install": cmd_install}
     handler = handlers.get(argv[0])
-    return handler(cfg, site, argv[1:]) if handler else 0
+    return handler(cfg, sites, argv[1:]) if handler else 0
 
 
 if __name__ == "__main__":
