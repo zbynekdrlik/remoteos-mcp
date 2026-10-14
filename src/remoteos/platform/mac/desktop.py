@@ -265,7 +265,7 @@ def _require_post_event_access() -> None:
     if preflight is not None and not preflight():
         raise RuntimeError(
             "macOS does not let this process post keyboard events — allow it in System Settings › "
-            "Privacy & Security › Accessibility (nothing was typed)"
+            "Privacy & Security › Accessibility (nothing was clicked, typed or pasted)"
         )
 
 
@@ -305,8 +305,11 @@ def type_text(
     Points are in the ``CGDisplayBounds`` space. Text goes through
     ``remoteos.text_entry`` (``type_unicode`` keystrokes, or a clipboard paste).
     pyautogui only clicks and presses named keys here (Command+A, Delete,
-    Command+V, Enter); it never types text.
+    Command+V, Enter); it never types text. Its events are ``CGEventPost`` too,
+    so the posting permission is checked before anything is clicked or pressed.
     """
+    if HAS_QUARTZ:
+        _require_post_event_access()
     if x is not None and y is not None:
         pyautogui.click(x, y)
         time.sleep(0.1)

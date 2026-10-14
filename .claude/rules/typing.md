@@ -46,8 +46,10 @@ paths:
   - At most 20 UTF-16 units per event: Quartz truncates a longer string.
   - Return / Tab are real keycodes (`kVK_Return` 0x24, `kVK_Tab` 0x30).
   - `CGEventPost` returns nothing, and without the posting permission macOS drops events
-    SILENTLY. So `type_unicode` checks `CGPreflightPostEventAccess()` (macOS 10.15+) first;
-    when it is false it raises and types nothing.
+    SILENTLY. pyautogui's click and Command+V post the same way. So `type_text` checks
+    `CGPreflightPostEventAccess()` (macOS 10.15+) BEFORE the click, clear or paste, and
+    `type_unicode` checks again for direct callers. When it is false they raise and nothing
+    is clicked, typed or pasted.
   - A locked console still drops events unseen. That diagnosis is #32.
   - Every event is built before any is posted, as in the scroll code.
   - The edit-shortcut modifier is **Command** (`_SHORTCUT_MODIFIER`). Ctrl+A in Cocoa moves

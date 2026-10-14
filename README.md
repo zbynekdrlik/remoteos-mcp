@@ -126,8 +126,8 @@ diacritics, symbols and emoji. `\n` (also `\r\n`) presses Enter and `\t` presses
   handed over.
   - **Windows:** if `SendInput` refuses input part-way (a locked or disconnected session),
     the reply is an error that says how many got through.
-  - **macOS:** refuses up front, typing nothing, when the process may not post keyboard
-    events.
+  - **macOS:** refuses up front, when the process may not post keyboard events. Nothing is
+    then clicked, typed or pasted.
   - **macOS and Linux:** cannot confirm delivery to a locked console.
 - **`method="paste"` (opt-in):** for an app that ignores typed keystrokes.
   - It saves the clipboard text, pastes with Ctrl+V (Command+V on macOS), then restores the
