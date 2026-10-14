@@ -243,16 +243,17 @@ def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = No
     steps = wheel_steps(direction, clicks)
     user32 = ctypes.windll.user32
     if x is not None and y is not None and not user32.SetCursorPos(int(x), int(y)):
-        raise RuntimeError(f"SetCursorPos({x},{y}) failed (error {ctypes.windll.kernel32.GetLastError()})")
+        raise RuntimeError(f"SetCursorPos({x},{y}) failed — no interactive desktop (locked or disconnected session?)")
     events = (_INPUT * 1)()
     events[0].type = _INPUT_MOUSE
     events[0].u.mi.dwFlags = _MOUSEEVENTF_HWHEEL if steps.horizontal else _MOUSEEVENTF_WHEEL
     events[0].u.mi.mouseData = steps.delta
+    # A 0 return means the input desktop refused the event. A UIPI block (a higher-integrity
+    # window under the cursor) is NOT reported: SendInput still returns 1 (Microsoft docs).
     sent = user32.SendInput(1, events, ctypes.sizeof(_INPUT))
     if sent != 1:
         raise RuntimeError(
-            f"SendInput inserted {sent} of 1 wheel events (error {ctypes.windll.kernel32.GetLastError()})"
-            " — input blocked: a locked/disconnected session or a higher-integrity window (UIPI)"
+            f"SendInput inserted {sent} of 1 wheel events — input is blocked (locked or disconnected session?)"
         )
     return steps.summary()
 

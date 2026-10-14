@@ -204,18 +204,26 @@ def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = No
         raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
     steps = wheel_steps(direction, clicks)
     point = (float(x), float(y)) if x is not None and y is not None else None
+    events = []  # built first, posted only when every event exists: all or nothing
     if point is not None:
         move = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, point, Quartz.kCGMouseButtonLeft)
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
+        events.append(_created(move, "CGEventCreateMouseEvent"))
     for lines in chunks(steps.signed_clicks, _MAX_LINES_PER_EVENT):
         wheel1, wheel2 = (0, -lines) if steps.horizontal else (lines, 0)
         event = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 2, wheel1, wheel2)
-        if event is None:
-            raise RuntimeError("CGEventCreateScrollWheelEvent returned no event")
+        events.append(_created(event, "CGEventCreateScrollWheelEvent"))
         if point is not None:
             Quartz.CGEventSetLocation(event, point)
+    for event in events:
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
     return steps.summary()
+
+
+def _created(event, factory: str):
+    """``event``, or a RuntimeError when the Quartz ``factory`` returned no event."""
+    if event is None:
+        raise RuntimeError(f"{factory} returned no event")
+    return event
 
 
 # ---------------------------------------------------------------------------

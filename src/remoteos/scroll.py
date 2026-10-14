@@ -40,16 +40,6 @@ class WheelSteps:
         return self.clicks if self.direction in ("up", "right") else -self.clicks
 
     @property
-    def dy(self) -> int:
-        """Vertical clicks, positive = up (0 for a horizontal scroll)."""
-        return 0 if self.horizontal else self.signed_clicks
-
-    @property
-    def dx(self) -> int:
-        """Horizontal clicks, positive = right (0 for a vertical scroll)."""
-        return self.signed_clicks if self.horizontal else 0
-
-    @property
     def delta(self) -> int:
         """Windows wheel delta (``mouseData``): ±clicks × WHEEL_DELTA, positive = up/right."""
         return self.signed_clicks * WHEEL_DELTA
