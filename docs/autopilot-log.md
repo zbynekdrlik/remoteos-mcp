@@ -87,3 +87,9 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Bug found:** `pip install --force-reinstall` from archive URL (`main.zip`) on Windows corrupts fastmcp's `__init__.py` — leaves a namespace package. Repair: targeted reinstall of fastmcp after main install.
 - **Commits:** `d0fe5a0` version bump 0.7.0.dev15; `ba6482b` [red] 4 structural tests; `9bc4fad` [green] fix: self-check + fastmcp repair.
 - **Tests:** 89/89 pass, ruff clean. pwsh not available locally — no hermetic behavioral test for install.ps1.
+
+### 2026-10-14 — #25 MCP gateway on dev1 (remoteos-gateway, 0.7.0.dev21)
+- **What:** new `src/remoteos/gateway/` (registry, accesslog, app, cli) + console script `remoteos-gateway` + `deploy/remoteos-gateway.service` (user unit) + README "MCP gateway (dev1)". Transparent streaming reverse proxy, per-consumer sha256 tokens, machine key read from `~/.claude/mcp-configs/remoteos-mcp.mcp.json` (never copied), 401→403→404 order, 503 JSON-RPC `-32000` when a machine is down, JSONL access log without token/args.
+- **Decisions (on #25):** HTTP client = `httpx2==2.12.0` (fastmcp/mcp's own runtime client; plain httpx is test-only); `starlette==1.6.0` + `uvicorn==0.52.4` pinned directly; constraints.txt regenerated (only `# via` comments changed).
+- **Commits:** `4cb648b` version bump 0.7.0.dev21; `840e39e` feat + 32 hermetic tests (in-process fake machine; chunk-by-chunk SSE proof; disconnect cleanup; SIGHUP forced reload). Mutation probe: 8/8 mutants killed.
+- **Not done here:** install on dev1 + `expose win-pjsnvs-pokladna` + consumer hand-off (airuleset#1243) — supervisor rollout; #25 stays open until then.

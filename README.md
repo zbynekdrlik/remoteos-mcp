@@ -65,6 +65,105 @@ Create `.mcp.json` in your project directory:
 
 Claude Code only loads MCP servers from the current project's `.mcp.json`, so different projects = different Windows machines.
 
+## MCP gateway (dev1)
+
+The machines are reachable only from boxes with a LAN route to them. `remoteos-gateway`
+runs on dev1, which has that route, and lets a **remote fleet consumer** reach a machine's
+MCP. Example consumer: `david3@subdev` → `win-pjsnvs-pokladna`. The machine key never
+leaves dev1.
+
+- **Listens on dev1's tailscale address only:** `100.104.8.125:8796`. It refuses
+  `0.0.0.0` / `::`.
+- **One URL per machine:** `http://100.104.8.125:8796/<machine>/mcp`. The machine name is
+  its key in `~/.claude/mcp-configs/remoteos-mcp.mcp.json`.
+- **Per-consumer tokens, registered by hash only.** The gateway checks the consumer's
+  `Authorization: Bearer <token>`. It then forwards the request with the machine's own key,
+  read from the master MCP config (never copied). The consumer token is never forwarded.
+- **Transparent streaming proxy.** JSON and SSE responses stream back unchanged, including
+  `Mcp-Session-Id`.
+
+| Answer | Meaning |
+|---|---|
+| 401 | missing token, or its sha256 is not registered |
+| 403 | consumer known, but not allowed that machine |
+| 404 | machine not exposed (or unknown path) |
+| 503 + JSON-RPC `-32000` | the machine is down / unreachable, or missing from the master config |
+
+### Run it
+
+Install into a **dedicated venv** with the pinned `constraints.txt`. Never install into the
+user's shared site-packages: that would move `fastmcp` / `mcp` for every other tool of that
+account.
+
+```bash
+python3 -m venv ~/.local/share/remoteos-gateway/venv
+~/.local/share/remoteos-gateway/venv/bin/pip install \
+  -c https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt \
+  "git+https://github.com/zbynekdrlik/remoteos-mcp.git@main"
+ln -sf ~/.local/share/remoteos-gateway/venv/bin/remoteos-gateway ~/.local/bin/remoteos-gateway
+cp deploy/remoteos-gateway.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now remoteos-gateway
+loginctl enable-linger "$USER"
+curl -s http://100.104.8.125:8796/healthz      # {"status":"ok","version":"..."}
+```
+
+To upgrade, re-run the `pip install` line with `--force-reinstall` added. pip does not
+re-fetch a git URL whose version is already installed. Then run
+`systemctl --user restart remoteos-gateway` and check that `/healthz` shows the new version.
+
+### Add a consumer
+
+1. **The consumer**, on its own box, generates a random token and keeps it `0600` in its
+   home. It sends **only the sha256** of the token (through a ticket).
+   - The hash is over the exact token bytes, with no trailing newline:
+
+     ```bash
+     umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")' > ~/.remoteos-gateway.token
+     sha256sum < ~/.remoteos-gateway.token        # 64 hex chars — this is what you send
+     ```
+
+2. **On dev1**, register it and grant a machine. `consumer add` refuses anything that is not
+   64 hex characters, so a raw token can never be registered by mistake.
+
+   ```bash
+   remoteos-gateway consumer add david3@subdev --sha256 <64-hex>
+   remoteos-gateway expose win-pjsnvs-pokladna          # once per machine
+   remoteos-gateway allow david3@subdev win-pjsnvs-pokladna
+   ```
+
+3. **The consumer's** `.mcp.json`:
+
+   ```json
+   "win-pjsnvs-pokladna": {"type": "http",
+     "url": "http://100.104.8.125:8796/win-pjsnvs-pokladna/mcp",
+     "headers": {"Authorization": "Bearer <its own token>"}}
+   ```
+
+### Revoke, inspect
+
+```bash
+remoteos-gateway deny david3@subdev win-pjsnvs-pokladna    # take one machine away
+remoteos-gateway consumer revoke david3@subdev             # remove the consumer entirely
+remoteos-gateway consumer revoke david3@subdev --sha256 <hex>   # retire one token (rotation)
+remoteos-gateway unexpose win-pjsnvs-pokladna              # kill switch for everyone
+remoteos-gateway list                                      # machines, consumers, hash prefixes
+remoteos-gateway log --consumer david3@subdev --tail 50    # who called what, when
+```
+
+Every edit is written atomically to `~/.config/remoteos-gateway/registry.json` (`0600`). The
+running gateway applies it on the next request, so no restart is needed. To force a re-read,
+run `systemctl --user reload remoteos-gateway` (SIGHUP).
+
+A registry that turns invalid is never applied: the last good copy stays and an error is
+logged. A deleted registry denies everything.
+
+**Logs:**
+
+- `journalctl --user -u remoteos-gateway` — operational log: decisions, reloads, errors.
+- `~/.local/state/remoteos-gateway/access.jsonl` — one line per request: time, consumer,
+  machine, JSON-RPC method, tool name, status, duration. It never holds a token, a key, or
+  tool arguments. It rotates to `.1` at 20 MiB.
+
 ## Uninstall
 
 ```powershell
