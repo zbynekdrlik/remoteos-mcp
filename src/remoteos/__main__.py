@@ -57,6 +57,7 @@ from remoteos.tiers import (
     parse_tool_csv,
     resolve_enabled_tools,
 )
+from remoteos.typing_input import check_method
 
 load_dotenv()
 
@@ -341,39 +342,45 @@ def Type(
     monitor: int = 0,
     max_width: int = 1280,
     coords: str = "image",
+    method: str = "keys",
 ) -> str:
-    """Type text, optionally clicking a point of the Snapshot image first.
+    """Type text in any language, optionally clicking a point of the Snapshot image first.
 
-    x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = type at the
-    current focus without clicking.
+    Any Unicode text is typed exactly — diacritics (e.g. Slovak "Žltý kôň
+    ďakuje"), symbols (€, –) and emoji — whatever the machine's keyboard layout.
+    "\\n" (also "\\r\\n") presses Enter and "\\t" presses Tab. The reply "Typed N
+    chars" counts the characters handed to the OS. On Windows, input the OS
+    refuses part-way (e.g. a locked session) is an error saying how many got
+    through, never a success; macOS refuses up front when this process may not
+    post keyboard events. Neither macOS nor Linux can confirm delivery to a locked
+    console. x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = type at
+    the current focus without clicking.
 
     Args:
         text: Text to type.
         x: X in Snapshot image pixels (0 = current position).
         y: Y in Snapshot image pixels (0 = current position).
-        clear: Clear existing content first (Ctrl+A, Delete).
+        clear: Clear existing content first (select all, Delete).
         press_enter: Press Enter after typing.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
         coords: 'image' (default) or 'screen' = raw OS coordinates.
+        method: 'keys' (default) = Unicode keystrokes, the clipboard is not
+            touched. 'paste' = put the text on the clipboard, press Ctrl+V
+            (Command+V on macOS), then restore the previous clipboard text — only
+            for an app that ignores typed keystrokes (some games, nested remote
+            desktops). Not for secrets: clipboard history keeps a copy. The reply
+            means the paste keys were pressed, not that the app took the text.
     """
     try:
+        how = check_method(method)
         points, note = _to_screen([(x, y)] if x and y else [], monitor, max_width, coords)
-        if is_linux():
-            sx, sy = points[0] if points else (0, 0)
-            msg = get_desktop().type_text(text, x=sx, y=sy, clear=_tobool(clear), press_enter=_tobool(press_enter))
-            return msg + note
-        if points:
-            pyautogui.click(*points[0])
-            time.sleep(0.1)
-        if _tobool(clear):
-            pyautogui.hotkey("ctrl", "a")
-            pyautogui.press("delete")
-            time.sleep(0.05)
-        pyautogui.typewrite(text, interval=0.02) if text.isascii() else pyautogui.write(text)
-        if _tobool(press_enter):
-            pyautogui.press("enter")
-        return f"Typed {len(text)} chars{note}"
+        sx, sy = points[0] if points else (None, None)
+        log.debug("Type %d chars by %s at %s (clear=%s, enter=%s)", len(text), how, points, clear, press_enter)
+        reply = get_desktop().type_text(
+            text, x=sx, y=sy, clear=_tobool(clear), press_enter=_tobool(press_enter), method=how
+        )
+        return reply + note
     except Exception as e:
         return f"Type error: {e}"
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -259,6 +260,85 @@ def test_x11_type_text_with_clear_and_enter(x11):
     assert ["xdotool", "key", "--clearmodifiers", "ctrl+a"] in argvs
     assert ["xdotool", "type", "--delay", "20", "--", "hello"] in argvs
     assert ["xdotool", "key", "Return"] in argvs
+
+
+def test_x11_type_text_keys_types_unicode_with_xdotool(x11):
+    mod, calls = x11
+    assert mod.type_text("Žltý kôň ďakuje", method="keys") == "Typed 15 chars"
+    assert ["xdotool", "type", "--delay", "20", "--", "Žltý kôň ďakuje"] in calls
+
+
+@pytest.fixture
+def x11_clipboard(monkeypatch, x11):
+    """xclip with a real-ish clipboard: every non-read call is logged with what the clipboard then holds."""
+    mod, _ = x11
+    board = {"text": "clip-content"}
+    log: list[tuple[list[str], str]] = []
+
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        if cmd[:1] == ["xclip"] and "-o" in cmd:
+            return _FakeProc(stdout=board["text"].encode("utf-8"))
+        if cmd[:1] == ["xclip"]:
+            board["text"] = input_bytes.decode("utf-8")
+        log.append((cmd, board["text"]))
+        return _FakeProc()
+
+    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(time, "sleep", lambda s: None)  # the paste settle wait
+    return mod, board, log
+
+
+def test_x11_type_text_paste_method_pastes_then_restores_the_clipboard(x11_clipboard):
+    mod, board, log = x11_clipboard
+    out = mod.type_text("Žltý kôň", method="paste")
+    assert log == [
+        (["xclip", "-selection", "clipboard"], "Žltý kôň"),
+        (["xdotool", "key", "--clearmodifiers", "ctrl+v"], "Žltý kôň"),
+        (["xclip", "-selection", "clipboard"], "clip-content"),
+    ]
+    assert out == "Pasted 8 chars (clipboard restored)"
+
+
+def test_x11_paste_with_an_empty_clipboard_does_not_restore_it(x11_clipboard):
+    mod, board, log = x11_clipboard
+    board["text"] = ""
+    out = mod.type_text("ž", method="paste")
+    assert [cmd for cmd, _ in log] == [
+        ["xclip", "-selection", "clipboard"],
+        ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
+    ]
+    assert out == "Pasted 1 chars (the clipboard held no text, so it was not restored)"
+
+
+def test_x11_type_text_point_on_column_zero_is_a_real_point(x11):
+    mod, calls = x11
+    mod.type_text("a", x=0, y=5)
+    assert ["xdotool", "mousemove", "0", "5", "click", "1"] in calls
+
+
+def test_x11_type_unicode_types_with_xdotool_and_returns_the_count(x11):
+    mod, calls = x11
+    assert mod.type_unicode("Žltý kôň") == 8
+    assert calls[-1] == ["xdotool", "type", "--delay", "20", "--", "Žltý kôň"]
+
+
+def test_headless_type_unicode_raises_the_stub_message(headless):
+    with pytest.raises(RuntimeError) as exc:
+        headless.type_unicode("x")
+    assert str(exc.value) == _MSG
+
+
+def test_x11_type_text_paste_with_clear_and_enter_keeps_their_order(x11_clipboard):
+    mod, _, log = x11_clipboard
+    mod.type_text("ďakujem", clear=True, press_enter=True, method="paste")
+    assert [cmd for cmd, _ in log] == [
+        ["xdotool", "key", "--clearmodifiers", "ctrl+a"],
+        ["xdotool", "key", "Delete"],
+        ["xclip", "-selection", "clipboard"],
+        ["xdotool", "key", "--clearmodifiers", "ctrl+v"],
+        ["xclip", "-selection", "clipboard"],
+        ["xdotool", "key", "Return"],
+    ]
 
 
 @pytest.mark.parametrize(

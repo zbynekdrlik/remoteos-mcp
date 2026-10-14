@@ -112,6 +112,30 @@ clamped to 1..100.
 - **Legacy calls still work:** a signed `amount` (positive = up/right, negative = down/left)
   with `horizontal=true` for left/right. An explicit `direction` wins over both.
 
+## Typing text (Unicode)
+
+`Type("Žltý kôň ďakuje – €")` types any Unicode text exactly, whatever the keyboard layout:
+diacritics, symbols and emoji. `\n` (also `\r\n`) presses Enter and `\t` presses Tab.
+
+- **Windows:** `SendInput` Unicode packets (`KEYEVENTF_UNICODE`), one down/up per UTF-16
+  code unit, so emoji go as surrogate pairs.
+- **macOS:** Quartz keyboard events that carry the text, at most 20 UTF-16 units per event.
+  The process needs the Accessibility permission (System Settings › Privacy & Security).
+- **Linux:** `xdotool type`.
+- **The reply counts what was handed to the OS.** `Typed N chars` means N characters were
+  handed over.
+  - **Windows:** if `SendInput` refuses input part-way (a locked or disconnected session),
+    the reply is an error that says how many got through.
+  - **macOS:** refuses up front, when the process may not post keyboard events. Nothing is
+    then clicked, typed or pasted.
+  - **macOS and Linux:** cannot confirm delivery to a locked console.
+- **`method="paste"` (opt-in):** for an app that ignores typed keystrokes.
+  - It saves the clipboard text, pastes with Ctrl+V (Command+V on macOS), then restores the
+    clipboard.
+  - Only text can be restored. When the clipboard held none, the reply says so.
+  - The reply means the paste keys were pressed; it does not confirm the app took the text.
+  - Not for secrets: clipboard history and sync keep a copy.
+
 ## MCP gateway (dev1)
 
 The machines are reachable only from boxes with a LAN route to them. `remoteos-gateway`

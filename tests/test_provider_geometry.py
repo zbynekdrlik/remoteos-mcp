@@ -1,17 +1,21 @@
-"""Windows / macOS provider geometry, the pyautogui input branch (#28) and the wheel (#29).
+"""Windows / macOS provider geometry, the pyautogui input branch (#28), the wheel (#29)
+and Unicode typing (#30).
 
 The Windows and macOS providers are imported here against FAKE OS APIs — the
 external boundary only: ``ctypes.windll`` (user32 ``SendInput`` / ``SetCursorPos``
-included) / pywin32 / ``ImageGrab.grab`` / pyautogui on Windows, the ``Quartz``
-framework (event creation + posting included) and the ``screencapture``
-subprocess on macOS. Everything of ours (``capture_geometry``, ``capture_frame``,
-``scroll``, the frame math, the tool functions) is the real code.
+included) / pywin32 (``win32clipboard`` included) / ``ImageGrab.grab`` / pyautogui
+on Windows, the ``Quartz`` framework (event creation + posting included) and the
+``screencapture`` / ``pbcopy`` / ``pbpaste`` subprocesses on macOS. Everything of
+ours (``capture_geometry``, ``capture_frame``, ``scroll``, ``type_unicode``, the
+frame math, the tool functions) is the real code.
 """
 
 from __future__ import annotations
 
 import ctypes
 import importlib
+import logging
+import struct
 import sys
 import types
 from pathlib import Path
@@ -48,11 +52,17 @@ def _purge(name: str) -> None:
 
 
 class _FakeInput:
-    """user32 cursor + ``SendInput``: records every call in order, reading the INPUT array."""
+    """user32 cursor + ``SendInput``: records every call in order, reading the INPUT array.
+
+    ``raw`` keeps each call's INPUT array as raw bytes, so keyboard events are decoded
+    with the Win32 ``KEYBDINPUT`` layout itself, not with the provider's field names.
+    """
 
     def __init__(self):
         self.log: list[tuple] = []
+        self.raw: list[tuple[int, bytes]] = []  # (cbSize, the INPUT array's bytes) per SendInput call
         self.inserted: int | None = None  # None = all events accepted
+        self.accepted_calls: int | None = None  # N = every SendInput call after the N-th inserts 0
         self.cursor_ok = True
 
     def SetCursorPos(self, x, y):
@@ -62,6 +72,9 @@ class _FakeInput:
     def SendInput(self, count, events, size):
         entries = [(e.type, e.u.mi.dwFlags, e.u.mi.mouseData, e.u.mi.dx, e.u.mi.dy) for e in events[:count]]
         self.log.append(("SendInput", count, entries, size))
+        self.raw.append((size, bytes(events)))
+        if self.accepted_calls is not None and len(self.raw) > self.accepted_calls:
+            return 0
         return count if self.inserted is None else self.inserted
 
 
@@ -156,6 +169,7 @@ def pyautogui_branch(monkeypatch, win):
         hscroll=_Recorder(),
     )
     monkeypatch.setattr(server, "pyautogui", fake, raising=False)
+    monkeypatch.setattr(mod, "pyautogui", fake, raising=False)  # the provider's own typing path (#30)
     monkeypatch.setattr(server, "is_linux", lambda: False)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
@@ -281,6 +295,229 @@ def test_windows_scroll_unknown_direction_sends_nothing(pyautogui_branch):
     assert ctypes.windll.input.log == []
 
 
+# --- Windows: typing is SendInput + KEYEVENTF_UNICODE, one call per character (#30) ---
+
+_INPUT_KEYBOARD, _KEYEVENTF_KEYUP, _KEYEVENTF_UNICODE = 1, 0x0002, 0x0004
+_VK_RETURN, _VK_TAB = 0x0D, 0x09
+# INPUT's union starts at offset 8 on x64 / 4 on x86 (it holds a ULONG_PTR). KEYBDINPUT inside
+# it: wVk WORD @+0, wScan WORD @+2, dwFlags DWORD @+4.
+_UNION_OFFSET = ctypes.sizeof(ctypes.c_void_p)
+
+
+def _key_calls(win_input):
+    """Per SendInput call, the (type, wVk, wScan, dwFlags) of each INPUT, decoded from raw bytes."""
+    calls = []
+    for size, raw in win_input.raw:
+        assert size == _SIZEOF_INPUT
+        events = []
+        for start in range(0, len(raw), _SIZEOF_INPUT):
+            (kind,) = struct.unpack_from("<I", raw, start)
+            vk, scan, flags = struct.unpack_from("<HHI", raw, start + _UNION_OFFSET)
+            events.append((kind, vk, scan, flags))
+        calls.append(events)
+    return calls
+
+
+def _packet(unit):
+    """The down + up of one UTF-16 code unit sent as a Unicode packet."""
+    return [
+        (_INPUT_KEYBOARD, 0, unit, _KEYEVENTF_UNICODE),
+        (_INPUT_KEYBOARD, 0, unit, _KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP),
+    ]
+
+
+def _vkey(code):
+    return [(_INPUT_KEYBOARD, code, 0, 0), (_INPUT_KEYBOARD, code, 0, _KEYEVENTF_KEYUP)]
+
+
+_SLOVAK = "Žltý kôň ďakuje"  # 15 characters, all in the BMP: one code unit each
+
+
+def test_windows_type_unicode_sends_a_unicode_packet_pair_per_character(win):
+    mod, _ = win
+    assert mod.type_unicode(_SLOVAK) == 15
+    calls = _key_calls(ctypes.windll.input)
+    assert calls[0] == _packet(0x017D)  # Ž
+    assert calls[9] == _packet(0x010F)  # ď
+    assert calls == [_packet(ord(char)) for char in _SLOVAK]
+
+
+def test_windows_type_unicode_emoji_is_one_call_with_a_surrogate_pair(win):
+    mod, _ = win
+    assert mod.type_unicode("😀") == 1
+    assert _key_calls(ctypes.windll.input) == [_packet(0xD83D) + _packet(0xDE00)]
+
+
+def test_windows_type_unicode_enter_and_tab_are_virtual_keys(win):
+    mod, _ = win
+    assert mod.type_unicode("a\tb\r\n") == 5  # CRLF = one Enter, counted as its two characters
+    assert _key_calls(ctypes.windll.input) == [_packet(0x61), _vkey(_VK_TAB), _packet(0x62), _vkey(_VK_RETURN)]
+
+
+def test_windows_type_unicode_waits_a_little_between_characters(win, monkeypatch):
+    mod, _ = win
+    sleeps = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+    mod.type_unicode("abc")
+    assert len(sleeps) == 2 and all(0 < s <= 0.05 for s in sleeps)
+
+
+def test_windows_short_sendinput_is_an_error_naming_what_got_through(win):
+    mod, _ = win
+    ctypes.windll.input.accepted_calls = 3  # the 4th SendInput inserts 0: the session locked mid-text
+    with pytest.raises(
+        RuntimeError, match=r"^SendInput inserted 0 of 2 key events after 3 of 8 chars — input is blocked"
+    ):
+        mod.type_unicode("Žltý kôň")
+    assert len(_key_calls(ctypes.windll.input)) == 4  # stopped at the refused character
+
+
+def test_windows_type_tool_sends_every_slovak_character(pyautogui_branch):
+    server, fake = pyautogui_branch
+    out = server.Type(_SLOVAK)
+    assert _key_calls(ctypes.windll.input) == [_packet(ord(char)) for char in _SLOVAK]
+    assert out == "Typed 15 chars"
+    assert fake.typewrite.calls == [] and fake.write.calls == []  # pyautogui's ASCII-only key map is never used
+
+
+def test_windows_type_tool_reports_blocked_input_as_an_error_not_typed(pyautogui_branch):
+    server, _ = pyautogui_branch
+    ctypes.windll.input.inserted = 0
+    out = server.Type("ab")
+    assert out.startswith("Type error: SendInput inserted 0 of 2 key events after 0 of 2 chars")
+    assert "Typed" not in out
+
+
+def test_windows_type_tool_clicks_clears_types_and_presses_enter(pyautogui_branch):
+    server, fake = pyautogui_branch
+    out = server.Type("ď", x=640, y=228, clear=True, press_enter=True)
+    assert fake.click.calls == [((320, 798), {})]
+    assert fake.hotkey.calls == [(("ctrl", "a"), {})]
+    assert fake.press.calls == [(("delete",), {}), (("enter",), {})]
+    assert _key_calls(ctypes.windll.input) == [_packet(0x010F)]
+    assert out.startswith("Typed 1 chars [image (640,228) → screen (320,798)")
+
+
+def test_type_tool_unknown_method_is_an_error_and_does_nothing(pyautogui_branch):
+    server, fake = pyautogui_branch
+    out = server.Type("x", x=640, y=228, method="clipboard")
+    assert out == "Type error: method must be 'keys' or 'paste' (got 'clipboard')"
+    assert fake.click.calls == [] and ctypes.windll.input.raw == []
+
+
+class _FakeClipboard:
+    """pywin32 ``win32clipboard`` with one CF_UNICODETEXT slot (``None`` = no text on it)."""
+
+    def __init__(self, text):
+        self.text = text
+        self.writes: list[str] = []
+
+    def OpenClipboard(self):
+        pass
+
+    def CloseClipboard(self):
+        pass
+
+    def EmptyClipboard(self):
+        self.text = None
+
+    def GetClipboardData(self, fmt):
+        if self.text is None:
+            raise TypeError("Specified clipboard format is not available")
+        return self.text
+
+    def SetClipboardText(self, text, fmt):
+        self.text = text
+        self.writes.append(text)
+
+
+@pytest.fixture
+def win_clipboard(monkeypatch, pyautogui_branch):
+    """``method="paste"`` on Windows: a fake clipboard, and the paste keys see what it holds."""
+    server, fake = pyautogui_branch
+    clip = _FakeClipboard("old clip")
+    module = sys.modules["win32clipboard"]
+    for name in ("OpenClipboard", "CloseClipboard", "EmptyClipboard", "GetClipboardData", "SetClipboardText"):
+        monkeypatch.setattr(module, name, getattr(clip, name), raising=False)
+    monkeypatch.setattr(sys.modules["win32con"], "CF_UNICODETEXT", 13, raising=False)
+    pressed: list[tuple] = []
+    fake.hotkey = lambda *keys: pressed.append((keys, clip.text))
+    return server, clip, pressed
+
+
+def test_windows_paste_method_pastes_then_restores_the_clipboard(win_clipboard):
+    server, clip, pressed = win_clipboard
+    out = server.Type("Žltý kôň", method="paste")
+    assert pressed == [(("ctrl", "v"), "Žltý kôň")]  # the text was on the clipboard at Ctrl+V
+    assert clip.writes == ["Žltý kôň", "old clip"] and clip.text == "old clip"
+    assert out == "Pasted 8 chars (clipboard restored)"
+    assert ctypes.windll.input.raw == []  # no keystrokes
+
+
+def test_windows_paste_method_says_so_when_the_clipboard_held_no_text(win_clipboard):
+    server, clip, pressed = win_clipboard
+    clip.text = None
+    out = server.Type("ďakujem", method="paste")
+    assert pressed == [(("ctrl", "v"), "ďakujem")]
+    assert out == "Pasted 7 chars (the clipboard held no text, so it was not restored)"
+
+
+def test_windows_paste_method_refused_clipboard_is_an_error_before_the_paste_keys(win_clipboard, monkeypatch):
+    server, _, pressed = win_clipboard
+
+    def _refuse(text, fmt):
+        raise OSError("OpenClipboard failed")
+
+    monkeypatch.setattr(sys.modules["win32clipboard"], "SetClipboardText", _refuse)
+    out = server.Type("x", method="paste")
+    assert out == "Type error: could not put the text on the clipboard: Error: OpenClipboard failed"
+    assert pressed == []
+
+
+def test_windows_paste_reports_a_failed_restore(win_clipboard, monkeypatch):
+    server, clip, pressed = win_clipboard
+    write = clip.SetClipboardText
+
+    def _second_write_refused(text, fmt):
+        if clip.writes:  # the restore is the second write
+            raise OSError("OpenClipboard failed")
+        write(text, fmt)
+
+    monkeypatch.setattr(sys.modules["win32clipboard"], "SetClipboardText", _second_write_refused)
+    out = server.Type("ďakujem", method="paste")
+    assert pressed == [(("ctrl", "v"), "ďakujem")]
+    assert out == "Pasted 7 chars, but restoring the clipboard failed: Error: OpenClipboard failed"
+
+
+def test_windows_paste_restores_the_clipboard_when_the_paste_keys_fail(win_clipboard, pyautogui_branch):
+    server, clip, _ = win_clipboard
+    _, fake = pyautogui_branch
+
+    def _broken_keyboard(*keys):
+        raise OSError("keyboard is gone")
+
+    fake.hotkey = _broken_keyboard
+    out = server.Type("ďakujem", method="paste")
+    assert out == "Type error: keyboard is gone"
+    assert clip.writes == ["ďakujem", "old clip"] and clip.text == "old clip"
+
+
+def test_windows_provider_type_text_clicks_a_point_on_row_zero(pyautogui_branch):
+    server, fake = pyautogui_branch
+    mod = server.get_desktop()
+    assert mod.type_text("ď", x=-1500, y=0) == "Typed 1 chars"
+    assert fake.click.calls == [((-1500, 0), {})]  # y=0 is a real screen row, not "no point"
+    assert _key_calls(ctypes.windll.input) == [_packet(0x010F)]
+
+
+def test_type_tool_logs_the_count_never_the_text(pyautogui_branch, caplog):
+    server, _ = pyautogui_branch
+    with caplog.at_level(logging.DEBUG, logger="remoteos.mcp"):
+        assert server.Type("tajné heslo 123") == "Typed 15 chars"
+    assert "Type 15 chars by keys" in caplog.text
+    assert "tajné" not in caplog.text and "heslo" not in caplog.text
+
+
 # --- Windows: a failed grab is retried once after reconnecting the RDP session ---
 
 
@@ -386,8 +623,13 @@ def mac(monkeypatch):
     }
     quartz.CGEventCreateMouseEvent = lambda src, kind, point, button: {"mouse": (kind, tuple(point), button)}
     quartz.CGEventSetLocation = lambda event, point: event.update(location=tuple(point))
+    # Keyboard events (#30): (keycode, key down?) and the Unicode string set on the event.
+    quartz.CGEventCreateKeyboardEvent = lambda src, keycode, down: {"key": (keycode, down), "unicode": None}
+    quartz.CGEventKeyboardSetUnicodeString = lambda event, length, text: event.update(unicode=(length, text))
+    quartz.CGPreflightPostEventAccess = lambda: True  # the process may post events (Privacy & Security)
     quartz.CGEventPost = lambda tap, event: quartz.posted.append((tap, event))
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
+    monkeypatch.setitem(sys.modules, "pyautogui", types.ModuleType("pyautogui"))
     _purge("remoteos.platform.mac.desktop")
     mod = importlib.import_module("remoteos.platform.mac.desktop")
 
@@ -481,15 +723,94 @@ def test_mac_failed_event_creation_is_an_error_and_posts_nothing(mac, monkeypatc
     assert quartz.posted == []
 
 
+# --- macOS: typing is keyboard events carrying a Unicode string, <= 20 UTF-16 units each (#30) ---
+
+_KVK_RETURN, _KVK_TAB = 0x24, 0x30
+
+
+def _keys_posted(quartz):
+    """((keycode, down), (length, unicode string) | None) of every posted keyboard event."""
+    return [(event["key"], event["unicode"]) for _, event in quartz.posted if "key" in event]
+
+
+def _typed_strings(quartz):
+    return [unicode for (_, down), unicode in _keys_posted(quartz) if down]
+
+
+def test_mac_type_unicode_posts_the_text_and_a_real_return(mac):
+    mod, _ = mac
+    quartz = sys.modules["Quartz"]
+    assert mod.type_unicode("Žltý kôň\n") == 9
+    assert _keys_posted(quartz) == [
+        ((0, True), (8, "Žltý kôň")),
+        ((0, False), (8, "Žltý kôň")),
+        ((_KVK_RETURN, True), None),
+        ((_KVK_RETURN, False), None),
+    ]
+    assert {tap for tap, _ in quartz.posted} == {0}  # the HID event tap
+
+
+def test_mac_type_unicode_tab_is_the_tab_keycode(mac):
+    mod, _ = mac
+    quartz = sys.modules["Quartz"]
+    mod.type_unicode("a\tb")
+    assert _keys_posted(quartz) == [
+        ((0, True), (1, "a")),
+        ((0, False), (1, "a")),
+        ((_KVK_TAB, True), None),
+        ((_KVK_TAB, False), None),
+        ((0, True), (1, "b")),
+        ((0, False), (1, "b")),
+    ]
+
+
+def test_mac_type_unicode_chunks_at_20_units_without_splitting_a_surrogate_pair(mac):
+    mod, _ = mac
+    quartz = sys.modules["Quartz"]
+    assert mod.type_unicode("a" * 19 + "😀b") == 21
+    # the emoji is 2 UTF-16 units: 19 + 2 > 20, so it starts the next event, whole
+    assert _typed_strings(quartz) == [(19, "a" * 19), (3, "😀b")]
+
+
+def test_mac_failed_keyboard_event_is_an_error_and_posts_nothing(mac, monkeypatch):
+    mod, _ = mac
+    quartz = sys.modules["Quartz"]
+    monkeypatch.setattr(quartz, "CGEventCreateKeyboardEvent", lambda *args: None)
+    with pytest.raises(RuntimeError, match="^CGEventCreateKeyboardEvent returned no event"):
+        mod.type_unicode("ab\ncd")
+    assert quartz.posted == []
+
+
+def test_mac_type_unicode_without_the_posting_permission_is_an_error_and_posts_nothing(mac, monkeypatch):
+    mod, _ = mac
+    quartz = sys.modules["Quartz"]
+    # CGEventPost returns nothing: without this permission macOS drops the events silently
+    monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
+    with pytest.raises(RuntimeError, match=r"^macOS does not let this process post keyboard events"):
+        mod.type_unicode("Žltý")
+    assert quartz.posted == []
+
+
 @pytest.fixture
 def mac_tool_layer(monkeypatch, mac):
     import remoteos.__main__ as server
 
     mod, _ = mac
-    fake = types.SimpleNamespace(scroll=_Recorder(), hscroll=_Recorder(), moveTo=_Recorder())
+    fake = types.SimpleNamespace(
+        scroll=_Recorder(),
+        hscroll=_Recorder(),
+        moveTo=_Recorder(),
+        click=_Recorder(),
+        hotkey=_Recorder(),
+        press=_Recorder(),
+        typewrite=_Recorder(),
+        write=_Recorder(),
+    )
     monkeypatch.setattr(server, "pyautogui", fake, raising=False)
+    monkeypatch.setattr(mod, "pyautogui", fake, raising=False)  # the provider's own typing path (#30)
     monkeypatch.setattr(server, "is_linux", lambda: False)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
     return server, fake, sys.modules["Quartz"]
 
 
@@ -506,3 +827,101 @@ def test_mac_scroll_tool_maps_the_image_point_to_points(mac_tool_layer):
     _, first = quartz.posted[0]
     assert first == {"mouse": (5, (720, 450), 0)}
     assert _scrolls(quartz) == [(1, 2, -3, 0)]
+
+
+def test_mac_type_tool_types_slovak_text_through_quartz(mac_tool_layer):
+    server, fake, quartz = mac_tool_layer
+    assert server.Type(_SLOVAK) == "Typed 15 chars"
+    assert _typed_strings(quartz) == [(15, _SLOVAK)]
+    assert fake.typewrite.calls == [] and fake.write.calls == []  # pyautogui's ASCII-only key map is never used
+
+
+def test_mac_clear_selects_all_with_command_not_ctrl(mac_tool_layer):
+    server, fake, _ = mac_tool_layer
+    server.Type("x", clear=True)
+    # Ctrl+A in a Cocoa text field moves the caret to the paragraph start; forward-delete then ate one character
+    assert fake.hotkey.calls == [(("command", "a"), {})]
+    assert fake.press.calls == [(("delete",), {})]
+
+
+def _mac_pasteboard(monkeypatch, server, fake, text):
+    """``pbpaste`` / ``pbcopy`` over one text slot; the paste keys record what it holds when pressed."""
+    board = {"text": text, "writes": [], "pressed": []}
+
+    def _run(cmd, **kwargs):
+        if cmd == ["pbpaste"]:
+            return types.SimpleNamespace(returncode=0, stdout=board["text"], stderr="")
+        if cmd == ["pbcopy"]:
+            board["text"] = kwargs["input"].decode("utf-8")
+            board["writes"].append(board["text"])
+            return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        raise AssertionError(f"unexpected command {cmd}")
+
+    monkeypatch.setattr(server.get_desktop().subprocess, "run", _run)
+    fake.hotkey = lambda *keys: board["pressed"].append((keys, board["text"]))
+    return board
+
+
+def test_mac_paste_method_uses_command_v_and_restores_the_clipboard(mac_tool_layer, monkeypatch):
+    server, fake, quartz = mac_tool_layer
+    board = _mac_pasteboard(monkeypatch, server, fake, "old clip")
+    out = server.Type("Žltý kôň", method="paste")
+    assert board["pressed"] == [(("command", "v"), "Žltý kôň")]
+    assert board["writes"] == ["Žltý kôň", "old clip"]
+    assert out == "Pasted 8 chars (clipboard restored)"
+    assert _keys_posted(quartz) == []
+
+
+def test_mac_paste_with_an_empty_or_non_text_clipboard_says_it_was_not_restored(mac_tool_layer, monkeypatch):
+    server, fake, _ = mac_tool_layer
+    # pbpaste prints "" for an empty clipboard AND for an image: there is no text to put back
+    board = _mac_pasteboard(monkeypatch, server, fake, "")
+    out = server.Type("Žltý", method="paste")
+    assert board["writes"] == ["Žltý"]  # no "restore" that would only wipe the clipboard
+    assert out == "Pasted 4 chars (the clipboard held no text, so it was not restored)"
+
+
+def test_mac_paste_without_the_posting_permission_is_an_error_and_touches_nothing(mac_tool_layer, monkeypatch):
+    server, fake, quartz = mac_tool_layer
+    board = _mac_pasteboard(monkeypatch, server, fake, "old clip")
+    monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
+    # pyautogui's Command+V is a CGEventPost too: macOS would drop it silently behind "Pasted 4 chars"
+    out = server.Type("Žltý", x=640, y=400, clear=True, method="paste")
+    assert out.startswith("Type error: macOS does not let this process post keyboard events")
+    assert board["writes"] == [] and board["pressed"] == []
+    assert fake.click.calls == [] and fake.press.calls == []
+
+
+def test_mac_keys_without_the_posting_permission_clicks_and_clears_nothing(mac_tool_layer, monkeypatch):
+    server, fake, quartz = mac_tool_layer
+    monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
+    out = server.Type("Žltý", x=640, y=400, clear=True, press_enter=True)
+    assert out.startswith("Type error: macOS does not let this process post keyboard events")
+    assert fake.click.calls == [] and fake.hotkey.calls == [] and fake.press.calls == []
+    assert quartz.posted == []
+
+
+def test_mac_type_tool_clicks_clears_pastes_and_presses_enter_in_order(mac_tool_layer, monkeypatch):
+    server, fake, _ = mac_tool_layer
+    board = _mac_pasteboard(monkeypatch, server, fake, "old clip")
+    order = []
+    fake.click = lambda *point: order.append(("click", point))
+    fake.hotkey = lambda *keys: order.append(("hotkey", keys, board["text"]))
+    fake.press = lambda *keys: order.append(("press", keys))
+    server.Type("ď", x=640, y=400, clear=True, press_enter=True, method="paste")
+    assert order == [
+        ("click", (720, 450)),  # image (640,400) on the 1440x900-point main display
+        ("hotkey", ("command", "a"), "old clip"),
+        ("press", ("delete",)),
+        ("hotkey", ("command", "v"), "ď"),
+        ("press", ("enter",)),
+    ]
+    assert board["text"] == "old clip"
+
+
+def test_mac_provider_type_text_clicks_a_point_on_column_zero(mac_tool_layer):
+    server, fake, quartz = mac_tool_layer
+    mod = server.get_desktop()
+    assert mod.type_text("ď", x=0, y=10) == "Typed 1 chars"
+    assert fake.click.calls == [((0, 10), {})]  # x=0 is a real screen column, not "no point"
+    assert _typed_strings(quartz) == [(1, "ď")]
