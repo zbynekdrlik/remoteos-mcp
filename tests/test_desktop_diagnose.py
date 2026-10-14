@@ -552,7 +552,8 @@ def test_windows_click_on_a_disconnected_session_is_refused_without_moving_the_s
 def mac_tools(monkeypatch, mac_session):
     mod, state = mac_session
     clicks: list = []
-    monkeypatch.setattr(server, "pyautogui", types.SimpleNamespace(click=lambda *a, **k: clicks.append(a)))
+    fake_gui = types.SimpleNamespace(click=lambda *a, **k: clicks.append(a))
+    monkeypatch.setattr(server, "pyautogui", fake_gui, raising=False)  # not imported on Linux
     monkeypatch.setattr(server, "is_linux", lambda: False)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
     quartz = sys.modules["Quartz"]
