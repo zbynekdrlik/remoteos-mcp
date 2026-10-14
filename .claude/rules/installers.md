@@ -27,6 +27,10 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 
   Before ARM nothing has changed. While armed, **any** exit goes through the EXIT trap (`on_exit` → `rollback_install`): a failed step, a signal, a lost console (the write fails, set -e exits), or a truncated download. The rollback removes every visible pip-owned copy of the three, the changed and the added deps, one name per pip call, then restores the snapshot and re-checks version + import. The installer exits non-zero and never touches the service. A failed rollback keeps the work dir and prints the restore command + log.
   - Never arm on a list of signals alone. A no-tty `ssh … | sudo bash` drop sends no SIGHUP; bash just dies on SIGPIPE.
+  - Armed pip steps run through `shield` (a subshell ignoring HUP/INT/TERM). Ctrl-C, a tty hang-up and a killpg timeout hit the whole process group, and pip writes a wheel's RECORD last, so a killed pip leaves files no rollback can find.
+  - The rollback also fails loudly on `leftovers`: dist-infos of the affected names that were not there before.
+  - plan refuses a dep owned by another installer (uv, conda, …) whose pin changes.
+  - Both installers run inside `main()`, called on the last line, so a truncated download fails to parse instead of half-running.
   - Never let pip write to the console: pip writes to logs, and the logs are printed afterwards.
   - Strih-pp was once left with no package, the service alive only from memory. That is what this order prevents.
 - **The rollback helper reads dists through `importlib.metadata`** (RECORD + INSTALLER, the visible dist first on sys.path, which is what pip sees). It never parses `pip show` text: real pip prints a multi-line License raw, including a literal `---` and a `Name:` line. "pip-owned" = INSTALLER `pip` + a RECORD. Apt dists (`debian`, no RECORD) and other installers (`uv`) are never uninstalled.

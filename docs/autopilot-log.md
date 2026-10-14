@@ -138,4 +138,15 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - plan and snapshot abort when a RECORD is missing or does not list its own METADATA.
   - The fake box got two site dirs (pip over apt).
   - Result: 297 pass. 52/52 shell-dependent installer tests pass under bash 3.2.57. Real pip 24.0 check of plan/pipowned/snapshot/restore OK.
+- **Review round 3:** 0🔴 1🟡 10🔵.
+  - Commits: `4500cab` [red] (10 fail), `238f760` [green].
+  - pip is shielded from group signals while armed (it no longer dies mid-wheel).
+  - A `leftovers` check runs after the rollback.
+  - A pre-uninstall failure is fatal.
+  - restore refuses a directory in the way.
+  - Deps owned by another installer abort the upgrade.
+  - Both installers run inside `main()`, so a truncated download fails to parse.
+  - macOS auth key fixed: `tr | head` died of SIGPIPE, so a fresh mac aborted at [3/5]. The harness had hidden it.
+  - Result: 304 pass, 59/59 shell tests pass under bash 3.2.57.
+  - Left for follow-up: a CI job for the bash-3.2/shellcheck checks, the skill recovery section, the Windows rollback, venv migration, `PYTHONNOUSERSITE` in the unit.
 - **Not done here:** running the installer on strih-pp and stream-pp (26.04). The supervisor deploys and verifies.
