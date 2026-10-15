@@ -238,3 +238,37 @@ def test_a_successful_tool_still_returns_its_result_with_the_task_prefix():
     out = tm.wrap_sync_tool("Shell", lambda: "ok")()
     assert out == f"[task:{_only_task(tm).task_id}] ok"
     assert _only_task(tm).status is TaskStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: the stale-task auto-cancel respects a tool's own longer timeout
+# ---------------------------------------------------------------------------
+
+
+def _runs_for(tm: TaskManager, seconds: float, result="done"):
+    """A tool body that has 'been running' ``seconds`` when another task is created (the stale sweep)."""
+
+    def tool(**kwargs):
+        [task] = [t for t in tm._tasks.values() if t.status is TaskStatus.RUNNING]
+        task.started_at = time.time() - seconds
+        tm.create_task("GetSystemInfo")  # every new task runs _cleanup_old
+        return result
+
+    return tool
+
+
+def test_a_long_shell_within_its_own_timeout_is_not_auto_cancelled():
+    # a Shell(timeout=600) that finishes after 400 s completed: its output is the reply, not an error
+    tm = TaskManager()
+    out = tm.wrap_sync_tool("Shell", _runs_for(tm, 400))(command="sleep 400", timeout=600)
+    [task] = [t for t in tm._tasks.values() if t.tool_name == "Shell"]
+    assert out == f"[task:{task.task_id}] done"
+    assert task.status is TaskStatus.COMPLETED
+
+
+def test_a_task_past_the_stale_limit_is_still_auto_cancelled():
+    tm = TaskManager()
+    with pytest.raises(ToolError, match="Cancelled during execution"):
+        tm.wrap_sync_tool("Shell", _runs_for(tm, 400))(command="x", timeout=30)
+    with pytest.raises(ToolError, match="Cancelled during execution"):
+        tm.wrap_sync_tool("Click", _runs_for(tm, 400))(x=1, y=1)

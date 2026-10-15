@@ -13,6 +13,7 @@ import asyncio
 import logging
 import re
 import subprocess
+import sys
 import types
 
 import pytest
@@ -181,3 +182,19 @@ def test_kill_by_pid_logs_the_pid_never_the_name(monkeypatch, caplog):
         assert process_mgr.kill_process(pid=4321) == f"Killed PID 4321 ({secret})"
     assert "PID 4321" in caplog.text
     assert secret not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: output that is not valid in the console code page never hides the failure
+# ---------------------------------------------------------------------------
+
+
+def test_undecodable_command_output_still_reports_the_failure():
+    # e.g. localized PowerShell stderr in the OEM code page (cp852): strict decoding raised
+    # UnicodeDecodeError and replaced the real reason with a codec message
+    from remoteos.platform.command import run_command
+
+    script = "import sys; sys.stderr.buffer.write(b'\\x90 service refused'); sys.exit(3)"
+    with pytest.raises(RuntimeError, match="service refused"):
+        run_command([sys.executable, "-c", script], check=True, label="probe")
+    assert "service refused" in run_command([sys.executable, "-c", script])

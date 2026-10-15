@@ -444,10 +444,26 @@ def test_reconnect_session_that_leaves_the_session_disconnected_is_an_error(wind
     assert commands == [["tscon", "1", "/dest:console"]]
 
 
-def test_reconnect_session_on_a_connected_session_does_nothing(windows_tools):
+def test_reconnect_session_on_a_connected_session_does_nothing_and_says_so(windows_tools):
+    # review round 2: an attached session (console OR remote desktop) is never "connected to console"
     _, _, commands = windows_tools
     (reply,) = server.ReconnectSession()
-    assert reply.text == "Session connected to console"
+    assert reply.text == "Session already attached (console or remote desktop): nothing to do"
+    assert commands == []
+
+
+def test_snapshot_without_vision_still_lists_windows_on_a_disconnected_session(windows_tools, monkeypatch):
+    # review round 2: use_vision=False captures nothing, so the capture preflight must not refuse it
+    # (live on win-pz-server: a disconnected session still answers EnumWindows and GetSystemMetrics)
+    session, _, commands = windows_tools
+    session.connect_state = WTS_DISCONNECTED
+    monkeypatch.setattr(sys.modules["win32gui"], "EnumWindows", lambda cb, extra: cb(0x10, None))
+    monkeypatch.setattr(sys.modules["win32gui"], "IsWindowVisible", lambda hwnd: True, raising=False)
+    monkeypatch.setattr(sys.modules["win32gui"], "GetWindowText", lambda hwnd: "Editor", raising=False)
+    monkeypatch.setattr(sys.modules["win32gui"], "GetWindowRect", lambda hwnd: (0, 0, 640, 480), raising=False)
+    monkeypatch.setattr(sys.modules["win32process"], "GetWindowThreadProcessId", lambda hwnd: (1, 4242), raising=False)
+    (text,) = server.Snapshot(use_vision=False)
+    assert "Editor" in text.text and "screen 1920x1080" in text.text
     assert commands == []
 
 

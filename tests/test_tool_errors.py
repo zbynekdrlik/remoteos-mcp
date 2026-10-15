@@ -74,6 +74,44 @@ def test_a_failure_is_logged_without_its_message(monkeypatch, caplog):
     assert "secret-marker-32" not in caplog.text
 
 
+@pytest.fixture
+def every_log(caplog):
+    """caplog that also hears the ``fastmcp`` loggers (they do not propagate: FastMCP has its own handler)."""
+    fastmcp_log = logging.getLogger("fastmcp")
+    fastmcp_log.addHandler(caplog.handler)
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
+        yield caplog
+    fastmcp_log.removeHandler(caplog.handler)
+
+
+def test_refused_arguments_are_never_logged(tmp_path, every_log):
+    # review round 2: a path or a working directory is a tool argument; logs never carry those (#31)
+    marker = "secret-" + "path-32"
+    _error_text("Shell", {"command": "true", "cwd": str(tmp_path / marker)})
+    _error_text("FileUpload", {"path": str(tmp_path / marker), "data_base64": "!!!!"})
+    _error_text("FileUpload", {"path": str(tmp_path / marker), "data_base64": "A" * (100 * 1024 * 1024 + 4)})
+    assert "Shell refused" in every_log.text and "FileUpload refused" in every_log.text
+    assert marker not in every_log.text
+
+
+def test_a_written_upload_logs_its_size_never_its_path(tmp_path, every_log):
+    marker = "secret-" + "path-32"
+    result = _call("FileUpload", {"path": str(tmp_path / marker), "data_base64": "aGk="})
+    assert result.is_error is False
+    assert "FileUpload wrote 2 bytes" in every_log.text
+    assert marker not in every_log.text
+
+
+def test_fastmcp_never_logs_the_value_of_an_invalid_argument(every_log):
+    # FastMCP logs "Invalid arguments for tool ...: [... 'input': <value>]" at WARNING (review round 2)
+    marker = "secret-" + "arg-32"
+    result = _call("KillProcess", {"pid": marker})
+    assert result.is_error is True  # the client still gets the validation error
+    assert "Invalid arguments for tool 'KillProcess'" in every_log.text
+    assert "int_parsing" in every_log.text  # what was wrong stays in the log
+    assert marker not in every_log.text
+
+
 def test_shell_with_a_missing_cwd_is_an_mcp_error(tmp_path):
     missing = tmp_path / "nope"
     _, text = _error_text("Shell", {"command": "true", "cwd": str(missing)})

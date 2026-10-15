@@ -562,7 +562,8 @@ def test_windows_launch_app_success(win, monkeypatch):
     import subprocess
 
     mod, _ = win
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: types.SimpleNamespace(returncode=0, stderr=""))
+    ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: ok)
     assert mod.launch_app("notepad") == "Launched notepad"
 
 
@@ -653,6 +654,16 @@ def test_windows_capture_reports_failed_retry(monkeypatch, windows_tool_layer):
     _flaky_grab(monkeypatch, failures=2)
     with pytest.raises(RuntimeError, match="after session reconnect: screen grab failed"):
         server._capture_snapshot_frame(0, 1280)
+
+
+def test_windows_capture_on_an_attached_session_retries_once_and_says_so(monkeypatch, windows_tool_layer):
+    # review round 2: no reconnect happened, so neither the log nor the error may claim one
+    server, commands = windows_tool_layer
+    monkeypatch.setattr(server.subprocess, "run", lambda cmd, **kw: commands.append(list(cmd)))
+    _flaky_grab(monkeypatch, failures=2)  # the default fake session is attached
+    with pytest.raises(RuntimeError, match="^after a retry: screen grab failed"):
+        server._capture_snapshot_frame(0, 1280)
+    assert commands == []  # no tscon
 
 
 def test_session_reconnect_helper_is_defined_once():
