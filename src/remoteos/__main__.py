@@ -167,7 +167,8 @@ def _desktop_preflight(need: str) -> None:
     """Stop a desktop tool before it touches a desktop that cannot be used (#32).
 
     ``need`` is what the tool needs from the desktop: ``"capture"`` (read the
-    screen) or ``"input"`` (send mouse/keyboard events). The provider's
+    screen), ``"input"`` (send mouse/keyboard events) or ``"windows"`` (only the
+    window list: the user's desktop, locked or not). The provider's
     ``diagnose(need)`` is cheap and read-only. Only a positive finding raises,
     as :class:`DesktopUnavailable`, its text verbatim to the client. A
     diagnose() that itself fails is logged and the tool goes ahead: a probe
@@ -198,7 +199,7 @@ _input_tool = reports_errors(preflight=functools.partial(_desktop_preflight, "in
         openWorldHint=False,
     )
 )
-@reports_errors  # the capture preflight runs only for the screenshot (use_vision): the window list works anyway
+@reports_errors  # its preflight depends on use_vision: "capture" for the screenshot, else only "windows"
 def Snapshot(
     use_vision: bool | str = True,
     quality: int = 65,
@@ -230,6 +231,8 @@ def Snapshot(
         img, frame = _capture_snapshot_frame(monitor, max_width)
         parts.append(ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"))
     else:
+        # the window list works on a locked or disconnected desktop, not outside the user's (#32 round 3)
+        _desktop_preflight("windows")
         frame = _current_frame(monitor, max_width)
 
     _desktop = get_desktop()
@@ -609,6 +612,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        errors="replace",  # output in a console code page (e.g. cp852) is still the command's answer
         cwd=workdir,
         start_new_session=not is_windows(),
     )

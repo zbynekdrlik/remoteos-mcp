@@ -100,19 +100,25 @@ def diagnose(need: str = "input") -> Optional[str]:
     Cheap, read-only probes with no side effects, in this order: session 0, a
     non-interactive window station, a disconnected session, then the input
     desktop (the secure desktop = locked screen, UAC prompt or Ctrl+Alt+Del).
-    ``need`` ("capture" / "input") does not matter on Windows: each of these
-    blocks screenshots and input alike. Only a positive finding is a diagnosis.
-    A probe that fails is logged and the desktop is taken as usable (fail open),
-    never blocked.
+    ``need``:
+    - ``"capture"`` and ``"input"``: every check, because each of these blocks
+      screenshots and input alike.
+    - ``"windows"`` (the window list, Snapshot without vision): only session 0
+      and the window station. A disconnected or locked session still lists the
+      user's windows (live on win-pz-server); outside the user's desktop the
+      list would be a hollow, empty success.
+
+    Only a positive finding is a diagnosis. A probe that fails is logged and the
+    desktop is taken as usable (fail open), never blocked.
     """
     try:
-        return _diagnose()
+        return _diagnose(need)
     except Exception as e:
         log.warning("desktop probe failed (%s: %s): assuming the desktop is usable", type(e).__name__, e)
         return None
 
 
-def _diagnose() -> Optional[str]:
+def _diagnose(need: str) -> Optional[str]:
     session = _session_id()
     if session == 0:
         return errors.SESSION_ZERO
@@ -121,6 +127,8 @@ def _diagnose() -> Optional[str]:
     station = _object_name(user32.GetProcessWindowStation())
     if station is not None and station.lower() != "winsta0":
         return errors.non_interactive_window_station(station)
+    if need == "windows":
+        return None
     if _disconnected(session):
         return errors.DISCONNECTED
     opened, name = _input_desktop()

@@ -38,7 +38,8 @@ def diagnose(need: str = "input") -> Optional[str]:
 
     The window-server session first (none, not on the console, locked), then the
     permission this use needs. Without it macOS fails SILENTLY (a wallpaper-only
-    screenshot, dropped events).
+    screenshot, dropped events). ``"windows"`` (the window list) needs only a GUI
+    session.
 
     - Screen Recording, to capture: ``CGPreflightScreenCaptureAccess``.
     - Posting events, for input: ``CGPreflightPostEventAccess``, the same check the
@@ -64,6 +65,8 @@ def _diagnose(need: str) -> Optional[str]:
         info = session_info()
         if info is None:  # NULL outside a window-server (GUI) session
             return errors.MAC_NO_GUI_SESSION
+        if need == "windows":  # the window list needs only a GUI session
+            return None
         on_console = getattr(quartz, "kCGSessionOnConsoleKey", "kCGSSessionOnConsoleKey")
         if not info.get(on_console, True):
             return errors.MAC_NOT_ON_CONSOLE

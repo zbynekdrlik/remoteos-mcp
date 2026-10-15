@@ -439,7 +439,7 @@ def resize_window(handle: int, width: int, height: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Clipboard — a failure raises (#32); a clipboard without text raises too
+# Clipboard — a failure raises (#32); a clipboard without text reads as ""
 # ---------------------------------------------------------------------------
 
 
