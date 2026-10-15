@@ -22,25 +22,26 @@ Expected values are literals, never imported from the code under test.
 
 from __future__ import annotations
 
+import ast
+import locale
 import logging
 import re
 import sys
 from pathlib import Path
 
 import pytest
-from fake_console_child import POWERSHELL_UTF8_PREFIX, oem_code_page, run_result
+from fake_console_child import POWERSHELL_UTF8_PREFIX, TEXT_MODE, oem_code_page, run_result
 
 import remoteos.__main__ as server
 from remoteos.platform.win import services as win_services
 
 SLOVAK = "Žltý kôň ďakuje – €"
 _CREATE_NO_WINDOW = 0x08000000
-_TEXT_MODE = ("text", "encoding", "errors", "universal_newlines")
 
 
 def _binary_in_its_own_console(kwargs: dict) -> None:
     """The child's bytes come back raw (decoded by us), and it has its own hidden console (#32 round 5)."""
-    assert not any(kwargs.get(key) for key in _TEXT_MODE), kwargs
+    assert not any(kwargs.get(key) for key in TEXT_MODE), kwargs
     assert kwargs["creationflags"] == _CREATE_NO_WINDOW
 
 
@@ -108,17 +109,52 @@ def test_powershell_argv_puts_the_utf8_prefix_on_its_own_line_and_keeps_the_scri
     assert powershell_argv(script) == ["powershell", "-NoProfile", "-Command", POWERSHELL_UTF8_PREFIX + "\n" + script]
 
 
+_POWERSHELL_PROGRAM = re.compile(r"(?i)^(powershell|pwsh)(\.exe)?$")
+_POWERSHELL_COMMAND_LINE = re.compile(r"(?i)^(powershell|pwsh)(\.exe)?\s+-")
+
+
+def _starts_powershell(node: ast.AST) -> bool:
+    """An argv list/tuple whose program is PowerShell, or a command-line string that starts it."""
+    if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+        first = node.elts[0]
+        return isinstance(first, ast.Constant) and isinstance(first.value, str) and bool(
+            _POWERSHELL_PROGRAM.match(first.value)
+        )
+    return isinstance(node, ast.Constant) and isinstance(node.value, str) and bool(
+        _POWERSHELL_COMMAND_LINE.match(node.value)
+    )
+
+
 def test_every_powershell_child_is_started_by_the_one_builder():
-    # one builder instead of four hand-built argv lists (Shell, services, launch_app/notification, OCR)
+    # one builder instead of four hand-built argv lists (Shell, services, launch_app/notification, OCR).
+    # Review round 1: an AST scan, so ['powershell', …], ("PowerShell.exe", …), ["pwsh", …] or a
+    # "powershell -Command …" string outside platform/command.py is caught whatever the quotes or
+    # case; a label such as label="PowerShell" is not a child.
     src = Path(server.__file__).parent
     hand_built = [
-        f"{path.relative_to(src).as_posix()}:{number}"
+        f"{path.relative_to(src).as_posix()}:{node.lineno}"
         for path in sorted(src.rglob("*.py"))
         if path.relative_to(src).as_posix() != "platform/command.py"
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-        if '"powershell"' in line
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if _starts_powershell(node)
     ]
     assert hand_built == []
+
+
+@pytest.mark.parametrize(
+    ("source", "caught"),
+    [
+        ("argv = ['powershell', '-Command', 'x']", True),
+        ('argv = ("PowerShell.exe", "-NoProfile")', True),
+        ('argv = ["pwsh", "-c", "x"]', True),
+        ('cmd = "powershell -NoProfile -Command x"', True),
+        ('run_command(argv, label="PowerShell")', False),
+        ('argv = powershell_argv("x")', False),
+    ],
+)
+def test_the_one_builder_guard_catches_a_hand_built_powershell_child(source, caught):
+    # the guard itself can fail: each hand-built shape is caught, a label or the builder is not
+    assert any(_starts_powershell(node) for node in ast.walk(ast.parse(source))) is caught
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +209,15 @@ def test_decode_output_off_windows_reads_the_locale_and_never_loses_output():
     from remoteos.platform.command import decode_output
 
     assert decode_output("Žltý kôň".encode("utf-8") + b" \x90", windows=False) == "Žltý kôň \ufffd"
+
+
+def test_decode_output_off_windows_follows_the_locale_not_a_fixed_utf8(monkeypatch):
+    # review round 1: on a UTF-8 CI a hard-coded "utf-8" would pass the test above; the C library's
+    # locale (the OS boundary) is faked as latin-1, the page a text-mode run would have used
+    from remoteos.platform.command import decode_output
+
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda do_setlocale=True: "latin-1")
+    assert decode_output(b"caf\xe9", windows=False) == "café"
 
 
 # ---------------------------------------------------------------------------

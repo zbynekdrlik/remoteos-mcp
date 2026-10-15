@@ -18,6 +18,7 @@
   - cp932 = a double-byte page, where a byte sequence can be undecodable.
 - ``POWERSHELL_UTF8_PREFIX``: the line every PowerShell child runs before its script, as a
   literal (never imported from the code under test).
+- ``TEXT_MODE``: the ``subprocess`` keyword arguments that make a call text mode.
 """
 
 from __future__ import annotations
@@ -29,7 +30,8 @@ import sys
 import types
 from typing import Callable, Union
 
-_TEXT_MODE = ("text", "encoding", "errors", "universal_newlines")
+# the subprocess keyword arguments that make a call text mode
+TEXT_MODE = ("text", "encoding", "errors", "universal_newlines")
 
 # UTF-8 without a BOM, for the child's console output and for what PowerShell pipes to native programs
 POWERSHELL_UTF8_PREFIX = (
@@ -42,7 +44,7 @@ _REAL_POPEN = subprocess.Popen
 
 def returned(kwargs: dict, value: str | bytes) -> str | bytes:
     """``value`` as subprocess returns it for a call made with ``kwargs``: text in text mode, else bytes."""
-    if isinstance(value, str) and not any(kwargs.get(key) for key in _TEXT_MODE):
+    if isinstance(value, str) and not any(kwargs.get(key) for key in TEXT_MODE):
         return value.encode("utf-8")
     return value
 

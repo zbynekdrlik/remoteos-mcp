@@ -18,7 +18,7 @@ import sys
 import types
 
 import pytest
-from fake_console_child import POWERSHELL_UTF8_PREFIX, run_result
+from fake_console_child import POWERSHELL_UTF8_PREFIX, TEXT_MODE, run_result
 from fastmcp import Client
 from PIL import Image
 
@@ -229,7 +229,6 @@ def test_undecodable_command_output_still_reports_the_failure():
 
 _CREATE_NO_WINDOW = 0x08000000
 _OEM = {"text": True, "encoding": "oem", "errors": "replace", "creationflags": _CREATE_NO_WINDOW}
-_TEXT_MODE = ("text", "encoding", "errors", "universal_newlines")
 
 
 def test_a_windows_console_child_gets_its_own_console_in_the_oem_code_page():
@@ -247,7 +246,7 @@ def test_windows_ocr_reads_its_own_console_losslessly_as_utf8(windows_ocr):
     windows_ocr.reply = (0, "12,50 € – Žltý", "")
     assert ocr.ocr_windows_builtin() == "12,50 € – Žltý"
     (kwargs,) = windows_ocr.kwargs
-    assert not any(kwargs.get(key) for key in _TEXT_MODE), kwargs  # binary: the bytes are decoded by us
+    assert not any(kwargs.get(key) for key in TEXT_MODE), kwargs  # binary: the bytes are decoded by us
     assert kwargs["creationflags"] == _CREATE_NO_WINDOW
     (argv,) = windows_ocr.calls
     assert argv[:3] == ["powershell", "-NoProfile", "-Command"]
