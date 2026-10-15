@@ -74,7 +74,7 @@ paths:
   - `_FakeInput.raw` keeps each `SendInput` call's INPUT bytes. `_key_calls` decodes them with
     the Win32 offsets (union at 8 on x64 / 4 on x86; `wVk`, `wScan` WORDs, then `dwFlags`),
     not with our field names.
-  - `_FakeClipboard` stands in for `win32clipboard`. The fake Quartz records keyboard events
+  - `fake_windows_session.FakeClipboard` stands in for `win32clipboard`. The fake Quartz records keyboard events
     and has `CGPreflightPostEventAccess`. `_mac_pasteboard` fakes `pbcopy`/`pbpaste`.
   - The tool-layer fixtures patch BOTH `server.pyautogui` and the provider's `pyautogui`.
   - Expected values are literals (0x0004, 0x017D for Ž, 0xD83D/0xDE00).

@@ -252,12 +252,10 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - Round 5 (0🔴 1🟡 2🔵): `672a4c5` → `ad440f8`.
   - Round 6 (0🔴 0🟡 1🔵): `1318664` test move.
   - Round 7 (0🔴 1🟡 2🔵): `ad21f74`.
+  - Round 8 (0🔴 2🟡 5🔵): `2d1c3d4` → `a37e496` (the stale sweep honours Wait's `seconds`), `06e8dfd` + `3e19e52` tests.
 - **Tests:**
-  - New: `tests/test_tool_errors.py` (real client), `test_desktop_diagnose.py` (per-OS fakes plus the preflight contract), `test_helper_failures.py`, `test_windows_tool_errors.py`, and the shared `fake_windows_session.py` / `conftest.win_session`.
-  - Existing error-text tests now expect the raised ToolError with the same texts. Result: 616 pass, ruff clean.
+  - New: `tests/test_tool_errors.py` (real client), `test_desktop_diagnose.py` (per-OS fakes plus the preflight contract), `test_helper_failures.py`, `test_windows_tool_errors.py`, and the shared `fake_windows_session.py` / `tool_test_support.py` / `conftest.win_session`.
+  - Existing error-text tests now expect the raised ToolError with the same texts. Result: 628 pass, ruff clean.
 - **Out of scope, recorded on other tickets:**
   - #39: PowerShell `$()` injection in the Windows toast (Notification is tier 1).
   - #37: the AX tree needs a new `need`.
-- **Review-probe side effects (for the supervisor):**
-  - A round-4 read-only probe printed win-pz-server's `--auth-key` into a subagent transcript: rotate it.
-  - A round-5 probe briefly set that server's shared console to 65001. It was restored to 852, and the isolation fix now prevents it.

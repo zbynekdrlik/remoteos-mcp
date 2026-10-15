@@ -155,8 +155,9 @@ def reconnect_to_console(force: bool = False) -> str:
     ran. Raises RuntimeError when the state cannot be read or the session is
     still disconnected after tscon (#32 review rounds 1-2).
 
-    Only the ReconnectSession tool and the Snapshot capture retry call it, never
-    a preflight: it puts the user's desktop on the machine's physical screen.
+    Only the ReconnectSession tool and the capture retry of Snapshot and
+    AnnotatedSnapshot call it, never a preflight: it puts the user's desktop on
+    the machine's physical screen.
     The session is the server's own (ProcessIdToSessionId), never one parsed
     out of ``query session``, whose line for a disconnected session has a blank
     SESSIONNAME.

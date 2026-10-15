@@ -61,5 +61,5 @@ paths:
   - Tool-level tests run the real MCP tool functions on a fake X11 display, stubbing only
     `_run_x` and `_load_atspi`.
   - Windows/macOS providers are imported against fake `ctypes.windll` / pywin32 / `Quartz`
-    modules. See `tests/test_provider_geometry.py`: `fake_windows_session.purge_module`
+    modules. See `tests/test_provider_geometry.py`: `tool_test_support.purge_module`
     re-imports the provider fresh, and `conftest.win_session` is the shared Windows fixture.

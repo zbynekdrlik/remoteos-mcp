@@ -13,6 +13,7 @@ paths:
   - "tests/test_helper_failures.py"
   - "tests/test_windows_tool_errors.py"
   - "tests/fake_windows_session.py"
+  - "tests/tool_test_support.py"
   - "tests/conftest.py"
 ---
 
@@ -149,8 +150,8 @@ paths:
   ("run ReconnectSession"). Only two callers run `reconnect_to_console`, because a tscon puts
   the user's desktop on the machine's physical screen:
   - the explicit ReconnectSession tool;
-  - the Snapshot capture retry in `_capture_snapshot_frame`, which tscons only when the
-    session went disconnected between the preflight and the grab.
+  - the capture retry in `_capture_snapshot_frame` (Snapshot AND AnnotatedSnapshot), which
+    tscons only when the session went disconnected between the preflight and the grab.
 - **`reconnect_to_console`** reconnects the server's OWN session: `ProcessIdToSessionId`,
   `WTSConnectState`, `tscon <id> /dest:console`, then a re-check.
   - It returns `"reattached"` or `"attached"` (it already was: console or remote desktop) and
@@ -197,8 +198,15 @@ paths:
     tests run the preflight's real healthy path.
   - New Windows error tests go into `test_windows_tool_errors.py`, not into
     `test_provider_geometry.py`. That module is about geometry and sits just under the
-    ~1000-line budget (974).
-  - The helper tests fake the stdlib `subprocess.run`.
+    ~1000-line budget.
+  - The helper and tool-error tests fake the stdlib `subprocess.run` / `Popen`, never an
+    internal `_run`. `tests/test_helper_failures.py` has one test per raise path; check a
+    new one against a mutant that returns the message instead of raising.
+  - `tests/tool_test_support.py` holds `tool_error` (the text of a tool's ToolError) and
+    `purge_module` (re-import a provider against the current fakes) for every OS.
+  - A macOS input test records the PROVIDER's `pyautogui` too (`_GuiRecorder` in
+    `test_desktop_diagnose.py`): `type_text` clicks, clears and pastes through it, so a
+    "nothing was clicked" check on `server.pyautogui` alone can never fail.
 - **Live check (supervisor, after deploy):**
   - `Shell(cwd="C:\\no such dir")` on a Windows box must show as a tool error in Claude.
   - A healthy `Snapshot` must still succeed. That proves the preflight does not
