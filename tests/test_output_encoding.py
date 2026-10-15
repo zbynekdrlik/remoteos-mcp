@@ -92,6 +92,16 @@ def test_windows_shell_decodes_each_stream_on_its_own(monkeypatch, windows_child
     assert out == f"{SLOVAK}\n\n[STDERR] Chýba ukončovací znak.\n\n[Exit code: 1]"
 
 
+def test_windows_shell_keeps_powershell_utf8_lines_exact_next_to_a_native_oem_line(monkeypatch, windows_child):
+    # review round 1: one line a native program wrote in the OEM page falls back on its own
+    monkeypatch.setattr(server, "is_windows", lambda: True)
+    windows_child.oem = "cp852"
+    windows_child.stdout = (
+        (SLOVAK + "\r\n").encode("utf-8") + "Prístup odmietnutý.\r\n".encode("cp852") + "Hotovo\r\n".encode("utf-8")
+    )
+    assert server.Shell("x") == f"{SLOVAK}\nPrístup odmietnutý.\nHotovo"
+
+
 def test_linux_shell_returns_utf8_output_exactly_through_real_bash():
     # macOS/Linux are unchanged (the locale, UTF-8 here); this locks it with a real /bin/bash
     assert server.Shell('printf "Žltý kôň"') == "Žltý kôň"
@@ -178,7 +188,7 @@ def test_decode_output_falls_back_to_the_oem_page_for_bytes_that_are_not_utf8(ca
     [record] = _remoteos_records(caplog)
     message = record.getMessage()
     assert record.levelno == logging.INFO  # nothing was lost
-    assert "stderr" in message and re.search(r"\b0\b", message)
+    assert "stderr: 1 line(s) not UTF-8" in message and "; 0 undecodable" in message
     assert "Čaká" not in caplog.text and "aká" not in caplog.text  # never the content
 
 
@@ -192,8 +202,28 @@ def test_decode_output_keeps_undecodable_bytes_as_replacement_characters_and_log
     [record] = _remoteos_records(caplog)
     message = record.getMessage()
     assert record.levelno == logging.WARNING  # a character was lost
-    assert "stdout" in message and re.search(r"\b1\b", message)
+    assert "stdout: 1 line(s) not UTF-8" in message and "; 1 undecodable" in message
     assert "Zz-marker" not in caplog.text
+
+
+def test_decode_output_falls_back_line_by_line_so_utf8_lines_stay_exact(caplog):
+    # review round 1: a native program started from PowerShell may write its own page into the same
+    # pipe; that one line must not turn PowerShell's UTF-8 lines around it into mojibake
+    from remoteos.platform.command import decode_output
+
+    raw = (
+        (SLOVAK + "\r\n").encode("utf-8")
+        + "Prístup odmietnutý.\r\n".encode("cp852")
+        + "Hotovo – €\r\n".encode("utf-8")
+    )
+    with oem_code_page("cp852"), caplog.at_level(logging.DEBUG, logger="remoteos"):
+        out = decode_output(raw, windows=True, stream="stdout")
+    assert out == f"{SLOVAK}\nPrístup odmietnutý.\nHotovo – €\n"
+    [record] = _remoteos_records(caplog)
+    message = record.getMessage()
+    assert record.levelno == logging.INFO
+    assert "stdout: 1 line(s) not UTF-8" in message and "; 0 undecodable" in message
+    assert "odmietnut" not in caplog.text and "Hotovo" not in caplog.text
 
 
 @pytest.mark.parametrize("windows", [True, False], ids=["windows", "posix"])

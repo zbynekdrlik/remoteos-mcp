@@ -33,9 +33,12 @@ from typing import Callable, Union
 # the subprocess keyword arguments that make a call text mode
 TEXT_MODE = ("text", "encoding", "errors", "universal_newlines")
 
-# UTF-8 without a BOM, for the child's console output and for what PowerShell pipes to native programs
+# UTF-8 without a BOM, for the child's console output and for what PowerShell pipes to native programs.
+# In try/catch (review round 1): where the switch is refused (e.g. Constrained Language Mode), the
+# command still runs, with no error text on every reply, and is read through the OEM fallback.
 POWERSHELL_UTF8_PREFIX = (
-    "$OutputEncoding = New-Object System.Text.UTF8Encoding $false; [Console]::OutputEncoding = $OutputEncoding"
+    "try { $OutputEncoding = New-Object System.Text.UTF8Encoding $false;"
+    " [Console]::OutputEncoding = $OutputEncoding } catch { }"
 )
 
 # The real Popen, taken when this module is imported (at test collection), before any test patches it.
