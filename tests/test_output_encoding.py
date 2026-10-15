@@ -233,6 +233,16 @@ def test_decode_output_falls_back_line_by_line_so_utf8_lines_stay_exact(caplog):
     assert "odmietnut" not in caplog.text and "Hotovo" not in caplog.text
 
 
+def test_decode_output_fallback_breaks_lines_at_a_lone_carriage_return_too():
+    # review round 2: a text-mode run (and decode_output's own result) treats a lone \r as a line
+    # break, so the per-line fallback must split there too; read together, the UTF-8 line went OEM
+    from remoteos.platform.command import decode_output
+
+    raw = "Žltý".encode("utf-8") + b"\r" + "čaká".encode("cp852") + b"\r\n" + "kôň".encode("utf-8")
+    with oem_code_page("cp852"):
+        assert decode_output(raw, windows=True) == "Žltý\nčaká\nkôň"
+
+
 @pytest.mark.parametrize("windows", [True, False], ids=["windows", "posix"])
 def test_decode_output_translates_newlines_like_a_text_mode_run(windows):
     from remoteos.platform.command import decode_output
