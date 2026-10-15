@@ -362,7 +362,13 @@ def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) ->
     _reap(proc, 5)
 
 
-def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd: Optional[str] = None) -> ChildOutput:
+def run_child(
+    cmd: list[str],
+    timeout: int,
+    windows: Optional[bool] = None,
+    cwd: Optional[str] = None,
+    env: Optional[dict[str, str]] = None,
+) -> ChildOutput:
     """Run ``cmd`` in binary mode and decode both streams with ``decode_output``.
 
     - The child gets its own hidden console on Windows (``own_console``) and its own session on
@@ -371,6 +377,8 @@ def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd:
       stream, and a child that reads stdin would eat protocol frames (review round 1).
     - ``cwd``: the working directory (Shell on POSIX); ``None`` inherits the server's. A PowerShell
       child takes its cwd in ``powershell_argv`` instead.
+    - ``env``: the child's WHOLE environment (Linux Shell: ``shell_env()``, the server's own plus
+      its user's session variables, #52); ``None`` inherits the server's.
     - A timeout kills the tree (``kill_process_tree``) and raises ``subprocess.TimeoutExpired``
       naming the command as the user knows it (``_shown``). Any other exception while waiting
       kills the tree too, as ``subprocess.run`` did.
@@ -385,6 +393,7 @@ def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
+        env=env,
         start_new_session=not windows,
         **own_console(windows),
     )

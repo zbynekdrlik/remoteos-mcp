@@ -55,7 +55,7 @@ Both provider fns are display-gated in `tiers.py` (`LINUX_DISPLAY_TOOLS`); the p
 
 Review of #6/#7/#8 fixed 5 defects; keep them fixed:
 
-- **`_load_atspi()` must NOT leak env into global `os.environ`.** It injects the session's `DBUS_SESSION_BUS_ADDRESS`/`DISPLAY`/`XAUTHORITY`/`XDG_RUNTIME_DIR`, forces `Atspi.get_desktop(0)` **while they're set** (Atspi/libdbus caches the a11y-bus connection process-wide, so the later tree walk still works), then RESTORES the originals in a `finally`. Leaking them (a) poisons every later `Shell` tool call (it inherits the process env) and (b) makes a root-service force-redetect misclassify itself as a uid-0 env session. If AnnotatedSnapshot ever returns 0 elements after this, the connection isn't being cached before restore — wrap the whole walk in the env window instead.
+- **`_load_atspi()` must NOT leak env into global `os.environ`.** It injects the session's `DBUS_SESSION_BUS_ADDRESS`/`DISPLAY`/`XAUTHORITY`/`XDG_RUNTIME_DIR`, forces `Atspi.get_desktop(0)` **while they're set** (Atspi/libdbus caches the a11y-bus connection process-wide, so the later tree walk still works), then RESTORES the originals in a `finally`. Leaking them (a) poisons every later `Shell` tool call (`shell_env()` starts from a copy of the process env, #52) and (b) makes a root-service force-redetect misclassify itself as a uid-0 env session. Even restored, the window is a race: a Shell call (a root service included) that copies `os.environ` during it passes the session user's bus/display on. It predates #52; closing it needs one lock shared by this window and the `shell_env` snapshot. If AnnotatedSnapshot ever returns 0 elements after this, the connection isn't being cached before restore — wrap the whole walk in the env window instead.
 - **`_detect()` trusts its own env only when `os.geteuid() != 0`.** A root service's own env is never the real seat; a root process always resolves the session via loginctl (otherwise a stray/leaked `DISPLAY` drops the `sudo -n -u <user>` wrap → D-Bus EXTERNAL auth rejects uid 0 → clipboard/notifications break).
 - **Screen captures go to the session user's `XDG_RUNTIME_DIR` (`/run/user/<uid>`, 0700), never `/tmp`.** `_capture_tmp(suffix)` returns the private path used by both `capture_png` (scrot/import) and `record_screen` (ffmpeg). `/tmp` is world-readable (0644 under a sticky dir) → a co-located local user could read screenshots/recordings. The runtime dir is also writable by the session user under `sudo -u` (a root-owned 0700 /tmp dir would not be).
 - **`_run_x` converts `subprocess.TimeoutExpired` → `RuntimeError(f"{cmd[0]} timed out after {timeout}s")`** at BOTH the first-attempt and retry call sites. TimeoutExpired is not a RuntimeError, so it otherwise escapes every caller's `except RuntimeError`.
@@ -66,6 +66,36 @@ Review of #6/#7/#8 fixed 5 defects; keep them fixed:
 `pip install "git+…@main"` right after a merge can clone a **stale** `main` (pre-merge) → installs the OLD version. Pin to the merge commit SHA: `sudo python3 -m pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps "git+https://github.com/zbynekdrlik/remoteos-mcp.git@<merge-sha>"` (both imag-nb and cam1 install into system `dist-packages`, so `sudo` + `--break-system-packages` on Ubuntu 24.04). Version surface for this MCP server is `/health` (`{"version":"…"}`), not a web DOM.
 
 **The fast src-copy (tar→scp→extract) does NOT bump `/health`.** `__version__` comes from `importlib.metadata.version("remoteos-mcp")` = the installed `.dist-info`, which a src-copy leaves untouched — so `/health` keeps reporting the OLD version even though the CODE is new. Use src-copy only for PRE-merge FUNCTIONAL testing (behavior); to make `/health` show the new version you must `pip install @<sha>` (updates metadata). Verify the fixes live (session self-resolves via loginctl — pass `python3 … </dev/null` so ffmpeg's stdin read doesn't hang the heredoc).
+
+## Shell child environment (#52) — the provider's session reaches Shell
+
+The service is a system unit (`User=newlevel` on stream-pp/strih-pp/imag-nb, `User=root` on
+cam1..4) with NO login-session environment. Since 0.7.0.dev31 a Linux `Shell` child gets
+`platform/linux/shell_env.shell_env()`: the server's environment plus, for the server's OWN
+effective uid only, `XDG_RUNTIME_DIR` + `DBUS_SESSION_BUS_ADDRESS` (from `/run/user/<euid>` and its
+`bus` socket) and `DISPLAY` / `XAUTHORITY` / `WAYLAND_DISPLAY` from THIS provider's
+`get_session()` when `session.uid == euid` and the socket exists (an X socket only when root or
+the euid owns it). A root service (cam1) adds nothing. So `systemctl --user`, `journalctl --user`
+and `gsettings` work from Shell, with no SSH fallback. Full contract and tests:
+`.claude/rules/server-startup.md`.
+
+- A GUI program from Shell must be DETACHED: `setsid -f obs >/dev/null 2>&1` or
+  `systemd-run --user obs`. A plain `obs &` keeps the call's pipes, runs to the Shell timeout and
+  dies in `run_child`'s process-group kill (review round 1, pinned by a real-bash test).
+- `shell_env` reads this module's `_SESSION` cache and never forces a re-detection
+  (`get_session(force=True)`); only an EMPTY cache (the start-up detection failed) is filled by
+  `get_session()`'s own first use. A re-detect at a logout once wrote `headless` here and every
+  desktop tool refused until a restart (review round 1). Keep `get_session()` cheap and never
+  raising; `shell_env` catches anything anyway.
+- Detached programs started from Shell now carry the session's `DISPLAY` / `XAUTHORITY`, so
+  `_scan_proc_for_x_env` (the first euid process with both) can pick such a program's STALE pair
+  after a re-login on another display. A resident `xclip` already had the same effect. The fix
+  belongs here (prefer a process whose `/proc/<pid>/sessionid` is the chosen loginctl session);
+  it is a follow-up candidate of #52, which did not grow this file (#49).
+- `SessionInfo` has no Wayland socket name; `shell_env` uses libwayland's default `wayland-0`.
+- Live check (supervisor, after install): stream-pp `Shell("systemctl --user is-system-running")`
+  → `running` / `degraded`, never the bus error; `Shell("echo $DISPLAY")` → the X11 session's
+  display. The same two on strih-pp.
 
 ## Testing gotcha
 
