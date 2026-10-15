@@ -317,3 +317,35 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   `windows-powershell` CI job (real PowerShell 5.1, en-US cp437, no fakes). Result: 711 pass on
   Linux, ruff clean.
 - **Follow-up candidate (supervisor):** split the pre-existing `__main__.py` (1883 lines).
+
+## #52 — Linux Shell children get the user session environment (0.7.0.dev31)
+
+- **Why:** the Linux server is a system unit with `User=`, which has no login-session
+  environment, so a Shell child had no `XDG_RUNTIME_DIR` / `DBUS_SESSION_BUS_ADDRESS` / `DISPLAY`
+  and `systemctl --user` failed (live on stream-pp) although `/run/user/1000/bus` existed.
+- **Design (main session, Approach 1):** new `platform/linux/shell_env.shell_env()`: the server's
+  environment plus, for its OWN effective uid only and only where a variable is unset or empty,
+  `XDG_RUNTIME_DIR` (an owned dir), `DBUS_SESSION_BUS_ADDRESS` (its bus socket), and from the
+  provider's cached session (same uid) `DISPLAY` (a local display whose X socket is owned by root
+  or the euid, lstat), `XAUTHORITY` (only with that checked display), `WAYLAND_DISPLAY=wayland-0`
+  (a Wayland session, socket in the child's runtime dir). Nothing as root. `run_child(env=)`;
+  Linux Shell passes it, Windows/macOS unchanged. `desktop.py` untouched.
+- **Decisions on the way (all on #52):** the design's re-detect-on-gone-socket was REMOVED in
+  review round 1 (`get_session(force=True)` at a logout wrote `headless` into the shared cache and
+  the desktop tools refused until a restart); the environment is copied key by key (a key popped
+  by `_load_atspi` in another thread raised KeyError, round 4); one lock for the log de-dups;
+  conftest gives every test a headless start-up session cache; GUI programs must be started
+  detached, prompting commands non-interactive (docs + Shell description).
+- **Commits:** `55ac948` bump; RED `3cfbc00`/`e9554c9`/`b98730b` → GREEN `d8fe0a6`; review rounds
+  as RED → GREEN: `5c3dc2a` → `16a35c7`, `8660de5`/`268575e` → `6024b59`, `cb100a8` (test gaps),
+  `03ce11c` → `d1179f4`, `b1d3e20` (round-5 pins); docs `9985678`, `8e4ae88`, `fc08c37`, `969bc59`, `d872ff7`.
+  Reviews: 1🔴3🟡4🔵, 0🔴2🟡6🔵, 0🔴2🟡6🔵, 0🔴1🟡5🔵, 0🔴0🟡7🔵 (folded or dispositioned).
+- **Tests:** `tests/test_shell_env.py` (real AF_UNIX sockets in a short temp tree, real bash,
+  loginctl faked at `subprocess.run`, euid / stat+lstat owner faked only where needed). Result:
+  771 pass, ruff clean; the lane's 36-mutant pass over `shell_env.py` caught all.
+- **Follow-up candidates (supervisor):** the provider-wide start-up-only session cache (a
+  graphical login after a boot-time start reaches neither Shell's DISPLAY nor the display-tool
+  gating until a restart); `desktop._load_atspi`'s temporary `os.environ` window, which a
+  concurrent Shell snapshot can copy (needs a lock shared with `desktop.py`); the provider's
+  `/proc` scan can pick a detached Shell-started program's stale `DISPLAY`/`XAUTHORITY` after a
+  re-login on another display (match `/proc/<pid>/sessionid`).

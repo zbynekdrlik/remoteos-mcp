@@ -208,6 +208,34 @@ notifications and Windows OCR. On macOS and Linux, output is read in the locale'
   error, and that a timed-out PowerShell is gone. The other points above are verified on the
   fleet only.
 
+**Shell on Linux: the user's session.** The Linux service is a systemd system unit, which has no
+login-session environment. A Shell command still gets the session of the user the service runs
+as, so `systemctl --user`, `journalctl --user` and GUI programs work through MCP (no SSH needed):
+
+- `XDG_RUNTIME_DIR`, when `/run/user/<uid>` exists (any login or linger);
+- `DBUS_SESSION_BUS_ADDRESS`, when its `bus` socket exists too;
+- `DISPLAY` and `XAUTHORITY` of that same user's graphical session (the one found when the
+  service started) when its X socket exists, plus `WAYLAND_DISPLAY` in a Wayland session. The
+  service starts at boot, so after a reboot a login that came later is picked up only when the
+  service restarts.
+
+A variable the service already has with a value is never changed; an empty one is filled in. A
+service running as root gets none of them: it never borrows another user's session. (One known
+exception, older than this feature: a Shell call made at the very moment an AnnotatedSnapshot
+sets up its accessibility connection can copy that session's variables.)
+
+Start a GUI program detached, so it outlives the Shell call: `setsid -f obs >/dev/null 2>&1`, or
+`systemd-run --user obs`. A plain `obs &` keeps the call's output open: the call waits until its
+timeout and is then stopped together with everything it started, the program included.
+
+With `DISPLAY` set, a command that would prompt (an `ssh` host-key question or passphrase,
+`sudo -A`) may open a dialog on the screen (`ssh-askpass`) and wait there until the timeout,
+instead of failing at once. Run such commands non-interactively: `ssh -o BatchMode=yes`, or
+`SSH_ASKPASS_REQUIRE=never` before the command. The session bus can do the same: a program that
+asks a locked keyring for a secret (git's credential helper, `secret-tool`) makes the keyring
+show its unlock dialog on the screen. Run it with `env -u DBUS_SESSION_BUS_ADDRESS`, or with a
+short `timeout`.
+
 ## MCP gateway (dev1)
 
 The machines are reachable only from boxes with a LAN route to them. `remoteos-gateway`

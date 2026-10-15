@@ -100,3 +100,18 @@ def windows_child(monkeypatch, windows_python):
     monkeypatch.setattr(subprocess, "Popen", child)
     with oem_code_page(lambda: child.oem):
         yield child
+
+
+@pytest.fixture(autouse=True)
+def _linux_session_detected_at_start_up(monkeypatch):
+    """A Linux Shell call reads the provider's cached session (#52).
+
+    The server detects it at start-up, so a Shell call never has to. Each test starts from such
+    a cache, holding what CI's start-up finds (no graphical session); a test that needs another
+    session sets its own. Without it, the first Linux Shell call would run the host's real
+    ``loginctl`` (through ``subprocess``, which some tests record), and whatever it found would
+    leak into later tests.
+    """
+    from remoteos.platform.linux import desktop
+
+    monkeypatch.setattr(desktop, "_SESSION", desktop.SessionInfo(mode="headless"))

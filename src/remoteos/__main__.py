@@ -47,6 +47,7 @@ from remoteos.coords import check_space, contract_line, frame_for, image_to_scre
 from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.platform.command import powershell_argv, run_child
+from remoteos.platform.linux.shell_env import shell_env
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, window_lines
@@ -587,7 +588,13 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     On Windows the command runs unchanged in a console switched to UTF-8 before PowerShell
     starts, so PowerShell's output comes back as exact Unicode; error records, exit codes and
     ``param(...)`` are plain PowerShell's. On macOS/Linux the output is read in the locale's
-    encoding.
+    encoding. On Linux the command also gets the server user's own session variables the
+    service lacks (XDG_RUNTIME_DIR, the D-Bus session bus, DISPLAY), so ``systemctl --user``
+    works. Start a GUI program detached (``setsid -f prog >/dev/null 2>&1``): a plain
+    ``prog &`` keeps the output open, so the call runs to its timeout and the program is
+    stopped with it. A prompt (ssh, sudo -A, a locked keyring) may open a dialog on the screen
+    instead of failing: run it non-interactively (``ssh -o BatchMode=yes``,
+    ``env -u DBUS_SESSION_BUS_ADDRESS``).
 
     Args:
         command: Command to execute.
@@ -607,6 +614,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             log.warning("Shell refused: working directory %s", problem)  # never the path (#31)
             raise ValueError(f"working directory {problem}: {cwd}")
     windows = is_windows()
+    env = None  # Windows and macOS: the server's own environment
     if windows:
         # unchanged, in its own console switched to UTF-8 before PowerShell starts (#48 round 2).
         # The cwd goes to PowerShell through the trampoline, which itself runs in the server's
@@ -616,11 +624,13 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
         shell_cmd = ["/bin/zsh", "-c", command]
     else:
         shell_cmd = ["/bin/bash", "-c", command]
+        # a system unit has no login-session environment: add the server user's own (#52)
+        env = shell_env()
 
     # the shared runner (#48 round 2): binary, in its own console (Windows) or session (POSIX);
     # decode_output reads the bytes, and a timeout kills everything the command started
     try:
-        result = run_child(shell_cmd, timeout, windows, cwd=workdir)
+        result = run_child(shell_cmd, timeout, windows, cwd=workdir, env=env)
     except subprocess.TimeoutExpired:
         raise failure(f"Command timed out after {timeout}s") from None  # run_child logged it
     # A non-zero exit is the command's own answer (it ran), not a tool failure.
