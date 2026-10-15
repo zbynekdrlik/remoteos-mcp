@@ -115,6 +115,13 @@ def test_a_start_failure_after_a_refused_page_is_still_an_error(monkeypatch, win
     assert tool_error(lambda: server.Shell("Get-Date")) == f"Shell error: {refused}\n{_COULD_NOT_START}"
 
 
+def test_a_trampolined_exit_1_with_nothing_on_stderr_is_the_commands_answer(monkeypatch, windows_child):
+    # review round 5: e.g. `cmd /c exit 7` as the last statement; an empty stderr is no start failure
+    monkeypatch.setattr(server, "is_windows", lambda: True)
+    windows_child.returncode = 1
+    assert server.Shell("cmd /c exit 7") == "[Exit code: 1]"
+
+
 def test_only_the_trampolines_own_exit_1_is_a_start_failure(monkeypatch, windows_child):
     # review round 4: the exit code and the trampolined argv are part of the rule (both guards were
     # surviving mutants). PowerShell exiting 2 with that text is its own answer.

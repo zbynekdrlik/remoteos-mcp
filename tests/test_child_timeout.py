@@ -30,7 +30,7 @@ import psutil
 import pytest
 
 import remoteos.__main__ as server
-from remoteos.platform.command import powershell_argv, run_child, run_command
+from remoteos.platform.command import KILL_GRACE_S, powershell_argv, run_child, run_command
 
 # A child that starts a grandchild sharing its stdout, writes the grandchild's pid to a file, then
 # hangs. The grandchild hangs too, holding the pipe open.
@@ -197,7 +197,7 @@ def test_a_timed_out_windows_child_is_killed_with_taskkill_of_its_tree(windows_n
 
 def test_a_timeout_names_the_powershell_command_not_the_trampoline(windows_never_finishing, windows_python):
     # review round 1: the error the client sees names the command as before round 2, without the
-    # ~425 characters of the console trampoline in front of it
+    # ~700 characters of the console trampoline in front of it
     with pytest.raises(subprocess.TimeoutExpired) as exc:
         run_command(powershell_argv("Start-Sleep 60"), timeout=3)
     assert exc.value.cmd == ["powershell", "-NoProfile", "-Command", "Start-Sleep 60"]
@@ -272,18 +272,20 @@ def test_a_grandchild_that_ignores_sigterm_without_our_pipes_is_killed_too(grand
 
 # Review round 2: SIGTERM comes first, so a process that handles it can clean up (a removed SIGTERM
 # step survived the suite). The handler leaves a marker, then exits.
+# Review round 5: the grandchild writes its OWN pid file, after its handler is installed, so a SIGTERM
+# can never find it still starting up.
 _GRANDCHILD_THAT_CLEANS_UP_ON_SIGTERM = (
-    "import signal, sys, time\n"
+    "import os, signal, sys, time\n"
     "def done(*_):\n"
     "    open(sys.argv[1], 'w').write('cleaned up')\n"
     "    sys.exit(0)\n"
     "signal.signal(signal.SIGTERM, done)\n"
+    "open(sys.argv[2], 'w').write(str(os.getpid()))\n"
     "time.sleep(60)\n"
 )
 _PARENT_OF_A_GRANDCHILD_THAT_CLEANS_UP = f"""
 import subprocess, sys, time
-grandchild = subprocess.Popen([sys.executable, "-c", {_GRANDCHILD_THAT_CLEANS_UP_ON_SIGTERM!r}, sys.argv[2]])
-open(sys.argv[1], "w").write(str(grandchild.pid))
+subprocess.Popen([sys.executable, "-c", {_GRANDCHILD_THAT_CLEANS_UP_ON_SIGTERM!r}, sys.argv[2], sys.argv[1]])
 time.sleep(60)
 """
 
@@ -301,18 +303,18 @@ def test_the_group_gets_sigterm_before_sigkill(grandchild_pid_file):
 # behind (`x &`, `nohup x &`) holds the pipe. It was reparented to init, so it is no longer the
 # child's descendant, but it is still in the child's process group, and it gets the grace too.
 _GRANDCHILD_THAT_CLEANS_UP_SLOWLY = (
-    "import signal, sys, time\n"
+    "import os, signal, sys, time\n"
     "def done(*_):\n"
     "    time.sleep(0.3)\n"
     "    open(sys.argv[1], 'w').write('cleaned up')\n"
     "    sys.exit(0)\n"
     "signal.signal(signal.SIGTERM, done)\n"
+    "open(sys.argv[2], 'w').write(str(os.getpid()))\n"
     "time.sleep(60)\n"
 )
 _PARENT_THAT_LEAVES_A_GRANDCHILD_BEHIND = f"""
 import subprocess, sys
-grandchild = subprocess.Popen([sys.executable, "-c", {_GRANDCHILD_THAT_CLEANS_UP_SLOWLY!r}, sys.argv[2]])
-open(sys.argv[1], "w").write(str(grandchild.pid))
+subprocess.Popen([sys.executable, "-c", {_GRANDCHILD_THAT_CLEANS_UP_SLOWLY!r}, sys.argv[2], sys.argv[1]])
 """
 
 
@@ -341,7 +343,9 @@ def _seed_a_stale_psutil_entry(pid_file: Path, seeded: list) -> None:
     stale = psutil.Process(pid)
     stale._ident = (pid, stale.create_time() - 1000.0)
     psutil._pmap[pid] = stale
-    seeded.append(pid)
+    # review round 5: the seed must really be a different identity, or a renamed psutil internal would
+    # make this test a silent copy of the one above
+    seeded.append((pid, stale != psutil.Process(pid)))
 
 
 def test_a_member_whose_pid_psutil_cached_stale_still_gets_the_grace(grandchild_pid_file):
@@ -349,7 +353,7 @@ def test_a_member_whose_pid_psutil_cached_stale_still_gets_the_grace(grandchild_
     # time, is_running() says "exited" and the member got no SIGTERM grace
     marker = grandchild_pid_file.parent / "cleaned-up"
     cmd = [sys.executable, "-c", _PARENT_THAT_LEAVES_A_GRANDCHILD_BEHIND, str(grandchild_pid_file), str(marker)]
-    seeded: list[int] = []
+    seeded: list[tuple[int, bool]] = []
     seeder = threading.Thread(target=_seed_a_stale_psutil_entry, args=(grandchild_pid_file, seeded))
     seeder.start()
     try:
@@ -357,15 +361,18 @@ def test_a_member_whose_pid_psutil_cached_stale_still_gets_the_grace(grandchild_
             run_command(cmd, timeout=2)
     finally:
         seeder.join()
-        for pid in seeded:
+        for pid, _ in seeded:
             psutil._pmap.pop(pid, None)
     assert seeded, "the grandchild never wrote its pid"
+    assert seeded[0][1], "the seeded identity was not stale: psutil's internals changed"
     assert _gone_within(int(grandchild_pid_file.read_text()), 5)
     assert marker.exists() and marker.read_text() == "cleaned up", "the stale identity cost the grace"
 
 
-def test_a_failing_process_scan_still_kills_the_child(monkeypatch):
-    # review round 4: kill_process_tree never raises; a failing scan only skips the grace wait
+def test_a_failing_process_scan_still_signals_the_group(monkeypatch, grandchild_pid_file):
+    # review round 4: kill_process_tree never raises; a failing scan only skips the grace wait. Review
+    # round 5: a grandchild holding the pipe proves the GROUP signals still go out (a lone child dies
+    # by proc.kill() either way)
     def _broken_pids():
         raise RuntimeError("/proc is not readable")
 
@@ -373,8 +380,31 @@ def test_a_failing_process_scan_still_kills_the_child(monkeypatch):
     monkeypatch.setattr(psutil, "process_iter", lambda *a, **k: _broken_pids())
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
-        run_command([sys.executable, "-c", "import time; time.sleep(60)"], timeout=1)
+        run_command([sys.executable, "-c", _PARENT_OF_A_HANGING_GRANDCHILD, str(grandchild_pid_file)], timeout=2)
     assert time.monotonic() - started < 15
+    assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the group was never signalled"
+
+
+def test_a_failing_grace_wait_still_sends_sigkill(monkeypatch, grandchild_pid_file):
+    # review round 5: an unexpected OSError from psutil while waiting must neither skip the SIGKILL nor
+    # replace TimeoutExpired. The grandchild ignores SIGTERM, so only the SIGKILL ends it.
+    def _broken_status(self):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(psutil.Process, "status", _broken_status)
+    cmd = [sys.executable, "-c", _DETACHED_GRANDCHILD_THAT_IGNORES_SIGTERM, str(grandchild_pid_file)]
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command(cmd, timeout=2)
+    assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the SIGKILL never went out"
+
+
+def test_a_group_that_exits_on_sigterm_never_waits_out_the_grace():
+    # review round 5: only the group's members are waited for; a child that dies on SIGTERM ends the
+    # wait at once (a scan that waited on other processes would always spend the full 2 s grace)
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command([sys.executable, "-c", "import time; time.sleep(60)"], timeout=1)
+    assert time.monotonic() - started < 1 + KILL_GRACE_S - 0.5
 
 
 _RUNS_A_CHILD_THAT_READS_STDIN = """
