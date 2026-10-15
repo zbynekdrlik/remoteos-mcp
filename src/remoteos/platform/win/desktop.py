@@ -36,6 +36,7 @@ except ImportError:
 from PIL import ImageGrab  # noqa: E402
 
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
+from remoteos.platform.command import run_command  # noqa: E402
 from remoteos.platform.win.availability import diagnose, reconnect_to_console  # noqa: E402,F401  (#32)
 from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
@@ -420,20 +421,12 @@ def minimize_all() -> str:
 
 
 def launch_app(name: str, args: str = "") -> str:
-    """Launch application via PowerShell Start-Process."""
-    import subprocess
-
+    """Launch application via PowerShell Start-Process; a non-zero exit (e.g. no such app) raises (#32)."""
     cmd = f'Start-Process "{name}"'
     if args:
         cmd += f' -ArgumentList "{args}"'
-    _powershell_ok(subprocess.run(["powershell", "-Command", cmd], timeout=10, capture_output=True, text=True))
+    run_command(["powershell", "-Command", cmd], timeout=10, check=True, label="PowerShell")
     return f"Launched {name}"
-
-
-def _powershell_ok(result) -> None:
-    """Raise when a PowerShell call failed: a non-zero exit is a failure, never a success (#32)."""
-    if result.returncode != 0:
-        raise RuntimeError((result.stderr or "").strip() or f"PowerShell exited {result.returncode}")
 
 
 def resize_window(handle: int, width: int, height: int) -> str:
@@ -506,9 +499,7 @@ def lock_screen() -> str:
 
 
 def show_notification(title: str, message: str) -> str:
-    """Show a Windows toast notification via PowerShell."""
-    import subprocess
-
+    """Show a Windows toast notification via PowerShell; a non-zero exit raises (#32)."""
     ps = f"""
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
@@ -525,5 +516,5 @@ $xml.LoadXml($template)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("remoteos-mcp").Show($toast)
 """
-    _powershell_ok(subprocess.run(["powershell", "-Command", ps], timeout=10, capture_output=True, text=True))
+    run_command(["powershell", "-Command", ps], timeout=10, check=True, label="PowerShell")
     return "Notification shown"

@@ -34,11 +34,13 @@ __all__ = [
     "MAC_NO_GUI_SESSION",
     "SESSION_ZERO",
     "DesktopUnavailable",
+    "RedactInvalidArguments",
     "ToolError",
     "failure",
     "mac_accessibility",
     "mac_screen_recording",
     "non_interactive_window_station",
+    "redact_fastmcp_argument_logs",
     "reports_errors",
     "secure_desktop",
     "stack_frames",
@@ -131,6 +133,42 @@ def stack_frames(exc: BaseException) -> str:
     """
     frames = "".join(traceback.format_tb(exc.__traceback__))
     return f"Traceback (most recent call last):\n{frames}{type(exc).__qualname__} (message not logged)"
+
+
+class RedactInvalidArguments(logging.Filter):
+    """Strip the argument VALUES from FastMCP's "Invalid arguments for tool …" warning (#32 review round 2).
+
+    FastMCP 4.0.3 (``server.py`` ``call_tool``) logs a bad call's pydantic errors,
+    each with the ``input`` it got, at WARNING, and FastMCP's loggers write to
+    stderr whatever ``--debug`` says. Logs never carry tool arguments (#31). This
+    filter keeps where and what was wrong (``loc``, ``type``, ``msg``) and drops
+    the rest. The client still gets the full validation error.
+    """
+
+    _PREFIX = "Invalid arguments for tool"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str) and record.msg.startswith(self._PREFIX):
+            args = record.args if isinstance(record.args, tuple) else ()
+            if len(args) == 2:
+                record.args = (args[0], _without_values(args[1]))
+        return True
+
+
+def _without_values(detail):
+    if isinstance(detail, list):
+        return [
+            {key: entry.get(key) for key in ("loc", "type", "msg")} if isinstance(entry, dict) else "<withheld>"
+            for entry in detail
+        ]
+    return "<details withheld: they echo the arguments>"
+
+
+def redact_fastmcp_argument_logs() -> None:
+    """Install :class:`RedactInvalidArguments` on FastMCP's server logger (once)."""
+    server_log = logging.getLogger("fastmcp.server.server")
+    if not any(isinstance(f, RedactInvalidArguments) for f in server_log.filters):
+        server_log.addFilter(RedactInvalidArguments())
 
 
 def failure(message: str) -> ToolError:

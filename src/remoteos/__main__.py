@@ -44,7 +44,7 @@ from starlette.responses import JSONResponse
 from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
-from remoteos.errors import DesktopUnavailable, failure, reports_errors
+from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
@@ -64,6 +64,7 @@ from remoteos.typing_input import check_method
 load_dotenv()
 
 log = logging.getLogger("remoteos.mcp")
+redact_fastmcp_argument_logs()  # FastMCP's "Invalid arguments" warning would log the argument values (#32)
 
 mcp = FastMCP(
     "remoteos-mcp",
@@ -118,19 +119,26 @@ def _current_frame(monitor: int, max_width: int):
 def _capture_snapshot_frame(monitor: int, max_width: int):
     """``(image, frame)`` for Snapshot/AnnotatedSnapshot.
 
-    On Windows a failed grab is retried once after reconnecting a disconnected RDP
-    session to the console (a disconnected session has no desktop to capture).
+    On Windows a failed grab is retried once. If the session went disconnected
+    since the preflight it is reattached first; the log and the error say which
+    of the two happened (#32 review round 2).
     """
     try:
         img, frame = get_desktop().capture_frame(monitor=monitor, max_width=max_width)
     except Exception as first_error:
-        if not is_windows() or _ensure_session_connected() is not None:
+        if not is_windows():
             raise
-        log.warning("capture failed (%s) — retrying after session reconnect", first_error)
+        try:
+            status = _ensure_session_connected()
+        except RuntimeError as reconnect_error:
+            log.warning("capture failed (%s); the session state is unusable: %s", first_error, reconnect_error)
+            raise first_error
+        how = "after session reconnect" if status == "reattached" else "after a retry"
+        log.warning("capture failed (%s) — retrying (%s)", first_error, how)
         try:
             img, frame = get_desktop().capture_frame(monitor=monitor, max_width=max_width)
         except Exception as retry_error:
-            raise RuntimeError(f"after session reconnect: {retry_error}") from retry_error
+            raise RuntimeError(f"{how}: {retry_error}") from retry_error
     log.debug("snapshot frame: %s", contract_line(frame))
     return img, frame
 
@@ -189,7 +197,7 @@ _input_tool = reports_errors(preflight=functools.partial(_desktop_preflight, Fal
         openWorldHint=False,
     )
 )
-@_capture_tool
+@reports_errors  # the capture preflight runs only for the screenshot (use_vision): the window list works anyway
 def Snapshot(
     use_vision: bool | str = True,
     quality: int = 65,
@@ -217,6 +225,7 @@ def Snapshot(
     """
     parts = []
     if _tobool(use_vision):
+        _desktop_preflight(True)
         img, frame = _capture_snapshot_frame(monitor, max_width)
         parts.append(ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"))
     else:
@@ -585,7 +594,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
         workdir = os.path.expandvars(os.path.expanduser(cwd))
         if not os.path.isdir(workdir):
             problem = "is not a directory" if os.path.exists(workdir) else "not found"
-            log.warning("Shell refused: working directory %s: %r", problem, cwd)
+            log.warning("Shell refused: working directory %s", problem)  # never the path (#31)
             raise ValueError(f"working directory {problem}: {cwd}")
     if is_windows():
         shell_cmd = ["powershell", "-NoProfile", "-Command", command]
@@ -724,16 +733,18 @@ def GetSystemInfo() -> str:
     return process_mgr.get_system_info()
 
 
-def _ensure_session_connected(force: bool = False) -> str | None:
+def _ensure_session_connected(force: bool = False) -> str:
     """Attach this server's own Windows session to the console when it is disconnected.
 
-    Returns None when it is attached (or not on Windows), else why not. The
-    provider reads the session state through ProcessIdToSessionId + WTSConnectState
-    and re-checks it after ``tscon`` (#32 review round 1). The old ``query session``
-    parse never found a real disconnected session, because its SESSIONNAME is blank.
+    Returns ``"reattached"`` (tscon ran and the session is attached now) or
+    ``"attached"`` (it already was: console or remote desktop; also off Windows).
+    Raises RuntimeError when the state cannot be read or tscon did not attach it.
+    The provider reads the session through ProcessIdToSessionId + WTSConnectState
+    and re-checks it after ``tscon`` (#32 review rounds 1-2). The old ``query
+    session`` parse never found a real disconnected session (its SESSIONNAME is blank).
     """
     if not is_windows():
-        return None
+        return "attached"
     return get_desktop().reconnect_to_console(force=force)
 
 
@@ -743,16 +754,21 @@ def ReconnectSession(force: bool = False) -> list:
     """Reconnect a disconnected Windows desktop session to the console.
 
     This enables screenshot and UI automation tools to work when no RDP
-    client is actively connected. Runs 'tscon' to attach the user's
-    session to the console.
+    client is actively connected. Runs 'tscon' to attach this server's own
+    session to the console, then checks it worked. This puts the desktop on the
+    machine's physical screen. A session that is already attached (console or
+    remote desktop) is left alone.
 
     Args:
         force: Reconnect even if session appears active (default False).
     """
-    err = _ensure_session_connected(force=force)
-    if err:
-        raise failure(f"ReconnectSession failed: {err}")
-    return [TextContent(type="text", text="Session connected to console")]
+    try:
+        status = _ensure_session_connected(force=force)
+    except RuntimeError as e:
+        raise failure(f"ReconnectSession failed: {e}") from e
+    if status == "reattached":
+        return [TextContent(type="text", text="Session connected to console")]
+    return [TextContent(type="text", text="Session already attached (console or remote desktop): nothing to do")]
 
 
 @mcp.tool(
@@ -1009,19 +1025,19 @@ def FileUpload(path: str, data_base64: str) -> str:
     # Both checks run before the directory is created or the file opened (#31):
     # lax decoding dropped junk characters, so "!!!!" truncated a file to 0 bytes.
     if len(data_base64) > FILE_UPLOAD_MAX_BASE64:
-        log.warning("FileUpload refused %s: %d base64 characters over the cap", path, len(data_base64))
+        log.warning("FileUpload refused: %d base64 characters over the cap", len(data_base64))  # never the path
         raise ValueError(
             f"data_base64 is {len(data_base64)} characters; the limit is {FILE_UPLOAD_MAX_BASE64} (100 MB of base64)"
         )
     try:
         data = base64.b64decode(data_base64.translate(_B64_WHITESPACE), validate=True)
     except ValueError as e:  # binascii.Error is one; non-ASCII text raises a plain ValueError
-        log.warning("FileUpload refused %s: invalid base64 (%s)", path, e)
+        log.warning("FileUpload refused: invalid base64 (%s)", e)
         raise ValueError(f"data_base64 is not valid base64 ({e})") from e
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(data)
-    log.info("FileUpload wrote %d bytes to %s", len(data), path)
+    log.info("FileUpload wrote %d bytes", len(data))  # never the path: logs carry no tool arguments (#31)
     return f"Written {len(data)} bytes to {path}"
 
 

@@ -89,6 +89,20 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
     "NetConnections": ToolCategory.NETWORK,
 }
 
+# A RUNNING task older than this is taken as stuck and auto-cancelled (unless it declared a longer timeout).
+STALE_AFTER_S = 300
+# Headroom over a tool's own `timeout` argument: its kill-and-reap path takes a few seconds more.
+_TIMEOUT_HEADROOM_S = 60
+
+
+def _declared_runtime(kwargs: dict) -> float | None:
+    """The runtime a call declares through a numeric ``timeout`` argument (e.g. Shell), plus headroom."""
+    timeout = kwargs.get("timeout")
+    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
+        return float(timeout) + _TIMEOUT_HEADROOM_S
+    return None
+
+
 # Max concurrent tasks per category
 CATEGORY_LIMITS: dict[ToolCategory, int] = {
     ToolCategory.DESKTOP: 1,  # Exclusive — only one at a time
@@ -112,6 +126,8 @@ class TaskInfo:
     completed_at: float | None = None
     result: Any = None
     error: str | None = None
+    # how long it may run before the stale sweep cancels it (None = STALE_AFTER_S)
+    max_runtime: float | None = None
     _cancel_event: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -167,13 +183,14 @@ class TaskManager:
             self._semaphores[category] = asyncio.Semaphore(limit)
         return self._semaphores[category]
 
-    def create_task(self, tool_name: str) -> TaskInfo:
-        """Register a new task."""
+    def create_task(self, tool_name: str, max_runtime: float | None = None) -> TaskInfo:
+        """Register a new task (``max_runtime``: a longer stale limit than ``STALE_AFTER_S``)."""
         category = TOOL_CATEGORIES.get(tool_name, ToolCategory.QUERY)
         task = TaskInfo(
             task_id=uuid.uuid4().hex[:12],
             tool_name=tool_name,
             category=category,
+            max_runtime=max_runtime,
         )
         with self._lock:
             self._tasks[task.task_id] = task
@@ -215,9 +232,12 @@ class TaskManager:
     def _cleanup_old(self) -> None:
         """Remove old completed tasks beyond max_history, and cancel stale running tasks."""
         now = time.time()
-        # Cancel tasks running longer than 5 minutes (they're likely stuck)
+        # Cancel tasks running longer than 5 minutes (they're likely stuck), or longer than their own
+        # declared runtime: a cancelled task's reply is an error (#32), so a command that is still
+        # inside its own timeout must never be swept (review round 2).
         for t in list(self._tasks.values()):
-            if t.status == TaskStatus.RUNNING and t.started_at and (now - t.started_at) > 300:
+            limit = max(STALE_AFTER_S, t.max_runtime or 0)
+            if t.status == TaskStatus.RUNNING and t.started_at and (now - t.started_at) > limit:
                 elapsed = now - t.started_at
                 logger.warning("Auto-cancelling stale task %s (%s) after %.0fs", t.task_id, t.tool_name, elapsed)
                 t.cancel()
@@ -265,7 +285,7 @@ class TaskManager:
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            task = self.create_task(tool_name)
+            task = self.create_task(tool_name, max_runtime=_declared_runtime(kwargs))
             prefix = f"[task:{task.task_id}]"
 
             # Try to acquire semaphore — wait up to 60s

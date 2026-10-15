@@ -19,7 +19,9 @@ def run_command(cmd: list[str], timeout: int = 30, check: bool = False, label: O
     as an MCP error. Without it, the exit code is part of the answer, the way a
     listing reports it (e.g. Get-WinEvent's "No events were found").
     """
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # errors="replace": output in another code page (e.g. a localized PowerShell's OEM cp852)
+    # must never turn the real failure into a UnicodeDecodeError (#32 review round 2)
+    result = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
     if check and result.returncode != 0:
         reason = (result.stderr or "").strip() or (result.stdout or "").strip() or "(no output)"
         raise RuntimeError(f"{label or ' '.join(cmd[:2])} failed (exit {result.returncode}): {reason}")

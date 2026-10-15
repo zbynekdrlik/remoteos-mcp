@@ -14,6 +14,7 @@ import time
 from typing import Optional
 
 from remoteos import errors
+from remoteos.platform.command import run_command
 
 log = logging.getLogger("remoteos.platform.win.availability")
 
@@ -137,35 +138,35 @@ def _disconnected(session: int) -> bool:
     return state is not None and state.value == _WTS_DISCONNECTED
 
 
-def reconnect_to_console(force: bool = False) -> Optional[str]:
-    """Attach THIS server's own session to the console (``tscon <id> /dest:console``); None = attached.
+def reconnect_to_console(force: bool = False) -> str:
+    """Attach THIS server's own session to the console (``tscon <id> /dest:console``).
 
-    The ReconnectSession tool and the Snapshot capture retry call it. Nothing calls
-    it on its own: it puts the user's desktop on the machine's physical screen.
-    The session is the server's own (ProcessIdToSessionId), never one parsed out of
-    ``query session``, whose line for a disconnected session has a blank
-    SESSIONNAME (#32 review round 1). Afterwards the connect state is read again:
-    a session that is still disconnected is an error, never "connected".
+    Returns ``"reattached"`` when tscon ran and the session is attached now, or
+    ``"attached"`` when it already was (console or remote desktop) and nothing
+    ran. Raises RuntimeError when the state cannot be read or the session is
+    still disconnected after tscon (#32 review rounds 1-2).
+
+    Only the ReconnectSession tool and the Snapshot capture retry call it, never
+    a preflight: it puts the user's desktop on the machine's physical screen.
+    The session is the server's own (ProcessIdToSessionId), never one parsed
+    out of ``query session``, whose line for a disconnected session has a blank
+    SESSIONNAME.
     """
     try:
         session = _session_id()
         disconnected = _disconnected(session)
     except Exception as e:
-        return f"cannot read the session state: {type(e).__name__}: {e}"
+        raise RuntimeError(f"cannot read the session state: {type(e).__name__}: {e}") from e
     if not disconnected and not force:
         log.debug("session %s is attached: nothing to reconnect", session)
-        return None
+        return "attached"
     log.warning("attaching session %s to the console (tscon)", session)
     try:
-        result = subprocess.run(
-            ["tscon", str(session), "/dest:console"], capture_output=True, text=True, timeout=10
-        )
+        run_command(["tscon", str(session), "/dest:console"], timeout=10, check=True, label="tscon")
     except subprocess.TimeoutExpired:
-        return "tscon timed out"
-    if result.returncode != 0:
-        return f"tscon failed: {result.stderr.strip() or result.stdout.strip() or f'exit code {result.returncode}'}"
+        raise RuntimeError("tscon timed out") from None
     time.sleep(1)  # the session needs a moment to attach
     if _disconnected(session):
-        return f"session {session} is still disconnected after tscon"
+        raise RuntimeError(f"session {session} is still disconnected after tscon")
     log.info("session %s attached to the console", session)
-    return None
+    return "reattached"

@@ -1,8 +1,9 @@
 """Network diagnostic tools.
 
-A failure (ping cannot run or hangs, the host does not resolve, psutil is
-refused) raises; the tool layer reports it as an MCP error (#32, upstream
-winremote-mcp PR 83). A port that is closed or does not answer is a result.
+A failure raises and the tool layer reports it as an MCP error (#32, upstream
+winremote-mcp PR 83): ping cannot run or hangs, PortCheck's host does not
+resolve, psutil is refused. Ping's own output (also for an unknown or silent
+host) and a port that is closed or does not answer are results.
 """
 
 from __future__ import annotations
