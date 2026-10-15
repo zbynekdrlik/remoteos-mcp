@@ -33,14 +33,20 @@ jobs:
 
   # Real Windows PowerShell 5.1, no fakes (#48 round 2): en-US, OEM code page 437 like resolume-pp.
   # Its own directory, which the Linux job never collects (testpaths = tests).
+  # cmd, not the default pwsh 7 (review round 2): pwsh puts its own module folders first in
+  # PSModulePath, and powershell.exe 5.1 started below python would inherit them and fail to load
+  # Microsoft.PowerShell.Utility. The fleet starts the server from cmd too (wscript -> cmd -> python).
   windows-powershell:
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e '.[test]'
+      - run: pip install -e .[test]
       - run: pytest tests_windows
 
   version-check:
