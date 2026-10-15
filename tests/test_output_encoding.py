@@ -80,7 +80,7 @@ def test_windows_shell_translates_newlines_like_a_text_mode_run(monkeypatch, win
     assert server.Shell("Get-Content x") == "a\nb"
 
 
-def test_windows_shell_decodes_each_stream_on_its_own(monkeypatch, windows_child):
+def test_windows_shell_decodes_each_stream_on_its_own(monkeypatch, windows_child, caplog):
     # A script that does not parse never runs the prefix: PowerShell prints the parse error in the
     # console's OEM page (cp852 on a Slovak Windows). stderr falls back to OEM; stdout stays UTF-8.
     monkeypatch.setattr(server, "is_windows", lambda: True)
@@ -88,8 +88,12 @@ def test_windows_shell_decodes_each_stream_on_its_own(monkeypatch, windows_child
     windows_child.stdout = (SLOVAK + "\r\n").encode("utf-8")
     windows_child.stderr = "Chýba ukončovací znak.\r\n".encode("cp852")
     windows_child.returncode = 1
-    out = server.Shell("x")
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
+        out = server.Shell("x")
     assert out == f"{SLOVAK}\n\n[STDERR] Chýba ukončovací znak.\n\n[Exit code: 1]"
+    # review round 2: the log names the stream that fell back (a swapped label survived)
+    [record] = _remoteos_records(caplog)
+    assert record.getMessage().startswith("stderr: 1 line(s) not UTF-8")
 
 
 def test_windows_shell_keeps_powershell_utf8_lines_exact_next_to_a_native_oem_line(monkeypatch, windows_child):
@@ -119,8 +123,9 @@ def test_powershell_argv_puts_the_utf8_prefix_on_its_own_line_and_keeps_the_scri
     assert powershell_argv(script) == ["powershell", "-NoProfile", "-Command", POWERSHELL_UTF8_PREFIX + "\n" + script]
 
 
-_POWERSHELL_PROGRAM = re.compile(r"(?i)^(powershell|pwsh)(\.exe)?$")
-_POWERSHELL_COMMAND_LINE = re.compile(r"(?i)^(powershell|pwsh)(\.exe)?\s+-")
+# review round 2: also a full path, e.g. C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+_POWERSHELL_PROGRAM = re.compile(r"(?i)(^|[\\/])(powershell|pwsh)(\.exe)?$")
+_POWERSHELL_COMMAND_LINE = re.compile(r"(?i)^(\S*[\\/])?(powershell|pwsh)(\.exe)?\s+-")
 
 
 def _starts_powershell(node: ast.AST) -> bool:
@@ -128,7 +133,7 @@ def _starts_powershell(node: ast.AST) -> bool:
     if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
         first = node.elts[0]
         return isinstance(first, ast.Constant) and isinstance(first.value, str) and bool(
-            _POWERSHELL_PROGRAM.match(first.value)
+            _POWERSHELL_PROGRAM.search(first.value)
         )
     return isinstance(node, ast.Constant) and isinstance(node.value, str) and bool(
         _POWERSHELL_COMMAND_LINE.match(node.value)
@@ -158,6 +163,8 @@ def test_every_powershell_child_is_started_by_the_one_builder():
         ('argv = ("PowerShell.exe", "-NoProfile")', True),
         ('argv = ["pwsh", "-c", "x"]', True),
         ('cmd = "powershell -NoProfile -Command x"', True),
+        ('argv = [r"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-Command", "x"]', True),
+        ('cmd = "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -Command x"', True),
         ('run_command(argv, label="PowerShell")', False),
         ('argv = powershell_argv("x")', False),
     ],

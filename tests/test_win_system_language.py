@@ -46,9 +46,15 @@ def test_system_language_is_the_windows_user_locale_name(win_session, monkeypatc
     assert ctypes.sizeof(buf) == _LOCALE_NAME_MAX_LENGTH * ctypes.sizeof(ctypes.c_wchar)
 
 
+def _fails_after_writing(buf, size):
+    """A failed call (0) that still left text in the buffer: the return value decides, not the buffer."""
+    buf.value = "xx-XX"
+    return 0
+
+
 def test_a_failing_locale_name_call_falls_back_to_getlocale(win_session, monkeypatch):
     mod, _ = win_session
-    _locale_name_api(monkeypatch, lambda buf, size: 0)  # 0 = the call failed
+    _locale_name_api(monkeypatch, _fails_after_writing)  # 0 = the call failed (review round 2 mutant)
     monkeypatch.setattr(locale, "getlocale", lambda category=locale.LC_CTYPE: ("Slovak_Slovakia", "1250"))
     assert mod._get_system_language() == "Slovak_Slovakia"
 
@@ -80,5 +86,9 @@ def test_without_any_locale_name_it_is_en_US(win_session, monkeypatch, api, getl
 def test_no_getdefaultlocale_call_is_left():
     # removed in Python 3.15: a call left anywhere would be an AttributeError there
     src = Path(remoteos.__file__).parent
-    callers = [p.relative_to(src).as_posix() for p in sorted(src.rglob("*.py")) if "getdefaultlocale" in p.read_text()]
+    callers = [
+        p.relative_to(src).as_posix()
+        for p in sorted(src.rglob("*.py"))
+        if "getdefaultlocale" in p.read_text(encoding="utf-8")
+    ]
     assert callers == []
