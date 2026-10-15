@@ -1,7 +1,7 @@
 """Windows PowerShell 5.1 children in a UTF-8 console, with no code added to the script (#48 round 2).
 
 Real processes only: the Shell tool and the shared runner start the console trampoline
-(``python.exe -I -S -c <program>``), which switches its own hidden console to UTF-8 and runs
+(``python.exe -I -S -X utf8 -c <program> <cwd>``), which switches its own hidden console to UTF-8 and runs
 ``powershell -NoProfile -Command <script>`` with the script unchanged.
 
 The runner is en-US with OEM code page 437, the same class as resolume-pp. cp437 has no Ž, ť, ň,

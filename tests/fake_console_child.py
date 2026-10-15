@@ -21,7 +21,8 @@
   - cp932 = a double-byte page, where a byte sequence can be undecodable.
 - ``assert_runs_powershell(argv, python, script)``: ``argv`` runs ``script`` unchanged, as
   ``powershell -NoProfile -Command`` did before #48, under the console trampoline
-  ``<python.exe> -I -S -c <program>`` (#48 round 2). The program is checked in its own tests.
+  ``<python.exe> -I -S -X utf8 -c <program> <cwd>`` (#48 round 2). The program is checked in its
+  own tests.
 - ``TEXT_MODE``: the ``subprocess`` keyword arguments that make a call text mode.
 """
 

@@ -5,7 +5,7 @@ Live in the #32 verification, ``Shell('"Žltý kôň"')`` came back ``Zlty kôn`
 characters that page cannot hold were best-fitted away before Python decoded anything.
 
 The contract now (#48 round 2):
-- every PowerShell child runs ``powershell_argv(script)``: a console ``python.exe -I -S -c
+- every PowerShell child runs ``powershell_argv(script)``: a console ``python.exe -I -S -X utf8 -c
   <program>`` (the trampoline) in the child's OWN console (#32) switches that console to UTF-8,
   then runs ``powershell -NoProfile -Command <script>`` with the script UNCHANGED. No PowerShell
   code is added, so error records, exit codes and ``param()`` are plain PowerShell's (round 1's
@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pytest
 from fake_console_child import TEXT_MODE, assert_runs_powershell, oem_code_page, popen_answered_by, run_result
+from tool_test_support import tool_error
 
 import remoteos.__main__ as server
 from remoteos.platform.win import services as win_services
@@ -65,7 +66,7 @@ def _remoteos_records(caplog) -> list[logging.LogRecord]:
 
 
 def test_windows_shell_returns_powershell_utf8_output_exactly(monkeypatch, windows_child):
-    # the child writes UTF-8 (its console was switched by the prefix); read through the OEM page
+    # the child writes UTF-8 (its console is UTF-8 before PowerShell starts); read through the OEM page
     # (cp437 on resolume-pp) the same bytes came back as "┼╜lt├╜ k├┤┼ê …"
     monkeypatch.setattr(server, "is_windows", lambda: True)
     windows_child.stdout = (SLOVAK + "\r\n").encode("utf-8")
@@ -90,6 +91,29 @@ def test_windows_shell_translates_newlines_like_a_text_mode_run(monkeypatch, win
     monkeypatch.setattr(server, "is_windows", lambda: True)
     windows_child.stdout = b"a\r\nb\r\n"
     assert server.Shell("Get-Content x") == "a\nb"
+
+
+_COULD_NOT_START = "remoteos: could not start powershell: [WinError 2] The system cannot find the file specified"
+
+
+def test_powershell_that_could_not_be_started_is_a_tool_error_not_a_reply(monkeypatch, windows_child):
+    # review round 3: a command that never ran is a failure (tool-errors.md), never "[Exit code: 1]",
+    # which PowerShell's own failures use too. The trampoline says so in one fixed line.
+    monkeypatch.setattr(server, "is_windows", lambda: True)
+    windows_child.stderr = (_COULD_NOT_START + "\r\n").encode("utf-8")
+    windows_child.returncode = 1
+    assert tool_error(lambda: server.Shell("Get-Date")) == f"Shell error: {_COULD_NOT_START}"
+
+
+def test_powershell_that_could_not_be_started_fails_a_listing_too(monkeypatch, windows_child):
+    monkeypatch.setattr(sys, "platform", "win32")
+    windows_child.stderr = (_COULD_NOT_START + "\r\n").encode("utf-8")
+    windows_child.returncode = 1
+    with pytest.raises(RuntimeError, match=r"^remoteos: could not start powershell: \[WinError 2\]"):
+        win_services.service_list()  # check=False: a listing's own exit code is its answer, but this never ran
+    # PowerShell's own failure with exit 1 stays the listing's answer
+    windows_child.stderr = b"Get-Service : Cannot find any service\r\n"
+    assert win_services.service_list() == "[STDERR] Get-Service : Cannot find any service\n\n[Exit code: 1]"
 
 
 def test_windows_shell_decodes_each_stream_on_its_own(monkeypatch, windows_child, caplog):

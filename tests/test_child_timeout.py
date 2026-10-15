@@ -295,6 +295,34 @@ def test_the_group_gets_sigterm_before_sigkill(grandchild_pid_file):
     assert marker.read_text() == "cleaned up"
 
 
+# Review round 3: the usual POSIX timeout. The child (the shell) has exited and a process it left
+# behind (`x &`, `nohup x &`) holds the pipe. It was reparented to init, so it is no longer the
+# child's descendant, but it is still in the child's process group, and it gets the grace too.
+_GRANDCHILD_THAT_CLEANS_UP_SLOWLY = (
+    "import signal, sys, time\n"
+    "def done(*_):\n"
+    "    time.sleep(0.3)\n"
+    "    open(sys.argv[1], 'w').write('cleaned up')\n"
+    "    sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, done)\n"
+    "time.sleep(60)\n"
+)
+_PARENT_THAT_LEAVES_A_GRANDCHILD_BEHIND = f"""
+import subprocess, sys
+grandchild = subprocess.Popen([sys.executable, "-c", {_GRANDCHILD_THAT_CLEANS_UP_SLOWLY!r}, sys.argv[2]])
+open(sys.argv[1], "w").write(str(grandchild.pid))
+"""
+
+
+def test_a_process_left_behind_in_the_group_gets_the_sigterm_grace(grandchild_pid_file):
+    marker = grandchild_pid_file.parent / "cleaned-up"
+    cmd = [sys.executable, "-c", _PARENT_THAT_LEAVES_A_GRANDCHILD_BEHIND, str(grandchild_pid_file), str(marker)]
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command(cmd, timeout=2)
+    assert _gone_within(int(grandchild_pid_file.read_text()), 5)
+    assert marker.exists() and marker.read_text() == "cleaned up", "SIGKILL came before its SIGTERM handler finished"
+
+
 _RUNS_A_CHILD_THAT_READS_STDIN = """
 import sys
 from remoteos.platform.command import run_command
