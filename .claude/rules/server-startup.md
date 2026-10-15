@@ -79,7 +79,9 @@ paths:
   - A failing session lookup (even an unimportable provider) costs only the display variables:
     one WARNING per exception TYPE, not one per call. One INFO line per change names the added
     variables, never a value. Both de-dups run under one lock (`_log_lock`): up to 3 Shell calls
-    run at once.
+    run at once. The log call stays inside the lock on purpose (review round 5 asked): logged
+    outside, two threads could write their lines in swapped order and the last line would name a
+    stale set; a stalled stderr already blocks every thread on the logging handler's own lock.
   - **Copy `os.environ` key by key, never `dict(os.environ)`** (`_snapshot`, review round 4).
     `dict()` lists the keys, then reads each; `desktop._load_atspi`'s `finally` pops keys in
     another thread, and a key gone in between raised KeyError and failed the Shell call.
@@ -92,6 +94,14 @@ paths:
     open `ssh-askpass` on the session's screen and wait there until the Shell timeout, where it
     used to fail at once (review round 4). The README and the Shell description tell clients to
     run prompting commands non-interactively (`ssh -o BatchMode=yes`).
+    - The bus alone does the same (review round 5): a secret-service client (git's libsecret
+      helper, `secret-tool`) reaching a LOCKED login keyring (autologin boxes start locked) makes
+      gnome-keyring show its unlock dialog on the screen. `BatchMode` does not help: run it with
+      `env -u DBUS_SESSION_BUS_ADDRESS` or a short `timeout`.
+  - The provider's `/proc` scan can now find a detached Shell-started program's STALE
+    `DISPLAY` / `XAUTHORITY` after a re-login on another display (it takes the first euid
+    process with both; a resident `xclip` already could). Fixing it belongs in `desktop.py`
+    (match `/proc/<pid>/sessionid`), a follow-up candidate of #52 (see the linux-desktop skill).
   - **A GUI program started from Shell must be detached**: `setsid -f obs >/dev/null 2>&1` (or
     `systemd-run --user obs`, which works now that the bus is set). A plain `obs &` keeps the
     call's stdout/stderr pipes, so the call runs to its timeout and `run_child`'s process-group

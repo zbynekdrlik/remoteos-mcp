@@ -82,10 +82,16 @@ and `gsettings` work from Shell, with no SSH fallback. Full contract and tests:
 - A GUI program from Shell must be DETACHED: `setsid -f obs >/dev/null 2>&1` or
   `systemd-run --user obs`. A plain `obs &` keeps the call's pipes, runs to the Shell timeout and
   dies in `run_child`'s process-group kill (review round 1, pinned by a real-bash test).
-- `shell_env` only READS this module's `_SESSION` cache; it never calls `get_session(force=True)`.
-  A re-detect at a logout once wrote `headless` here and every desktop tool refused until a
-  restart (review round 1). Keep `get_session()` cheap and never raising; `shell_env` catches
-  anything anyway.
+- `shell_env` reads this module's `_SESSION` cache and never forces a re-detection
+  (`get_session(force=True)`); only an EMPTY cache (the start-up detection failed) is filled by
+  `get_session()`'s own first use. A re-detect at a logout once wrote `headless` here and every
+  desktop tool refused until a restart (review round 1). Keep `get_session()` cheap and never
+  raising; `shell_env` catches anything anyway.
+- Detached programs started from Shell now carry the session's `DISPLAY` / `XAUTHORITY`, so
+  `_scan_proc_for_x_env` (the first euid process with both) can pick such a program's STALE pair
+  after a re-login on another display. A resident `xclip` already had the same effect. The fix
+  belongs here (prefer a process whose `/proc/<pid>/sessionid` is the chosen loginctl session);
+  it is a follow-up candidate of #52, which did not grow this file (#49).
 - `SessionInfo` has no Wayland socket name; `shell_env` uses libwayland's default `wayland-0`.
 - Live check (supervisor, after install): stream-pp `Shell("systemctl --user is-system-running")`
   → `running` / `degraded`, never the bus error; `Shell("echo $DISPLAY")` → the X11 session's

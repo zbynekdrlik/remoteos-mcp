@@ -220,7 +220,9 @@ as, so `systemctl --user`, `journalctl --user` and GUI programs work through MCP
   service restarts.
 
 A variable the service already has with a value is never changed; an empty one is filled in. A
-service running as root gets none of them: it never borrows another user's session.
+service running as root gets none of them: it never borrows another user's session. (One known
+exception, older than this feature: a Shell call made at the very moment an AnnotatedSnapshot
+sets up its accessibility connection can copy that session's variables.)
 
 Start a GUI program detached, so it outlives the Shell call: `setsid -f obs >/dev/null 2>&1`, or
 `systemd-run --user obs`. A plain `obs &` keeps the call's output open: the call waits until its
@@ -229,7 +231,10 @@ timeout and is then stopped together with everything it started, the program inc
 With `DISPLAY` set, a command that would prompt (an `ssh` host-key question or passphrase,
 `sudo -A`) may open a dialog on the screen (`ssh-askpass`) and wait there until the timeout,
 instead of failing at once. Run such commands non-interactively: `ssh -o BatchMode=yes`, or
-`SSH_ASKPASS_REQUIRE=never` before the command.
+`SSH_ASKPASS_REQUIRE=never` before the command. The session bus can do the same: a program that
+asks a locked keyring for a secret (git's credential helper, `secret-tool`) makes the keyring
+show its unlock dialog on the screen. Run it with `env -u DBUS_SESSION_BUS_ADDRESS`, or with a
+short `timeout`.
 
 ## MCP gateway (dev1)
 
