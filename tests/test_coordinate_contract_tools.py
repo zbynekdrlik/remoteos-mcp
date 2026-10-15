@@ -16,8 +16,8 @@ import io
 from pathlib import Path
 
 import pytest
-from fastmcp.exceptions import ToolError
 from PIL import Image
+from tool_test_support import tool_error
 
 import remoteos.__main__ as server
 from remoteos.platform.linux import desktop as d
@@ -112,13 +112,6 @@ def _image_size(parts) -> tuple[int, int]:
     return Image.open(io.BytesIO(base64.b64decode(img.data))).size
 
 
-def _tool_error(call) -> str:
-    """The text of the ToolError a failing tool raises (#32: a failure is never a success string)."""
-    with pytest.raises(ToolError) as exc:
-        call()
-    return str(exc.value)
-
-
 # ---------------------------------------------------------------------------
 # input tools take IMAGE pixels by default
 # ---------------------------------------------------------------------------
@@ -172,7 +165,7 @@ def test_scroll_legacy_signed_amount_and_direction_wins(fake_x11):
 
 
 def test_scroll_unknown_direction_is_an_error_and_sends_nothing(fake_x11):
-    out = _tool_error(lambda: server.Scroll(1, direction="sideways"))
+    out = tool_error(lambda: server.Scroll(1, direction="sideways"))
     assert out == "Scroll error: direction must be one of up, down, left, right (got 'sideways')"
     assert _wheel_clicks(fake_x11) == []
 
@@ -211,7 +204,7 @@ def test_type_paste_method_clicks_the_mapped_point_then_pastes(fake_x11, monkeyp
 
 
 def test_type_unknown_method_is_an_error_and_sends_nothing(fake_x11):
-    out = _tool_error(lambda: server.Type("x", x=300, y=200, method="clipboard"))
+    out = tool_error(lambda: server.Type("x", x=300, y=200, method="clipboard"))
     assert out == "Type error: method must be 'keys' or 'paste' (got 'clipboard')"
     assert [c for c in fake_x11 if c[:1] == ["xdotool"]] == []
 
@@ -230,7 +223,7 @@ def test_click_coords_screen_passes_through(fake_x11):
 
 
 def test_click_rejects_unknown_coords(fake_x11):
-    out = _tool_error(lambda: server.Click(1, 1, coords="pixels"))
+    out = tool_error(lambda: server.Click(1, 1, coords="pixels"))
     assert "coords must be 'image' or 'screen'" in out
     assert _mousemoves(fake_x11) == []
 
@@ -306,13 +299,13 @@ def test_matching_capture_logs_no_mismatch_warning(fake_x11, caplog):
 
 def test_missing_xrandr_fails_loudly_never_a_wrong_frame(monkeypatch):
     calls = _install_fake_x11(monkeypatch, root=(2560, 1600), heads=[(0, 0, 2560, 1600)], xrandr_installed=False)
-    assert _tool_error(server.Snapshot).startswith("Snapshot error: xrandr not installed")
-    assert _tool_error(lambda: server.Click(640, 400)).startswith("Click error: xrandr not installed")
+    assert tool_error(server.Snapshot).startswith("Snapshot error: xrandr not installed")
+    assert tool_error(lambda: server.Click(640, 400)).startswith("Click error: xrandr not installed")
     assert _mousemoves(calls) == []  # no click at an unmapped / guessed point
 
 
 def test_unknown_monitor_index_is_an_error(dual_x11):
-    assert _tool_error(lambda: server.Click(1, 1, monitor=3)) == "Click error: Monitor 3 not found (have 2)"
+    assert tool_error(lambda: server.Click(1, 1, monitor=3)) == "Click error: Monitor 3 not found (have 2)"
     assert _mousemoves(dual_x11) == []
 
 
@@ -320,10 +313,10 @@ def test_headless_input_tool_raises_the_exact_provider_stub(monkeypatch):
     # the stub TEXT is the cam1..4 contract and stays byte-for-byte; it now arrives as an error (#32)
     monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
     stub = "Not available on headless Linux (no display)"
-    assert _tool_error(lambda: server.Click(10, 10)) == stub
-    assert _tool_error(lambda: server.Move(10, 10)) == stub
-    assert _tool_error(lambda: server.Scroll(3, direction="down", x=10, y=10)) == stub
-    assert _tool_error(lambda: server.Scroll(-3)) == stub
+    assert tool_error(lambda: server.Click(10, 10)) == stub
+    assert tool_error(lambda: server.Move(10, 10)) == stub
+    assert tool_error(lambda: server.Scroll(3, direction="down", x=10, y=10)) == stub
+    assert tool_error(lambda: server.Scroll(-3)) == stub
 
 
 def test_annotated_snapshot_states_contract(fake_x11):

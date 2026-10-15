@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,6 @@ from fastmcp.exceptions import ToolError
 
 import remoteos.__main__ as server
 from remoteos.platform.linux import desktop as linux_desktop
-from remoteos.platform.linux import services as linux_services
 
 _TASK = re.compile(r"^\[task:([0-9a-f]{12})\] ")
 _HEADLESS = "Not available on headless Linux (no display)"
@@ -49,10 +49,11 @@ def _error_text(name: str, args: dict | None = None) -> tuple[str, str]:
 
 
 def test_a_service_helper_failure_is_an_mcp_error(monkeypatch):
-    def _no_systemctl(cmd, timeout=30):
-        raise RuntimeError("systemctl unavailable")
+    # only the OS boundary is faked (review round 8): the stdlib subprocess.run cannot start systemctl
+    def _no_systemctl(cmd, **kwargs):
+        raise OSError("systemctl unavailable")
 
-    monkeypatch.setattr(linux_services, "_run", _no_systemctl)
+    monkeypatch.setattr(subprocess, "run", _no_systemctl)
     _, text = _error_text("ServiceList")
     assert text == "ServiceList error: systemctl unavailable"
 
@@ -62,14 +63,14 @@ def test_a_failure_is_logged_without_its_message(monkeypatch, caplog):
     # carry tool arguments or replies (#31), so a failure logs the tool and the error type only.
     secret = "secret-" + "marker-32"  # built at run time: the logged frames show source lines, never values
 
-    def _fails(cmd, timeout=30):
-        raise RuntimeError(secret)
+    def _fails(cmd, **kwargs):
+        raise OSError(secret)
 
-    monkeypatch.setattr(linux_services, "_run", _fails)
+    monkeypatch.setattr(subprocess, "run", _fails)
     with caplog.at_level(logging.DEBUG, logger="remoteos"):
         _, text = _error_text("ServiceList")
     assert text == "ServiceList error: secret-marker-32"  # the client gets the whole message
-    assert "ServiceList" in caplog.text and "RuntimeError" in caplog.text
+    assert "ServiceList" in caplog.text and "OSError" in caplog.text
     assert "Traceback" in caplog.text  # where it broke stays in the log
     assert "secret-marker-32" not in caplog.text
 

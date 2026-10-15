@@ -9,15 +9,13 @@ report for ONE session; ``add_to(windll)`` puts those functions on a fake
 provider's own struct. The default is a HEALTHY session (session 1, WinSta0,
 active, input desktop "Default", unlocked).
 
-Also shared by the provider tests: ``FakeClipboard`` (pywin32's clipboard) and
-``purge_module`` (re-import a provider against the current fakes).
+Also shared by the provider tests: ``FakeClipboard`` (pywin32's clipboard).
 """
 
 from __future__ import annotations
 
 import ctypes
 import struct
-import sys
 import types
 
 WTS_CONNECT_STATE, WTS_SESSION_INFO_EX = 8, 25  # WTS_INFO_CLASS
@@ -151,10 +149,3 @@ class FakeClipboard:
         self.text = text
         self.writes.append(text)
 
-
-def purge_module(name: str) -> None:
-    """Forget an imported provider module, so the next import runs against the current fakes."""
-    sys.modules.pop(name, None)
-    parent, _, child = name.rpartition(".")
-    if parent in sys.modules and hasattr(sys.modules[parent], child):
-        delattr(sys.modules[parent], child)

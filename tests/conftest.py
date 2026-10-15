@@ -8,9 +8,10 @@ import sys
 import types
 
 import pytest
-from fake_windows_session import FakeWindowsSession, purge_module
+from fake_windows_session import FakeWindowsSession
 from gateway_harness import MACHINE, OTHER_MACHINE, FakeMachine, Harness, _default_registry, _machines_file, _write_json
 from PIL import Image, ImageGrab
+from tool_test_support import purge_module
 
 
 @pytest.fixture

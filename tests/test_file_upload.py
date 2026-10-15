@@ -7,19 +7,11 @@ from __future__ import annotations
 
 import base64
 
-import pytest
-from fastmcp.exceptions import ToolError
+from tool_test_support import tool_error
 
 import remoteos.__main__ as server
 
 _CAP = 100 * 1024 * 1024  # 100 MB of base64 text, as upstream winremote c3a675174c
-
-
-def _tool_error(call) -> str:
-    """The text of the ToolError a failing tool raises (#32: a failure is never a success string)."""
-    with pytest.raises(ToolError) as exc:
-        call()
-    return str(exc.value)
 
 
 def test_upload_writes_the_decoded_bytes_and_creates_the_directory(tmp_path):
@@ -42,7 +34,7 @@ def test_line_wrapped_base64_is_accepted(tmp_path):
 def test_non_base64_is_rejected_and_the_existing_file_is_untouched(tmp_path):
     dest = tmp_path / "keep.txt"
     dest.write_bytes(b"precious")
-    out = _tool_error(lambda: server.FileUpload(str(dest), "!!!!"))
+    out = tool_error(lambda: server.FileUpload(str(dest), "!!!!"))
     assert out.startswith("FileUpload error: data_base64 is not valid base64")
     assert dest.read_bytes() == b"precious"
 
@@ -50,7 +42,7 @@ def test_non_base64_is_rejected_and_the_existing_file_is_untouched(tmp_path):
 def test_stray_characters_are_rejected_not_skipped(tmp_path):
     dest = tmp_path / "x.bin"
     # lax decoding silently dropped '*' and wrote b"hello"
-    out = _tool_error(lambda: server.FileUpload(str(dest), "aGVs*bG8="))
+    out = tool_error(lambda: server.FileUpload(str(dest), "aGVs*bG8="))
     assert out.startswith("FileUpload error: data_base64 is not valid base64")
     assert not dest.exists()
 
@@ -58,19 +50,19 @@ def test_stray_characters_are_rejected_not_skipped(tmp_path):
 def test_non_ascii_input_is_rejected_as_invalid_base64(tmp_path):
     dest = tmp_path / "x.bin"
     for junk in ("aGVs€bG8=", "aGVs bG8="):  # a euro sign, a no-break space
-        out = _tool_error(lambda: server.FileUpload(str(dest), junk))
+        out = tool_error(lambda: server.FileUpload(str(dest), junk))
         assert out.startswith("FileUpload error: data_base64 is not valid base64"), out
     assert not dest.exists()
 
 
 def test_rejected_input_creates_no_directory(tmp_path):
-    _tool_error(lambda: server.FileUpload(str(tmp_path / "new" / "x.bin"), "!!!!"))
+    tool_error(lambda: server.FileUpload(str(tmp_path / "new" / "x.bin"), "!!!!"))
     assert not (tmp_path / "new").exists()
 
 
 def test_over_the_cap_is_rejected_before_decoding(tmp_path):
     dest = tmp_path / "big.bin"
-    out = _tool_error(lambda: server.FileUpload(str(dest), "A" * (_CAP + 4)))
+    out = tool_error(lambda: server.FileUpload(str(dest), "A" * (_CAP + 4)))
     assert out == "FileUpload error: data_base64 is 104857604 characters; the limit is 104857600 (100 MB of base64)"
     assert not dest.exists()
 

@@ -21,8 +21,9 @@ import sys
 import types
 
 import pytest
-from fake_windows_session import LOCK, UNLOCK, WTS_ACTIVE, WTS_DISCONNECTED, purge_module
+from fake_windows_session import LOCK, UNLOCK, WTS_ACTIVE, WTS_DISCONNECTED
 from fastmcp.exceptions import ToolError
+from tool_test_support import purge_module
 
 import remoteos.__main__ as server
 from remoteos.platform.linux import desktop as linux_desktop
@@ -468,12 +469,25 @@ def test_snapshot_without_vision_still_lists_windows_on_a_disconnected_session(w
     assert commands == []
 
 
+class _GuiRecorder:
+    """pyautogui's mouse/key calls: each one is recorded as ``(name, args)`` in a shared list."""
+
+    def __init__(self, log: list):
+        self._log = log
+
+    def __getattr__(self, name):
+        if name not in ("click", "hotkey", "press", "keyDown", "keyUp", "typewrite", "write"):
+            raise AttributeError(name)
+        return lambda *args, **kwargs: self._log.append((name, args))
+
+
 @pytest.fixture
 def mac_tools(monkeypatch, mac_session):
+    """The macOS tools; ``inputs`` records pyautogui calls through the server AND the provider (round 8)."""
     mod, state = mac_session
-    clicks: list = []
-    fake_gui = types.SimpleNamespace(click=lambda *a, **k: clicks.append(a))
-    monkeypatch.setattr(server, "pyautogui", fake_gui, raising=False)  # not imported on Linux
+    inputs: list = []
+    monkeypatch.setattr(server, "pyautogui", _GuiRecorder(inputs), raising=False)  # not imported on Linux
+    monkeypatch.setattr(mod, "pyautogui", _GuiRecorder(inputs))  # type_text clicks/clears/pastes through it
     monkeypatch.setattr(server, "is_linux", lambda: False)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
     quartz = sys.modules["Quartz"]
@@ -482,23 +496,23 @@ def mac_tools(monkeypatch, mac_session):
         origin=types.SimpleNamespace(x=0.0, y=0.0), size=types.SimpleNamespace(width=1440.0, height=900.0)
     )
     quartz.CGDisplayCopyDisplayMode = lambda did: None
-    return state, clicks
+    return state, inputs
 
 
 def test_mac_click_without_accessibility_is_refused_before_any_input(mac_tools):
-    state, clicks = mac_tools
+    state, inputs = mac_tools
     state.post_events = False
     with pytest.raises(ToolError) as exc:
         server.Click(100, 100)
     assert "Accessibility" in str(exc.value)
-    assert clicks == []
+    assert inputs == []
 
 
 def test_mac_click_with_accessibility_but_no_screen_recording_still_clicks(mac_tools):
-    state, clicks = mac_tools
+    state, inputs = mac_tools
     state.screen_recording = False  # only a capture needs it
     assert server.Click(100, 100, max_width=0).startswith("Clicked left at (100,100)")
-    assert clicks == [(100, 100)]
+    assert inputs == [("click", (100, 100))]
 
 
 def test_mac_type_text_still_refuses_without_the_posting_permission_when_the_preflight_fails_open(
@@ -506,8 +520,9 @@ def test_mac_type_text_still_refuses_without_the_posting_permission_when_the_pre
 ):
     # review round 7: a probe that raises counts as "usable", so the provider's own
     # CGPreflightPostEventAccess gate in type_text is what still stops a click, clear or paste
-    # that macOS would drop silently
-    state, clicks = mac_tools
+    # that macOS would drop silently. Round 8: the provider's own pyautogui is recorded, so
+    # "nothing was clicked, cleared or pasted" is observed, and checked before the message.
+    state, inputs = mac_tools
     state.post_events = False
 
     def _window_server_unreachable():
@@ -516,8 +531,8 @@ def test_mac_type_text_still_refuses_without_the_posting_permission_when_the_pre
     monkeypatch.setattr(sys.modules["Quartz"], "CGSessionCopyCurrentDictionary", _window_server_unreachable)
     with pytest.raises(ToolError) as exc:
         server.Type("Žltý", x=640, y=400, clear=True, method="paste")
+    assert inputs == []
     assert str(exc.value).startswith("Type error: macOS does not let this process post keyboard events")
-    assert clicks == []
 
 
 def test_linux_ocr_without_a_display_is_the_unchanged_stub(monkeypatch, no_subprocess):
