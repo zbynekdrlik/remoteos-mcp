@@ -60,14 +60,18 @@ paths:
       default. Do not grow `desktop.py` for it (#49).
   - As root (euid 0) NOTHING is added and the session is never read: never another user's bus or
     display (the X tools' `sudo -u` wrap exists for that).
-  - **Shell only READS the provider's cache; it never re-detects or writes it** (review round 1).
-    The design's "re-detect when the cached display's X socket is gone" was removed:
-    `get_session(force=True)` at a logout wrote `headless` into the SHARED cache, and every desktop
-    tool then refused on `mode != "x11"` before `_run_x`'s own self-heal retry could run, until
-    the service restarted. The socket checks keep a logout honest: no socket, no DISPLAY; the same
-    display back, DISPLAY back. A new session on ANOTHER display reaches Shell when the X tools'
-    retry re-detects it, or at the next start. Never call `get_session(force=True)` from a
-    consumer of the cache.
+  - **Shell never forces a re-detection of the provider's cache** (review round 1). The design's
+    "re-detect when the cached display's X socket is gone" was removed: `get_session(force=True)`
+    at a logout wrote `headless` into the SHARED cache, and every desktop tool then refused on
+    `mode != "x11"` before `_run_x`'s own self-heal retry could run, until the service restarted.
+    Only an EMPTY cache (the start-up detection failed) is filled by `get_session()`'s own first
+    use. The socket checks keep a logout honest: no socket, no DISPLAY; the same display back,
+    DISPLAY back. A new session on ANOTHER display reaches Shell when the X tools' retry
+    re-detects it, or at the next start. Never call `get_session(force=True)` from a consumer of
+    the cache.
+    - A live root-owned socket proves the display is up, not whose session it is: a display
+      manager (lightdm, sddm) that reuses `:N` for ANOTHER user's login gets the euid's DISPLAY
+      and its stale cookie, which X auth refuses. No access is gained (review round 3).
     - Limitation (provider-wide): the cache is filled at start-up, and the unit starts at boot. A
       graphical login after that start is seen neither by Shell's DISPLAY nor by the display-tool
       gating until the service restarts. The runtime dir and the bus do not depend on the session.
@@ -90,7 +94,10 @@ paths:
     it, the effective uid, and the owner `os.stat` AND `os.lstat` report (`report_owner`), faked
     only where a test needs another uid (root, another user's dir or socket). A failing detection
     is `pwd.getpwuid` raising. A logout is `tree.unbind(path)`: the socket closes and its file
-    goes. A scratch mutation pass (26 mutants of `shell_env.py`) caught all of them at round 2.
+    goes. Positive display tests use more than display 0 (a GDM Xorg session is often `:1`), and
+    every "never override" branch has a case where only that check keeps the value (review
+    round 3). A scratch mutation pass is a sample, not a proof: 31 chosen mutants of
+    `shell_env.py` were all caught at round 3, after round 3's own 41 found gaps.
   - `conftest._linux_session_detected_at_start_up` gives EVERY test a headless session cache, as
     a started server has. With an empty cache, the first Linux Shell call ran the host's real
     `loginctl`, and a test that records `subprocess.Popen` caught those calls.

@@ -214,8 +214,9 @@ as, so `systemctl --user`, `journalctl --user` and GUI programs work through MCP
 
 - `XDG_RUNTIME_DIR`, when `/run/user/<uid>` exists (any login or linger);
 - `DBUS_SESSION_BUS_ADDRESS`, when its `bus` socket exists too;
-- `DISPLAY` and `XAUTHORITY` (or `WAYLAND_DISPLAY`) of that same user's graphical session, when
-  its display socket exists.
+- `DISPLAY` and `XAUTHORITY` (or `WAYLAND_DISPLAY`) of that same user's graphical session, the
+  one found when the service started, when its display socket exists. The service starts at
+  boot, so after a reboot a login that came later is picked up only when the service restarts.
 
 A variable the service already has with a value is never changed; an empty one is filled in. A
 service running as root gets none of them: it never borrows another user's session.

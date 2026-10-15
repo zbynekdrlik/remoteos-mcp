@@ -29,12 +29,15 @@ Never another user's session. As root (euid 0) nothing is added: root has no use
 own, and handing a root child a user's display or bus is what the X tools' ``sudo -u`` wrap
 exists to avoid.
 
-The session is only READ: the provider's cache, detected at start-up. A Shell call never runs a
-detection and never writes the cache (review round 1). Re-detecting at a logout wrote
-"headless" into it, and after a re-login the desktop tools stayed refused until a restart. The
-socket checks above are what keep a logout honest: no X socket, no DISPLAY; the same display
-back, DISPLAY back. A new session on another display reaches Shell when the X tools' own retry
-re-detects it, or at the next start.
+The session is the provider's cache, detected at start-up. A Shell call never forces a
+re-detection (review round 1): re-detecting at a logout wrote "headless" into the shared cache,
+and after a re-login the desktop tools stayed refused until a restart. Only an EMPTY cache (the
+start-up detection failed) is filled by ``get_session()``'s own first use. The socket checks
+above keep a logout honest: no X socket, no DISPLAY; the same display back, DISPLAY back. A live
+root-owned socket proves the display is up, not whose session it is: a display manager that
+reuses ``:N`` for another user's login gets the euid's DISPLAY and stale cookie, which X auth
+refuses. A new session on another display reaches Shell when the X tools' own retry re-detects
+it, or at the next start.
 
 Logs name the added variables, once per change, never their values. A failing session lookup is
 one WARNING per exception type.
