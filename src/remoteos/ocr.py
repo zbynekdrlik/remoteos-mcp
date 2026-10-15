@@ -75,8 +75,9 @@ def ocr_windows_builtin(
 
     # Stop: a failing step ends the script with a non-zero exit. Without it a call on a null
     # OcrEngine exits 0 with empty stdout, which read as "(no text detected)" (#32 review round 1).
-    # UTF-8 comes from powershell_argv's prefix, in the child's OWN console: through the OEM page
-    # PowerShell replaced € and – with "?" (#32 review round 5, shared since #48).
+    # UTF-8 comes from powershell_argv's console trampoline, which switches the child's OWN console
+    # before PowerShell starts: through the OEM page PowerShell replaced € and – with "?" (#32
+    # review round 5; shared since #48, with no encoding code in the script since round 2).
     ps_script = f"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime

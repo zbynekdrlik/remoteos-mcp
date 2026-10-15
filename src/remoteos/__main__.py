@@ -584,10 +584,10 @@ def App(
 def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     """Execute a shell command (PowerShell on Windows, zsh on macOS, bash on Linux).
 
-    On Windows the command runs after a one-line prefix that switches its console to UTF-8, so
-    PowerShell's output comes back as exact Unicode. A script that must begin with
-    ``param(...)`` or a ``using`` statement cannot run here (PowerShell requires those first).
-    On macOS/Linux the output is read in the locale's encoding.
+    On Windows the command runs unchanged in a console switched to UTF-8 before PowerShell
+    starts, so PowerShell's output comes back as exact Unicode; error records, exit codes and
+    ``param(...)`` are plain PowerShell's. On macOS/Linux the output is read in the locale's
+    encoding.
 
     Args:
         command: Command to execute.
@@ -608,7 +608,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             raise ValueError(f"working directory {problem}: {cwd}")
     windows = is_windows()
     if windows:
-        # its console switched to UTF-8 first, so PowerShell's own output is exact (#48)
+        # unchanged, in its own console switched to UTF-8 before PowerShell starts (#48 round 2)
         shell_cmd = powershell_argv(command)
     elif is_macos():
         shell_cmd = ["/bin/zsh", "-c", command]
