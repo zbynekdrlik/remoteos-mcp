@@ -128,8 +128,9 @@ diacritics, symbols and emoji. `\n` (also `\r\n`) presses Enter and `\t` presses
     the reply is an error that says how many got through.
   - **macOS:** refuses up front, when the process may not post keyboard events. Nothing is
     then clicked, typed or pasted.
-  - **Every OS:** a locked screen is refused before anything is typed (see
-    [Tool errors](#tool-errors-and-desktop-diagnoses)).
+  - **Windows and macOS:** a locked screen is refused before anything is typed (see
+    [Tool errors](#tool-errors-and-desktop-diagnoses)). On Linux X11, typed input reaches
+    the screen locker.
 - **`method="paste"` (opt-in):** for an app that ignores typed keystrokes.
   - It saves the clipboard text, pastes with Ctrl+V (Command+V on macOS), then restores the
     clipboard.
@@ -151,16 +152,17 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
 - **Windows:**
   - the server runs in session 0: start it with `schtasks /Run /TN RemoteOSMCP`;
   - the server runs in a non-interactive window station;
-  - the session is disconnected. A screen tool reconnects it to the console; an input
-    tool says to run ReconnectSession;
+  - the session is disconnected: run **ReconnectSession**. It attaches the server's own
+    session to the console, then checks it worked. No other tool moves the session, since
+    that puts the user's desktop on the machine's physical screen;
   - the screen is locked, or a secure desktop (UAC prompt, Ctrl+Alt+Del) is showing.
 - **macOS:** no GUI session, the session is not on the screen (fast user switching), or the
   screen is locked. Also a missing permission: **Screen Recording** for the screen tools,
   **Accessibility** for the input tools. The message names the Python binary to allow.
-- **Linux:** no X11 session (the headless/Wayland text is unchanged), or a session that
-  logind reports as locked.
+- **Linux:** no X11 session (the headless/Wayland text is unchanged). A locked X11 screen
+  is not refused: the screenshot shows the locker, and typed input reaches it.
 - **It never refuses a working desktop.** A check that cannot run (an older OS, a missing
-  API) counts as "usable", and the tool goes ahead.
+  API, a probe error) counts as "usable", and the tool goes ahead.
 
 ## MCP gateway (dev1)
 
