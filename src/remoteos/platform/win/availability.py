@@ -1,14 +1,16 @@
 """Windows desktop availability (#32): can this process see and drive the user's desktop right now?
 
 Read-only ctypes probes (kernel32, user32, wtsapi32), no pywin32 and no side
-effects. ``diagnose()`` is re-exported by ``platform.win.desktop`` as the
-provider's diagnosis.
+effects. ``diagnose()`` and ``reconnect_to_console()`` are re-exported by
+``platform.win.desktop`` for the tools.
 """
 
 from __future__ import annotations
 
 import ctypes
 import logging
+import subprocess
+import time
 from typing import Optional
 
 from remoteos import errors
@@ -117,8 +119,7 @@ def _diagnose() -> Optional[str]:
     station = _object_name(user32.GetProcessWindowStation())
     if station is not None and station.lower() != "winsta0":
         return errors.non_interactive_window_station(station)
-    state = _wts_query(session, _WTS_CONNECT_STATE, ctypes.c_int32)
-    if state is not None and state.value == _WTS_DISCONNECTED:
+    if _disconnected(session):
         return errors.DISCONNECTED
     opened, name = _input_desktop()
     log.debug("desktop probe: session %s, input desktop %s", session, name if opened else "(cannot open)")
@@ -128,3 +129,43 @@ def _diagnose() -> Optional[str]:
     if info is not None and info.Level == 1 and info.SessionFlags == _WTS_SESSIONSTATE_LOCK:
         return errors.LOCKED
     return errors.secure_desktop(name)
+
+
+def _disconnected(session: int) -> bool:
+    """WTSConnectState of ``session`` is WTSDisconnected (an unreadable state is "connected")."""
+    state = _wts_query(session, _WTS_CONNECT_STATE, ctypes.c_int32)
+    return state is not None and state.value == _WTS_DISCONNECTED
+
+
+def reconnect_to_console(force: bool = False) -> Optional[str]:
+    """Attach THIS server's own session to the console (``tscon <id> /dest:console``); None = attached.
+
+    The ReconnectSession tool and the Snapshot capture retry call it. Nothing calls
+    it on its own: it puts the user's desktop on the machine's physical screen.
+    The session is the server's own (ProcessIdToSessionId), never one parsed out of
+    ``query session``, whose line for a disconnected session has a blank
+    SESSIONNAME (#32 review round 1). Afterwards the connect state is read again:
+    a session that is still disconnected is an error, never "connected".
+    """
+    try:
+        session = _session_id()
+        disconnected = _disconnected(session)
+    except Exception as e:
+        return f"cannot read the session state: {type(e).__name__}: {e}"
+    if not disconnected and not force:
+        log.debug("session %s is attached: nothing to reconnect", session)
+        return None
+    log.warning("attaching session %s to the console (tscon)", session)
+    try:
+        result = subprocess.run(
+            ["tscon", str(session), "/dest:console"], capture_output=True, text=True, timeout=10
+        )
+    except subprocess.TimeoutExpired:
+        return "tscon timed out"
+    if result.returncode != 0:
+        return f"tscon failed: {result.stderr.strip() or result.stdout.strip() or f'exit code {result.returncode}'}"
+    time.sleep(1)  # the session needs a moment to attach
+    if _disconnected(session):
+        return f"session {session} is still disconnected after tscon"
+    log.info("session %s attached to the console", session)
+    return None

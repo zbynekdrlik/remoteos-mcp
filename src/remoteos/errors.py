@@ -35,6 +35,7 @@ __all__ = [
     "SESSION_ZERO",
     "DesktopUnavailable",
     "ToolError",
+    "failure",
     "mac_accessibility",
     "mac_screen_recording",
     "non_interactive_window_station",
@@ -132,6 +133,14 @@ def stack_frames(exc: BaseException) -> str:
     return f"Traceback (most recent call last):\n{frames}{type(exc).__qualname__} (message not logged)"
 
 
+def failure(message: str) -> ToolError:
+    """A ``ToolError`` for an expected failure whose text needs no tool prefix (``File not found: …``).
+
+    FastMCP logs it at WARNING, like every mapped failure; a bare ``ToolError`` would be ERROR.
+    """
+    return ToolError(message, log_level=logging.WARNING)
+
+
 def tool_error(tool: str, exc: BaseException) -> ToolError:
     """The ``ToolError`` a failure of ``tool`` reaches the client as.
 
@@ -142,8 +151,8 @@ def tool_error(tool: str, exc: BaseException) -> ToolError:
     if isinstance(exc, ToolError):
         return exc
     if isinstance(exc, DesktopUnavailable):
-        return ToolError(str(exc), log_level=logging.WARNING)
-    return ToolError(f"{tool} error: {exc}", log_level=logging.WARNING)
+        return failure(str(exc))
+    return failure(f"{tool} error: {exc}")
 
 
 def reports_errors(fn: Optional[Callable] = None, *, preflight: Optional[Callable[[], None]] = None):
@@ -176,6 +185,7 @@ def reports_errors(fn: Optional[Callable] = None, *, preflight: Optional[Callabl
                 log.warning("%s failed: %s\n%s", name, type(e).__name__, stack_frames(e))
                 raise tool_error(name, e) from e
 
+        wrapper.__remoteos_reports_errors__ = True  # tests assert every registered tool carries it
         return wrapper
 
     return decorate(fn) if fn is not None else decorate

@@ -36,7 +36,7 @@ except ImportError:
 from PIL import ImageGrab  # noqa: E402
 
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
-from remoteos.platform.win.availability import diagnose  # noqa: E402,F401  (the provider's diagnose(), #32)
+from remoteos.platform.win.availability import diagnose, reconnect_to_console  # noqa: E402,F401  (#32)
 from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
 from remoteos.text_entry import enter_text  # noqa: E402
@@ -426,8 +426,14 @@ def launch_app(name: str, args: str = "") -> str:
     cmd = f'Start-Process "{name}"'
     if args:
         cmd += f' -ArgumentList "{args}"'
-    subprocess.run(["powershell", "-Command", cmd], timeout=10, capture_output=True)
+    _powershell_ok(subprocess.run(["powershell", "-Command", cmd], timeout=10, capture_output=True, text=True))
     return f"Launched {name}"
+
+
+def _powershell_ok(result) -> None:
+    """Raise when a PowerShell call failed: a non-zero exit is a failure, never a success (#32)."""
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or "").strip() or f"PowerShell exited {result.returncode}")
 
 
 def resize_window(handle: int, width: int, height: int) -> str:
@@ -457,7 +463,11 @@ def get_clipboard() -> str:
         raise RuntimeError(_NO_PYWIN32)
     try:
         win32clipboard.OpenClipboard()
-        data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+        # an empty clipboard, or one holding only an image, is "no text", not a failure
+        if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+            data = ""
+        else:
+            data = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
         win32clipboard.CloseClipboard()
         return data
     except Exception as e:
@@ -515,5 +525,5 @@ $xml.LoadXml($template)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("remoteos-mcp").Show($toast)
 """
-    subprocess.run(["powershell", "-Command", ps], timeout=10, capture_output=True)
+    _powershell_ok(subprocess.run(["powershell", "-Command", ps], timeout=10, capture_output=True, text=True))
     return "Notification shown"

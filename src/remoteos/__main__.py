@@ -44,7 +44,7 @@ from starlette.responses import JSONResponse
 from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
-from remoteos.errors import DISCONNECTED, DesktopUnavailable, ToolError, reports_errors
+from remoteos.errors import DesktopUnavailable, failure, reports_errors
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
@@ -99,7 +99,7 @@ def _tobool(v: bool | str) -> bool:
 def _require_win32(tool_name: str = "This tool") -> None:
     """Raise when the Windows desktop dependency (pywin32) this tool needs is missing."""
     if is_windows() and not desktop.HAS_WIN32:
-        raise ToolError(f"pywin32 not installed — {tool_name} requires it (`pip install pywin32`).")
+        raise failure(f"pywin32 not installed — {tool_name} requires it (`pip install pywin32`).")
 
 
 # ============================= DESKTOP CONTROL =============================
@@ -158,19 +158,19 @@ def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coor
 def _desktop_preflight(capture: bool) -> None:
     """Stop a desktop tool before it touches a desktop that cannot be used (#32).
 
-    The provider's ``diagnose(capture)`` is cheap and read-only and fails open,
-    so only a positive finding raises (as :class:`DesktopUnavailable`, its text
-    verbatim to the client). A disconnected Windows session is reconnected for a
-    capture (Snapshot's self-heal through ``_ensure_session_connected`` from
-    before #32); input tools report it and never move the session themselves.
+    The provider's ``diagnose(capture)`` is cheap and read-only. Only a positive
+    finding raises, as :class:`DesktopUnavailable`, its text verbatim to the
+    client. A diagnose() that itself fails is logged and the tool goes ahead:
+    a probe never blocks a desktop it could not read. Nothing here changes the
+    session. A disconnected Windows session is reported, and reattaching it
+    (``tscon``) is the explicit ReconnectSession tool's job (#32 review round 1).
     """
     kind = "capture" if capture else "input"
-    provider = get_desktop()
-    reason = provider.diagnose(capture=capture)
-    if reason == DISCONNECTED and capture:
-        log.warning("desktop session disconnected: reconnecting it to the console before the capture")
-        failure = _ensure_session_connected()
-        reason = provider.diagnose(capture=capture) if failure is None else f"{reason} (reconnect failed: {failure})"
+    try:
+        reason = get_desktop().diagnose(capture=capture)
+    except Exception as e:
+        log.warning("desktop probe failed (%s: %s): assuming the desktop is usable", type(e).__name__, e)
+        return
     if reason:
         log.warning("desktop unavailable (%s): %s", kind, reason)
         raise DesktopUnavailable(reason)
@@ -309,11 +309,12 @@ def Type(
     Any Unicode text is typed exactly — diacritics (e.g. Slovak "Žltý kôň
     ďakuje"), symbols (€, –) and emoji — whatever the machine's keyboard layout.
     "\\n" (also "\\r\\n") presses Enter and "\\t" presses Tab. The reply "Typed N
-    chars" counts the characters handed to the OS. A locked screen, a secure
-    desktop or a missing permission is an error before anything is typed; on
-    Windows, input the OS refuses part-way is an error saying how many got
-    through, never a success. x/y are IMAGE pixels of the last Snapshot (see
-    Click); 0/0 = type at the current focus without clicking.
+    chars" counts the characters handed to the OS. A desktop that cannot take
+    input (a locked Windows/macOS screen, a secure desktop, no display, a missing
+    permission) is an error before anything is typed; on Windows, input the OS
+    refuses part-way is an error saying how many got through, never a success.
+    x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = type at the
+    current focus without clicking.
 
     Args:
         text: Text to type.
@@ -550,9 +551,9 @@ def App(
     elif action == "resize":
         _require_win32("App(resize)")
         if not handle:
-            raise ToolError("resize requires a window handle")
+            raise failure("resize requires a window handle")
         return get_desktop().resize_window(handle, width, height)
-    raise ToolError(f"Unknown action: {action}")
+    raise failure(f"Unknown action: {action}")
 
 
 # =========================== REMOTE MANAGEMENT ============================
@@ -606,7 +607,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     except subprocess.TimeoutExpired:
         _kill_process_tree(proc)
         log.warning("Shell command timed out after %ss (pid %s killed)", timeout, proc.pid)
-        raise ToolError(f"Command timed out after {timeout}s") from None
+        raise failure(f"Command timed out after {timeout}s") from None
     # A non-zero exit is the command's own answer (it ran), not a tool failure.
     output = stdout or ""
     if stderr:
@@ -724,73 +725,16 @@ def GetSystemInfo() -> str:
 
 
 def _ensure_session_connected(force: bool = False) -> str | None:
-    """Reconnect a disconnected desktop session to console.
+    """Attach this server's own Windows session to the console when it is disconnected.
 
-    Returns None on success or if already connected, error string on failure.
+    Returns None when it is attached (or not on Windows), else why not. The
+    provider reads the session state through ProcessIdToSessionId + WTSConnectState
+    and re-checks it after ``tscon`` (#32 review round 1). The old ``query session``
+    parse never found a real disconnected session, because its SESSIONNAME is blank.
     """
     if not is_windows():
         return None
-    try:
-        result = subprocess.run(["query", "session"], capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            return f"Failed to query sessions: {result.stderr}"
-
-        lines = result.stdout.strip().split("\n")
-        user_session_id = None
-        is_disconnected = False
-
-        for line in lines[1:]:
-            line = line.lstrip(">").strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) < 4:
-                continue
-            # Format: sessionname username ID state ...
-            # or:     sessionname          ID state ... (no user)
-            name = parts[0].lower()
-            if name in ("services", "rdp-tcp"):
-                continue
-            # Find the numeric session ID and state
-            for i, p in enumerate(parts[1:], 1):
-                if p.isdigit():
-                    sid = int(p)
-                    if i + 1 < len(parts):
-                        state = parts[i + 1].lower()
-                        # Check if there's a username before the ID
-                        has_user = i > 1 and not parts[i - 1].isdigit()
-                        if has_user or name == "console":
-                            user_session_id = sid
-                            # Chinese Windows: 已断开=Disc, 运行中=Active
-                            is_disconnected = state in (
-                                "disc",
-                                "断开",
-                                "已断开",
-                                "disconnected",
-                            )
-                    break
-
-        if user_session_id is None:
-            return "No user session found"
-
-        if not is_disconnected and not force:
-            return None  # Already connected
-
-        result = subprocess.run(
-            ["tscon", str(user_session_id), "/dest:console"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip() or "Unknown error"
-            return f"tscon failed: {err}"
-        time.sleep(1)  # Wait for session to stabilize
-        return None
-    except subprocess.TimeoutExpired:
-        return "Session reconnect timed out"
-    except Exception as e:
-        return f"Session reconnect error: {e}"
+    return get_desktop().reconnect_to_console(force=force)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="ReconnectSession", readOnlyHint=False))
@@ -807,7 +751,7 @@ def ReconnectSession(force: bool = False) -> list:
     """
     err = _ensure_session_connected(force=force)
     if err:
-        raise ToolError(f"ReconnectSession failed: {err}")
+        raise failure(f"ReconnectSession failed: {err}")
     return [TextContent(type="text", text="Session connected to console")]
 
 
@@ -890,7 +834,7 @@ def FileRead(path: str, encoding: str = "utf-8") -> str:
     """
     p = Path(path)
     if not p.exists():
-        raise ToolError(f"File not found: {path}")
+        raise failure(f"File not found: {path}")
     if encoding == "binary":
         data = p.read_bytes()
         return base64.b64encode(data).decode()
@@ -944,7 +888,7 @@ def FileList(path: str = ".", show_hidden: bool | str = False) -> str:
 
     p = Path(path)
     if not p.is_dir():
-        raise ToolError(f"Not a directory: {path}")
+        raise failure(f"Not a directory: {path}")
 
     rows = []
     for item in sorted(p.iterdir()):
@@ -965,7 +909,7 @@ def FileList(path: str = ".", show_hidden: bool | str = False) -> str:
             else:
                 size_str = f"{size // 1048576}MB"
             rows.append([kind, name, size_str, mtime])
-        except OSError:  # one unreadable entry (a dangling link, no permission) is listed as unknown
+        except (OSError, ValueError, OverflowError):  # one unreadable entry or out-of-range mtime: "?"
             rows.append(["?", name, "?", "?"])
 
     if not rows:
@@ -1034,7 +978,7 @@ def FileDownload(path: str) -> str:
     """
     p = Path(path)
     if not p.exists():
-        raise ToolError(f"File not found: {path}")
+        raise failure(f"File not found: {path}")
     data = p.read_bytes()
     b64 = base64.b64encode(data).decode()
     return f"base64:{len(data)}bytes:{b64}"
@@ -1474,7 +1418,7 @@ def CancelTask(task_id: str) -> str:
     """
     result = task_manager.cancel_task(task_id)
     if "error" in result:
-        raise ToolError(f"Cancel failed: {result['error']}")
+        raise failure(f"Cancel failed: {result['error']}")
     return f"Cancelled task {task_id} ({result['tool_name']})"
 
 
@@ -1491,7 +1435,7 @@ def GetTaskStatus(task_id: str = "") -> str:
     if task_id:
         info = task_manager.get_task(task_id)
         if info is None:
-            raise ToolError(f"Task {task_id} not found")
+            raise failure(f"Task {task_id} not found")
         return json.dumps(info, indent=2)
     tasks = task_manager.list_tasks()
     if not tasks:

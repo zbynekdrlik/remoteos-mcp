@@ -3,23 +3,8 @@
 from __future__ import annotations
 
 import os
-import subprocess
 
-
-def _run(cmd: list[str], timeout: int = 30) -> str:
-    """Run a command and return stdout+stderr."""
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    output = result.stdout
-    if result.stderr:
-        output += f"\n[STDERR] {result.stderr}"
-    if result.returncode != 0:
-        output += f"\n[Exit code: {result.returncode}]"
-    return output.strip() or "(no output)"
+from remoteos.platform.command import run_command as _run
 
 
 def _shell_quote(s: str) -> str:
@@ -44,12 +29,12 @@ def service_list(filter_str: str = "") -> str:
 
 def service_start(name: str) -> str:
     """Start a systemd service."""
-    return _run(["systemctl", "start", name])
+    return _run(["systemctl", "start", name], check=True)
 
 
 def service_stop(name: str) -> str:
     """Stop a systemd service."""
-    return _run(["systemctl", "stop", name])
+    return _run(["systemctl", "stop", name], check=True)
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +100,8 @@ WantedBy=timers.target
     with open(timer_path, "w") as f:
         f.write(timer_content)
 
-    reload_out = _run(["systemctl", "daemon-reload"])
-    enable_out = _run(["systemctl", "enable", "--now", timer_name])
+    reload_out = _run(["systemctl", "daemon-reload"], check=True)
+    enable_out = _run(["systemctl", "enable", "--now", timer_name], check=True)
     return f"Created {service_path} and {timer_path}\n{reload_out}\n{enable_out}"
 
 
@@ -126,7 +111,10 @@ def task_delete(name: str) -> str:
     service_name = f"remoteos-{name}.service"
     service_path = os.path.join(_SYSTEMD_DIR, service_name)
     timer_path = os.path.join(_SYSTEMD_DIR, timer_name)
+    if not (os.path.exists(timer_path) or os.path.exists(service_path)):
+        raise FileNotFoundError(f"No remoteos task '{name}' ({timer_path} not found)")
 
+    # the unit files are removed even when systemd no longer knows the timer, so this one stays an answer
     disable_out = _run(["systemctl", "disable", "--now", timer_name])
     results = [disable_out]
 
@@ -137,7 +125,7 @@ def task_delete(name: str) -> str:
         else:
             results.append(f"Not found: {path}")
 
-    results.append(_run(["systemctl", "daemon-reload"]))
+    results.append(_run(["systemctl", "daemon-reload"], check=True))
     return "\n".join(results)
 
 

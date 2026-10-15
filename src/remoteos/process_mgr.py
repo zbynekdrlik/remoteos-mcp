@@ -66,7 +66,7 @@ def kill_process(pid: int = 0, name: str = "") -> str:
             raise RuntimeError(f"PID {pid} not found") from None
         except psutil.AccessDenied:
             raise PermissionError(f"Access denied for PID {pid}") from None
-        log.info("killed PID %s (%s)", pid, proc_name)
+        log.info("killed PID %s", pid)  # never the process name: logs carry no tool replies (#31)
         return f"Killed PID {pid} ({proc_name})"
 
     if name:
@@ -79,7 +79,7 @@ def kill_process(pid: int = 0, name: str = "") -> str:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
         if killed:
-            log.info("killed by name %r: %s", name, ", ".join(killed))
+            log.info("killed %d process(es) by name", len(killed))  # never the name or the matches (#31)
             return f"Killed: {', '.join(killed)}"
         raise RuntimeError(f"No process matching '{name}'")
 

@@ -1265,7 +1265,15 @@ def shortcut(keys: str) -> str:
 def get_clipboard() -> str:
     if get_session().mode != "x11":
         raise DesktopUnavailable(_unavailable())
-    r = _run_x(["xclip", "-selection", "clipboard", "-o"])
+    try:
+        r = _run_x(["xclip", "-selection", "clipboard", "-o"])
+    except RuntimeError as e:
+        # xclip -o exits 1 with "target STRING not available" when the clipboard is empty or
+        # holds no text (an image): that is "no text", not a failure
+        if "not available" in str(e):
+            log.debug("clipboard holds no text")
+            return ""
+        raise
     return (r.stdout or b"").decode("utf-8", "replace")
 
 

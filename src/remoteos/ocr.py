@@ -71,7 +71,10 @@ def ocr_windows_builtin(
         tmp.write(png_bytes)
         tmp_path = tmp.name
 
+    # Stop: a failing step ends the script with a non-zero exit. Without it a call on a null
+    # OcrEngine exits 0 with empty stdout, which read as "(no text detected)" (#32 review round 1).
     ps_script = f"""
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
@@ -110,9 +113,11 @@ Write-Output $result.Text
             text=True,
             timeout=30,
         )
-        if result.returncode != 0:  # empty stdout here is a failure, never "no text detected"
-            raise RuntimeError(f"Windows OCR failed: {result.stderr.strip() or f'exit code {result.returncode}'}")
-        return result.stdout.strip()
+        text, problem = result.stdout.strip(), result.stderr.strip()
+        # a failure is a non-zero exit, or an error with no text: never "(no text detected)"
+        if result.returncode != 0 or (problem and not text):
+            raise RuntimeError(f"Windows OCR failed: {problem or f'exit code {result.returncode}'}")
+        return text
     finally:
         try:
             Path(tmp_path).unlink(missing_ok=True)

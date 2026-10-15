@@ -4,24 +4,8 @@ from __future__ import annotations
 
 import os
 import plistlib
-import subprocess
 
-
-def _run(cmd: list[str], timeout: int = 30) -> str:
-    """Run a command and return stdout+stderr."""
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    output = result.stdout
-    if result.stderr:
-        output += f"\n[STDERR] {result.stderr}"
-    if result.returncode != 0:
-        output += f"\n[Exit code: {result.returncode}]"
-    return output.strip() or "(no output)"
-
+from remoteos.platform.command import run_command as _run
 
 # ---------------------------------------------------------------------------
 # Services (launchctl)
@@ -41,12 +25,12 @@ def service_list(filter_str: str = "") -> str:
 
 def service_start(name: str) -> str:
     """Start a macOS service."""
-    return _run(["launchctl", "start", name])
+    return _run(["launchctl", "start", name], check=True)
 
 
 def service_stop(name: str) -> str:
     """Stop a macOS service."""
-    return _run(["launchctl", "stop", name])
+    return _run(["launchctl", "stop", name], check=True)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +78,7 @@ def task_create(name: str, command: str, schedule: str) -> str:
     with open(plist_path, "wb") as f:
         plistlib.dump(plist_data, f)
 
-    load_out = _run(["launchctl", "load", plist_path])
+    load_out = _run(["launchctl", "load", plist_path], check=True)
     return f"Created and loaded {plist_path}\n{load_out}"
 
 
@@ -105,6 +89,7 @@ def task_delete(name: str) -> str:
 
     if not os.path.exists(plist_path):
         raise FileNotFoundError(f"Plist not found: {plist_path}")
+    # an agent that is not loaded fails to unload; the plist is deleted anyway, so this stays an answer
     unload_out = _run(["launchctl", "unload", plist_path])
     os.remove(plist_path)
     return f"Unloaded and deleted {plist_path}\n{unload_out}"

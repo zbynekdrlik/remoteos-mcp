@@ -2,23 +2,12 @@
 
 from __future__ import annotations
 
-import subprocess
+from remoteos.platform.command import run_command
 
 
-def _ps(command: str, timeout: int = 30) -> str:
-    """Run a PowerShell command and return output."""
-    result = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", command],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    output = result.stdout
-    if result.stderr:
-        output += f"\n[STDERR] {result.stderr}"
-    if result.returncode != 0:
-        output += f"\n[Exit code: {result.returncode}]"
-    return output.strip() or "(no output)"
+def _ps(command: str, timeout: int = 30, check: bool = False) -> str:
+    """Run a PowerShell command; ``check=True`` for one that changes state (see ``run_command``)."""
+    return run_command(["powershell", "-NoProfile", "-Command", command], timeout, check=check, label="PowerShell")
 
 
 # ---------------------------------------------------------------------------
@@ -37,12 +26,12 @@ def service_list(filter_str: str = "") -> str:
 
 def service_start(name: str) -> str:
     """Start a Windows service."""
-    return _ps(f'Start-Service -Name "{name}" -PassThru | Format-Table Name, Status -AutoSize')
+    return _ps(f'Start-Service -Name "{name}" -PassThru | Format-Table Name, Status -AutoSize', check=True)
 
 
 def service_stop(name: str) -> str:
     """Stop a Windows service."""
-    return _ps(f'Stop-Service -Name "{name}" -Force -PassThru | Format-Table Name, Status -AutoSize')
+    return _ps(f'Stop-Service -Name "{name}" -Force -PassThru | Format-Table Name, Status -AutoSize', check=True)
 
 
 # ---------------------------------------------------------------------------
@@ -62,12 +51,12 @@ def task_list(filter_str: str = "") -> str:
 def task_create(name: str, command: str, schedule: str) -> str:
     """Create a scheduled task using schtasks."""
     cmd = f'schtasks /Create /TN "{name}" /TR "{command}" /SC {schedule} /F'
-    return _ps(cmd)
+    return _ps(cmd, check=True)
 
 
 def task_delete(name: str) -> str:
     """Delete a scheduled task."""
-    return _ps(f'schtasks /Delete /TN "{name}" /F')
+    return _ps(f'schtasks /Delete /TN "{name}" /F', check=True)
 
 
 # ---------------------------------------------------------------------------
