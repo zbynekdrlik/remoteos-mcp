@@ -18,8 +18,11 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Optional
+
+import psutil
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +30,7 @@ log = logging.getLogger(__name__)
 # constant only on Windows, hence the literal.
 CREATE_NO_WINDOW = 0x08000000
 
-# The console trampoline of every PowerShell child (#48 round 2): `python.exe -I -S -c <this> <cwd> <argv…>`.
+# The console trampoline of every PowerShell child (#48 round 2): `python.exe <_TRAMPOLINE_FLAGS> <this> <cwd> <argv…>`.
 # PowerShell 5.1 writes through [Console]::OutputEncoding, which it takes from its console's output
 # page at start-up: the OEM page, where cp437 (resolume-pp) best-fitted "Žltý kôň" to "Zlty kôn"
 # and cp852 has no "€" or "–". Started in a console that is ALREADY 65001, it writes UTF-8 with no
@@ -49,6 +52,8 @@ CREATE_NO_WINDOW = 0x08000000
 #   stderr; refused output is read by decode_output's OEM fallback. PowerShell that cannot be
 #   started (no powershell.exe, a vanished cwd) is one "remoteos: could not start" line and exit 1.
 # - Fixed text: never any user data (that is the argv after it). -I -S: isolated, no site import.
+#   -X utf8 (review round 2): its own messages reach the pipe as UTF-8, a localized OSError included
+#   (the pipe would otherwise get the ANSI page, which the OEM fallback misreads).
 UTF8_CONSOLE_TRAMPOLINE = "\n".join(
     [
         "import ctypes, subprocess, sys",
@@ -106,6 +111,10 @@ def console_child(windows: Optional[bool] = None) -> dict:
     return {"text": True, "encoding": None, "errors": "replace"}
 
 
+# The interpreter flags of the trampoline, up to its program: isolated, no site, UTF-8 stdio.
+_TRAMPOLINE_FLAGS = ["-I", "-S", "-X", "utf8", "-c"]
+
+
 def _console_python() -> str:
     """The console-subsystem ``python.exe`` next to the server's interpreter (#48 round 2).
 
@@ -122,7 +131,7 @@ def _console_python() -> str:
 def powershell_argv(script: str, cwd: Optional[str] = None) -> list[str]:
     """The argv of a PowerShell child running ``script`` in a UTF-8 console (#48 round 2).
 
-    ``[python.exe, "-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE, cwd or "", "powershell",
+    ``[python.exe, "-I", "-S", "-X", "utf8", "-c", UTF8_CONSOLE_TRAMPOLINE, cwd or "", "powershell",
     "-NoProfile", "-Command", script]``: the trampoline switches the child's own console to UTF-8,
     then runs the PowerShell argv, which is exactly the one a PowerShell child had before #48, the
     script unchanged. ``subprocess`` quotes it with ``list2cmdline`` and the trampoline's own
@@ -131,14 +140,15 @@ def powershell_argv(script: str, cwd: Optional[str] = None) -> list[str]:
     ``cwd`` is PowerShell's working directory. Pass it HERE, never to ``run_child``: the
     trampoline must run in the server's directory, which is where "powershell" is looked up.
     """
-    trampoline = [_console_python(), "-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE, cwd or ""]
+    trampoline = [_console_python(), *_TRAMPOLINE_FLAGS, UTF8_CONSOLE_TRAMPOLINE, cwd or ""]
     return [*trampoline, "powershell", "-NoProfile", "-Command", script]
 
 
 def _shown(cmd: list[str]) -> list[str]:
     """``cmd`` as the user knows it: a trampolined PowerShell child is its PowerShell argv (review round 1)."""
-    if len(cmd) > 6 and cmd[1:5] == ["-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE]:
-        return cmd[6:]
+    head = [*_TRAMPOLINE_FLAGS, UTF8_CONSOLE_TRAMPOLINE]
+    if len(cmd) > len(head) + 2 and cmd[1 : len(head) + 1] == head:
+        return cmd[len(head) + 2 :]
     return cmd
 
 
@@ -227,6 +237,30 @@ class ChildOutput:
 KILL_GRACE_S = 2.0
 
 
+def _tree(pid: int) -> list[psutil.Process]:
+    """The process ``pid`` and its descendants now (empty when unreadable); psutil detects pid reuse."""
+    try:
+        leader = psutil.Process(pid)
+        return [leader, *leader.children(recursive=True)]
+    except psutil.Error:
+        return []
+
+
+def _running(process: psutil.Process) -> bool:
+    """Not exited: gone (psutil also reports a reused pid as gone) and a zombie both count as exited."""
+    try:
+        return process.status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
+
+
+def _wait_exited(processes: list[psutil.Process], seconds: float) -> None:
+    """Wait at most ``seconds`` until every one of ``processes`` exited. Reaps nothing (review round 2)."""
+    deadline = time.monotonic() + seconds
+    while any(_running(p) for p in processes) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def _signal_group(pgid: int, sig: int) -> None:
     """``killpg``; ESRCH (no such group: the child leads none, or it is gone) is no error."""
     try:
@@ -259,10 +293,15 @@ def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) ->
       timeout, gh-81605).
     - **POSIX:** the process group whose id is the child's pid: the child's own, when it leads
       one (``run_child`` starts it in a new session). The caller's group id is never the child's
-      pid, so the server is never signalled. SIGTERM first, then SIGKILL after ``KILL_GRACE_S``
-      for whatever ignored it (review round 1).
+      pid, so the server is never signalled.
+      - SIGTERM to the group, then up to ``KILL_GRACE_S`` for the child and its descendants to
+        exit, then SIGKILL to the group in any case: whatever ignored SIGTERM dies, whether or
+        not it holds our pipes (review round 2).
+      - Nothing is reaped before that SIGKILL: the child, a zombie by then, keeps the group id
+        from being reused, so the SIGKILL can only reach the child's own group.
 
-    The child itself is killed and reaped; the whole kill waits at most ``KILL_GRACE_S`` + 5 s.
+    Then the child itself is killed and reaped. The whole kill waits at most ``KILL_GRACE_S`` + 5 s
+    on POSIX, and 10 s on Windows (taskkill's 5 s, then the reap's 5 s).
     """
     windows = _on_windows(windows)
     if windows:
@@ -273,16 +312,15 @@ def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) ->
         except Exception as e:
             log.debug("taskkill of %s failed (%s)", proc.pid, type(e).__name__)
     else:
+        started = _tree(proc.pid)  # before any signal: the tree is still intact
         _signal_group(proc.pid, signal.SIGTERM)
+        _wait_exited(started, KILL_GRACE_S)
+        _signal_group(proc.pid, signal.SIGKILL)
     try:
-        proc.kill()
+        proc.kill()  # Popen polls first: an exited child is reaped here, never signalled
     except Exception as e:
         log.debug("killing %s failed (%s)", proc.pid, type(e).__name__)
-    if _reap(proc, KILL_GRACE_S if not windows else 5):
-        return
-    if not windows:
-        _signal_group(proc.pid, signal.SIGKILL)
-        _reap(proc, 5)
+    _reap(proc, 5)
 
 
 def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd: Optional[str] = None) -> ChildOutput:
@@ -312,7 +350,7 @@ def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd:
         raw_out, raw_err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         # never the argv: it carries the user's command (#31)
-        log.warning("a child timed out after %ss: pid %s and everything it started are killed", timeout, proc.pid)
+        log.warning("a child timed out after %ss: killing pid %s and the processes it started", timeout, proc.pid)
         kill_process_tree(proc, windows)
         raise subprocess.TimeoutExpired(_shown(cmd), timeout) from None
     except BaseException:
@@ -339,5 +377,5 @@ def run_command(cmd: list[str], timeout: int = 30, check: bool = False, label: O
     result = run_child(cmd, timeout)
     if check and result.returncode != 0:
         reason = result.stderr.strip() or result.stdout.strip() or "(no output)"
-        raise RuntimeError(f"{label or ' '.join(cmd[:2])} failed (exit {result.returncode}): {reason}")
+        raise RuntimeError(f"{label or ' '.join(_shown(cmd)[:2])} failed (exit {result.returncode}): {reason}")
     return result.reply()
