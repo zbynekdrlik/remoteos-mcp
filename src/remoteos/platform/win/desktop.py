@@ -35,8 +35,8 @@ except ImportError:
 
 from PIL import ImageGrab  # noqa: E402
 
-from remoteos import errors  # noqa: E402
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
+from remoteos.platform.win.availability import diagnose  # noqa: E402,F401  (the provider's diagnose(), #32)
 from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
 from remoteos.text_entry import enter_text  # noqa: E402
@@ -488,125 +488,6 @@ def lock_screen() -> str:
     if not ctypes.windll.user32.LockWorkStation():
         raise RuntimeError("LockWorkStation failed (no interactive desktop?)")
     return "Screen locked"
-
-
-# ---------------------------------------------------------------------------
-# Desktop availability (#32): session 0, window station, disconnected, locked, secure desktop
-# ---------------------------------------------------------------------------
-
-_DESKTOP_READOBJECTS = 0x0001  # enough to read the input desktop's name
-_UOI_NAME = 2
-_WTS_CONNECT_STATE = 8  # WTS_INFO_CLASS.WTSConnectState → an INT (WTS_CONNECTSTATE_CLASS)
-_WTS_SESSION_INFO_EX = 25  # WTS_INFO_CLASS.WTSSessionInfoEx → WTSINFOEXW
-_WTS_DISCONNECTED = 4  # WTS_CONNECTSTATE_CLASS.WTSDisconnected
-_WTS_SESSIONSTATE_LOCK = 0  # WTSINFOEX_LEVEL1_W.SessionFlags (Windows 7 / 2008 R2 report it inverted)
-
-
-class _WTSINFOEX_HEAD(ctypes.Structure):
-    """The start of WTSINFOEXW (Level 1).
-
-    Its union holds LARGE_INTEGERs, so it is 8-aligned: SessionId is at offset 8,
-    SessionState at 12, SessionFlags at 16, on x86 and x64 alike.
-    """
-
-    _fields_ = [
-        ("Level", ctypes.c_uint32),
-        ("_align", ctypes.c_uint32),
-        ("SessionId", ctypes.c_uint32),
-        ("SessionState", ctypes.c_int32),
-        ("SessionFlags", ctypes.c_int32),
-    ]
-
-
-def _session_id() -> int:
-    sid = ctypes.c_uint32()
-    kernel32 = ctypes.windll.kernel32
-    if not kernel32.ProcessIdToSessionId(kernel32.GetCurrentProcessId(), ctypes.byref(sid)):
-        raise OSError("ProcessIdToSessionId failed")
-    return sid.value
-
-
-def _object_name(handle: int) -> Optional[str]:
-    """The name of a window station or desktop handle (UOI_NAME), or None when unreadable."""
-    user32 = ctypes.windll.user32
-    buf = ctypes.create_unicode_buffer(256)
-    needed = ctypes.c_uint32()
-    if not user32.GetUserObjectInformationW(
-        ctypes.c_void_p(handle), _UOI_NAME, buf, ctypes.sizeof(buf), ctypes.byref(needed)
-    ):
-        return None
-    return buf.value
-
-
-def _input_desktop() -> tuple[bool, Optional[str]]:
-    """``(opened, name)`` of the desktop that receives input now.
-
-    A user process cannot open the secure "Winlogon" desktop (lock screen, UAC
-    prompt, Ctrl+Alt+Del), so ``opened`` is False exactly when that one is up.
-    """
-    user32 = ctypes.windll.user32
-    user32.OpenInputDesktop.restype = ctypes.c_void_p  # HDESK: pointer-sized
-    handle = user32.OpenInputDesktop(0, False, _DESKTOP_READOBJECTS)
-    if not handle:
-        return False, None
-    try:
-        return True, _object_name(handle)
-    finally:
-        user32.CloseDesktop(ctypes.c_void_p(handle))
-
-
-def _wts_query(session_id: int, info_class: int, ctype):
-    """A copy of ``WTSQuerySessionInformationW(info_class)`` as ``ctype``, or None when refused."""
-    wtsapi32 = ctypes.windll.wtsapi32
-    buf = ctypes.c_void_p()
-    size = ctypes.c_uint32()
-    if not wtsapi32.WTSQuerySessionInformationW(None, session_id, info_class, ctypes.byref(buf), ctypes.byref(size)):
-        return None
-    try:
-        if not buf.value or size.value < ctypes.sizeof(ctype):
-            return None
-        return ctype.from_buffer_copy(ctypes.string_at(buf.value, ctypes.sizeof(ctype)))
-    finally:
-        wtsapi32.WTSFreeMemory(buf)
-
-
-def diagnose(capture: bool = False) -> Optional[str]:
-    """Why the desktop cannot be seen or driven now, or None when it can (#32).
-
-    Cheap, read-only probes with no side effects, in this order: session 0, a
-    non-interactive window station, a disconnected session, then the input
-    desktop (the secure desktop = locked screen, UAC prompt or Ctrl+Alt+Del).
-    ``capture`` does not matter on Windows: each of these blocks screenshots and
-    input alike. Only a positive finding is a diagnosis. A probe that fails is
-    logged and the desktop is taken as usable (fail open), never blocked.
-    """
-    try:
-        return _diagnose()
-    except Exception as e:
-        log.warning("desktop probe failed (%s: %s): assuming the desktop is usable", type(e).__name__, e)
-        return None
-
-
-def _diagnose() -> Optional[str]:
-    session = _session_id()
-    if session == 0:
-        return errors.SESSION_ZERO
-    user32 = ctypes.windll.user32
-    user32.GetProcessWindowStation.restype = ctypes.c_void_p  # HWINSTA, not to be closed
-    station = _object_name(user32.GetProcessWindowStation())
-    if station is not None and station.lower() != "winsta0":
-        return errors.non_interactive_window_station(station)
-    state = _wts_query(session, _WTS_CONNECT_STATE, ctypes.c_int32)
-    if state is not None and state.value == _WTS_DISCONNECTED:
-        return errors.DISCONNECTED
-    opened, name = _input_desktop()
-    log.debug("desktop probe: session %s, input desktop %s", session, name if opened else "(cannot open)")
-    if opened and (name is None or name.lower() == "default"):
-        return None
-    info = _wts_query(session, _WTS_SESSION_INFO_EX, _WTSINFOEX_HEAD)
-    if info is not None and info.Level == 1 and info.SessionFlags == _WTS_SESSIONSTATE_LOCK:
-        return errors.LOCKED
-    return errors.secure_desktop(name)
 
 
 # ---------------------------------------------------------------------------

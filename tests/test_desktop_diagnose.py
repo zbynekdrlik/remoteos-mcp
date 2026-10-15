@@ -246,9 +246,10 @@ def test_windows_failing_probe_is_usable_and_logged(win_session, caplog):
     assert "desktop probe failed" in caplog.text
 
 
-def test_windows_wtsinfoex_head_keeps_the_win32_offsets(win_session):
-    mod, _ = win_session
-    head = mod._WTSINFOEX_HEAD
+def test_windows_wtsinfoex_head_keeps_the_win32_offsets():
+    from remoteos.platform.win import availability
+
+    head = availability._WTSINFOEX_HEAD
     assert (head.SessionId.offset, head.SessionState.offset, head.SessionFlags.offset) == (8, 12, 16)
 
 
@@ -283,7 +284,9 @@ def mac_session(monkeypatch):
             raise OSError("dlopen(ApplicationServices) failed")
         return types.SimpleNamespace(AXIsProcessTrusted=_Fn(lambda: state.accessibility))
 
-    monkeypatch.setattr(mod, "_load_application_services", _application_services)
+    from remoteos.platform.mac import availability
+
+    monkeypatch.setattr(availability, "_load_application_services", _application_services)
     yield mod, state
     _purge("remoteos.platform.mac.desktop")
 

@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 from remoteos.coords import CaptureGeometry, frame_for
-from remoteos.errors import LOCKED, DesktopUnavailable
+from remoteos.errors import DesktopUnavailable
 from remoteos.platform.linux.display import query_geometry
 from remoteos.scroll import wheel_steps
 from remoteos.snapshot import fit_to_frame
@@ -336,31 +336,6 @@ def _unavailable() -> str:
     if s.mode == "wayland":
         return "Not available: Wayland session detected (X11 backend only — Wayland support is a separate tier)"
     return _MSG
-
-
-def diagnose(capture: bool = False) -> Optional[str]:
-    """Why the desktop cannot be seen or driven now, or None when it can (#32).
-
-    No X11 session → the exact headless/Wayland stub (the cam1..4 contract). A
-    locked X11 session (logind ``LockedHint``, set by the screen locker) → locked.
-    ``capture`` does not matter on Linux. A lock state that cannot be read means
-    "unlocked" (fail open).
-    """
-    s = get_session()
-    if s.mode != "x11":
-        return _unavailable()
-    if s.session_id and _session_locked(s.session_id):
-        return LOCKED
-    return None
-
-
-def _session_locked(session_id: str) -> bool:
-    rc, out, err = _run_capture(["loginctl", "show-session", session_id, "-p", "LockedHint", "--value"], timeout=5)
-    if rc != 0:
-        log.debug("LockedHint of session %s unreadable (rc=%s: %s): assuming unlocked", session_id, rc, err.strip())
-        return False
-    log.debug("LockedHint of session %s: %s", session_id, out.strip())
-    return out.strip().lower() == "yes"
 
 
 # ---------------------------------------------------------------------------
@@ -1332,3 +1307,7 @@ def show_notification(title: str, message: str) -> str:
         raise DesktopUnavailable(_unavailable())
     _run_x(["notify-send", title, message], timeout=10)
     return "Notification shown"
+
+
+# The provider's diagnose() (#32). Imported last: availability reads this module at call time.
+from remoteos.platform.linux.availability import diagnose  # noqa: E402,F401
