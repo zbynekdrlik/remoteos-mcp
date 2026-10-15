@@ -103,11 +103,13 @@ def test_param_at_the_start_of_the_script_works():
 
 
 def test_a_parse_error_is_reported_with_the_scripts_exact_text():
-    # Windows PowerShell 5.1 prints a -Command parse error as the message, CategoryInfo and
-    # FullyQualifiedErrorId, with no "At line / + <script>" excerpt (first CI run). The unexpected-
-    # token message quotes the script's own token, so its Slovak letters prove the exact read.
+    # Observed on windows-latest (5.1): an unexpected token is printed as "At line:1 char:5", the
+    # script line "+ \"a\" ťava kôň", the squiggle, then the message quoting the token. (An
+    # INCOMPLETE script, e.g. a missing "}", gets only the message: no excerpt.) The Slovak
+    # letters in both the excerpt and the message prove the exact read.
     reply = server.Shell('"a" ťava kôň')
-    assert reply.startswith("[STDERR] Unexpected token 'ťava' in expression or statement.\n"), reply
+    assert '\n+ "a" ťava kôň\n' in reply, reply
+    assert "Unexpected token 'ťava' in expression or statement." in reply, reply
     assert "ParserError" in reply and reply.endswith("[Exit code: 1]"), reply
     _only_the_users_text(reply)
 
