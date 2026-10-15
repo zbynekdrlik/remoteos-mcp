@@ -22,9 +22,11 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 import remoteos.__main__ as server
@@ -321,6 +323,58 @@ def test_a_process_left_behind_in_the_group_gets_the_sigterm_grace(grandchild_pi
         run_command(cmd, timeout=2)
     assert _gone_within(int(grandchild_pid_file.read_text()), 5)
     assert marker.exists() and marker.read_text() == "cleaned up", "SIGKILL came before its SIGTERM handler finished"
+
+
+def _seed_a_stale_psutil_entry(pid_file: Path, seeded: list) -> None:
+    """Once the grandchild's pid is known, put an OLDER identity for that pid in psutil's process_iter
+    cache: what that cache holds after the pid was reused since an earlier iteration (ListProcesses and
+    KillProcess iterate too)."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            pid = int(pid_file.read_text())
+            break
+        except (OSError, ValueError):
+            time.sleep(0.02)
+    else:
+        return
+    stale = psutil.Process(pid)
+    stale._ident = (pid, stale.create_time() - 1000.0)
+    psutil._pmap[pid] = stale
+    seeded.append(pid)
+
+
+def test_a_member_whose_pid_psutil_cached_stale_still_gets_the_grace(grandchild_pid_file):
+    # review round 4: process_iter() hands back its CACHED Process for a known pid; with an old start
+    # time, is_running() says "exited" and the member got no SIGTERM grace
+    marker = grandchild_pid_file.parent / "cleaned-up"
+    cmd = [sys.executable, "-c", _PARENT_THAT_LEAVES_A_GRANDCHILD_BEHIND, str(grandchild_pid_file), str(marker)]
+    seeded: list[int] = []
+    seeder = threading.Thread(target=_seed_a_stale_psutil_entry, args=(grandchild_pid_file, seeded))
+    seeder.start()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_command(cmd, timeout=2)
+    finally:
+        seeder.join()
+        for pid in seeded:
+            psutil._pmap.pop(pid, None)
+    assert seeded, "the grandchild never wrote its pid"
+    assert _gone_within(int(grandchild_pid_file.read_text()), 5)
+    assert marker.exists() and marker.read_text() == "cleaned up", "the stale identity cost the grace"
+
+
+def test_a_failing_process_scan_still_kills_the_child(monkeypatch):
+    # review round 4: kill_process_tree never raises; a failing scan only skips the grace wait
+    def _broken_pids():
+        raise RuntimeError("/proc is not readable")
+
+    monkeypatch.setattr(psutil, "pids", _broken_pids)
+    monkeypatch.setattr(psutil, "process_iter", lambda *a, **k: _broken_pids())
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command([sys.executable, "-c", "import time; time.sleep(60)"], timeout=1)
+    assert time.monotonic() - started < 15
 
 
 _RUNS_A_CHILD_THAT_READS_STDIN = """

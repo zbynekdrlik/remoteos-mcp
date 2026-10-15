@@ -105,6 +105,31 @@ def test_powershell_that_could_not_be_started_is_a_tool_error_not_a_reply(monkey
     assert tool_error(lambda: server.Shell("Get-Date")) == f"Shell error: {_COULD_NOT_START}"
 
 
+def test_a_start_failure_after_a_refused_page_is_still_an_error(monkeypatch, windows_child):
+    # review round 4: the trampoline may first say a console page was refused, then that it could not
+    # start PowerShell; the second line still makes it a failure
+    monkeypatch.setattr(server, "is_windows", lambda: True)
+    refused = "remoteos: the console output stays in the OEM code page (error 87)"
+    windows_child.stderr = f"{refused}\r\n{_COULD_NOT_START}\r\n".encode("utf-8")
+    windows_child.returncode = 1
+    assert tool_error(lambda: server.Shell("Get-Date")) == f"Shell error: {refused}\n{_COULD_NOT_START}"
+
+
+def test_only_the_trampolines_own_exit_1_is_a_start_failure(monkeypatch, windows_child):
+    # review round 4: the exit code and the trampolined argv are part of the rule (both guards were
+    # surviving mutants). PowerShell exiting 2 with that text is its own answer.
+    monkeypatch.setattr(server, "is_windows", lambda: True)
+    windows_child.stderr = (_COULD_NOT_START + "\r\n").encode("utf-8")
+    windows_child.returncode = 2
+    assert server.Shell("Get-Date") == f"[STDERR] {_COULD_NOT_START}\n\n[Exit code: 2]"
+
+
+def test_a_posix_command_that_writes_the_start_failure_line_is_its_own_answer():
+    # a real bash: no trampoline, so the same text and exit 1 are just the command's output
+    reply = server.Shell('echo "remoteos: could not start x" >&2; exit 1')
+    assert reply == "[STDERR] remoteos: could not start x\n\n[Exit code: 1]"
+
+
 def test_powershell_that_could_not_be_started_fails_a_listing_too(monkeypatch, windows_child):
     monkeypatch.setattr(sys, "platform", "win32")
     windows_child.stderr = (_COULD_NOT_START + "\r\n").encode("utf-8")
