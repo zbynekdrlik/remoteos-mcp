@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # constant only on Windows, hence the literal.
 CREATE_NO_WINDOW = 0x08000000
 
-# The console trampoline of every PowerShell child (#48 round 2): `python.exe -I -S -c <this> <argv…>`.
+# The console trampoline of every PowerShell child (#48 round 2): `python.exe -I -S -c <this> <cwd> <argv…>`.
 # PowerShell 5.1 writes through [Console]::OutputEncoding, which it takes from its console's output
 # page at start-up: the OEM page, where cp437 (resolume-pp) best-fitted "Žltý kôň" to "Zlty kôn"
 # and cp852 has no "€" or "–". Started in a console that is ALREADY 65001, it writes UTF-8 with no
@@ -36,22 +36,32 @@ CREATE_NO_WINDOW = 0x08000000
 #   (output and input page) to UTF-8, runs the real argv in the same console with its own stdout
 #   and stderr handed down, and exits with the child's exact exit code (all 32 bits; sys.exit takes
 #   a C long, so a code >= 2**31 is passed as the same bits, signed).
+# - It runs in the SERVER's directory and starts PowerShell in <cwd> ("" = the server's), because
+#   CreateProcess looks for "powershell" in the PARENT's current directory first: a powershell.exe
+#   in the user's Shell cwd is never found, as before #48 when the server was the parent (review
+#   round 1).
 # - No PowerShell code is ours: the script reaches PowerShell exactly as before #48, so its error
 #   records, exit codes, param() and Constrained Language Mode are plain PowerShell. Round 1's
 #   prefix was PowerShell code, and 5.1 printed it in every Write-Error record.
 # - Accepted cost: PowerShell's $OutputEncoding, what it pipes INTO a native program's stdin, is
 #   back to its default, ASCII (non-ASCII becomes "?"), as before #48.
-# - A console that refuses the switch (never seen) still runs the command, says so on stderr, and
-#   decode_output's OEM fallback reads the output.
+# - A console that refuses a page (never seen) still runs the command and says which page on
+#   stderr; refused output is read by decode_output's OEM fallback. PowerShell that cannot be
+#   started (no powershell.exe, a vanished cwd) is one "remoteos: could not start" line and exit 1.
 # - Fixed text: never any user data (that is the argv after it). -I -S: isolated, no site import.
 UTF8_CONSOLE_TRAMPOLINE = "\n".join(
     [
         "import ctypes, subprocess, sys",
         "kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)",
-        "if not (kernel32.SetConsoleOutputCP(65001) and kernel32.SetConsoleCP(65001)):",
-        "    sys.stderr.write('remoteos: could not switch the console to UTF-8 (error %d);"
-        " the output is read in the OEM code page\\n' % ctypes.get_last_error())",
-        "code = subprocess.call(sys.argv[1:], stdout=1, stderr=2)",
+        "for name, switch in (('output', kernel32.SetConsoleOutputCP), ('input', kernel32.SetConsoleCP)):",
+        "    if not switch(65001):",
+        "        sys.stderr.write('remoteos: the console %s stays in the OEM code page (error %d)\\n'"
+        " % (name, ctypes.get_last_error()))",
+        "try:",
+        "    code = subprocess.call(sys.argv[2:], cwd=sys.argv[1] or None, stdout=1, stderr=2)",
+        "except OSError as e:",
+        "    sys.stderr.write('remoteos: could not start %s: %s\\n' % (sys.argv[2], e))",
+        "    code = 1",
         "sys.exit(code - 2**32 if code >= 2**31 else code)",
     ]
 )
@@ -109,17 +119,27 @@ def _console_python() -> str:
     return path
 
 
-def powershell_argv(script: str) -> list[str]:
+def powershell_argv(script: str, cwd: Optional[str] = None) -> list[str]:
     """The argv of a PowerShell child running ``script`` in a UTF-8 console (#48 round 2).
 
-    ``[python.exe, "-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE, "powershell", "-NoProfile",
-    "-Command", script]``: the trampoline switches the child's own console to UTF-8, then runs
-    the PowerShell argv, which is exactly the one a PowerShell child had before #48, the script
-    unchanged. ``subprocess`` quotes it with ``list2cmdline`` and the trampoline's own
+    ``[python.exe, "-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE, cwd or "", "powershell",
+    "-NoProfile", "-Command", script]``: the trampoline switches the child's own console to UTF-8,
+    then runs the PowerShell argv, which is exactly the one a PowerShell child had before #48, the
+    script unchanged. ``subprocess`` quotes it with ``list2cmdline`` and the trampoline's own
     ``subprocess.call`` quotes it the same way, so PowerShell gets the same command line as before.
+
+    ``cwd`` is PowerShell's working directory. Pass it HERE, never to ``run_child``: the
+    trampoline must run in the server's directory, which is where "powershell" is looked up.
     """
-    trampoline = [_console_python(), "-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE]
+    trampoline = [_console_python(), "-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE, cwd or ""]
     return [*trampoline, "powershell", "-NoProfile", "-Command", script]
+
+
+def _shown(cmd: list[str]) -> list[str]:
+    """``cmd`` as the user knows it: a trampolined PowerShell child is its PowerShell argv (review round 1)."""
+    if len(cmd) > 6 and cmd[1:5] == ["-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE]:
+        return cmd[6:]
+    return cmd
 
 
 def decode_output(raw: Optional[bytes], windows: Optional[bool] = None, stream: str = "output") -> str:
@@ -203,36 +223,66 @@ class ChildOutput:
         return output.strip() or "(no output)"
 
 
+# A POSIX process group gets this long between SIGTERM and SIGKILL (review round 1).
+KILL_GRACE_S = 2.0
+
+
+def _signal_group(pgid: int, sig: int) -> None:
+    """``killpg``; ESRCH (no such group: the child leads none, or it is gone) is no error."""
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+    except Exception as e:
+        log.debug("killpg of %s failed (%s)", pgid, type(e).__name__)
+
+
+def _reap(proc: subprocess.Popen, seconds: float) -> bool:
+    """Wait at most ``seconds`` for the child's pipes and exit; never raises."""
+    try:
+        proc.communicate(timeout=seconds)
+        return True
+    except Exception as e:
+        # never the exception's text: TimeoutExpired's is the whole argv, the user's command (#31)
+        log.debug("reaping %s failed: %s", proc.pid, type(e).__name__)
+        return False
+
+
 def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) -> None:
     """Kill a timed-out child AND everything it started; best effort, never raises (#48 round 2).
 
-    - **Windows:** ``taskkill /F /T``. A PowerShell child runs under the console trampoline
+    - **Windows:** ``taskkill /F /T``, in its own hidden console (no window flashes up when the
+      server runs as ``pythonw.exe``). A PowerShell child runs under the console trampoline
       (``powershell_argv``), so the process the server started is not the one doing the work.
       Killing only it would leave PowerShell, and anything it started, running with our pipes
       open, and ``communicate()`` would never return (CPython's ``run()`` waits there with no
       timeout, gh-81605).
-    - **POSIX:** the child's process group, but only when the child leads one (``run_child``
-      starts it in a new session). A child in the caller's own group is never group-killed: that
-      would kill the server.
+    - **POSIX:** the process group whose id is the child's pid: the child's own, when it leads
+      one (``run_child`` starts it in a new session). The caller's group id is never the child's
+      pid, so the server is never signalled. SIGTERM first, then SIGKILL after ``KILL_GRACE_S``
+      for whatever ignored it (review round 1).
 
-    Then the child itself is killed and reaped, waiting at most 5 s.
+    The child itself is killed and reaped; the whole kill waits at most ``KILL_GRACE_S`` + 5 s.
     """
-    if _on_windows(windows):
+    windows = _on_windows(windows)
+    if windows:
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5)
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5, **own_console(True)
+            )
         except Exception as e:
-            log.debug("taskkill of %s failed: %s", proc.pid, e)
+            log.debug("taskkill of %s failed (%s)", proc.pid, type(e).__name__)
     else:
-        try:
-            if os.getpgid(proc.pid) == proc.pid:
-                os.killpg(proc.pid, signal.SIGTERM)
-        except Exception as e:
-            log.debug("killpg of %s failed: %s", proc.pid, e)
+        _signal_group(proc.pid, signal.SIGTERM)
     try:
         proc.kill()
-        proc.communicate(timeout=5)
     except Exception as e:
-        log.debug("reaping %s failed: %s", proc.pid, e)
+        log.debug("killing %s failed (%s)", proc.pid, type(e).__name__)
+    if _reap(proc, KILL_GRACE_S if not windows else 5):
+        return
+    if not windows:
+        _signal_group(proc.pid, signal.SIGKILL)
+        _reap(proc, 5)
 
 
 def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd: Optional[str] = None) -> ChildOutput:
@@ -240,12 +290,18 @@ def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd:
 
     - The child gets its own hidden console on Windows (``own_console``) and its own session on
       POSIX, so a timeout can kill its whole process tree.
-    - ``cwd``: the working directory (Shell); ``None`` inherits the server's.
-    - A timeout kills the tree (``kill_process_tree``) and raises ``subprocess.TimeoutExpired``.
+    - Its stdin is NUL, never the server's: under ``--transport stdio`` that is the MCP JSON-RPC
+      stream, and a child that reads stdin would eat protocol frames (review round 1).
+    - ``cwd``: the working directory (Shell on POSIX); ``None`` inherits the server's. A PowerShell
+      child takes its cwd in ``powershell_argv`` instead.
+    - A timeout kills the tree (``kill_process_tree``) and raises ``subprocess.TimeoutExpired``
+      naming the command as the user knows it (``_shown``). Any other exception while waiting
+      kills the tree too, as ``subprocess.run`` did.
     """
     windows = _on_windows(windows)
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=cwd,
@@ -257,6 +313,9 @@ def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd:
     except subprocess.TimeoutExpired:
         # never the argv: it carries the user's command (#31)
         log.warning("a child timed out after %ss: pid %s and everything it started are killed", timeout, proc.pid)
+        kill_process_tree(proc, windows)
+        raise subprocess.TimeoutExpired(_shown(cmd), timeout) from None
+    except BaseException:
         kill_process_tree(proc, windows)
         raise
     return ChildOutput(

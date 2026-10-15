@@ -608,8 +608,10 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             raise ValueError(f"working directory {problem}: {cwd}")
     windows = is_windows()
     if windows:
-        # unchanged, in its own console switched to UTF-8 before PowerShell starts (#48 round 2)
-        shell_cmd = powershell_argv(command)
+        # unchanged, in its own console switched to UTF-8 before PowerShell starts (#48 round 2).
+        # The cwd goes to PowerShell through the trampoline, which itself runs in the server's
+        # directory, where "powershell" is looked up (review round 1)
+        shell_cmd, workdir = powershell_argv(command, cwd=workdir), None
     elif is_macos():
         shell_cmd = ["/bin/zsh", "-c", command]
     else:
@@ -620,8 +622,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     try:
         result = run_child(shell_cmd, timeout, windows, cwd=workdir)
     except subprocess.TimeoutExpired:
-        log.warning("Shell command timed out after %ss", timeout)
-        raise failure(f"Command timed out after {timeout}s") from None
+        raise failure(f"Command timed out after {timeout}s") from None  # run_child logged it
     # A non-zero exit is the command's own answer (it ran), not a tool failure.
     return result.reply()
 
