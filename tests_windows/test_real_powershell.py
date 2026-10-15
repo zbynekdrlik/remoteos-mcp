@@ -13,6 +13,7 @@ front of the script instead, and PowerShell printed that prefix in every ``Write
 from __future__ import annotations
 
 import ctypes
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -41,6 +42,17 @@ def test_the_runner_is_windows_powershell_5_1_on_oem_code_page_437():
     assert ctypes.windll.kernel32.GetOEMCP() == 437
     assert server.Shell("$PSVersionTable.PSVersion.Major") == "5"
     assert powershell_argv("x")[0].lower().endswith("\\python.exe")  # the console python, never pythonw
+
+
+@pytest.mark.parametrize("trailing", ["", "\\"], ids=["plain", "trailing-backslash"])
+def test_shell_starts_powershell_in_its_cwd(tmp_path, trailing):
+    # review round 6: the cwd travels as a trampoline argv element (two command-line hops) and
+    # PowerShell must start there, spaces, diacritics and a trailing backslash included
+    work = tmp_path / "Žltý kôň dir"
+    work.mkdir()
+    reply = server.Shell("(Get-Location).Path", cwd=str(work) + trailing)
+    assert reply.rstrip("\\").endswith("\\Žltý kôň dir"), reply
+    assert os.path.samefile(reply, work)
 
 
 def test_powershell_output_is_exact():

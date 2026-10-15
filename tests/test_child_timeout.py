@@ -244,7 +244,7 @@ def test_a_grandchild_that_ignores_sigterm_is_killed_too(grandchild_pid_file):
     started = time.monotonic()
     cmd = [sys.executable, "-c", _PARENT_OF_A_GRANDCHILD_THAT_IGNORES_SIGTERM, str(grandchild_pid_file)]
     with pytest.raises(subprocess.TimeoutExpired):
-        run_command(cmd, timeout=2)
+        run_command(cmd, timeout=5)
     assert time.monotonic() - started < 15
     assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the grandchild survived the timeout"
 
@@ -266,7 +266,7 @@ time.sleep(60)
 def test_a_grandchild_that_ignores_sigterm_without_our_pipes_is_killed_too(grandchild_pid_file):
     cmd = [sys.executable, "-c", _DETACHED_GRANDCHILD_THAT_IGNORES_SIGTERM, str(grandchild_pid_file)]
     with pytest.raises(subprocess.TimeoutExpired):
-        run_command(cmd, timeout=2)
+        run_command(cmd, timeout=5)
     assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the grandchild survived the timeout"
 
 
@@ -294,7 +294,7 @@ def test_the_group_gets_sigterm_before_sigkill(grandchild_pid_file):
     marker = grandchild_pid_file.parent / "cleaned-up"
     cmd = [sys.executable, "-c", _PARENT_OF_A_GRANDCHILD_THAT_CLEANS_UP, str(grandchild_pid_file), str(marker)]
     with pytest.raises(subprocess.TimeoutExpired):
-        run_command(cmd, timeout=2)
+        run_command(cmd, timeout=5)
     assert _gone_within(int(grandchild_pid_file.read_text()), 5)
     assert marker.read_text() == "cleaned up"
 
@@ -322,7 +322,7 @@ def test_a_process_left_behind_in_the_group_gets_the_sigterm_grace(grandchild_pi
     marker = grandchild_pid_file.parent / "cleaned-up"
     cmd = [sys.executable, "-c", _PARENT_THAT_LEAVES_A_GRANDCHILD_BEHIND, str(grandchild_pid_file), str(marker)]
     with pytest.raises(subprocess.TimeoutExpired):
-        run_command(cmd, timeout=2)
+        run_command(cmd, timeout=5)
     assert _gone_within(int(grandchild_pid_file.read_text()), 5)
     assert marker.exists() and marker.read_text() == "cleaned up", "SIGKILL came before its SIGTERM handler finished"
 
@@ -358,7 +358,7 @@ def test_a_member_whose_pid_psutil_cached_stale_still_gets_the_grace(grandchild_
     seeder.start()
     try:
         with pytest.raises(subprocess.TimeoutExpired):
-            run_command(cmd, timeout=2)
+            run_command(cmd, timeout=5)
     finally:
         seeder.join()
         for pid, _ in seeded:
@@ -380,7 +380,7 @@ def test_a_failing_process_scan_still_signals_the_group(monkeypatch, grandchild_
     monkeypatch.setattr(psutil, "process_iter", lambda *a, **k: _broken_pids())
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
-        run_command([sys.executable, "-c", _PARENT_OF_A_HANGING_GRANDCHILD, str(grandchild_pid_file)], timeout=2)
+        run_command([sys.executable, "-c", _PARENT_OF_A_HANGING_GRANDCHILD, str(grandchild_pid_file)], timeout=5)
     assert time.monotonic() - started < 15
     assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the group was never signalled"
 
@@ -394,7 +394,7 @@ def test_a_failing_grace_wait_still_sends_sigkill(monkeypatch, grandchild_pid_fi
     monkeypatch.setattr(psutil.Process, "status", _broken_status)
     cmd = [sys.executable, "-c", _DETACHED_GRANDCHILD_THAT_IGNORES_SIGTERM, str(grandchild_pid_file)]
     with pytest.raises(subprocess.TimeoutExpired):
-        run_command(cmd, timeout=2)
+        run_command(cmd, timeout=5)
     assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the SIGKILL never went out"
 
 

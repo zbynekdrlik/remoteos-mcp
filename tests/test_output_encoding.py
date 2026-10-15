@@ -122,6 +122,14 @@ def test_a_trampolined_exit_1_with_nothing_on_stderr_is_the_commands_answer(monk
     assert server.Shell("cmd /c exit 7") == "[Exit code: 1]"
 
 
+def test_the_start_failure_line_counts_only_as_the_first_line(monkeypatch, windows_child):
+    # review round 6: PowerShell's own error first, then the same text: still the command's answer
+    monkeypatch.setattr(server, "is_windows", lambda: True)
+    windows_child.stderr = f"real error\r\n{_COULD_NOT_START}\r\n".encode("utf-8")
+    windows_child.returncode = 1
+    assert server.Shell("Get-Date") == f"[STDERR] real error\n{_COULD_NOT_START}\n\n[Exit code: 1]"
+
+
 def test_only_the_trampolines_own_exit_1_is_a_start_failure(monkeypatch, windows_child):
     # review round 4: the exit code and the trampolined argv are part of the rule (both guards were
     # surviving mutants). PowerShell exiting 2 with that text is its own answer.
