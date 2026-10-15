@@ -28,8 +28,12 @@ paths:
     `~/.local/share/fastmcp/version_cache.json`.
   - A temp HOME and XDG_DATA_HOME, `--config` with an empty file, and this checkout's
     `src` first on PYTHONPATH.
-- **Shell `cwd` goes to `Popen(cwd=…)`, never into the command text.** It is expanded with
+- **Shell `cwd` never goes into the command text.** It is expanded with
   `expandvars(expanduser())`, and a path that is not a directory is refused before anything runs.
+  - POSIX: it goes to the child's `Popen(cwd=…)` (through `run_child`).
+  - Windows: it goes to `powershell_argv(command, cwd=…)` and `run_child` gets none. The console
+    trampoline then runs in the server's directory, where `CreateProcess` looks for `powershell`,
+    and starts PowerShell in `cwd` (#48 round 2). See `.claude/rules/child-output.md`.
 - **FileUpload checks the cap and decodes with `validate=True` BEFORE any mkdir/write.** Only
   whitespace is dropped (`str.translate`). Catch `ValueError`: non-ASCII input raises a plain
   one, not `binascii.Error`.

@@ -19,7 +19,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | Typing text / Type: Unicode keystrokes (SendInput `KEYEVENTF_UNICODE`, Quartz Unicode string), delivered count, `method="paste"` | `.claude/rules/typing.md` (auto-loads on its `paths:`) + README "Typing text (Unicode)" |
 | Server start flags (`uvicorn_config`, payload-free `--debug`, stdio stdout), Shell `cwd`, FileUpload, task states | `.claude/rules/server-startup.md` (auto-loads on its `paths:`) |
 | Tool failures as MCP errors (`ToolError`, `@reports_errors`, `[task:<id>]`), desktop `diagnose()` preflight (locked / secure desktop / session 0 / macOS permissions) | `.claude/rules/tool-errors.md` (auto-loads on its `paths:`) + README "Tool errors and desktop diagnoses" |
-| Starting a child and decoding its output: the PowerShell UTF-8 prefix (`powershell_argv`), `decode_output` (per-line OEM fallback), its own console, Ping's OEM read, the Windows system language | `.claude/rules/child-output.md` (auto-loads on its `paths:`) + README "Console output on Windows" |
+| Starting a child and decoding its output: the PowerShell console trampoline (`powershell_argv`), `run_child` + the timeout tree kill, `decode_output` (per-line OEM fallback), its own console, Ping's OEM read, the Windows system language, the real-PowerShell `tests_windows` job | `.claude/rules/child-output.md` (auto-loads on its `paths:`) + README "Console output on Windows" |
 | Which MCP server belongs to which project | memory: `reference_mcp_project_mapping.md` |
 | SSH credentials for managed machines | memory: `reference_ssh_credentials.md` |
 

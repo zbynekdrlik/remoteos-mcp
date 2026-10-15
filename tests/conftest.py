@@ -72,13 +72,29 @@ def win_session(monkeypatch):
 
 
 @pytest.fixture
-def windows_child(monkeypatch):
+def windows_python(tmp_path, monkeypatch):
+    """A Windows Python install (#48 round 2); yields the path of its console ``python.exe``.
+
+    The folder holds ``python.exe`` and ``pythonw.exe``, as python.org's installer lays them out,
+    and the server runs as that ``python.exe`` (``sys.executable``). A PowerShell child starts
+    under the console trampoline of the ``python.exe`` next to the server's interpreter.
+    """
+    folder = tmp_path / "Python312"
+    folder.mkdir()
+    for exe in ("python.exe", "pythonw.exe"):
+        (folder / exe).write_bytes(b"")
+    monkeypatch.setattr(sys, "executable", str(folder / "python.exe"))
+    return folder / "python.exe"
+
+
+@pytest.fixture
+def windows_child(monkeypatch, windows_python):
     """A Windows console child at the OS boundary (#48); yields the ``fake_console_child.FakeChild``.
 
     ``subprocess.Popen`` (and so ``subprocess.run``) starts a real Python child that writes
     ``child.stdout`` / ``child.stderr`` bytes and exits ``child.returncode``. Python's Windows-only
     ``oem`` codec stands for ``child.oem``: cp437 (resolume-pp) unless the test sets another page
-    before the first decode.
+    before the first decode. ``windows_python`` is the install the trampoline is taken from.
     """
     child = FakeChild()
     monkeypatch.setattr(subprocess, "Popen", child)
