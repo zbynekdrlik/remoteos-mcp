@@ -266,6 +266,22 @@ def test_a_long_shell_within_its_own_timeout_is_not_auto_cancelled():
     assert task.status is TaskStatus.COMPLETED
 
 
+def test_a_long_wait_within_its_own_seconds_is_not_auto_cancelled():
+    # review round 8: Wait declares its runtime through `seconds`, not `timeout`; a Wait(seconds=400)
+    # that finishes after 400 s completed, so its reply is the answer, never "Cancelled during execution"
+    tm = TaskManager()
+    out = tm.wrap_sync_tool("Wait", _runs_for(tm, 400))(seconds=400)
+    [task] = [t for t in tm._tasks.values() if t.tool_name == "Wait"]
+    assert out == f"[task:{task.task_id}] done"
+    assert task.status is TaskStatus.COMPLETED
+
+
+def test_a_wait_past_its_own_seconds_and_the_stale_limit_is_auto_cancelled():
+    tm = TaskManager()
+    with pytest.raises(ToolError, match="Cancelled during execution"):
+        tm.wrap_sync_tool("Wait", _runs_for(tm, 400))(seconds=30)
+
+
 def test_a_task_past_the_stale_limit_is_still_auto_cancelled():
     tm = TaskManager()
     with pytest.raises(ToolError, match="Cancelled during execution"):
