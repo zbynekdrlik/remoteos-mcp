@@ -45,7 +45,7 @@ def test_windows_clipboard_without_text_reads_as_empty_not_an_error(clipboard_to
     [lambda mod: mod.launch_app("zz_no_such_app_zz"), lambda mod: mod.show_notification("t", "m")],
     ids=["launch_app", "show_notification"],
 )
-def test_windows_powershell_failure_is_an_error_not_a_success(win_session, monkeypatch, call):
+def test_windows_powershell_failure_is_an_error_not_a_success(win_session, windows_python, monkeypatch, call):
     # live on win-resolume: Start-Process of a missing app exits 1 (#32 review round 1)
     mod, _ = win_session
     stderr = "This command cannot be run: file not found."
@@ -54,7 +54,7 @@ def test_windows_powershell_failure_is_an_error_not_a_success(win_session, monke
         call(mod)
 
 
-def test_windows_launch_app_success(win_session, monkeypatch):
+def test_windows_launch_app_success(win_session, windows_python, monkeypatch):
     mod, _ = win_session
     monkeypatch.setattr(subprocess, "Popen", popen_answered_by(lambda cmd, **kwargs: run_result(kwargs)))
     assert mod.launch_app("notepad") == "Launched notepad"

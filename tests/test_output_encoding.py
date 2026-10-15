@@ -4,19 +4,24 @@ Live in the #32 verification, ``Shell('"Žltý kôň"')`` came back ``Zlty kôn`
 (en_150, OEM cp437). PowerShell writes its output through the child console's OEM page, so the
 characters that page cannot hold were best-fitted away before Python decoded anything.
 
-The contract now:
-- every PowerShell child runs ``powershell_argv(script)``: the UTF-8 prefix on its own line, then
-  the script verbatim. It switches the child's OWN console (#32) to UTF-8;
-- the child runs in binary mode, and ``decode_output`` reads each stream as strict UTF-8, falling
-  back to the OEM page (``errors="replace"``) for bytes written before the prefix ran or by a
-  native program started directly. The fallback is logged with the stream and the count, never
-  the content;
+The contract now (#48 round 2):
+- every PowerShell child runs ``powershell_argv(script)``: a console ``python.exe -I -S -c
+  <program>`` (the trampoline) in the child's OWN console (#32) switches that console to UTF-8,
+  then runs ``powershell -NoProfile -Command <script>`` with the script UNCHANGED. No PowerShell
+  code is added, so error records, exit codes and ``param()`` are plain PowerShell's (round 1's
+  prefix showed up in every ``Write-Error`` record);
+- the child runs in binary mode, and ``decode_output`` reads each stream as strict UTF-8 (a
+  leading BOM dropped), falling back line by line to the OEM page (``errors="replace"``) for a
+  native program that writes its own page. The fallback is logged with the stream and the count,
+  never the content;
 - macOS/Linux are unchanged: the locale.
 
 Only the OS boundary is faked:
 - ``windows_child`` (conftest): a real Python child that writes the given bytes, started through
   the real ``subprocess``;
-- Python's Windows-only ``oem`` codec, registered as a named code page.
+- Python's Windows-only ``oem`` codec, registered as a named code page;
+- the trampoline program's own boundary: kernel32 and its ``subprocess.call``.
+Real Windows PowerShell 5.1 runs the same contract in ``tests_windows`` (the windows-latest job).
 Expected values are literals, never imported from the code under test.
 """
 
@@ -30,7 +35,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from fake_console_child import POWERSHELL_UTF8_PREFIX, TEXT_MODE, oem_code_page, popen_answered_by, run_result
+from fake_console_child import TEXT_MODE, assert_runs_powershell, oem_code_page, popen_answered_by, run_result
 
 import remoteos.__main__ as server
 from remoteos.platform.win import services as win_services
@@ -62,14 +67,16 @@ def test_windows_shell_returns_powershell_utf8_output_exactly(monkeypatch, windo
     assert server.Shell(f'"{SLOVAK}"') == SLOVAK
 
 
-def test_windows_shell_runs_the_command_after_the_utf8_prefix_in_its_own_console(monkeypatch, windows_child):
+def test_windows_shell_runs_the_command_unchanged_under_the_trampoline_in_its_own_console(
+    monkeypatch, windows_child, windows_python
+):
     # #32 round 5: its own hidden console (CREATE_NO_WINDOW), so switching THAT console to UTF-8
     # can never change the server's console or another command's
     monkeypatch.setattr(server, "is_windows", lambda: True)
     windows_child.stdout = b"ok\r\n"
     assert server.Shell("Get-ChildItem") == "ok"
     [(argv, kwargs)] = windows_child.calls
-    assert argv == ["powershell", "-NoProfile", "-Command", POWERSHELL_UTF8_PREFIX + "\nGet-ChildItem"]
+    assert_runs_powershell(argv, windows_python, "Get-ChildItem")
     _binary_in_its_own_console(kwargs)
 
 
@@ -81,8 +88,8 @@ def test_windows_shell_translates_newlines_like_a_text_mode_run(monkeypatch, win
 
 
 def test_windows_shell_decodes_each_stream_on_its_own(monkeypatch, windows_child, caplog):
-    # A script that does not parse never runs the prefix: PowerShell prints the parse error in the
-    # console's OEM page (cp852 on a Slovak Windows). stderr falls back to OEM; stdout stays UTF-8.
+    # e.g. a native program that writes its error in the OEM page whatever the console's page
+    # (cp852 on a Slovak Windows): stderr falls back to OEM; stdout stays UTF-8
     monkeypatch.setattr(server, "is_windows", lambda: True)
     windows_child.oem = "cp852"
     windows_child.stdout = (SLOVAK + "\r\n").encode("utf-8")
@@ -116,11 +123,118 @@ def test_linux_shell_returns_utf8_output_exactly_through_real_bash():
 # ---------------------------------------------------------------------------
 
 
-def test_powershell_argv_puts_the_utf8_prefix_on_its_own_line_and_keeps_the_script_verbatim():
+def test_powershell_argv_keeps_the_script_verbatim_under_the_console_trampoline(windows_python):
     from remoteos.platform.command import powershell_argv
 
-    script = "Write-Output \"a; b\"\n$x = 'it''s'; Get-ChildItem 'C:\\Program Files'"
-    assert powershell_argv(script) == ["powershell", "-NoProfile", "-Command", POWERSHELL_UTF8_PREFIX + "\n" + script]
+    script = "param($a = 'x')\nWrite-Output \"a; b\"\n$x = 'it''s'; Get-ChildItem 'C:\\Program Files'"
+    argv = powershell_argv(script)
+    assert_runs_powershell(argv, windows_python, script)
+    assert powershell_argv("exit 3")[4] == argv[4]  # one fixed program: no user data in it
+
+
+def test_the_trampoline_is_the_console_python_even_when_the_server_runs_as_pythonw(windows_python, monkeypatch):
+    # pythonw.exe is a GUI-subsystem program: CREATE_NO_WINDOW gives it no console to switch
+    from remoteos.platform.command import powershell_argv
+
+    monkeypatch.setattr(sys, "executable", str(windows_python.with_name("pythonw.exe")))
+    assert powershell_argv("x")[0] == str(windows_python)
+
+
+def test_a_missing_console_python_is_a_loud_error(windows_python, monkeypatch):
+    from remoteos.platform.command import powershell_argv
+
+    windows_python.unlink()  # only pythonw.exe is left
+    monkeypatch.setattr(sys, "executable", str(windows_python.with_name("pythonw.exe")))
+    with pytest.raises(RuntimeError, match=r"^no python\.exe next to .*pythonw\.exe"):
+        powershell_argv("x")
+
+
+# ---------------------------------------------------------------------------
+# The console trampoline program (#48 round 2), run here against its own boundary: kernel32 and the
+# subprocess.call that starts PowerShell. Real Windows runs it in tests_windows.
+# ---------------------------------------------------------------------------
+
+
+class _Kernel32:
+    """kernel32's code-page calls, recorded; ``ok=False`` makes SetConsoleOutputCP fail."""
+
+    def __init__(self, events: list, ok: bool) -> None:
+        self.events, self.ok = events, ok
+
+    def SetConsoleOutputCP(self, page):
+        self.events.append(("SetConsoleOutputCP", page))
+        return 1 if self.ok else 0
+
+    def SetConsoleCP(self, page):
+        self.events.append(("SetConsoleCP", page))
+        return 1
+
+
+def _run_trampoline(monkeypatch, windows_python, *, child_exit: int = 0, kernel32_ok: bool = True):
+    """Run the trampoline program of ``powershell_argv`` as python.exe would; returns (events, exit code)."""
+    import types
+
+    from remoteos.platform.command import powershell_argv
+
+    argv = powershell_argv("Write-Error 'chyba ťava'; exit 3")
+    events: list = []
+    fake_ctypes = types.ModuleType("ctypes")
+
+    def _windll(name, use_last_error=False):
+        events.append(("WinDLL", name, use_last_error))
+        return _Kernel32(events, kernel32_ok)
+
+    fake_ctypes.WinDLL = _windll
+    fake_ctypes.get_last_error = lambda: 87
+    fake_subprocess = types.ModuleType("subprocess")
+
+    def _call(args, **kwargs):
+        events.append(("call", list(args), kwargs))
+        return child_exit
+
+    fake_subprocess.call = _call
+    monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+    monkeypatch.setitem(sys.modules, "subprocess", fake_subprocess)
+    monkeypatch.setattr(sys, "argv", ["-c", *argv[5:]])  # what python.exe -c <program> <args…> sets
+    with pytest.raises(SystemExit) as done:
+        exec(argv[4], {"__name__": "__main__"})
+    return events, done.value.code, argv
+
+
+def test_the_trampoline_switches_its_own_console_to_utf8_then_runs_powershell_unchanged(monkeypatch, windows_python):
+    events, code, _ = _run_trampoline(monkeypatch, windows_python)
+    powershell = ["powershell", "-NoProfile", "-Command", "Write-Error 'chyba ťava'; exit 3"]
+    assert events == [
+        ("WinDLL", "kernel32", True),
+        ("SetConsoleOutputCP", 65001),
+        ("SetConsoleCP", 65001),
+        # the same console (no creationflags) and the trampoline's own stdout/stderr handed down
+        ("call", powershell, {"stdout": 1, "stderr": 2}),
+    ]
+    assert code == 0
+
+
+@pytest.mark.parametrize(
+    ("child_exit", "process_exit"),
+    [(3, 3), (1, 1), (0xC000013A, -1073741510), (0xFFFFFFFF, -1)],
+    ids=["exit-3", "exit-1", "ctrl-c-status", "exit-minus-1"],
+)
+def test_the_trampoline_exits_with_powershells_exact_exit_code(monkeypatch, windows_python, child_exit, process_exit):
+    # Windows exit codes are 32-bit unsigned; sys.exit takes a C long, so a code >= 2**31 is handed
+    # over as the same 32 bits, signed (sys.exit(-1) ends the process with 0xFFFFFFFF)
+    _, code, _ = _run_trampoline(monkeypatch, windows_python, child_exit=child_exit)
+    assert code == process_exit
+    assert code & 0xFFFFFFFF == child_exit
+
+
+def test_a_console_that_refuses_utf8_still_runs_the_command_and_says_so(monkeypatch, windows_python, capsys):
+    # never seen (the child always has its own console); the output then takes the OEM fallback
+    events, code, _ = _run_trampoline(monkeypatch, windows_python, child_exit=3, kernel32_ok=False)
+    assert [e[0] for e in events] == ["WinDLL", "SetConsoleOutputCP", "call"]
+    assert code == 3
+    assert capsys.readouterr().err == (
+        "remoteos: could not switch the console to UTF-8 (error 87); the output is read in the OEM code page\n"
+    )
 
 
 # review round 2: also a full path, e.g. C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
@@ -177,6 +291,17 @@ def test_the_one_builder_guard_catches_a_hand_built_powershell_child(source, cau
 # ---------------------------------------------------------------------------
 # decode_output
 # ---------------------------------------------------------------------------
+
+
+def test_decode_output_drops_a_leading_utf8_bom(caplog):
+    # none was seen live (resolume-pp wrote C5 BD E2 82 AC 0D 0A for "Ž€"); dropped defensively,
+    # so a BOM never reaches the client as U+FEFF and never sends the stream to the OEM fallback
+    from remoteos.platform.command import decode_output
+
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
+        assert decode_output(b"\xef\xbb\xbf" + "Žltý\r\n".encode("utf-8"), windows=True) == "Žltý\n"
+    assert _remoteos_records(caplog) == []
+    assert decode_output(b"a\xef\xbb\xbf", windows=True) == "a\ufeff"  # only a LEADING one
 
 
 def test_decode_output_reads_utf8_exactly(caplog):
@@ -335,16 +460,18 @@ def test_posix_run_command_reads_the_locale_exactly():
     ],
     ids=["ServiceList", "TaskDelete", "EventLog"],
 )
-def test_windows_service_helpers_run_powershell_after_the_utf8_prefix(monkeypatch, windows_child, call, script):
+def test_windows_service_helpers_run_powershell_under_the_trampoline(
+    monkeypatch, windows_child, windows_python, call, script
+):
     monkeypatch.setattr(sys, "platform", "win32")
     windows_child.stdout = (SLOVAK + "\r\n").encode("utf-8")  # e.g. a service with a Slovak display name
     assert call() == SLOVAK
     [(argv, kwargs)] = windows_child.calls
-    assert argv == ["powershell", "-NoProfile", "-Command", POWERSHELL_UTF8_PREFIX + "\n" + script]
+    assert_runs_powershell(argv, windows_python, script)
     _binary_in_its_own_console(kwargs)
 
 
-def test_windows_launch_app_runs_powershell_after_the_utf8_prefix(win_session, monkeypatch):
+def test_windows_launch_app_runs_powershell_under_the_trampoline(win_session, windows_python, monkeypatch):
     mod, _ = win_session
     calls: list[list[str]] = []
 
@@ -354,17 +481,11 @@ def test_windows_launch_app_runs_powershell_after_the_utf8_prefix(win_session, m
 
     monkeypatch.setattr("subprocess.Popen", popen_answered_by(_run))
     assert mod.launch_app("notepad", "C:\\Users\\Žltý kôň.txt") == "Launched notepad"
-    assert calls == [
-        [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            POWERSHELL_UTF8_PREFIX + '\nStart-Process "notepad" -ArgumentList "C:\\Users\\Žltý kôň.txt"',
-        ]
-    ]
+    [argv] = calls
+    assert_runs_powershell(argv, windows_python, 'Start-Process "notepad" -ArgumentList "C:\\Users\\Žltý kôň.txt"')
 
 
-def test_windows_notification_runs_powershell_after_the_utf8_prefix(win_session, monkeypatch):
+def test_windows_notification_runs_powershell_under_the_trampoline(win_session, windows_python, monkeypatch):
     mod, _ = win_session
     calls: list[list[str]] = []
 
@@ -375,7 +496,6 @@ def test_windows_notification_runs_powershell_after_the_utf8_prefix(win_session,
     monkeypatch.setattr("subprocess.Popen", popen_answered_by(_run))
     assert mod.show_notification("Titulok", "Žltý kôň") == "Notification shown"
     [argv] = calls
-    assert argv[:3] == ["powershell", "-NoProfile", "-Command"]
-    prefix, script = argv[3].split("\n", 1)
-    assert prefix == POWERSHELL_UTF8_PREFIX
-    assert "<text>Žltý kôň</text>" in script
+    assert_runs_powershell(argv, windows_python, argv[-1])
+    assert argv[-1].startswith("\n[Windows.UI.Notifications.ToastNotificationManager")  # the script as written
+    assert "<text>Žltý kôň</text>" in argv[-1]

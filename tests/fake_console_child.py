@@ -4,7 +4,7 @@
   made with ``kwargs``. It returns text only for a text-mode call (``text``, ``encoding``,
   ``errors`` or ``universal_newlines``), and bytes otherwise. A ``str`` reply to a binary-mode
   call is encoded as UTF-8, which is what a UTF-8 child writes (a Linux tool, or a PowerShell
-  child after its prefix). So a faked ``subprocess.run`` / ``Popen.communicate`` keeps the real
+  child in its UTF-8 console). So a faked ``subprocess.run`` / ``Popen.communicate`` keeps the real
   return type, whichever mode the code under test uses.
 - ``popen_answered_by(run)``: ``subprocess.Popen`` answered by such a ``run``-style fake. The
   boundary for every child started through ``platform.command.run_child`` (which uses ``Popen``)
@@ -19,8 +19,9 @@
   - cp437 = resolume-pp (en_150);
   - cp852 = the Slovak fleet;
   - cp932 = a double-byte page, where a byte sequence can be undecodable.
-- ``POWERSHELL_UTF8_PREFIX``: the line every PowerShell child runs before its script, as a
-  literal (never imported from the code under test).
+- ``assert_runs_powershell(argv, python, script)``: ``argv`` runs ``script`` unchanged, as
+  ``powershell -NoProfile -Command`` did before #48, under the console trampoline
+  ``<python.exe> -I -S -c <program>`` (#48 round 2). The program is checked in its own tests.
 - ``TEXT_MODE``: the ``subprocess`` keyword arguments that make a call text mode.
 """
 
@@ -36,16 +37,20 @@ from typing import Callable, Union
 # the subprocess keyword arguments that make a call text mode
 TEXT_MODE = ("text", "encoding", "errors", "universal_newlines")
 
-# UTF-8 without a BOM, for the child's console output and for what PowerShell pipes to native programs.
-# In try/catch (review round 1): where the switch is refused (e.g. Constrained Language Mode), the
-# command still runs, with no error text on every reply, and is read through the OEM fallback.
-POWERSHELL_UTF8_PREFIX = (
-    "try { $OutputEncoding = New-Object System.Text.UTF8Encoding $false;"
-    " [Console]::OutputEncoding = $OutputEncoding } catch { }"
-)
-
-# The real Popen, taken when this module is imported (at test collection), before any test patches it.
+# The real Popen and interpreter, taken when this module is imported (at test collection), before
+# any test patches them (the windows_python fixture points sys.executable at a fake install).
 _REAL_POPEN = subprocess.Popen
+_REAL_PYTHON = sys.executable
+
+
+def assert_runs_powershell(argv: list[str], python, script: str) -> None:
+    """``argv`` runs ``script`` unchanged under the console trampoline of ``python`` (#48 round 2).
+
+    ``[<python.exe>, "-I", "-S", "-c", <program>, "powershell", "-NoProfile", "-Command", script]``:
+    the PowerShell part is exactly the argv a PowerShell child had before #48, with nothing added.
+    """
+    assert argv[:4] == [str(python), "-I", "-S", "-c"], argv[:4]
+    assert argv[5:] == ["powershell", "-NoProfile", "-Command", script], argv[5:]
 
 
 def returned(kwargs: dict, value: str | bytes) -> str | bytes:
@@ -128,7 +133,7 @@ class FakeChild:
             f"sys.stderr.buffer.write({self.stderr!r}); sys.stderr.flush(); "
             f"sys.exit({self.returncode})"
         )
-        return _REAL_POPEN([sys.executable, "-c", script], **kwargs)
+        return _REAL_POPEN([_REAL_PYTHON, "-c", script], **kwargs)
 
 
 @contextlib.contextmanager

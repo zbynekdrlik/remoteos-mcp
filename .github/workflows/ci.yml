@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e '.[dev]'
-      - run: ruff check src/ tests/
+      - run: ruff check src/ tests/ tests_windows/
 
   test:
     runs-on: ubuntu-latest
@@ -30,6 +30,18 @@ jobs:
           python-version: "3.12"
       - run: pip install -e '.[test]'
       - run: pytest
+
+  # Real Windows PowerShell 5.1, no fakes (#48 round 2): en-US, OEM code page 437 like resolume-pp.
+  # Its own directory, which the Linux job never collects (testpaths = tests).
+  windows-powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      - run: pytest tests_windows
 
   version-check:
     if: github.event_name == 'pull_request'
