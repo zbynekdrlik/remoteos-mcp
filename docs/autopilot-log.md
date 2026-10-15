@@ -223,3 +223,41 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - Review round 1 (0🔴 2🟡 6🔵): `ad9ff07` → `d1a0234`.
   - Review round 2 (0🔴 0🟡 4🔵): `8d0d949` → `fd8dc00`.
 - **Tests:** `tests/test_shell_tool.py`, `tests/test_file_upload.py`, `tests/test_taskmanager.py`, `tests/test_startup_flags.py` (the real server in a subprocess, hermetic env), plus additions to `test_coordinate_contract_tools.py`, `test_provider_geometry.py` and `test_linux_desktop.py`. Result: 474 pass, ruff clean.
+
+## #32 — Tool failures as real MCP errors (isError) + desktop diagnoses (0.7.0.dev28)
+
+- **Validated live first:** through a real in-process FastMCP 4.0.3 client, a missing Shell cwd, bad FileUpload base64, an unknown KillProcess pid, a missing FileRead file and a headless Click all came back `isError: false`.
+- **FastMCP 4.0.3 finding:** `call_tool` re-raises a `FastMCPError` before its masking branch, so a `ToolError` message is never masked. `_on_call_tool` returns it as `CallToolResult(isError=True)`.
+- **Design (the main's Approach 1):**
+  - `errors.py`: `ToolError`, `DesktopUnavailable` (verbatim text), `@reports_errors` on all 44 tools, `failure()` at WARNING, payload-free `stack_frames`, and `RedactInvalidArguments` for FastMCP's own argument-value warning.
+  - `wrap_sync_tool` raises with `[task:<id>]` on a failure, the lock timeout and a cancel. The stale sweep respects a call's own `timeout`.
+  - The helpers and providers raise instead of returning error text. `platform/command.run_command(check=)` is for commands that change state.
+  - `console_child()`: on Windows each child gets its own hidden console (CREATE_NO_WINDOW) at the OEM page, decoded with errors='replace'.
+  - `platform/<os>/availability.diagnose(need)` with the needs capture / input / windows.
+- **Decisions:**
+  - The preflight never moves a session. A disconnected session → "run ReconnectSession", which reattaches the server's OWN session (ProcessIdToSessionId + WTSConnectState, never `query session`: a disconnected session's SESSIONNAME is blank) and re-checks it.
+  - macOS input uses `CGPreflightPostEventAccess`, not `AXIsProcessTrusted`.
+  - No Linux lock check: the locker is visible in the screenshot and reachable by input.
+  - `Snapshot(use_vision=False)` needs only the user's desktop.
+  - Logs carry no paths, names or argument values (#31).
+  - A non-zero exit of Shell, a listing or EventLog is the answer.
+- **Commits:**
+  - `555f42a` bump.
+  - Contract: `aee8087`/`ff5a9fd`/`a7e3d23`/`c1fd204` [red] → `59791ed` [green].
+  - Diagnoses: `a251b6d`/`c15eacb` [red] → `73aa0cb` [green].
+  - Review round 1 (1🔴 7🟡 8🔵): `7dde22d` refactor, `5b0f810`/`ab0776d` → `cec6908`.
+  - Round 2 (0🔴 1🟡 6🔵): `b925145` → `4749122`.
+  - Round 3 (0🔴 1🟡 3🔵): `0b9c1f0` refactor, `9e16ab2` → `d4fa15f`.
+  - Round 4 (0🔴 0🟡 2🔵): `f85770c` → `c5bd63a`.
+  - Round 5 (0🔴 1🟡 2🔵): `672a4c5` → `ad440f8`.
+  - Round 6 (0🔴 0🟡 1🔵): `1318664` test move.
+  - Round 7 (0🔴 1🟡 2🔵): `ad21f74`.
+- **Tests:**
+  - New: `tests/test_tool_errors.py` (real client), `test_desktop_diagnose.py` (per-OS fakes plus the preflight contract), `test_helper_failures.py`, `test_windows_tool_errors.py`, and the shared `fake_windows_session.py` / `conftest.win_session`.
+  - Existing error-text tests now expect the raised ToolError with the same texts. Result: 616 pass, ruff clean.
+- **Out of scope, recorded on other tickets:**
+  - #39: PowerShell `$()` injection in the Windows toast (Notification is tier 1).
+  - #37: the AX tree needs a new `need`.
+- **Review-probe side effects (for the supervisor):**
+  - A round-4 read-only probe printed win-pz-server's `--auth-key` into a subagent transcript: rotate it.
+  - A round-5 probe briefly set that server's shared console to 65001. It was restored to 852, and the isolation fix now prevents it.

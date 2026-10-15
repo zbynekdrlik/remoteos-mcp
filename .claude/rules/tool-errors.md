@@ -36,7 +36,8 @@ paths:
     `raise failure("…")`. That sets the log level to WARNING; a bare `ToolError` logs at
     ERROR.
   - `functools.wraps` keeps the schema. All 44 `tools/list` entries were diffed against
-    main; only the Type description changed, and on purpose.
+    main: input schemas and annotations are identical. Only the Type and ReconnectSession
+    descriptions changed, both on purpose.
 - **`DesktopUnavailable` passes through verbatim, with no tool prefix.** The Linux
   headless/Wayland stub text is a contract (cam1..4) and must stay byte-for-byte. Raise it
   as `DesktopUnavailable(_unavailable())`, never `RuntimeError`, or it gains `"Click error: "`.
