@@ -259,3 +259,129 @@ def test_ping_reads_a_windows_console_in_its_code_page(monkeypatch):
     assert network.ping("10.0.0.1", count=1) == "Odpoveď od 10.0.0.1"
     assert commands.calls == [["ping", "-n", "1", "10.0.0.1"]]
     assert {key: commands.kwargs[0][key] for key in _OEM} == _OEM
+
+
+# ---------------------------------------------------------------------------
+# Review round 8: the remaining raise paths, each with the OS boundary faked
+# ---------------------------------------------------------------------------
+#
+# Deleting a task that does not exist is an error; unloading/disabling one the OS no longer
+# knows is not (the files are removed anyway, so that output stays part of the answer).
+
+
+def _replies(calls: list, failing: list[str], stderr: str):
+    """A fake ``subprocess.run``: a command starting with ``failing`` exits 1 with ``stderr``."""
+
+    def _run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[: len(failing)] == failing:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr=stderr)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    return _run
+
+
+def test_linux_task_delete_of_a_missing_task_is_an_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(linux_services, "_SYSTEMD_DIR", str(tmp_path))
+    commands = _Commands()
+    monkeypatch.setattr(subprocess, "run", commands)
+    with pytest.raises(FileNotFoundError, match="No remoteos task 'gone'"):
+        linux_services.task_delete("gone")
+    assert commands.calls == []  # nothing was disabled or reloaded
+
+
+def test_linux_task_delete_removes_the_units_when_systemd_no_longer_knows_the_timer(monkeypatch, tmp_path):
+    monkeypatch.setattr(linux_services, "_SYSTEMD_DIR", str(tmp_path))
+    timer, service = tmp_path / "remoteos-t.timer", tmp_path / "remoteos-t.service"
+    timer.write_text("[Timer]\n")
+    service.write_text("[Service]\n")
+    calls: list = []
+    not_loaded = "Unit remoteos-t.timer not loaded."
+    monkeypatch.setattr(subprocess, "run", _replies(calls, ["systemctl", "disable"], not_loaded))
+    out = linux_services.task_delete("t")
+    assert "not loaded" in out and "[Exit code: 1]" in out
+    assert f"Deleted {timer}" in out and f"Deleted {service}" in out
+    assert not timer.exists() and not service.exists()
+    assert calls == [["systemctl", "disable", "--now", "remoteos-t.timer"], ["systemctl", "daemon-reload"]]
+
+
+def test_mac_task_delete_of_a_missing_plist_is_an_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(mac_services, "_AGENTS_DIR", str(tmp_path))
+    commands = _Commands()
+    monkeypatch.setattr(subprocess, "run", commands)
+    with pytest.raises(FileNotFoundError, match="Plist not found"):
+        mac_services.task_delete("gone")
+    assert commands.calls == []
+
+
+def test_mac_task_delete_removes_the_plist_when_launchd_no_longer_has_it_loaded(monkeypatch, tmp_path):
+    monkeypatch.setattr(mac_services, "_AGENTS_DIR", str(tmp_path))
+    plist = tmp_path / "com.remoteos.t.plist"
+    plist.write_bytes(b"<plist/>")
+    calls: list = []
+    monkeypatch.setattr(subprocess, "run", _replies(calls, ["launchctl", "unload"], "Could not find specified service"))
+    out = mac_services.task_delete("t")
+    assert out.startswith(f"Unloaded and deleted {plist}") and "[Exit code: 1]" in out
+    assert not plist.exists()
+    assert calls == [["launchctl", "unload", str(plist)]]
+
+
+@pytest.fixture
+def linux_x11(monkeypatch):
+    from remoteos.platform.linux import desktop as linux_desktop
+
+    session = linux_desktop.SessionInfo(
+        mode="x11", display=":0", xauthority="/run/user/1000/gdm/Xauthority", uid=1000, user="u", session_id="7"
+    )
+    monkeypatch.setattr(linux_desktop, "_SESSION", session)
+    return linux_desktop
+
+
+def test_linux_launch_app_that_fails_every_way_is_an_error(monkeypatch, linux_x11):
+    launched: list = []
+
+    class _ExitsAtOnce:
+        def __init__(self, argv, **kwargs):
+            launched.append(list(argv))
+
+        def wait(self, timeout=None):
+            return 1
+
+    monkeypatch.setattr(subprocess, "Popen", _ExitsAtOnce)
+    with pytest.raises(RuntimeError, match=r"^Failed to launch zz-app \(last rc=1\)$"):
+        linux_x11.launch_app("zz-app")
+    assert len(launched) == 3  # gtk-launch, xdg-open, then the command itself
+
+
+def test_linux_lock_screen_that_loginctl_refuses_is_an_error(monkeypatch, linux_x11):
+    commands = _Commands(returncode=1, stderr="Access denied\n")
+    monkeypatch.setattr(subprocess, "run", commands)
+    with pytest.raises(RuntimeError, match="^loginctl lock-session failed: Access denied$"):
+        linux_x11.lock_screen()
+    assert commands.calls == [["loginctl", "lock-session", "7"]]
+
+
+@pytest.fixture
+def windows_registry(monkeypatch):
+    from remoteos.platform.win import registry
+
+    def _open_key(root, subkey, reserved, access):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(registry, "HAS_WINREG", True)
+    monkeypatch.setattr(registry, "winreg", types.SimpleNamespace(OpenKey=_open_key, KEY_READ=0x20019), raising=False)
+    monkeypatch.setitem(registry._ROOT_KEYS, "HKLM", 0x80000002)  # HKEY_LOCAL_MACHINE
+    return registry
+
+
+def test_windows_registry_read_of_a_missing_value_is_an_error(windows_registry):
+    with pytest.raises(FileNotFoundError, match=r"^Key or value not found: HKLM\\SOFTWARE\\Nope\\Missing$"):
+        windows_registry.reg_read("HKLM\\SOFTWARE\\Nope", "Missing")
+
+
+def test_kill_by_a_name_that_matches_nothing_is_an_error(monkeypatch):
+    bystander = _FakeProcess(4321, "bash")
+    monkeypatch.setattr(process_mgr.psutil, "process_iter", lambda attrs=None: [bystander])
+    with pytest.raises(RuntimeError, match="^No process matching 'zz-no-such-process'$"):
+        process_mgr.kill_process(name="zz-no-such-process")
+    assert not bystander.killed

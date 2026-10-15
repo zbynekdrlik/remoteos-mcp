@@ -8,6 +8,7 @@ faked: pywin32's clipboard, the screen grab, ``subprocess.run``.
 
 from __future__ import annotations
 
+import ctypes
 import subprocess
 import sys
 import types
@@ -58,6 +59,18 @@ def test_windows_launch_app_success(win_session, monkeypatch):
     ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: ok)
     assert mod.launch_app("notepad") == "Launched notepad"
+
+
+@pytest.mark.parametrize(("locked", "outcome"), [(1, "Screen locked"), (0, "LockWorkStation failed")])
+def test_windows_lock_screen_reports_a_refused_lock_as_an_error(win_session, monkeypatch, locked, outcome):
+    # review round 8: LockWorkStation returns 0 when it cannot lock (e.g. no interactive desktop)
+    mod, _ = win_session
+    monkeypatch.setattr(ctypes.windll.user32, "LockWorkStation", lambda: locked, raising=False)
+    if locked:
+        assert mod.lock_screen() == outcome
+    else:
+        with pytest.raises(RuntimeError, match=f"^{outcome} "):
+            mod.lock_screen()
 
 
 def test_windows_capture_on_an_attached_session_retries_once_and_says_so(monkeypatch, win_session):
