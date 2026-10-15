@@ -58,11 +58,27 @@ def _tobool(v: bool | str) -> bool:
     return str(v).lower() in ("true", "1", "yes")
 
 
+_LOCALE_NAME_MAX_LENGTH = 85  # winnls.h, including the terminating null
+
+
 def _get_system_language() -> str:
-    """Return current Windows display language."""
+    """The user's Windows locale name (e.g. ``sk-SK``) for Snapshot's "System Language" line.
+
+    kernel32 ``GetUserDefaultLocaleName`` (Vista+), then ``locale.getlocale()``, then ``en_US``.
+    The ``locale`` module's default-locale getter, used before, is deprecated since Python 3.11
+    and removed in 3.15 (#48).
+    """
     try:
-        return locale.getdefaultlocale()[0] or "en_US"
-    except Exception:
+        buf = ctypes.create_unicode_buffer(_LOCALE_NAME_MAX_LENGTH)
+        if ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, _LOCALE_NAME_MAX_LENGTH) and buf.value:
+            return buf.value
+        log.debug("GetUserDefaultLocaleName returned no name")
+    except Exception as e:
+        log.debug("GetUserDefaultLocaleName failed (%s)", type(e).__name__)
+    try:
+        return locale.getlocale()[0] or "en_US"
+    except Exception as e:
+        log.debug("locale.getlocale failed (%s)", type(e).__name__)
         return "en_US"
 
 
