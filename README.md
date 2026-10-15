@@ -188,7 +188,8 @@ encoding (UTF-8 on the fleet).
   in a pipeline, an assignment or `| Out-String`. PowerShell decodes it as UTF-8 then.
 - The switch also applies to programs started from the command. For example, cmd.exe reads a
   `.bat` file in the console's code page, which is now UTF-8.
-- Ping and `tscon` run without PowerShell and are read in the OEM code page.
+- Ping runs without PowerShell and is read in the OEM code page. `tscon` also runs without
+  PowerShell; it is read UTF-8 first, and a line that is not UTF-8 in the OEM code page.
 - A Windows `Shell` script that must begin with `param(...)` or a `using` statement cannot
   run: PowerShell requires those first, and the switch comes before them.
 
