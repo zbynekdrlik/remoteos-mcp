@@ -23,9 +23,9 @@ paths:
   `platform/command.py` (#32, #48).** (Other children, e.g. taskkill, install/uninstall,
   the Linux/macOS OCR and desktop helpers, have their own runs.)
   - **Every PowerShell child = `powershell_argv(script)`, the console trampoline (#48 round 2):**
-    `[<python.exe>, "-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE, cwd or "", "powershell",
-    "-NoProfile", "-Command", script]`. Users: Shell, services/tasks/EventLog `_ps`, `launch_app`,
-    `show_notification`, Windows OCR.
+    `[<python.exe>, "-I", "-S", "-X", "utf8", "-c", UTF8_CONSOLE_TRAMPOLINE, cwd or "",
+    "powershell", "-NoProfile", "-Command", script]`. Users: Shell, services/tasks/EventLog `_ps`,
+    `launch_app`, `show_notification`, Windows OCR.
     - **Why:** PowerShell 5.1 takes `[Console]::OutputEncoding` from its console's output page
       AT START-UP. That page is the OEM page: cp437 (resolume-pp, en_150) best-fitted `Žltý kôň`
       to `Zlty kôn`, and cp852 has no `€` or `–`. Started in a console that is ALREADY 65001,
@@ -43,6 +43,12 @@ paths:
         takes the OEM fallback. PowerShell that cannot be started (no powershell.exe, a cwd that
         vanished after Shell checked it) is one `remoteos: could not start …` line and exit 1,
         never a Python traceback.
+      - `-X utf8` (review round 2): the trampoline's own messages reach the pipe as UTF-8. A
+        pipe would otherwise get the ANSI page, and a localized OSError text would be misread
+        by the OEM fallback.
+    - **The trampoline costs about 650 characters** of Windows' 32 767-character command line
+      (python.exe's path, the flags, the program, the cwd). A script that fit the limit before
+      #48 by less than that now fails loudly (WinError 206).
     - **The cwd goes INTO the argv, never to `run_child` (review round 1).** `CreateProcess`
       looks for `powershell` in the PARENT's current directory first. The trampoline runs in
       the server's directory, as the server itself did when it was PowerShell's parent, so a
@@ -95,9 +101,14 @@ paths:
       the tree too, as `subprocess.run` did.
       - Windows: `taskkill /F /T`, in its own hidden console, so no window flashes up under
         `pythonw.exe`.
-      - POSIX: the group whose id is the child's pid. The caller's group id is never that pid.
-        SIGTERM, then SIGKILL after `KILL_GRACE_S` (2 s) for what ignored it; there is no
-        `getpgid` probe.
+      - POSIX: the group whose id is the child's pid. The caller's group id is never that pid,
+        and there is no `getpgid` probe.
+        - The tree is snapshotted (psutil), the group gets SIGTERM, the tree gets up to
+          `KILL_GRACE_S` (2 s) to exit, then the group gets SIGKILL IN ANY CASE (review round 2).
+          Whatever ignored SIGTERM dies, whether or not it holds our pipes.
+        - Nothing is reaped before that SIGKILL: the child, by then a zombie, keeps its group id
+          from being reused. Waiting uses psutil status, because CPython has no `os.waitid` on
+          macOS and `Popen.poll()` would reap.
       - Kill-path log lines carry exception TYPES only. `TimeoutExpired`'s text is the whole
         argv, the user's command included (#31).
     - **Every child's stdin is NUL** (`stdin=DEVNULL`, review round 1). Under
