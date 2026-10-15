@@ -2,8 +2,11 @@
 paths:
   - "src/remoteos/__main__.py"
   - "src/remoteos/taskmanager.py"
+  - "src/remoteos/platform/linux/shell_env.py"
   - "tests/test_startup_flags.py"
   - "tests/test_taskmanager.py"
+  - "tests/test_shell_env.py"
+  - "tests/test_shell_tool.py"
 ---
 
 # Server start, logging, Shell/FileUpload, task states (#31) — gotchas
@@ -34,6 +37,42 @@ paths:
   - Windows: it goes to `powershell_argv(command, cwd=…)` and `run_child` gets none. The console
     trampoline then runs in the server's directory, where `CreateProcess` looks for `powershell`,
     and starts PowerShell in `cwd` (#48 round 2). See `.claude/rules/child-output.md`.
+- **Linux Shell child environment = `platform/linux/shell_env.shell_env()` (#52)**, passed as
+  `run_child(…, env=)` (the child's WHOLE environment; `None` inherits). Windows and macOS pass
+  nothing. Why: the server is a system unit with `User=`, which has no login-session environment,
+  so `systemctl --user` failed ("$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined",
+  live on stream-pp) although `/run/user/<uid>/bus` existed.
+  - The contract: the server's own environment, plus, for its OWN effective uid only, each
+    variable that is unset or EMPTY, and only after what it names is checked:
+    - `XDG_RUNTIME_DIR=/run/user/<euid>`: a directory owned by the euid;
+    - `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<euid>/bus`: that dir, and `bus` is a socket;
+    - `DISPLAY`: the provider's cached session (`desktop.get_session()`) when its `uid` is the
+      euid, and only a local display (`:N`, `:N.S`, `unix:N`) whose `/tmp/.X11-unix/X<N>` socket
+      exists;
+    - `XAUTHORITY`: that session's file, if it exists and the child's DISPLAY is the session's;
+    - `WAYLAND_DISPLAY=wayland-0`: a Wayland session of the euid whose `wayland-0` socket is in
+      the child's runtime dir. `SessionInfo` has no Wayland name; `wayland-0` is libwayland's own
+      default. Do not grow `desktop.py` for it (#49).
+  - As root (euid 0) NOTHING is added and the session is never read: never another user's bus or
+    display (the X tools' `sudo -u` wrap exists for that).
+  - Re-detection: only a cached X11 session of the euid whose X socket is gone (a logout), at most
+    once per change of the names in `/tmp/.X11-unix`. A headless cache is never re-detected, so a
+    Shell call on cam1..4 runs no `loginctl`.
+    - Known gap: the cache is filled at start-up, and the unit starts at boot. A graphical login
+      after that start is not seen by Shell's DISPLAY nor by the display-tool gating until the
+      service restarts. The runtime dir and bus do not depend on it.
+  - A failing session lookup (even an unimportable provider) costs only the display variables,
+    logged with its exception TYPE. One INFO line per change names the added variables, never a
+    value.
+  - Tests (`tests/test_shell_env.py`): a fake `/run/user` + X socket dir under a SHORT
+    `mkdtemp(dir="/tmp")` with REAL AF_UNIX sockets (an AF_UNIX path must fit in 108 bytes; pytest's
+    `tmp_path` may not), `loginctl` faked at `subprocess.run`, the effective uid and `os.stat`'s
+    owner faked only where a test needs another uid. A re-detection that must find a session uses
+    the provider's env branch (a non-root `DISPLAY` / `XDG_SESSION_TYPE` in `os.environ`), never
+    the real `/proc` scan.
+  - `conftest._linux_session_detected_at_start_up` gives EVERY test a headless session cache, as
+    a started server has. With an empty cache, the first Linux Shell call ran the host's real
+    `loginctl`, and a test that records `subprocess.Popen` caught those calls.
 - **FileUpload checks the cap and decodes with `validate=True` BEFORE any mkdir/write.** Only
   whitespace is dropped (`str.translate`). Catch `ValueError`: non-ASCII input raises a plain
   one, not `binascii.Error`.

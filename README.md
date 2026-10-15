@@ -208,6 +208,18 @@ notifications and Windows OCR. On macOS and Linux, output is read in the locale'
   error, and that a timed-out PowerShell is gone. The other points above are verified on the
   fleet only.
 
+**Shell on Linux: the user's session.** The Linux service is a systemd system unit, which has no
+login-session environment. A Shell command still gets the session of the user the service runs
+as, so `systemctl --user`, `journalctl --user` and GUI programs work through MCP (no SSH needed):
+
+- `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, when `/run/user/<uid>` and its `bus` socket
+  exist (any login or linger);
+- `DISPLAY` and `XAUTHORITY` (or `WAYLAND_DISPLAY`) of that same user's graphical session, when
+  its display socket exists.
+
+A variable the service already has is never changed. A service running as root gets none of
+them: it never borrows another user's session.
+
 ## MCP gateway (dev1)
 
 The machines are reachable only from boxes with a LAN route to them. `remoteos-gateway`

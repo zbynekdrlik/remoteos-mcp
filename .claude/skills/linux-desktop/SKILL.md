@@ -67,6 +67,24 @@ Review of #6/#7/#8 fixed 5 defects; keep them fixed:
 
 **The fast src-copy (tar→scp→extract) does NOT bump `/health`.** `__version__` comes from `importlib.metadata.version("remoteos-mcp")` = the installed `.dist-info`, which a src-copy leaves untouched — so `/health` keeps reporting the OLD version even though the CODE is new. Use src-copy only for PRE-merge FUNCTIONAL testing (behavior); to make `/health` show the new version you must `pip install @<sha>` (updates metadata). Verify the fixes live (session self-resolves via loginctl — pass `python3 … </dev/null` so ffmpeg's stdin read doesn't hang the heredoc).
 
+## Shell child environment (#52) — the provider's session reaches Shell
+
+The service is a system unit (`User=newlevel` on stream-pp/strih-pp/imag-nb, `User=root` on
+cam1..4) with NO login-session environment. Since 0.7.0.dev31 a Linux `Shell` child gets
+`platform/linux/shell_env.shell_env()`: the server's environment plus, for the server's OWN
+effective uid only, `XDG_RUNTIME_DIR` + `DBUS_SESSION_BUS_ADDRESS` (from `/run/user/<euid>` and its
+`bus` socket) and `DISPLAY` / `XAUTHORITY` / `WAYLAND_DISPLAY` from THIS provider's
+`get_session()` when `session.uid == euid` and the socket exists. A root service (cam1) adds
+nothing. So `systemctl --user`, `journalctl --user`, `gsettings` and `obs &` work from Shell, with
+no SSH fallback. Full contract, re-detection and tests: `.claude/rules/server-startup.md`.
+
+- `shell_env` reads this module's `_SESSION` cache, so the cache is now on the Shell path too.
+  Keep `get_session()` cheap and never raising; `shell_env` catches anything anyway.
+- `SessionInfo` has no Wayland socket name; `shell_env` uses libwayland's default `wayland-0`.
+- Live check (supervisor, after install): stream-pp `Shell("systemctl --user is-system-running")`
+  → `running` / `degraded`, never the bus error; `Shell("echo $DISPLAY")` → the X11 session's
+  display. The same two on strih-pp.
+
 ## Testing gotcha
 
 `python3 -m pytest tests/` collection CRASHES here (`ModuleNotFoundError: jinja2`) because a stray global `pytest-html` plugin auto-loads. Run with `python3 -m pytest tests/ -q -p no:html -p no:cacheprovider`. Current suite: 71 tests (61 original + 10 #10 hardening).
