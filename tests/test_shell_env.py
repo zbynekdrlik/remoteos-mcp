@@ -34,6 +34,7 @@ import time
 import psutil
 import pytest
 from fake_console_child import assert_runs_powershell, returned
+from tool_test_support import tool_error
 
 import remoteos.__main__ as server
 from remoteos.platform import command
@@ -250,6 +251,13 @@ def test_a_bus_that_is_not_a_socket_is_not_given(tree, se):
     assert _added(se.shell_env(_base())) == {"XDG_RUNTIME_DIR": runtime}
 
 
+def test_a_runtime_path_that_is_not_a_directory_adds_nothing(tree, se):
+    # review round 2: /run/user/<euid> is the euid's, but a regular file
+    with open(os.path.join(tree.run_user, str(os.geteuid())), "w") as fh:
+        fh.write("not a directory")
+    assert _added(se.shell_env(_base())) == {}
+
+
 def test_a_runtime_dir_owned_by_another_user_adds_nothing(tree, se, monkeypatch):
     # /run/user/<euid> exists, but it is not the euid's: neither the dir nor its bus is ours
     euid = os.geteuid() + 4321
@@ -282,6 +290,42 @@ def test_as_root_nothing_is_added(tree, se, loginctl, monkeypatch, euid):
 
 
 # --------------------------------------------------------------------------- the display
+
+
+@pytest.mark.parametrize("display", [":0", ":0.1", "unix:0"])
+def test_every_local_display_form_is_given(tree, se, monkeypatch, display):
+    # review round 2: `unix:N` is in the contract and was untested
+    tree.x_display(0)
+    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), display))
+    assert _added(se.shell_env(_base())) == {"DISPLAY": display}
+
+
+def test_xauthority_goes_with_the_servers_own_display_when_it_is_the_sessions(tree, se, monkeypatch):
+    # review round 2: a server whose own environment has the session's DISPLAY (and no
+    # XAUTHORITY) still gets the session's cookie for it
+    tree.x_display(0)
+    xauth = tree.file("Xauthority")
+    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", xauth))
+    assert _added(se.shell_env({**_base(), "DISPLAY": ":0"})) == {"DISPLAY": ":0", "XAUTHORITY": xauth}
+
+
+def test_no_xauthority_for_a_display_that_is_not_a_checked_local_one(tree, se, monkeypatch):
+    # review round 2: a server started from `ssh -X` has DISPLAY=localhost:10.0 and no XAUTHORITY;
+    # the provider then guesses the gdm cookie file. Handing that file to the forwarded display
+    # broke X auth (it used ~/.Xauthority before), and skipped the X socket checks.
+    xauth = tree.file("Xauthority")
+    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), "localhost:10.0", xauth))
+    env = se.shell_env({**_base(), "DISPLAY": "localhost:10.0"})
+    assert (env["DISPLAY"], "XAUTHORITY" in env) == ("localhost:10.0", False)
+
+
+def test_a_symlinked_x_socket_is_not_trusted(tree, se, monkeypatch):
+    # review round 2: os.stat follows a link, so a link planted in the world-writable directory
+    # to a socket of root or the euid passed the owner check
+    real = tree.socket(os.path.join(tree.root, "elsewhere"))
+    os.symlink(real, os.path.join(tree.x11, "X0"))
+    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", tree.file("Xauthority")))
+    assert _added(se.shell_env(_base())) == {}
 
 
 def test_the_servers_own_session_gives_display_and_xauthority(tree, se, loginctl, monkeypatch):
@@ -389,6 +433,27 @@ def test_a_failing_session_lookup_never_fails_the_shell_call(tree, se, monkeypat
     assert "(ModuleNotFoundError)" in record.getMessage()
 
 
+def test_a_session_detection_that_raises_never_fails_the_shell_call(tree, se, monkeypatch, caplog):
+    # review round 2: not only an import failure. Here the passwd database fails (an OS boundary)
+    # while the provider detects its first session, so get_session() itself raises.
+    runtime = tree.runtime_dir(os.geteuid())
+    monkeypatch.setattr(desktop, "_SESSION", None)
+    monkeypatch.setenv("DISPLAY", ":0")  # the provider's env branch, which looks up the user name
+
+    def _nss_down(uid):
+        raise OSError("passwd database unavailable")
+
+    monkeypatch.setattr(desktop.pwd, "getpwuid", _nss_down)
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    for _ in range(2):
+        assert _added(se.shell_env(_base())) == {
+            "XDG_RUNTIME_DIR": runtime,
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus",
+        }
+    [record] = [r for r in caplog.records if r.name == LOGGER and r.levelno == logging.WARNING]
+    assert "(OSError)" in record.getMessage()
+
+
 # --------------------------------------------------------------------------- Wayland
 
 
@@ -428,21 +493,55 @@ def test_wayland_display_needs_the_childs_runtime_dir_to_be_the_one_checked(tree
 # --------------------------------------------------------------------------- GUI programs
 
 
+def _pid_written_to(pidfile, seconds: float = 5.0) -> int:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        text = pidfile.read_text().strip() if pidfile.exists() else ""
+        if text:
+            return int(text)
+        time.sleep(0.05)
+    raise AssertionError("the program never wrote its pid")
+
+
+def _gone(pid: int, seconds: float = 5.0) -> bool:
+    """The process exited (a zombie waiting for init to reap it counts as exited)."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                return True
+        except psutil.NoSuchProcess:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def test_a_gui_program_outlives_the_shell_call_only_when_detached(tree, tmp_path):
-    # review round 1, the playbook's recipe: a plain `obs &` keeps the call's stdout/stderr pipes,
-    # so the call runs to its timeout and the process-group kill takes the program with it.
-    # `setsid -f prog >/dev/null 2>&1` returns at once and the program keeps running.
+    # review round 1, the playbook's recipe: `setsid -f prog >/dev/null 2>&1` returns at once and
+    # the program keeps running (its own session, no pipe of the call held open)
     pidfile = tmp_path / "pid"
     detached = f"setsid -f sh -c 'echo $$ > \"{pidfile}\"; exec sleep 60' >/dev/null 2>&1; echo started"
     assert server.Shell(detached, timeout=10) == "started"
-    deadline = time.monotonic() + 5
-    while not (pidfile.exists() and pidfile.read_text().strip()) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    proc = psutil.Process(int(pidfile.read_text()))
+    proc = psutil.Process(_pid_written_to(pidfile))
     try:
         assert proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
     finally:
         proc.kill()
+
+
+def test_a_plain_background_program_dies_with_the_shell_call(tree, tmp_path):
+    # review round 2, the other half: a plain `prog &` keeps the call's stdout/stderr pipes, so
+    # the call runs to its timeout and the process-group kill takes the program with it
+    pidfile = tmp_path / "pid"
+    out = tool_error(lambda: server.Shell(f'sleep 60 & echo $! > "{pidfile}"', timeout=2))
+    assert out == "Command timed out after 2s"
+    pid = _pid_written_to(pidfile)
+    try:
+        assert _gone(pid)
+    finally:
+        if not _gone(pid, seconds=0):
+            psutil.Process(pid).kill()
 
 
 # --------------------------------------------------------------------------- logging
