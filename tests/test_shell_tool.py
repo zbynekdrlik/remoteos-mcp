@@ -136,3 +136,6 @@ def test_windows_shell_reads_powershell_in_the_console_oem_code_page(monkeypatch
     assert server.Shell("Write-Output AčšžB") == "ok"
     [(_args, kwargs)] = popen
     assert (kwargs["text"], kwargs["encoding"], kwargs["errors"]) == (True, "oem", "replace")
+    # review round 5: its own hidden console (CREATE_NO_WINDOW), so a `chcp 65001` in one command
+    # can never change the code page every later command's output is written in
+    assert kwargs["creationflags"] == 0x08000000

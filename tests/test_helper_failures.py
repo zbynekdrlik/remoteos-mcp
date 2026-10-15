@@ -209,16 +209,23 @@ def test_undecodable_command_output_still_reports_the_failure():
 # Live on win-pz-server: PowerShell and native tools write the OEM code page (852), but Python
 # reads a pipe as ANSI (1250), so "AčšžB" came back as "Aźç§B"; and on Windows a decode error
 # in subprocess's reader thread leaves stdout None: Shell said "(no output)", OCR and Ping
-# crashed on None.strip(). "oem" is Python's codec for the console's OEM code page (Windows only).
+# crashed on None.strip(). "oem" is Python's codec for the system OEM code page (Windows only).
+#
+# Review round 5: a child writes the CURRENT page of the console it is attached to, and every
+# child shared the server's own console, so one `chcp 65001` in a Shell call garbled every later
+# reply for every client (live: 'A─Ź┼í┼żB'). CREATE_NO_WINDOW (0x08000000) gives each child its
+# own hidden console at the default OEM page, which is exactly what "oem" decodes.
 
-_OEM = {"text": True, "encoding": "oem", "errors": "replace"}
+_CREATE_NO_WINDOW = 0x08000000
+_OEM = {"text": True, "encoding": "oem", "errors": "replace", "creationflags": _CREATE_NO_WINDOW}
 
 
-def test_console_decoding_is_the_oem_code_page_on_windows_and_the_locale_elsewhere():
-    from remoteos.platform.command import console_decoding
+def test_a_windows_console_child_gets_its_own_console_in_the_oem_code_page():
+    from remoteos.platform.command import console_child
 
-    assert console_decoding(windows=True) == _OEM
-    assert console_decoding(windows=False) == {"text": True, "encoding": None, "errors": "replace"}
+    assert console_child(windows=True) == _OEM
+    # off Windows: the locale, and no creationflags (POSIX rejects a non-zero value)
+    assert console_child(windows=False) == {"text": True, "encoding": None, "errors": "replace"}
 
 
 def test_run_command_reads_a_windows_console_in_its_code_page(monkeypatch):
@@ -231,10 +238,16 @@ def test_run_command_reads_a_windows_console_in_its_code_page(monkeypatch):
     assert {key: commands.kwargs[0][key] for key in _OEM} == _OEM
 
 
-def test_windows_ocr_reads_powershell_in_its_code_page(windows_ocr):
-    windows_ocr.reply = (0, "text", "")
-    ocr.ocr_windows_builtin()
-    assert {key: windows_ocr.kwargs[0][key] for key in _OEM} == _OEM
+def test_windows_ocr_reads_its_own_console_losslessly_as_utf8(windows_ocr):
+    # review round 5: through the OEM page PowerShell replaced € and – ("12,50 €" read as "12,50 ?",
+    # live "1€–č" -> "1?-č"). The script is ours and its child has its own console, so it switches
+    # that console to UTF-8 and Python decodes UTF-8: lossless, and the server's console is untouched.
+    windows_ocr.reply = (0, "12,50 €", "")
+    assert ocr.ocr_windows_builtin() == "12,50 €"
+    (kwargs,) = windows_ocr.kwargs
+    assert (kwargs["encoding"], kwargs["errors"], kwargs["creationflags"]) == ("utf-8", "replace", _CREATE_NO_WINDOW)
+    (argv,) = windows_ocr.calls
+    assert "[Console]::OutputEncoding = [Text.Encoding]::UTF8" in argv[-1]
 
 
 def test_ping_reads_a_windows_console_in_its_code_page(monkeypatch):
