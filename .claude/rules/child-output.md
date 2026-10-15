@@ -103,14 +103,17 @@ paths:
       client's error text is what it was before round 2. Any other exception while waiting kills
       the tree too, as `subprocess.run` did.
       - Windows: `taskkill /F /T`, in its own hidden console, so no window flashes up under
-        `pythonw.exe`.
+        `pythonw.exe`. Its limit: `/T` follows parent pids, so a process whose parent already
+        exited (PowerShell returned, something it started still holds the pipe) is not killed;
+        the bounded reap still returns the call. dev28 had the same gap (review round 5).
       - POSIX: the group whose id is the child's pid. The caller's group id is never that pid,
         so the signals need no check of the child's own group first.
-        - The group's members are snapshotted (`_group`: `os.getpgid` over `psutil.pids()`, plus
-          descendants whose group cannot be read), the group gets SIGTERM, the members get up to
-          `KILL_GRACE_S` (2 s) to exit, then the group gets SIGKILL IN ANY CASE (review round 2).
-          Whatever ignored SIGTERM dies, whether or not it holds our pipes. A failing scan only
-          skips the wait (review round 4).
+        - The group's members are snapshotted (`_group`: `os.getpgid` over `psutil.pids()`;
+          a process that left the group is neither signalled nor waited for), the group gets
+          SIGTERM, the members get up to `KILL_GRACE_S` (2 s) to exit, then the group gets
+          SIGKILL IN ANY CASE (review round 2), from a `finally`. Whatever ignored SIGTERM dies,
+          whether or not it holds our pipes. A failing scan or wait only cuts the grace short
+          (review rounds 4 and 5).
         - Each member is a FRESH `psutil.Process`, never `process_iter()`'s cached one: a cached
           object for a pid reused by a member since has an old start time, and `is_running()`
           would cut that member's grace (review round 4).
@@ -168,7 +171,9 @@ paths:
   - Windows OCR's script starts with `$ErrorActionPreference = 'Stop'`. A failing step can
     still exit 0 with empty stdout, so "stderr and no text" is a failure as well.
   - **Tests, Linux** (`tests/test_output_encoding.py`, `tests/test_child_timeout.py`) fake only
-    the OS boundary:
+    the OS boundary, with one exception: the stale-identity test seeds psutil's private
+    `process_iter` cache (`psutil._pmap`, `Process._ident`) and asserts the seed really differs,
+    so a psutil change fails it loudly instead of silently:
     - `fake_console_child.FakeChild` (the `windows_child` fixture) replaces `subprocess.Popen`
       with a REAL Python child that writes the given bytes, so subprocess's own text and binary
       handling runs. It starts the interpreter captured at import, because `windows_python`
