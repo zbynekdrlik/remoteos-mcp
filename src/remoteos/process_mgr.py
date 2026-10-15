@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 import psutil
 from tabulate import tabulate
 from thefuzz import fuzz
+
+log = logging.getLogger("remoteos.process_mgr")
 
 
 def list_processes(
@@ -52,18 +56,18 @@ def list_processes(
 
 
 def kill_process(pid: int = 0, name: str = "") -> str:
-    """Kill a process by PID or name."""
+    """Kill a process by PID or name; raises when nothing was killed (#32)."""
     if pid:
         try:
             p = psutil.Process(pid)
+            proc_name = p.name()
             p.kill()
-            return f"Killed PID {pid} ({p.name()})"
         except psutil.NoSuchProcess:
-            return f"PID {pid} not found"
+            raise RuntimeError(f"PID {pid} not found") from None
         except psutil.AccessDenied:
-            return f"Access denied for PID {pid}"
-        except Exception as e:
-            return f"Error: {e}"
+            raise PermissionError(f"Access denied for PID {pid}") from None
+        log.info("killed PID %s", pid)  # never the process name: logs carry no tool replies (#31)
+        return f"Killed PID {pid} ({proc_name})"
 
     if name:
         killed = []
@@ -75,10 +79,11 @@ def kill_process(pid: int = 0, name: str = "") -> str:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
         if killed:
+            log.info("killed %d process(es) by name", len(killed))  # never the name or the matches (#31)
             return f"Killed: {', '.join(killed)}"
-        return f"No process matching '{name}'"
+        raise RuntimeError(f"No process matching '{name}'")
 
-    return "Provide pid or name."
+    raise ValueError("Provide pid or name.")
 
 
 def get_system_info() -> str:

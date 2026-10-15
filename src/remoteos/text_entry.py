@@ -30,8 +30,6 @@ log = logging.getLogger("remoteos.text_entry")
 # The target app reads the clipboard when it handles the paste keys, not when they are
 # sent; restoring sooner would paste the OLD content. A short settle covers that.
 SETTLE_S = 0.3
-_SET_OK = "Clipboard set"  # what every provider's set_clipboard() returns on success
-_FAILED = "Error: "  # how every provider's get/set_clipboard() reports a failure (it does not raise)
 
 
 def enter_text(
@@ -63,30 +61,40 @@ def paste_text(
 ) -> str:
     """Paste ``text`` through the clipboard and put the previous clipboard text back.
 
-    The providers' clipboard functions report a failure as an ``Error: …`` string
-    instead of raising. A failed or empty read means "no text to restore": Windows
-    has no CF_UNICODETEXT, Linux no STRING target, and macOS ``pbpaste`` prints
-    nothing for an empty clipboard and for an image alike. A failed write of
-    ``text`` raises before the paste keys are pressed. The previous text is put
-    back even when pressing the paste keys fails.
+    The providers' clipboard functions RAISE on failure (#32), so clipboard text
+    that happens to start with ``Error:`` is ordinary text. A failed or empty read
+    means "no text to restore": Windows has no CF_UNICODETEXT, Linux no STRING
+    target, and macOS ``pbpaste`` prints nothing for an empty clipboard and for an
+    image alike. A failed write of ``text`` raises before the paste keys are
+    pressed. The previous text is put back even when pressing the paste keys
+    fails; a failed restore after a successful paste is reported in the reply.
     """
-    saved = get_clipboard()
-    restorable = bool(saved) and not saved.startswith(_FAILED)
-    if not restorable:  # never log what the clipboard holds
-        log.info("paste: no clipboard text to restore (%s)", "empty" if not saved else "read failed")
-    restored = None
     try:
-        result = set_clipboard(text)
-        if result != _SET_OK:
-            raise RuntimeError(f"could not put the text on the clipboard: {result}")
+        saved = get_clipboard()
+    except Exception as e:
+        log.info("paste: clipboard read failed (%s), nothing to restore", e)
+        saved = ""
+    restorable = bool(saved)
+    if not restorable:  # never log what the clipboard holds
+        log.info("paste: no clipboard text to restore")
+    restore_error: Exception | None = None
+    try:
+        try:
+            set_clipboard(text)
+        except Exception as e:
+            raise RuntimeError(f"could not put the text on the clipboard: {e}") from e
         press_paste()
         time.sleep(SETTLE_S)
     finally:
         if restorable:
-            restored = set_clipboard(saved)
-    log.debug("paste: %d chars, clipboard restore: %s", len(text), restored)
+            try:
+                set_clipboard(saved)
+            except Exception as e:  # never masks the paste's own error; reported below otherwise
+                log.warning("paste: restoring the clipboard failed: %s", e)
+                restore_error = e
+    log.debug("paste: %d chars, clipboard restored: %s", len(text), restorable and restore_error is None)
     if not restorable:
         return f"Pasted {len(text)} chars (the clipboard held no text, so it was not restored)"
-    if restored != _SET_OK:
-        return f"Pasted {len(text)} chars, but restoring the clipboard failed: {restored}"
+    if restore_error is not None:
+        return f"Pasted {len(text)} chars, but restoring the clipboard failed: {restore_error}"
     return f"Pasted {len(text)} chars (clipboard restored)"

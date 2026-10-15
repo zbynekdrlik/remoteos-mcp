@@ -9,6 +9,7 @@ the tool hands it are what is checked.
 from __future__ import annotations
 
 import pytest
+from tool_test_support import tool_error
 
 import remoteos.__main__ as server
 
@@ -32,7 +33,7 @@ def test_cwd_with_a_quote_runs_the_command_in_that_directory(tmp_path):
 def test_missing_cwd_is_a_clear_error_and_the_command_never_runs(tmp_path):
     marker = tmp_path / "ran"
     missing = tmp_path / "nope"
-    out = server.Shell(f"touch '{marker}'", cwd=str(missing))
+    out = tool_error(lambda: server.Shell(f"touch '{marker}'", cwd=str(missing)))
     assert out == f"Shell error: working directory not found: {missing}"
     assert not marker.exists()
 
@@ -41,14 +42,14 @@ def test_cwd_that_is_a_file_is_an_error_and_the_command_never_runs(tmp_path):
     marker = tmp_path / "ran"
     a_file = tmp_path / "file.txt"
     a_file.write_text("x")
-    out = server.Shell(f"touch '{marker}'", cwd=str(a_file))
+    out = tool_error(lambda: server.Shell(f"touch '{marker}'", cwd=str(a_file)))
     assert out == f"Shell error: working directory is not a directory: {a_file}"
     assert not marker.exists()
 
 
 def test_cwd_text_is_never_executed_as_a_command(tmp_path):
     pwned = tmp_path / "pwned"
-    out = server.Shell("true", cwd=f"{tmp_path}/x; touch {pwned}")
+    out = tool_error(lambda: server.Shell("true", cwd=f"{tmp_path}/x; touch {pwned}"))
     assert out.startswith("Shell error: working directory not found: ")
     assert not pwned.exists()
 
@@ -112,3 +113,22 @@ def test_without_cwd_the_process_inherits_the_server_directory(monkeypatch, pope
     [(args, kwargs)] = popen
     assert args == ["powershell", "-NoProfile", "-Command", "Get-Location"]
     assert kwargs.get("cwd") is None
+
+
+def test_output_that_is_not_utf8_is_still_the_commands_answer():
+    # review round 3: bytes outside the expected encoding produced a 'utf-8 codec' Shell error on
+    # Linux (on Windows the reader thread dropped stdout: "(no output)") and lost the output
+    out = server.Shell("printf 'ok \\220 done'")
+    assert out.startswith("ok ") and out.endswith(" done")
+
+
+def test_windows_shell_reads_powershell_in_the_console_oem_code_page(monkeypatch, popen):
+    # review round 4: PowerShell writes the OEM code page (852 on the Slovak fleet); read as the
+    # ANSI page (1250) "AčšžB" came back as "Aźç§B" (live on win-pz-server)
+    monkeypatch.setattr(server, "is_windows", lambda: True)
+    assert server.Shell("Write-Output AčšžB") == "ok"
+    [(_args, kwargs)] = popen
+    assert (kwargs["text"], kwargs["encoding"], kwargs["errors"]) == (True, "oem", "replace")
+    # review round 5: its own hidden console (CREATE_NO_WINDOW), so a `chcp 65001` in one command
+    # can never change the code page every later command's output is written in
+    assert kwargs["creationflags"] == 0x08000000

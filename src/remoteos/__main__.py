@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import logging
 import os
 import platform
@@ -43,7 +44,9 @@ from starlette.responses import JSONResponse
 from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
+from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
+from remoteos.platform.command import console_child
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, window_lines
@@ -62,6 +65,7 @@ from remoteos.typing_input import check_method
 load_dotenv()
 
 log = logging.getLogger("remoteos.mcp")
+redact_fastmcp_argument_logs()  # FastMCP's "Invalid arguments" warning would log the argument values (#32)
 
 mcp = FastMCP(
     "remoteos-mcp",
@@ -94,11 +98,10 @@ def _tobool(v: bool | str) -> bool:
     return str(v).lower() in ("true", "1", "yes")
 
 
-def _check_win32(tool_name: str = "This tool") -> str | None:
-    """Return an error string if platform-specific desktop deps are unavailable."""
+def _require_win32(tool_name: str = "This tool") -> None:
+    """Raise when the Windows desktop dependency (pywin32) this tool needs is missing."""
     if is_windows() and not desktop.HAS_WIN32:
-        return f"Error: pywin32 not installed — {tool_name} requires it."
-    return None
+        raise failure(f"pywin32 not installed — {tool_name} requires it (`pip install pywin32`).")
 
 
 # ============================= DESKTOP CONTROL =============================
@@ -117,19 +120,26 @@ def _current_frame(monitor: int, max_width: int):
 def _capture_snapshot_frame(monitor: int, max_width: int):
     """``(image, frame)`` for Snapshot/AnnotatedSnapshot.
 
-    On Windows a failed grab is retried once after reconnecting a disconnected RDP
-    session to the console (a disconnected session has no desktop to capture).
+    On Windows a failed grab is retried once. If the session went disconnected
+    since the preflight it is reattached first; the log and the error say which
+    of the two happened (#32 review round 2).
     """
     try:
         img, frame = get_desktop().capture_frame(monitor=monitor, max_width=max_width)
     except Exception as first_error:
-        if not is_windows() or _ensure_session_connected() is not None:
+        if not is_windows():
             raise
-        log.warning("capture failed (%s) — retrying after session reconnect", first_error)
+        try:
+            status = _ensure_session_connected()
+        except RuntimeError as reconnect_error:
+            log.warning("capture failed (%s); the session state is unusable: %s", first_error, reconnect_error)
+            raise first_error
+        how = "after session reconnect" if status == "reattached" else "after a retry"
+        log.warning("capture failed (%s) — retrying (%s)", first_error, how)
         try:
             img, frame = get_desktop().capture_frame(monitor=monitor, max_width=max_width)
         except Exception as retry_error:
-            raise RuntimeError(f"after session reconnect: {retry_error}") from retry_error
+            raise RuntimeError(f"{how}: {retry_error}") from retry_error
     log.debug("snapshot frame: %s", contract_line(frame))
     return img, frame
 
@@ -147,13 +157,40 @@ def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coor
     """Map input-tool points to screen coordinates; returns ``(screen_points, reply_note)``."""
     if check_space(coords) == "screen" or not points:
         return points, ""
-    if is_linux() and get_desktop().get_session().mode != "x11":
-        return points, ""  # no display: the provider answers with its exact headless/Wayland stub
     frame = _current_frame(monitor, max_width)
     mapped = [image_to_screen(frame, x, y) for x, y in points]
     note = mapping_note(frame, points, mapped)
     log.debug("input mapped%s (monitor=%s, max_width=%s)", note, monitor, max_width)
     return mapped, note
+
+
+def _desktop_preflight(need: str) -> None:
+    """Stop a desktop tool before it touches a desktop that cannot be used (#32).
+
+    ``need`` is what the tool needs from the desktop: ``"capture"`` (read the
+    screen), ``"input"`` (send mouse/keyboard events) or ``"windows"`` (only the
+    window list: the user's desktop, locked or not). The provider's
+    ``diagnose(need)`` is cheap and read-only. Only a positive finding raises,
+    as :class:`DesktopUnavailable`, its text verbatim to the client. A
+    diagnose() that itself fails is logged and the tool goes ahead: a probe
+    never blocks a desktop it could not read. Nothing here changes the session.
+    A disconnected Windows session is reported, and reattaching it (``tscon``)
+    is the explicit ReconnectSession tool's job (#32 review round 1).
+    """
+    try:
+        reason = get_desktop().diagnose(need)
+    except Exception as e:
+        log.warning("desktop probe failed (%s: %s): assuming the desktop is usable", type(e).__name__, e)
+        return
+    if reason:
+        log.warning("desktop unavailable (%s): %s", need, reason)
+        raise DesktopUnavailable(reason)
+    log.debug("desktop preflight (%s): usable", need)
+
+
+# A tool that reads the screen / one that sends input: @reports_errors with the matching preflight.
+_capture_tool = reports_errors(preflight=functools.partial(_desktop_preflight, "capture"))
+_input_tool = reports_errors(preflight=functools.partial(_desktop_preflight, "input"))
 
 
 @mcp.tool(
@@ -163,6 +200,7 @@ def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coor
         openWorldHint=False,
     )
 )
+@reports_errors  # its preflight depends on use_vision: "capture" for the screenshot, else only "windows"
 def Snapshot(
     use_vision: bool | str = True,
     quality: int = 65,
@@ -188,29 +226,29 @@ def Snapshot(
     - Screenshot image as JPEG (if use_vision=True)
     - Text: coordinate contract, windows and interactive UI elements (image pixels)
     """
-    try:
-        parts = []
-        if _tobool(use_vision):
-            img, frame = _capture_snapshot_frame(monitor, max_width)
-            parts.append(ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"))
-        else:
-            frame = _current_frame(monitor, max_width)
+    parts = []
+    if _tobool(use_vision):
+        _desktop_preflight("capture")
+        img, frame = _capture_snapshot_frame(monitor, max_width)
+        parts.append(ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"))
+    else:
+        # the window list works on a locked or disconnected desktop, not outside the user's (#32 round 3)
+        _desktop_preflight("windows")
+        frame = _current_frame(monitor, max_width)
 
-        _desktop = get_desktop()
-        windows = _desktop.enumerate_windows()
-        sys_lang = _desktop._get_system_language() if hasattr(_desktop, "_get_system_language") else "N/A"
-        lines = [f"**Coordinates:** {contract_line(frame)}", "", f"**System Language:** {sys_lang}", ""]
-        lines += ["**Windows:**", *window_lines(frame, windows)]
+    _desktop = get_desktop()
+    windows = _desktop.enumerate_windows()
+    sys_lang = _desktop._get_system_language() if hasattr(_desktop, "_get_system_language") else "N/A"
+    lines = [f"**Coordinates:** {contract_line(frame)}", "", f"**System Language:** {sys_lang}", ""]
+    lines += ["**Windows:**", *window_lines(frame, windows)]
 
-        # Interactive elements from foreground window
-        elements = _desktop.get_interactive_elements()
-        if elements:
-            lines += ["", "**Interactive Elements (foreground window):**", *element_lines(frame, elements[:50])]
+    # Interactive elements from foreground window
+    elements = _desktop.get_interactive_elements()
+    if elements:
+        lines += ["", "**Interactive Elements (foreground window):**", *element_lines(frame, elements[:50])]
 
-        parts.append(TextContent(type="text", text="\n".join(lines)))
-        return parts
-    except Exception as e:
-        return [f"Snapshot error: {e}"]
+    parts.append(TextContent(type="text", text="\n".join(lines)))
+    return parts
 
 
 @mcp.tool(
@@ -220,6 +258,7 @@ def Snapshot(
         openWorldHint=False,
     )
 )
+@_input_tool
 def Click(
     x: int,
     y: int,
@@ -246,21 +285,18 @@ def Click(
         coords: 'image' (default) or 'screen' = raw OS coordinates, passed through
             unchanged (physical pixels on Windows/Linux, points on macOS).
     """
-    try:
-        [(x, y)], note = _to_screen([(x, y)], monitor, max_width, coords)
-        if is_linux():
-            return get_desktop().click(x, y, button=button, action=action) + note
-        if action == "hover":
-            pyautogui.moveTo(x, y)
-            return f"Hovered at ({x},{y}){note}"
-        elif action == "double":
-            pyautogui.doubleClick(x, y, button=button)
-            return f"Double-clicked {button} at ({x},{y}){note}"
-        else:
-            pyautogui.click(x, y, button=button)
-            return f"Clicked {button} at ({x},{y}){note}"
-    except Exception as e:
-        return f"Click error: {e}"
+    [(x, y)], note = _to_screen([(x, y)], monitor, max_width, coords)
+    if is_linux():
+        return get_desktop().click(x, y, button=button, action=action) + note
+    if action == "hover":
+        pyautogui.moveTo(x, y)
+        return f"Hovered at ({x},{y}){note}"
+    elif action == "double":
+        pyautogui.doubleClick(x, y, button=button)
+        return f"Double-clicked {button} at ({x},{y}){note}"
+    else:
+        pyautogui.click(x, y, button=button)
+        return f"Clicked {button} at ({x},{y}){note}"
 
 
 @mcp.tool(
@@ -270,6 +306,7 @@ def Click(
         openWorldHint=False,
     )
 )
+@_input_tool
 def Type(
     text: str,
     x: int = 0,
@@ -286,12 +323,12 @@ def Type(
     Any Unicode text is typed exactly — diacritics (e.g. Slovak "Žltý kôň
     ďakuje"), symbols (€, –) and emoji — whatever the machine's keyboard layout.
     "\\n" (also "\\r\\n") presses Enter and "\\t" presses Tab. The reply "Typed N
-    chars" counts the characters handed to the OS. On Windows, input the OS
-    refuses part-way (e.g. a locked session) is an error saying how many got
-    through, never a success; macOS refuses up front when this process may not
-    post keyboard events. Neither macOS nor Linux can confirm delivery to a locked
-    console. x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = type at
-    the current focus without clicking.
+    chars" counts the characters handed to the OS. A desktop that cannot take
+    input (a locked Windows/macOS screen, a secure desktop, no display, a missing
+    permission) is an error before anything is typed; on Windows, input the OS
+    refuses part-way is an error saying how many got through, never a success.
+    x/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = type at the
+    current focus without clicking.
 
     Args:
         text: Text to type.
@@ -310,17 +347,14 @@ def Type(
             desktops). Not for secrets: clipboard history keeps a copy. The reply
             means the paste keys were pressed, not that the app took the text.
     """
-    try:
-        how = check_method(method)
-        points, note = _to_screen(_optional_point(x, y), monitor, max_width, coords)
-        sx, sy = points[0] if points else (None, None)
-        log.debug("Type %d chars by %s at %s (clear=%s, enter=%s)", len(text), how, points, clear, press_enter)
-        reply = get_desktop().type_text(
-            text, x=sx, y=sy, clear=_tobool(clear), press_enter=_tobool(press_enter), method=how
-        )
-        return reply + note
-    except Exception as e:
-        return f"Type error: {e}"
+    how = check_method(method)
+    points, note = _to_screen(_optional_point(x, y), monitor, max_width, coords)
+    sx, sy = points[0] if points else (None, None)
+    log.debug("Type %d chars by %s at %s (clear=%s, enter=%s)", len(text), how, points, clear, press_enter)
+    reply = get_desktop().type_text(
+        text, x=sx, y=sy, clear=_tobool(clear), press_enter=_tobool(press_enter), method=how
+    )
+    return reply + note
 
 
 @mcp.tool(
@@ -330,6 +364,7 @@ def Type(
         openWorldHint=False,
     )
 )
+@_input_tool
 def Scroll(
     amount: int,
     direction: str = "",
@@ -361,14 +396,11 @@ def Scroll(
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
         coords: 'image' (default) or 'screen' = raw OS coordinates.
     """
-    try:
-        steps = normalize_request(amount, direction, _tobool(horizontal))
-        points, note = _to_screen(_optional_point(x, y), monitor, max_width, coords)
-        sx, sy = points[0] if points else (None, None)
-        log.debug("Scroll %s x%d (requested %d) at %s", steps.direction, steps.clicks, steps.requested, points)
-        return get_desktop().scroll(steps.direction, steps.requested, x=sx, y=sy) + note
-    except Exception as e:
-        return f"Scroll error: {e}"
+    steps = normalize_request(amount, direction, _tobool(horizontal))
+    points, note = _to_screen(_optional_point(x, y), monitor, max_width, coords)
+    sx, sy = points[0] if points else (None, None)
+    log.debug("Scroll %s x%d (requested %d) at %s", steps.direction, steps.clicks, steps.requested, points)
+    return get_desktop().scroll(steps.direction, steps.requested, x=sx, y=sy) + note
 
 
 @mcp.tool(
@@ -378,6 +410,7 @@ def Scroll(
         openWorldHint=False,
     )
 )
+@_input_tool
 def Move(
     x: int,
     y: int,
@@ -405,25 +438,22 @@ def Move(
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
         coords: 'image' (default) or 'screen' = raw OS coordinates.
     """
-    try:
-        drag = _tobool(drag)
-        start = _optional_point(start_x, start_y) if drag else []
-        mapped, note = _to_screen([*start, (x, y)], monitor, max_width, coords)
-        x, y = mapped[-1]
-        start_x, start_y = mapped[0] if start else (None, None)
-        if is_linux():
-            msg = get_desktop().move(x, y, drag=drag, start_x=start_x, start_y=start_y, duration=duration)
-            return msg + note
-        if drag:
-            if start:
-                pyautogui.moveTo(start_x, start_y)
-            pyautogui.drag(x - pyautogui.position()[0], y - pyautogui.position()[1], duration=duration)
-            return f"Dragged to ({x},{y}){note}"
-        else:
-            pyautogui.moveTo(x, y, duration=duration)
-            return f"Moved to ({x},{y}){note}"
-    except Exception as e:
-        return f"Move error: {e}"
+    drag = _tobool(drag)
+    start = _optional_point(start_x, start_y) if drag else []
+    mapped, note = _to_screen([*start, (x, y)], monitor, max_width, coords)
+    x, y = mapped[-1]
+    start_x, start_y = mapped[0] if start else (None, None)
+    if is_linux():
+        msg = get_desktop().move(x, y, drag=drag, start_x=start_x, start_y=start_y, duration=duration)
+        return msg + note
+    if drag:
+        if start:
+            pyautogui.moveTo(start_x, start_y)
+        pyautogui.drag(x - pyautogui.position()[0], y - pyautogui.position()[1], duration=duration)
+        return f"Dragged to ({x},{y}){note}"
+    else:
+        pyautogui.moveTo(x, y, duration=duration)
+        return f"Moved to ({x},{y}){note}"
 
 
 @mcp.tool(
@@ -433,20 +463,18 @@ def Move(
         openWorldHint=False,
     )
 )
+@_input_tool
 def Shortcut(keys: str) -> str:
     """Execute keyboard shortcut.
 
     Args:
         keys: Shortcut string, e.g. 'ctrl+c', 'alt+tab', 'win+e'.
     """
-    try:
-        if is_linux():
-            return get_desktop().shortcut(keys)
-        parts = [k.strip() for k in keys.lower().split("+")]
-        pyautogui.hotkey(*parts)
-        return f"Executed shortcut: {keys}"
-    except Exception as e:
-        return f"Shortcut error: {e}"
+    if is_linux():
+        return get_desktop().shortcut(keys)
+    parts = [k.strip() for k in keys.lower().split("+")]
+    pyautogui.hotkey(*parts)
+    return f"Executed shortcut: {keys}"
 
 
 @mcp.tool(
@@ -456,6 +484,7 @@ def Shortcut(keys: str) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def Wait(seconds: float = 1.0) -> str:
     """Pause execution.
 
@@ -476,6 +505,7 @@ def Wait(seconds: float = 1.0) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def FocusWindow(title: str = "", handle: int = 0) -> str:
     """Bring a window to the foreground.
 
@@ -483,13 +513,8 @@ def FocusWindow(title: str = "", handle: int = 0) -> str:
         title: Window title (fuzzy matched).
         handle: Window handle (exact).
     """
-    err = _check_win32("FocusWindow")
-    if err:
-        return err
-    try:
-        return get_desktop().focus_window(title=title or None, handle=handle or None)
-    except Exception as e:
-        return f"FocusWindow error: {e}"
+    _require_win32("FocusWindow")
+    return get_desktop().focus_window(title=title or None, handle=handle or None)
 
 
 @mcp.tool(
@@ -499,12 +524,10 @@ def FocusWindow(title: str = "", handle: int = 0) -> str:
         openWorldHint=False,
     )
 )
+@_input_tool
 def MinimizeAll() -> str:
     """Minimize all windows (Win+D — show desktop)."""
-    try:
-        return get_desktop().minimize_all()
-    except Exception as e:
-        return f"MinimizeAll error: {e}"
+    return get_desktop().minimize_all()
 
 
 @mcp.tool(
@@ -514,6 +537,7 @@ def MinimizeAll() -> str:
         openWorldHint=True,
     )
 )
+@reports_errors
 def App(
     action: str = "launch",
     name: str = "",
@@ -533,24 +557,17 @@ def App(
             physical pixels on Windows/Linux, points on macOS) — not Snapshot image pixels.
         height: New height (for resize), in the same raw screen units as width.
     """
-    try:
-        if action == "launch":
-            return get_desktop().launch_app(name, args)
-        elif action == "switch":
-            err = _check_win32("App(switch)")
-            if err:
-                return err
-            return get_desktop().focus_window(title=name or None, handle=handle or None)
-        elif action == "resize":
-            err = _check_win32("App(resize)")
-            if err:
-                return err
-            if not handle:
-                return "resize requires a window handle"
-            return get_desktop().resize_window(handle, width, height)
-        return f"Unknown action: {action}"
-    except Exception as e:
-        return f"App error: {e}"
+    if action == "launch":
+        return get_desktop().launch_app(name, args)
+    elif action == "switch":
+        _require_win32("App(switch)")
+        return get_desktop().focus_window(title=name or None, handle=handle or None)
+    elif action == "resize":
+        _require_win32("App(resize)")
+        if not handle:
+            raise failure("resize requires a window handle")
+        return get_desktop().resize_window(handle, width, height)
+    raise failure(f"Unknown action: {action}")
 
 
 # =========================== REMOTE MANAGEMENT ============================
@@ -563,6 +580,7 @@ def App(
         openWorldHint=True,
     )
 )
+@reports_errors
 def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     """Execute a shell command (PowerShell on Windows, zsh on macOS, bash on Linux).
 
@@ -574,64 +592,66 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             directory; a path that is not an existing directory is an error and
             the command does not run.
     """
+    # The directory goes to the process itself (#31): pasting it into the
+    # command as ``cd {cwd}`` broke on spaces/quotes and ran ``; <cmd>`` in it.
+    workdir = None
+    if cwd:
+        workdir = os.path.expandvars(os.path.expanduser(cwd))
+        if not os.path.isdir(workdir):
+            problem = "is not a directory" if os.path.exists(workdir) else "not found"
+            log.warning("Shell refused: working directory %s", problem)  # never the path (#31)
+            raise ValueError(f"working directory {problem}: {cwd}")
+    if is_windows():
+        shell_cmd = ["powershell", "-NoProfile", "-Command", command]
+    elif is_macos():
+        shell_cmd = ["/bin/zsh", "-c", command]
+    else:
+        shell_cmd = ["/bin/bash", "-c", command]
+
+    proc = subprocess.Popen(
+        shell_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=workdir,
+        start_new_session=not is_windows(),
+        # its own console (Windows) in the OEM code page Python decodes; an undecodable byte never
+        # loses the output of a command that ran (#32 review rounds 4-5)
+        **console_child(windows=is_windows()),
+    )
     try:
-        # The directory goes to the process itself (#31): pasting it into the
-        # command as ``cd {cwd}`` broke on spaces/quotes and ran ``; <cmd>`` in it.
-        workdir = None
-        if cwd:
-            workdir = os.path.expandvars(os.path.expanduser(cwd))
-            if not os.path.isdir(workdir):
-                problem = "is not a directory" if os.path.exists(workdir) else "not found"
-                log.warning("Shell refused: working directory %s: %r", problem, cwd)
-                return f"Shell error: working directory {problem}: {cwd}"
-        if is_windows():
-            shell_cmd = ["powershell", "-NoProfile", "-Command", command]
-        elif is_macos():
-            shell_cmd = ["/bin/zsh", "-c", command]
-        else:
-            shell_cmd = ["/bin/bash", "-c", command]
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        log.warning("Shell command timed out after %ss (pid %s killed)", timeout, proc.pid)
+        raise failure(f"Command timed out after {timeout}s") from None
+    # A non-zero exit is the command's own answer (it ran), not a tool failure.
+    output = stdout or ""
+    if stderr:
+        output += f"\n[STDERR] {stderr}"
+    if proc.returncode != 0:
+        output += f"\n[Exit code: {proc.returncode}]"
+    return output.strip() or "(no output)"
 
-        proc = subprocess.Popen(
-            shell_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=workdir,
-            start_new_session=not is_windows(),
-        )
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Best-effort kill of a timed-out Shell command and its children; never raises."""
+    if is_windows():
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            if is_windows():
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                        capture_output=True,
-                        timeout=5,
-                    )
-                except Exception:
-                    pass
-            else:
-                import signal
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5)
+        except Exception as e:
+            log.debug("taskkill of %s failed: %s", proc.pid, e)
+    else:
+        import signal
 
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except Exception:
-                    pass
-            proc.kill()
-            try:
-                proc.communicate(timeout=5)
-            except Exception:
-                pass
-            return f"Command timed out after {timeout}s"
-        output = stdout or ""
-        if stderr:
-            output += f"\n[STDERR] {stderr}"
-        if proc.returncode != 0:
-            output += f"\n[Exit code: {proc.returncode}]"
-        return output.strip() or "(no output)"
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception as e:
+            log.debug("killpg of %s failed: %s", proc.pid, e)
+    proc.kill()
+    try:
+        proc.communicate(timeout=5)
     except Exception as e:
-        return f"Shell error: {e}"
+        log.debug("reaping %s failed: %s", proc.pid, e)
 
 
 @mcp.tool(
@@ -641,15 +661,11 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def GetClipboard() -> str:
     """Read the clipboard text content."""
-    err = _check_win32("GetClipboard")
-    if err:
-        return err
-    try:
-        return get_desktop().get_clipboard()
-    except Exception as e:
-        return f"GetClipboard error: {e}"
+    _require_win32("GetClipboard")
+    return get_desktop().get_clipboard()
 
 
 @mcp.tool(
@@ -659,19 +675,15 @@ def GetClipboard() -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def SetClipboard(text: str) -> str:
     """Set the clipboard text content.
 
     Args:
         text: Text to place on clipboard.
     """
-    err = _check_win32("SetClipboard")
-    if err:
-        return err
-    try:
-        return get_desktop().set_clipboard(text)
-    except Exception as e:
-        return f"SetClipboard error: {e}"
+    _require_win32("SetClipboard")
+    return get_desktop().set_clipboard(text)
 
 
 @mcp.tool(
@@ -681,6 +693,7 @@ def SetClipboard(text: str) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def ListProcesses(
     filter: str = "",
     sort_by: str = "memory",
@@ -693,10 +706,7 @@ def ListProcesses(
         sort_by: Sort by 'cpu', 'memory', or 'name'.
         limit: Max number of processes to return.
     """
-    try:
-        return process_mgr.list_processes(filter_name=filter, sort_by=sort_by, limit=limit)
-    except Exception as e:
-        return f"ListProcesses error: {e}"
+    return process_mgr.list_processes(filter_name=filter, sort_by=sort_by, limit=limit)
 
 
 @mcp.tool(
@@ -706,6 +716,7 @@ def ListProcesses(
         openWorldHint=False,
     )
 )
+@reports_errors
 def KillProcess(pid: int = 0, name: str = "") -> str:
     """Kill a process by PID or name.
 
@@ -713,10 +724,7 @@ def KillProcess(pid: int = 0, name: str = "") -> str:
         pid: Process ID.
         name: Process name (fuzzy matched).
     """
-    try:
-        return process_mgr.kill_process(pid=pid, name=name)
-    except Exception as e:
-        return f"KillProcess error: {e}"
+    return process_mgr.kill_process(pid=pid, name=name)
 
 
 @mcp.tool(
@@ -726,99 +734,48 @@ def KillProcess(pid: int = 0, name: str = "") -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def GetSystemInfo() -> str:
     """Get system information: CPU, memory, disk, network, uptime."""
-    try:
-        return process_mgr.get_system_info()
-    except Exception as e:
-        return f"GetSystemInfo error: {e}"
+    return process_mgr.get_system_info()
 
 
-def _ensure_session_connected(force: bool = False) -> str | None:
-    """Reconnect a disconnected desktop session to console.
+def _ensure_session_connected(force: bool = False) -> str:
+    """Attach this server's own Windows session to the console when it is disconnected.
 
-    Returns None on success or if already connected, error string on failure.
+    Returns ``"reattached"`` (tscon ran and the session is attached now) or
+    ``"attached"`` (it already was: console or remote desktop; also off Windows).
+    Raises RuntimeError when the state cannot be read or tscon did not attach it.
+    The provider reads the session through ProcessIdToSessionId + WTSConnectState
+    and re-checks it after ``tscon`` (#32 review rounds 1-2). The old ``query
+    session`` parse never found a real disconnected session (its SESSIONNAME is blank).
     """
     if not is_windows():
-        return None
-    try:
-        result = subprocess.run(["query", "session"], capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            return f"Failed to query sessions: {result.stderr}"
-
-        lines = result.stdout.strip().split("\n")
-        user_session_id = None
-        is_disconnected = False
-
-        for line in lines[1:]:
-            line = line.lstrip(">").strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) < 4:
-                continue
-            # Format: sessionname username ID state ...
-            # or:     sessionname          ID state ... (no user)
-            name = parts[0].lower()
-            if name in ("services", "rdp-tcp"):
-                continue
-            # Find the numeric session ID and state
-            for i, p in enumerate(parts[1:], 1):
-                if p.isdigit():
-                    sid = int(p)
-                    if i + 1 < len(parts):
-                        state = parts[i + 1].lower()
-                        # Check if there's a username before the ID
-                        has_user = i > 1 and not parts[i - 1].isdigit()
-                        if has_user or name == "console":
-                            user_session_id = sid
-                            # Chinese Windows: 已断开=Disc, 运行中=Active
-                            is_disconnected = state in (
-                                "disc",
-                                "断开",
-                                "已断开",
-                                "disconnected",
-                            )
-                    break
-
-        if user_session_id is None:
-            return "No user session found"
-
-        if not is_disconnected and not force:
-            return None  # Already connected
-
-        result = subprocess.run(
-            ["tscon", str(user_session_id), "/dest:console"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip() or "Unknown error"
-            return f"tscon failed: {err}"
-        time.sleep(1)  # Wait for session to stabilize
-        return None
-    except subprocess.TimeoutExpired:
-        return "Session reconnect timed out"
-    except Exception as e:
-        return f"Session reconnect error: {e}"
+        return "attached"
+    return get_desktop().reconnect_to_console(force=force)
 
 
 @mcp.tool(annotations=ToolAnnotations(title="ReconnectSession", readOnlyHint=False))
+@reports_errors
 def ReconnectSession(force: bool = False) -> list:
     """Reconnect a disconnected Windows desktop session to the console.
 
     This enables screenshot and UI automation tools to work when no RDP
-    client is actively connected. Runs 'tscon' to attach the user's
-    session to the console.
+    client is actively connected. Runs 'tscon' to attach this server's own
+    session to the console, then checks it worked. This puts the desktop on the
+    machine's physical screen. A session that is already attached (console or
+    remote desktop) is left alone.
 
     Args:
         force: Reconnect even if session appears active (default False).
     """
-    err = _ensure_session_connected(force=force)
-    if err:
-        return [TextContent(type="text", text=f"ReconnectSession failed: {err}")]
-    return [TextContent(type="text", text="Session connected to console")]
+    try:
+        status = _ensure_session_connected(force=force)
+    except RuntimeError as e:
+        raise failure(f"ReconnectSession failed: {e}") from e
+    if status == "reattached":
+        return [TextContent(type="text", text="Session connected to console")]
+    return [TextContent(type="text", text="Session already attached (console or remote desktop): nothing to do")]
 
 
 @mcp.tool(
@@ -828,6 +785,7 @@ def ReconnectSession(force: bool = False) -> list:
         openWorldHint=False,
     )
 )
+@reports_errors
 def Notification(title: str = "remoteos-mcp", message: str = "") -> str:
     """Show a desktop notification.
 
@@ -835,10 +793,7 @@ def Notification(title: str = "remoteos-mcp", message: str = "") -> str:
         title: Notification title.
         message: Notification body text.
     """
-    try:
-        return get_desktop().show_notification(title, message)
-    except Exception as e:
-        return f"Notification error: {e}"
+    return get_desktop().show_notification(title, message)
 
 
 @mcp.tool(
@@ -848,12 +803,10 @@ def Notification(title: str = "remoteos-mcp", message: str = "") -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def LockScreen() -> str:
     """Lock the workstation."""
-    try:
-        return get_desktop().lock_screen()
-    except Exception as e:
-        return f"LockScreen error: {e}"
+    return get_desktop().lock_screen()
 
 
 @mcp.tool(
@@ -863,27 +816,25 @@ def LockScreen() -> str:
         openWorldHint=True,
     )
 )
+@reports_errors
 def Scrape(url: str) -> str:
     """Fetch URL content and return as markdown.
 
     Args:
         url: URL to fetch.
     """
-    try:
-        import urllib.request
+    import urllib.request
 
-        from markdownify import markdownify
+    from markdownify import markdownify
 
-        req = urllib.request.Request(url, headers={"User-Agent": "remoteos-mcp/0.3"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
-        md = markdownify(html, heading_style="ATX", strip=["script", "style"])
-        # Truncate
-        if len(md) > 50000:
-            md = md[:50000] + "\n\n[... truncated]"
-        return md
-    except Exception as e:
-        return f"Scrape error: {e}"
+    req = urllib.request.Request(url, headers={"User-Agent": "remoteos-mcp/0.3"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+    md = markdownify(html, heading_style="ATX", strip=["script", "style"])
+    # Truncate
+    if len(md) > 50000:
+        md = md[:50000] + "\n\n[... truncated]"
+    return md
 
 
 # ============================== FILE OPERATIONS ============================
@@ -896,6 +847,7 @@ def Scrape(url: str) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def FileRead(path: str, encoding: str = "utf-8") -> str:
     """Read file content. Returns base64 for binary files.
 
@@ -903,20 +855,16 @@ def FileRead(path: str, encoding: str = "utf-8") -> str:
         path: File path.
         encoding: Text encoding (default utf-8). Use 'binary' for base64 output.
     """
-    try:
-        p = Path(path)
-        if not p.exists():
-            return f"File not found: {path}"
-        if encoding == "binary":
-            data = p.read_bytes()
-            return base64.b64encode(data).decode()
-        else:
-            text = p.read_text(encoding=encoding, errors="replace")
-            if len(text) > 100000:
-                text = text[:100000] + "\n\n[... truncated at 100KB]"
-            return text
-    except Exception as e:
-        return f"FileRead error: {e}"
+    p = Path(path)
+    if not p.exists():
+        raise failure(f"File not found: {path}")
+    if encoding == "binary":
+        data = p.read_bytes()
+        return base64.b64encode(data).decode()
+    text = p.read_text(encoding=encoding, errors="replace")
+    if len(text) > 100000:
+        text = text[:100000] + "\n\n[... truncated at 100KB]"
+    return text
 
 
 @mcp.tool(
@@ -926,6 +874,7 @@ def FileRead(path: str, encoding: str = "utf-8") -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def FileWrite(path: str, content: str, encoding: str = "utf-8", append: bool | str = False) -> str:
     """Write content to a file.
 
@@ -935,15 +884,12 @@ def FileWrite(path: str, content: str, encoding: str = "utf-8", append: bool | s
         encoding: Text encoding (default utf-8).
         append: Append instead of overwrite.
     """
-    try:
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        mode = "a" if _tobool(append) else "w"
-        with open(p, mode, encoding=encoding) as f:
-            f.write(content)
-        return f"Written {len(content)} chars to {path}"
-    except Exception as e:
-        return f"FileWrite error: {e}"
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    mode = "a" if _tobool(append) else "w"
+    with open(p, mode, encoding=encoding) as f:
+        f.write(content)
+    return f"Written {len(content)} chars to {path}"
 
 
 @mcp.tool(
@@ -953,6 +899,7 @@ def FileWrite(path: str, content: str, encoding: str = "utf-8", append: bool | s
         openWorldHint=False,
     )
 )
+@reports_errors
 def FileList(path: str = ".", show_hidden: bool | str = False) -> str:
     """List directory contents with size and modification date.
 
@@ -960,40 +907,37 @@ def FileList(path: str = ".", show_hidden: bool | str = False) -> str:
         path: Directory path.
         show_hidden: Include hidden files/folders.
     """
-    try:
-        from tabulate import tabulate
+    from tabulate import tabulate
 
-        p = Path(path)
-        if not p.is_dir():
-            return f"Not a directory: {path}"
+    p = Path(path)
+    if not p.is_dir():
+        raise failure(f"Not a directory: {path}")
 
-        rows = []
-        for item in sorted(p.iterdir()):
-            name = item.name
-            if not _tobool(show_hidden) and name.startswith("."):
-                continue
-            try:
-                stat = item.stat()
-                size = stat.st_size
-                mtime = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
-                kind = "DIR" if item.is_dir() else "FILE"
-                if item.is_dir():
-                    size_str = "<DIR>"
-                elif size < 1024:
-                    size_str = f"{size}B"
-                elif size < 1048576:
-                    size_str = f"{size // 1024}KB"
-                else:
-                    size_str = f"{size // 1048576}MB"
-                rows.append([kind, name, size_str, mtime])
-            except Exception:
-                rows.append(["?", name, "?", "?"])
+    rows = []
+    for item in sorted(p.iterdir()):
+        name = item.name
+        if not _tobool(show_hidden) and name.startswith("."):
+            continue
+        try:
+            stat = item.stat()
+            size = stat.st_size
+            mtime = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            kind = "DIR" if item.is_dir() else "FILE"
+            if item.is_dir():
+                size_str = "<DIR>"
+            elif size < 1024:
+                size_str = f"{size}B"
+            elif size < 1048576:
+                size_str = f"{size // 1024}KB"
+            else:
+                size_str = f"{size // 1048576}MB"
+            rows.append([kind, name, size_str, mtime])
+        except (OSError, ValueError, OverflowError):  # one unreadable entry or out-of-range mtime: "?"
+            rows.append(["?", name, "?", "?"])
 
-        if not rows:
-            return "Directory is empty."
-        return tabulate(rows, headers=["Type", "Name", "Size", "Modified"], tablefmt="simple")
-    except Exception as e:
-        return f"FileList error: {e}"
+    if not rows:
+        return "Directory is empty."
+    return tabulate(rows, headers=["Type", "Name", "Size", "Modified"], tablefmt="simple")
 
 
 @mcp.tool(
@@ -1003,6 +947,7 @@ def FileList(path: str = ".", show_hidden: bool | str = False) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def FileSearch(pattern: str, path: str = ".", recursive: bool | str = True, limit: int = 50) -> str:
     """Search files by name pattern.
 
@@ -1012,32 +957,29 @@ def FileSearch(pattern: str, path: str = ".", recursive: bool | str = True, limi
         recursive: Search subdirectories.
         limit: Max results.
     """
-    try:
-        p = Path(path)
-        glob_iter = p.rglob(pattern) if _tobool(recursive) else p.glob(pattern)
+    p = Path(path)
+    glob_iter = p.rglob(pattern) if _tobool(recursive) else p.glob(pattern)
 
-        # Stream results — stop as soon as we have enough (don't scan entire disk)
-        lines = []
-        total = 0
-        for m in glob_iter:
-            total += 1
-            if len(lines) < limit:
-                try:
-                    size = m.stat().st_size
-                    lines.append(f"  {m} ({size} bytes)")
-                except Exception:
-                    lines.append(f"  {m}")
-            if len(lines) >= limit:
-                break  # Don't keep scanning after hitting limit
+    # Stream results — stop as soon as we have enough (don't scan entire disk)
+    lines = []
+    total = 0
+    for m in glob_iter:
+        total += 1
+        if len(lines) < limit:
+            try:
+                size = m.stat().st_size
+                lines.append(f"  {m} ({size} bytes)")
+            except OSError:  # a match that vanished or cannot be stat'ed is listed without its size
+                lines.append(f"  {m}")
+        if len(lines) >= limit:
+            break  # Don't keep scanning after hitting limit
 
-        if not lines:
-            return f"No files matching '{pattern}' in {path}"
+    if not lines:
+        return f"No files matching '{pattern}' in {path}"
 
-        result = f"Found {total}+ files (showing first {limit})"
-        result += ":\n" + "\n".join(lines)
-        return result
-    except Exception as e:
-        return f"FileSearch error: {e}"
+    result = f"Found {total}+ files (showing first {limit})"
+    result += ":\n" + "\n".join(lines)
+    return result
 
 
 # ========================== FILE TRANSFER (BINARY) =========================
@@ -1050,21 +992,19 @@ def FileSearch(pattern: str, path: str = ".", recursive: bool | str = True, limi
         openWorldHint=False,
     )
 )
+@reports_errors
 def FileDownload(path: str) -> str:
     """Download a file as base64-encoded content. Use for binary files.
 
     Args:
         path: File path to download.
     """
-    try:
-        p = Path(path)
-        if not p.exists():
-            return f"File not found: {path}"
-        data = p.read_bytes()
-        b64 = base64.b64encode(data).decode()
-        return f"base64:{len(data)}bytes:{b64}"
-    except Exception as e:
-        return f"FileDownload error: {e}"
+    p = Path(path)
+    if not p.exists():
+        raise failure(f"File not found: {path}")
+    data = p.read_bytes()
+    b64 = base64.b64encode(data).decode()
+    return f"base64:{len(data)}bytes:{b64}"
 
 
 # FileUpload cap on the base64 TEXT (~75 MB of file), checked before decoding (#31).
@@ -1079,6 +1019,7 @@ _B64_WHITESPACE = str.maketrans("", "", " \t\r\n")  # line-wrapped base64 (e.g. 
         openWorldHint=False,
     )
 )
+@reports_errors
 def FileUpload(path: str, data_base64: str) -> str:
     """Upload a file from base64-encoded content. Use for binary files.
 
@@ -1088,27 +1029,23 @@ def FileUpload(path: str, data_base64: str) -> str:
             (about 75 MB of file). Line breaks are allowed; any other character
             outside the base64 alphabet is an error and nothing is written.
     """
+    # Both checks run before the directory is created or the file opened (#31):
+    # lax decoding dropped junk characters, so "!!!!" truncated a file to 0 bytes.
+    if len(data_base64) > FILE_UPLOAD_MAX_BASE64:
+        log.warning("FileUpload refused: %d base64 characters over the cap", len(data_base64))  # never the path
+        raise ValueError(
+            f"data_base64 is {len(data_base64)} characters; the limit is {FILE_UPLOAD_MAX_BASE64} (100 MB of base64)"
+        )
     try:
-        # Both checks run before the directory is created or the file opened (#31):
-        # lax decoding dropped junk characters, so "!!!!" truncated a file to 0 bytes.
-        if len(data_base64) > FILE_UPLOAD_MAX_BASE64:
-            log.warning("FileUpload refused %s: %d base64 characters over the cap", path, len(data_base64))
-            return (
-                f"FileUpload error: data_base64 is {len(data_base64)} characters; "
-                f"the limit is {FILE_UPLOAD_MAX_BASE64} (100 MB of base64)"
-            )
-        try:
-            data = base64.b64decode(data_base64.translate(_B64_WHITESPACE), validate=True)
-        except ValueError as e:  # binascii.Error is one; non-ASCII text raises a plain ValueError
-            log.warning("FileUpload refused %s: invalid base64 (%s)", path, e)
-            return f"FileUpload error: data_base64 is not valid base64 ({e})"
-        p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
-        log.info("FileUpload wrote %d bytes to %s", len(data), path)
-        return f"Written {len(data)} bytes to {path}"
-    except Exception as e:
-        return f"FileUpload error: {e}"
+        data = base64.b64decode(data_base64.translate(_B64_WHITESPACE), validate=True)
+    except ValueError as e:  # binascii.Error is one; non-ASCII text raises a plain ValueError
+        log.warning("FileUpload refused: invalid base64 (%s)", e)
+        raise ValueError(f"data_base64 is not valid base64 ({e})") from e
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    log.info("FileUpload wrote %d bytes", len(data))  # never the path: logs carry no tool arguments (#31)
+    return f"Written {len(data)} bytes to {path}"
 
 
 # ============================== REGISTRY ===================================
@@ -1121,6 +1058,7 @@ def FileUpload(path: str, data_base64: str) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def RegRead(key: str, value_name: str) -> str:
     """Read system preferences (Windows registry / macOS defaults).
 
@@ -1128,10 +1066,7 @@ def RegRead(key: str, value_name: str) -> str:
         key: Registry key path, e.g. "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion".
         value_name: Name of the value to read.
     """
-    try:
-        return get_system().reg_read(key, value_name)
-    except Exception as e:
-        return f"RegRead error: {e}"
+    return get_system().reg_read(key, value_name)
 
 
 @mcp.tool(
@@ -1141,6 +1076,7 @@ def RegRead(key: str, value_name: str) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def RegWrite(key: str, value_name: str, data: str, reg_type: str = "REG_SZ") -> str:
     """Write system preferences (Windows registry / macOS defaults).
 
@@ -1150,10 +1086,7 @@ def RegWrite(key: str, value_name: str, data: str, reg_type: str = "REG_SZ") -> 
         data: Value data. For REG_DWORD/REG_QWORD pass as string number. For REG_MULTI_SZ use | separator.
         reg_type: Registry type: REG_SZ, REG_EXPAND_SZ, REG_DWORD, REG_QWORD, REG_BINARY, REG_MULTI_SZ.
     """
-    try:
-        return get_system().reg_write(key, value_name, data, reg_type)
-    except Exception as e:
-        return f"RegWrite error: {e}"
+    return get_system().reg_write(key, value_name, data, reg_type)
 
 
 # ============================= SERVICES ====================================
@@ -1166,16 +1099,14 @@ def RegWrite(key: str, value_name: str, data: str, reg_type: str = "REG_SZ") -> 
         openWorldHint=False,
     )
 )
+@reports_errors
 def ServiceList(filter: str = "") -> str:
     """List system services.
 
     Args:
         filter: Filter by service name or display name (substring match).
     """
-    try:
-        return get_services().service_list(filter)
-    except Exception as e:
-        return f"ServiceList error: {e}"
+    return get_services().service_list(filter)
 
 
 @mcp.tool(
@@ -1185,16 +1116,14 @@ def ServiceList(filter: str = "") -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def ServiceStart(name: str) -> str:
     """Start a system service.
 
     Args:
         name: Service name.
     """
-    try:
-        return get_services().service_start(name)
-    except Exception as e:
-        return f"ServiceStart error: {e}"
+    return get_services().service_start(name)
 
 
 @mcp.tool(
@@ -1204,16 +1133,14 @@ def ServiceStart(name: str) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def ServiceStop(name: str) -> str:
     """Stop a system service.
 
     Args:
         name: Service name.
     """
-    try:
-        return get_services().service_stop(name)
-    except Exception as e:
-        return f"ServiceStop error: {e}"
+    return get_services().service_stop(name)
 
 
 # ========================= SCHEDULED TASKS =================================
@@ -1226,16 +1153,14 @@ def ServiceStop(name: str) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def TaskList(filter: str = "") -> str:
     """List scheduled tasks.
 
     Args:
         filter: Filter by task name (substring match).
     """
-    try:
-        return get_services().task_list(filter)
-    except Exception as e:
-        return f"TaskList error: {e}"
+    return get_services().task_list(filter)
 
 
 @mcp.tool(
@@ -1245,6 +1170,7 @@ def TaskList(filter: str = "") -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def TaskCreate(name: str, command: str, schedule: str) -> str:
     """Create a scheduled task.
 
@@ -1253,10 +1179,7 @@ def TaskCreate(name: str, command: str, schedule: str) -> str:
         command: Command to execute.
         schedule: Schedule type (ONCE, DAILY, WEEKLY, MONTHLY, ONSTART, ONLOGON, ONIDLE).
     """
-    try:
-        return get_services().task_create(name, command, schedule)
-    except Exception as e:
-        return f"TaskCreate error: {e}"
+    return get_services().task_create(name, command, schedule)
 
 
 @mcp.tool(
@@ -1266,16 +1189,14 @@ def TaskCreate(name: str, command: str, schedule: str) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def TaskDelete(name: str) -> str:
     """Delete a scheduled task.
 
     Args:
         name: Task name.
     """
-    try:
-        return get_services().task_delete(name)
-    except Exception as e:
-        return f"TaskDelete error: {e}"
+    return get_services().task_delete(name)
 
 
 # ============================= NETWORK =====================================
@@ -1288,6 +1209,7 @@ def TaskDelete(name: str) -> str:
         openWorldHint=True,
     )
 )
+@reports_errors
 def Ping(host: str, count: int = 4) -> str:
     """Ping a host.
 
@@ -1295,10 +1217,7 @@ def Ping(host: str, count: int = 4) -> str:
         host: Hostname or IP address.
         count: Number of ping requests (default 4).
     """
-    try:
-        return network.ping(host, count)
-    except Exception as e:
-        return f"Ping error: {e}"
+    return network.ping(host, count)
 
 
 @mcp.tool(
@@ -1308,6 +1227,7 @@ def Ping(host: str, count: int = 4) -> str:
         openWorldHint=True,
     )
 )
+@reports_errors
 def PortCheck(host: str, port: int, timeout: float = 5.0) -> str:
     """Check if a TCP port is open.
 
@@ -1316,10 +1236,7 @@ def PortCheck(host: str, port: int, timeout: float = 5.0) -> str:
         port: Port number.
         timeout: Connection timeout in seconds (default 5).
     """
-    try:
-        return network.port_check(host, port, timeout)
-    except Exception as e:
-        return f"PortCheck error: {e}"
+    return network.port_check(host, port, timeout)
 
 
 @mcp.tool(
@@ -1329,6 +1246,7 @@ def PortCheck(host: str, port: int, timeout: float = 5.0) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def NetConnections(filter: str = "", limit: int = 50) -> str:
     """List network connections.
 
@@ -1336,10 +1254,7 @@ def NetConnections(filter: str = "", limit: int = 50) -> str:
         filter: Filter connections by local/remote address, status, or PID.
         limit: Maximum number of connections to return (default 50).
     """
-    try:
-        return network.net_connections(filter, limit=limit)
-    except Exception as e:
-        return f"NetConnections error: {e}"
+    return network.net_connections(filter, limit=limit)
 
 
 # ============================ EVENT LOG ====================================
@@ -1352,6 +1267,7 @@ def NetConnections(filter: str = "", limit: int = 50) -> str:
         openWorldHint=False,
     )
 )
+@reports_errors
 def EventLog(log_name: str = "System", count: int = 20, level: str = "") -> str:
     """Read system event log entries.
 
@@ -1360,10 +1276,7 @@ def EventLog(log_name: str = "System", count: int = 20, level: str = "") -> str:
         count: Number of entries to retrieve (default 20).
         level: Filter by level: critical, error, warning, information, verbose.
     """
-    try:
-        return get_services().event_log(log_name, count, level)
-    except Exception as e:
-        return f"EventLog error: {e}"
+    return get_services().event_log(log_name, count, level)
 
 
 # ============================== OCR ========================================
@@ -1376,6 +1289,7 @@ def EventLog(log_name: str = "System", count: int = 20, level: str = "") -> str:
         openWorldHint=False,
     )
 )
+@_capture_tool
 def OCR(
     left: int = 0,
     top: int = 0,
@@ -1397,18 +1311,13 @@ def OCR(
         bottom: Bottom edge of region.
         lang: OCR language for pytesseract (default 'eng').
     """
-    try:
-        region = {}
-        if left or top or right or bottom:
-            region = {"left": left, "top": top, "right": right, "bottom": bottom}
-        text = ocr.run_ocr(**region, lang=lang) if region else ocr.run_ocr(lang=lang)
-        if not text:
-            return "(no text detected)"
-        return text
-    except ImportError as e:
-        return f"OCR error: {e}"
-    except Exception as e:
-        return f"OCR error: {e}"
+    region = {}
+    if left or top or right or bottom:
+        region = {"left": left, "top": top, "right": right, "bottom": bottom}
+    text = ocr.run_ocr(**region, lang=lang) if region else ocr.run_ocr(lang=lang)
+    if not text:
+        return "(no text detected)"
+    return text
 
 
 # ========================== SCREEN RECORDING ===============================
@@ -1421,6 +1330,7 @@ def OCR(
         openWorldHint=False,
     )
 )
+@_capture_tool
 def ScreenRecord(
     duration: float = 3.0,
     fps: int = 5,
@@ -1444,26 +1354,23 @@ def ScreenRecord(
         bottom: Bottom edge of capture region.
         max_width: Max width of output GIF (default 800).
     """
-    try:
-        region = {}
-        if left or top or right or bottom:
-            region = {"left": left, "top": top, "right": right, "bottom": bottom}
-        if is_linux():
-            # Linux path: ffmpeg x11grab in the resolved session (issue #8). Same
-            # base64-GIF return shape as recording.record_screen, so the content
-            # below is identical to the Windows/macOS path.
-            b64 = get_desktop().record_screen(duration=duration, fps=fps, max_width=max_width, **region)
-        else:
-            b64 = recording.record_screen(duration=duration, fps=fps, max_width=max_width, **region)
-        return [
-            ImageContent(type="image", data=b64, mimeType="image/gif"),
-            TextContent(
-                type="text",
-                text=f"Recorded {duration}s at {fps}fps ({len(b64) * 3 // 4 // 1024}KB GIF)",
-            ),
-        ]
-    except Exception as e:
-        return [TextContent(type="text", text=f"ScreenRecord error: {e}")]
+    region = {}
+    if left or top or right or bottom:
+        region = {"left": left, "top": top, "right": right, "bottom": bottom}
+    if is_linux():
+        # Linux path: ffmpeg x11grab in the resolved session (issue #8). Same
+        # base64-GIF return shape as recording.record_screen, so the content
+        # below is identical to the Windows/macOS path.
+        b64 = get_desktop().record_screen(duration=duration, fps=fps, max_width=max_width, **region)
+    else:
+        b64 = recording.record_screen(duration=duration, fps=fps, max_width=max_width, **region)
+    return [
+        ImageContent(type="image", data=b64, mimeType="image/gif"),
+        TextContent(
+            type="text",
+            text=f"Recorded {duration}s at {fps}fps ({len(b64) * 3 // 4 // 1024}KB GIF)",
+        ),
+    ]
 
 
 # ======================== ANNOTATED SNAPSHOT ===============================
@@ -1476,6 +1383,7 @@ def ScreenRecord(
         openWorldHint=False,
     )
 )
+@_capture_tool
 def AnnotatedSnapshot(
     max_elements: int = 30,
     quality: int = 65,
@@ -1499,41 +1407,32 @@ def AnnotatedSnapshot(
         max_width: Max image width in pixels. 0=native resolution. Default 1280 (same as Snapshot).
         monitor: Monitor to capture. 0=all monitors (default; on macOS the main display), 1/2/3=specific monitor.
     """
-    try:
+    img, frame = _capture_snapshot_frame(monitor, max_width)
+    coordinates = f"**Coordinates:** {contract_line(frame)}"
+
+    elements = get_desktop().get_interactive_elements()
+    if not elements:
+        note = "No interactive elements found"
         if is_linux():
-            d = get_desktop()
-            if d.get_session().mode != "x11":
-                return [TextContent(type="text", text=d._unavailable())]
-        try:
-            img, frame = _capture_snapshot_frame(monitor, max_width)
-        except Exception as e:
-            return [TextContent(type="text", text=f"AnnotatedSnapshot error: {e}")]
-        coordinates = f"**Coordinates:** {contract_line(frame)}"
-
-        elements = get_desktop().get_interactive_elements()
-        if not elements:
-            note = "No interactive elements found"
-            if is_linux():
-                note += " (AT-SPI exposed none for the focused app)"
-            return [
-                ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"),
-                TextContent(type="text", text=f"{coordinates}\n\n{note}."),
-            ]
-
-        annotated = draw_annotations(img, elements, frame, max_elements)
-        text_summary = f"{coordinates}\n\n**Annotated {len(annotated)} elements:**\n" + "\n".join(annotated)
+            note += " (AT-SPI exposed none for the focused app)"
         return [
             ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"),
-            TextContent(type="text", text=text_summary),
+            TextContent(type="text", text=f"{coordinates}\n\n{note}."),
         ]
-    except Exception as e:
-        return [TextContent(type="text", text=f"AnnotatedSnapshot error: {e}")]
+
+    annotated = draw_annotations(img, elements, frame, max_elements)
+    text_summary = f"{coordinates}\n\n**Annotated {len(annotated)} elements:**\n" + "\n".join(annotated)
+    return [
+        ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"),
+        TextContent(type="text", text=text_summary),
+    ]
 
 
 # ================================ Task Management ================================
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@reports_errors
 def CancelTask(task_id: str) -> str:
     """Cancel a running or pending task by its task ID.
 
@@ -1542,11 +1441,12 @@ def CancelTask(task_id: str) -> str:
     """
     result = task_manager.cancel_task(task_id)
     if "error" in result:
-        return f"Cancel failed: {result['error']}"
+        raise failure(f"Cancel failed: {result['error']}")
     return f"Cancelled task {task_id} ({result['tool_name']})"
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@reports_errors
 def GetTaskStatus(task_id: str = "") -> str:
     """Get status of a specific task or list recent tasks.
 
@@ -1558,7 +1458,7 @@ def GetTaskStatus(task_id: str = "") -> str:
     if task_id:
         info = task_manager.get_task(task_id)
         if info is None:
-            return f"Task {task_id} not found"
+            raise failure(f"Task {task_id} not found")
         return json.dumps(info, indent=2)
     tasks = task_manager.list_tasks()
     if not tasks:
@@ -1572,6 +1472,7 @@ def GetTaskStatus(task_id: str = "") -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+@reports_errors
 def GetRunningTasks() -> str:
     """List all currently running and pending tasks."""
 

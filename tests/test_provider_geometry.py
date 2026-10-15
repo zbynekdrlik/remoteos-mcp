@@ -21,7 +21,9 @@ import types
 from pathlib import Path
 
 import pytest
+from fake_windows_session import WTS_DISCONNECTED, FakeClipboard, FakeWindowsSession
 from PIL import Image, ImageGrab
+from tool_test_support import purge_module, tool_error
 
 from remoteos.coords import image_to_screen
 
@@ -42,13 +44,6 @@ class _Recorder:
     def __call__(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         return self.result
-
-
-def _purge(name: str) -> None:
-    sys.modules.pop(name, None)
-    parent, _, child = name.rpartition(".")
-    if parent in sys.modules and hasattr(sys.modules[parent], child):
-        delattr(sys.modules[parent], child)
 
 
 class _FakeInput:
@@ -81,6 +76,7 @@ class _FakeInput:
 @pytest.fixture
 def win(monkeypatch):
     user_input = _FakeInput()
+    session = FakeWindowsSession()  # a HEALTHY session: the desktop tools' preflight (#32) passes for real
     windll = types.SimpleNamespace(
         user32=types.SimpleNamespace(
             GetSystemMetrics=lambda i: _METRICS[i],
@@ -91,7 +87,9 @@ def win(monkeypatch):
         ),
         shcore=types.SimpleNamespace(SetProcessDpiAwareness=lambda v: 0),
         input=user_input,  # not a DLL: the tests' handle on the recorded input
+        session=session,  # not a DLL: the tests' handle on the fake logon session
     )
+    session.add_to(windll)
     monkeypatch.setattr(ctypes, "windll", windll, raising=False)
     from remoteos.platform.win import dpi
 
@@ -112,10 +110,10 @@ def win(monkeypatch):
         return Image.new("RGB", (bbox[2] - bbox[0], bbox[3] - bbox[1]))
 
     monkeypatch.setattr(ImageGrab, "grab", _grab)
-    _purge("remoteos.platform.win.desktop")
+    purge_module("remoteos.platform.win.desktop")
     mod = importlib.import_module("remoteos.platform.win.desktop")
     yield mod, grabs
-    _purge("remoteos.platform.win.desktop")
+    purge_module("remoteos.platform.win.desktop")
 
 
 def test_windows_import_sets_per_monitor_v2(win):
@@ -299,7 +297,7 @@ def test_windows_scroll_direction_wins_over_sign_and_horizontal(pyautogui_branch
 
 def test_windows_scroll_unknown_direction_sends_nothing(pyautogui_branch):
     server, _ = pyautogui_branch
-    out = server.Scroll(3, direction="sideways")
+    out = tool_error(lambda: server.Scroll(3, direction="sideways"))
     assert out == "Scroll error: direction must be one of up, down, left, right (got 'sideways')"
     assert ctypes.windll.input.log == []
 
@@ -392,7 +390,7 @@ def test_windows_type_tool_sends_every_slovak_character(pyautogui_branch):
 def test_windows_type_tool_reports_blocked_input_as_an_error_not_typed(pyautogui_branch):
     server, _ = pyautogui_branch
     ctypes.windll.input.inserted = 0
-    out = server.Type("ab")
+    out = tool_error(lambda: server.Type("ab"))
     assert out.startswith("Type error: SendInput inserted 0 of 2 key events after 0 of 2 chars")
     assert "Typed" not in out
 
@@ -409,44 +407,25 @@ def test_windows_type_tool_clicks_clears_types_and_presses_enter(pyautogui_branc
 
 def test_type_tool_unknown_method_is_an_error_and_does_nothing(pyautogui_branch):
     server, fake = pyautogui_branch
-    out = server.Type("x", x=640, y=228, method="clipboard")
+    out = tool_error(lambda: server.Type("x", x=640, y=228, method="clipboard"))
     assert out == "Type error: method must be 'keys' or 'paste' (got 'clipboard')"
     assert fake.click.calls == [] and ctypes.windll.input.raw == []
-
-
-class _FakeClipboard:
-    """pywin32 ``win32clipboard`` with one CF_UNICODETEXT slot (``None`` = no text on it)."""
-
-    def __init__(self, text):
-        self.text = text
-        self.writes: list[str] = []
-
-    def OpenClipboard(self):
-        pass
-
-    def CloseClipboard(self):
-        pass
-
-    def EmptyClipboard(self):
-        self.text = None
-
-    def GetClipboardData(self, fmt):
-        if self.text is None:
-            raise TypeError("Specified clipboard format is not available")
-        return self.text
-
-    def SetClipboardText(self, text, fmt):
-        self.text = text
-        self.writes.append(text)
 
 
 @pytest.fixture
 def win_clipboard(monkeypatch, pyautogui_branch):
     """``method="paste"`` on Windows: a fake clipboard, and the paste keys see what it holds."""
     server, fake = pyautogui_branch
-    clip = _FakeClipboard("old clip")
+    clip = FakeClipboard("old clip")
     module = sys.modules["win32clipboard"]
-    for name in ("OpenClipboard", "CloseClipboard", "EmptyClipboard", "GetClipboardData", "SetClipboardText"):
+    for name in (
+        "OpenClipboard",
+        "CloseClipboard",
+        "IsClipboardFormatAvailable",
+        "EmptyClipboard",
+        "GetClipboardData",
+        "SetClipboardText",
+    ):
         monkeypatch.setattr(module, name, getattr(clip, name), raising=False)
     monkeypatch.setattr(sys.modules["win32con"], "CF_UNICODETEXT", 13, raising=False)
     pressed: list[tuple] = []
@@ -478,8 +457,8 @@ def test_windows_paste_method_refused_clipboard_is_an_error_before_the_paste_key
         raise OSError("OpenClipboard failed")
 
     monkeypatch.setattr(sys.modules["win32clipboard"], "SetClipboardText", _refuse)
-    out = server.Type("x", method="paste")
-    assert out == "Type error: could not put the text on the clipboard: Error: OpenClipboard failed"
+    out = tool_error(lambda: server.Type("x", method="paste"))
+    assert out == "Type error: could not put the text on the clipboard: OpenClipboard failed"
     assert pressed == []
 
 
@@ -495,7 +474,7 @@ def test_windows_paste_reports_a_failed_restore(win_clipboard, monkeypatch):
     monkeypatch.setattr(sys.modules["win32clipboard"], "SetClipboardText", _second_write_refused)
     out = server.Type("ďakujem", method="paste")
     assert pressed == [(("ctrl", "v"), "ďakujem")]
-    assert out == "Pasted 7 chars, but restoring the clipboard failed: Error: OpenClipboard failed"
+    assert out == "Pasted 7 chars, but restoring the clipboard failed: OpenClipboard failed"
 
 
 def test_windows_paste_restores_the_clipboard_when_the_paste_keys_fail(win_clipboard, pyautogui_branch):
@@ -506,7 +485,7 @@ def test_windows_paste_restores_the_clipboard_when_the_paste_keys_fail(win_clipb
         raise OSError("keyboard is gone")
 
     fake.hotkey = _broken_keyboard
-    out = server.Type("ďakujem", method="paste")
+    out = tool_error(lambda: server.Type("ďakujem", method="paste"))
     assert out == "Type error: keyboard is gone"
     assert clip.writes == ["ďakujem", "old clip"] and clip.text == "old clip"
 
@@ -556,18 +535,20 @@ def windows_tool_layer(monkeypatch, win):
     return server, commands
 
 
-def _session_tools(monkeypatch, server, commands, query_rc=0):
-    """Fake ``query session`` (one disconnected RDP session, id 2) and ``tscon``."""
-    query_out = (
-        " SESSIONNAME       USERNAME                 ID  STATE   TYPE        DEVICE\n"
-        " rdp-tcp#5         newlevel                  2  Disc\n"
-    )
+def _session_tools(monkeypatch, server, commands, readable=True):
+    """The server's own session (id 2) is disconnected; ``tscon 2 /dest:console`` attaches it.
+
+    The session is read through ProcessIdToSessionId + WTSConnectState (#32 review round 1),
+    never parsed out of ``query session``: a real disconnected session's line there has a
+    blank SESSIONNAME (``>   drlikzbynek   2  Disc``), which the old parser skipped.
+    """
+    session = ctypes.windll.session
+    session.session_id, session.connect_state = 2, WTS_DISCONNECTED
+    session.fail_session_id = not readable
 
     def _run(cmd, **kwargs):
         commands.append(list(cmd))
-        if cmd[:2] == ["query", "session"]:
-            return types.SimpleNamespace(returncode=query_rc, stdout=query_out, stderr="boom")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")  # tscon
+        return session.tscon(cmd)  # only tscon may run
 
     monkeypatch.setattr(server.subprocess, "run", _run)
 
@@ -578,16 +559,16 @@ def test_windows_capture_retries_after_session_reconnect(monkeypatch, windows_to
     _flaky_grab(monkeypatch, failures=1)
     img, frame = server._capture_snapshot_frame(0, 1280)
     assert img.size == frame.image_size == (1280, 457)
-    assert ["tscon", "2", "/dest:console"] in commands
+    assert commands == [["tscon", "2", "/dest:console"]]
 
 
 def test_windows_capture_error_surfaces_when_not_a_session_issue(monkeypatch, windows_tool_layer):
     server, commands = windows_tool_layer
-    _session_tools(monkeypatch, server, commands, query_rc=1)  # query fails → no reconnect
+    _session_tools(monkeypatch, server, commands, readable=False)  # session state unreadable → no reconnect
     _flaky_grab(monkeypatch, failures=1)
     with pytest.raises(OSError, match="screen grab failed"):
         server._capture_snapshot_frame(0, 1280)
-    assert not [c for c in commands if c[:1] == ["tscon"]]
+    assert commands == []
 
 
 def test_windows_capture_reports_failed_retry(monkeypatch, windows_tool_layer):
@@ -651,7 +632,7 @@ def mac(monkeypatch):
     quartz.CGEventPost = lambda tap, event: quartz.posted.append((tap, event))
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
     monkeypatch.setitem(sys.modules, "pyautogui", types.ModuleType("pyautogui"))
-    _purge("remoteos.platform.mac.desktop")
+    purge_module("remoteos.platform.mac.desktop")
     mod = importlib.import_module("remoteos.platform.mac.desktop")
 
     commands: list[list[str]] = []
@@ -664,7 +645,7 @@ def mac(monkeypatch):
 
     monkeypatch.setattr(mod.subprocess, "run", _run)
     yield mod, commands
-    _purge("remoteos.platform.mac.desktop")
+    purge_module("remoteos.platform.mac.desktop")
 
 
 def test_mac_retina_geometry_is_points_with_pixel_capture(mac):
@@ -907,8 +888,9 @@ def test_mac_paste_without_the_posting_permission_is_an_error_and_touches_nothin
     board = _mac_pasteboard(monkeypatch, server, fake, "old clip")
     monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
     # pyautogui's Command+V is a CGEventPost too: macOS would drop it silently behind "Pasted 4 chars"
-    out = server.Type("Žltý", x=640, y=400, clear=True, method="paste")
-    assert out.startswith("Type error: macOS does not let this process post keyboard events")
+    out = tool_error(lambda: server.Type("Žltý", x=640, y=400, clear=True, method="paste"))
+    # the Type tool's preflight (#32) refuses first, with the same CGPreflightPostEventAccess predicate
+    assert out.startswith("macOS does not let this process control the mouse and keyboard")
     assert board["writes"] == [] and board["pressed"] == []
     assert fake.click.calls == [] and fake.press.calls == []
 
@@ -916,8 +898,9 @@ def test_mac_paste_without_the_posting_permission_is_an_error_and_touches_nothin
 def test_mac_keys_without_the_posting_permission_clicks_and_clears_nothing(mac_tool_layer, monkeypatch):
     server, fake, quartz = mac_tool_layer
     monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
-    out = server.Type("Žltý", x=640, y=400, clear=True, press_enter=True)
-    assert out.startswith("Type error: macOS does not let this process post keyboard events")
+    out = tool_error(lambda: server.Type("Žltý", x=640, y=400, clear=True, press_enter=True))
+    # the Type tool's preflight (#32) refuses first, with the same CGPreflightPostEventAccess predicate
+    assert out.startswith("macOS does not let this process control the mouse and keyboard")
     assert fake.click.calls == [] and fake.hotkey.calls == [] and fake.press.calls == []
     assert quartz.posted == []
 

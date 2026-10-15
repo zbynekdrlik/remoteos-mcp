@@ -50,17 +50,21 @@ paths:
     `CGPreflightPostEventAccess()` (macOS 10.15+) BEFORE the click, clear or paste, and
     `type_unicode` checks again for direct callers. When it is false they raise and nothing
     is clicked, typed or pasted.
-  - A locked console still drops events unseen. That diagnosis is #32.
+  - A locked console still drops events unseen. Since #32 the Type tool's preflight refuses
+    it first: `diagnose()` checks `CGSSessionScreenIsLocked` and the same
+    `CGPreflightPostEventAccess`. See `.claude/rules/tool-errors.md`.
   - Every event is built before any is posted, as in the scroll code.
   - The edit-shortcut modifier is **Command** (`_SHORTCUT_MODIFIER`). Ctrl+A in Cocoa moves
     the caret to the paragraph start, so the old `clear` deleted one character.
 - **The reply is the delivered count.** `typed_reply(delivered, len(text))`: any shortfall is
   an error, never `Typed N chars`.
 - **`method="paste"` = `text_entry.paste_text`.**
-  - It goes through the providers' existing `get_clipboard` / `set_clipboard`. Those REPORT a
-    failure as an `Error: …` string and do not raise.
-  - A failed or EMPTY read means "no text to restore". macOS `pbpaste` prints `""` for an
-    image too, so "restoring" `""` would only wipe it.
+  - It goes through the providers' existing `get_clipboard` / `set_clipboard`. Those RAISE on
+    failure (#32). Clipboard text that starts with `Error:` is ordinary text. A clipboard
+    without text reads as `""` on every OS: Windows checks `IsClipboardFormatAvailable`, and
+    Linux maps xclip's "target … not available" to `""`.
+  - A failed (raising) or EMPTY read means "no text to restore". macOS `pbpaste` prints `""`
+    for an image too, so "restoring" `""` would only wipe it.
   - A failed write raises before the paste keys are pressed. The `finally` restores even when
     the paste keys fail.
   - It waits 0.3 s before restoring, because the target app reads the clipboard when it
@@ -70,7 +74,7 @@ paths:
   - `_FakeInput.raw` keeps each `SendInput` call's INPUT bytes. `_key_calls` decodes them with
     the Win32 offsets (union at 8 on x64 / 4 on x86; `wVk`, `wScan` WORDs, then `dwFlags`),
     not with our field names.
-  - `_FakeClipboard` stands in for `win32clipboard`. The fake Quartz records keyboard events
+  - `fake_windows_session.FakeClipboard` stands in for `win32clipboard`. The fake Quartz records keyboard events
     and has `CGPreflightPostEventAccess`. `_mac_pasteboard` fakes `pbcopy`/`pbpaste`.
   - The tool-layer fixtures patch BOTH `server.pyautogui` and the provider's `pyautogui`.
   - Expected values are literals (0x0004, 0x017D for Ž, 0xD83D/0xDE00).

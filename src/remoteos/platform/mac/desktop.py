@@ -12,6 +12,7 @@ from typing import Optional
 import pyautogui
 
 from remoteos.coords import CaptureGeometry, frame_for
+from remoteos.platform.mac.availability import diagnose  # noqa: F401  (the provider's diagnose(), #32)
 from remoteos.scroll import chunks, wheel_steps
 from remoteos.snapshot import fit_to_frame
 from remoteos.text_entry import enter_text
@@ -335,29 +336,25 @@ def type_text(
 # ---------------------------------------------------------------------------
 
 
+def _app_of_window(handle: int) -> str:
+    """The app name owning window ``handle`` (the title before " — "); raises when there is none."""
+    for w in enumerate_windows():
+        if w.handle == handle:
+            return w.title.split(" — ")[0] if " — " in w.title else w.title
+    raise LookupError(f"No window with handle {handle}")
+
+
 def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> str:
-    """Bring a window to the foreground via AppleScript."""
+    """Bring a window to the foreground via AppleScript; raises when it cannot (#32)."""
     if not title and not handle:
-        return "No window specified"
-
+        raise ValueError("No window specified")
     if handle:
-        # Try to find the window owner by handle from enumeration
-        try:
-            for w in enumerate_windows():
-                if w.handle == handle:
-                    # Extract the app name (before " — ")
-                    app_name = w.title.split(" — ")[0] if " — " in w.title else w.title
-                    title = app_name
-                    break
-            else:
-                return f"No window with handle {handle}"
-        except Exception as e:
-            return f"Failed to look up handle {handle}: {e}"
-
+        title = _app_of_window(handle)
     if not title:
-        return "No window found"
+        raise LookupError("No window found")
 
-    # Escape double quotes in title for AppleScript
+    # Escape double quotes in title for AppleScript. "error" makes osascript exit
+    # non-zero, so a missing process raises instead of being returned as text.
     safe_title = title.replace('"', '\\"')
     script = f'''
 tell application "System Events"
@@ -368,13 +365,10 @@ tell application "System Events"
             return "Focused " & name of proc
         end if
     end repeat
-    return "No process matching \\"{safe_title}\\""
+    error "No process matching \\"{safe_title}\\""
 end tell
 '''
-    try:
-        return _run_osascript(script)
-    except Exception as e:
-        return f"Failed to focus: {e}"
+    return _run_osascript(script)
 
 
 def minimize_all() -> str:
@@ -387,76 +381,50 @@ tell application "System Events"
     end repeat
 end tell
 '''
-    try:
-        _run_osascript(script)
-        return "Minimized all windows"
-    except Exception as e:
-        return f"Failed: {e}"
+    _run_osascript(script)
+    return "Minimized all windows"
 
 
 def launch_app(name: str, args: str = "") -> str:
     """Launch application via 'open -a'."""
+    cmd = ["open", "-a", name]
+    if args:
+        cmd.append("--args")
+        cmd.extend(args.split())
     try:
-        cmd = ["open", "-a", name]
-        if args:
-            cmd.append("--args")
-            cmd.extend(args.split())
         subprocess.run(cmd, timeout=10, capture_output=True, check=True)
-        return f"Launched {name}"
     except subprocess.CalledProcessError as e:
-        return f"Failed to launch {name}: {e.stderr.decode().strip()}"
-    except Exception as e:
-        return f"Failed to launch {name}: {e}"
+        raise RuntimeError(f"Failed to launch {name}: {e.stderr.decode().strip()}") from e
+    return f"Launched {name}"
 
 
 def resize_window(handle: int, width: int, height: int) -> str:
     """Resize the front window of the app owning the given window handle."""
-    # Find the app name from the handle
-    app_name = None
-    try:
-        for w in enumerate_windows():
-            if w.handle == handle:
-                app_name = w.title.split(" — ")[0] if " — " in w.title else w.title
-                break
-    except Exception:
-        pass
-
-    if not app_name:
-        return f"No window with handle {handle}"
-
-    safe_name = app_name.replace('"', '\\"')
+    safe_name = _app_of_window(handle).replace('"', '\\"')
+    # an AppleScript error makes osascript exit non-zero: _run_osascript raises it
     script = f'''
 tell application "System Events"
     tell process "{safe_name}"
-        try
-            set size of front window to {{{width}, {height}}}
-            return "Resized {safe_name} to {width}x{height}"
-        on error errMsg
-            return "Failed: " & errMsg
-        end try
+        set size of front window to {{{width}, {height}}}
+        return "Resized {safe_name} to {width}x{height}"
     end tell
 end tell
 '''
-    try:
-        return _run_osascript(script)
-    except Exception as e:
-        return f"Failed: {e}"
+    return _run_osascript(script)
 
 
 # ---------------------------------------------------------------------------
-# Clipboard
+# Clipboard — a failure raises (#32)
 # ---------------------------------------------------------------------------
 
 
 def get_clipboard() -> str:
-    """Get clipboard contents via pbpaste."""
+    """Get clipboard contents via pbpaste ("" for an empty or non-text clipboard)."""
     try:
         result = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=5)
-        return result.stdout
     except FileNotFoundError:
-        return "Error: pbpaste not found — requires macOS"
-    except Exception as e:
-        return f"Error: {e}"
+        raise RuntimeError("pbpaste not found — requires macOS") from None
+    return result.stdout
 
 
 def set_clipboard(text: str) -> str:
@@ -468,11 +436,9 @@ def set_clipboard(text: str) -> str:
             timeout=5,
             check=True,
         )
-        return "Clipboard set"
     except FileNotFoundError:
-        return "Error: pbcopy not found — requires macOS"
-    except Exception as e:
-        return f"Error: {e}"
+        raise RuntimeError("pbcopy not found — requires macOS") from None
+    return "Clipboard set"
 
 
 # ---------------------------------------------------------------------------
@@ -482,11 +448,8 @@ def set_clipboard(text: str) -> str:
 
 def lock_screen() -> str:
     """Put display to sleep (locks screen if password required on wake)."""
-    try:
-        subprocess.run(["pmset", "displaysleepnow"], timeout=5, check=True)
-        return "Screen locked"
-    except Exception as e:
-        return f"Failed: {e}"
+    subprocess.run(["pmset", "displaysleepnow"], timeout=5, check=True)
+    return "Screen locked"
 
 
 # ---------------------------------------------------------------------------
@@ -499,8 +462,5 @@ def show_notification(title: str, message: str) -> str:
     safe_title = title.replace('"', '\\"')
     safe_message = message.replace('"', '\\"')
     script = f'display notification "{safe_message}" with title "{safe_title}"'
-    try:
-        _run_osascript(script)
-        return "Notification shown"
-    except Exception as e:
-        return f"Failed: {e}"
+    _run_osascript(script)
+    return "Notification shown"
