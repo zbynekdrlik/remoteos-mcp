@@ -103,9 +103,12 @@ def test_param_at_the_start_of_the_script_works():
 
 
 def test_a_parse_error_is_reported_with_the_scripts_exact_text():
-    reply = server.Shell('if ( { "Žltý kôň"')
-    assert '+ if ( { "Žltý kôň"' in reply, reply
-    assert "Missing closing" in reply, reply
+    # Windows PowerShell 5.1 prints a -Command parse error as the message, CategoryInfo and
+    # FullyQualifiedErrorId, with no "At line / + <script>" excerpt (first CI run). The unexpected-
+    # token message quotes the script's own token, so its Slovak letters prove the exact read.
+    reply = server.Shell('"a" ťava kôň')
+    assert reply.startswith("[STDERR] Unexpected token 'ťava' in expression or statement.\n"), reply
+    assert "ParserError" in reply and reply.endswith("[Exit code: 1]"), reply
     _only_the_users_text(reply)
 
 
