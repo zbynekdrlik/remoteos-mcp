@@ -89,18 +89,22 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
     "NetConnections": ToolCategory.NETWORK,
 }
 
-# A RUNNING task older than this is taken as stuck and auto-cancelled (unless it declared a longer timeout).
+# A RUNNING task older than this is taken as stuck and auto-cancelled (unless it declared a longer runtime).
 STALE_AFTER_S = 300
-# Headroom over a tool's own `timeout` argument: its kill-and-reap path takes a few seconds more.
+# The arguments through which a call declares how long it runs: Shell's `timeout`, Wait's `seconds`.
+_RUNTIME_ARGS = ("timeout", "seconds")
+# Headroom over a declared runtime: Shell's kill-and-reap path takes a few seconds more.
 _TIMEOUT_HEADROOM_S = 60
 
 
 def _declared_runtime(kwargs: dict) -> float | None:
-    """The runtime a call declares through a numeric ``timeout`` argument (e.g. Shell), plus headroom."""
-    timeout = kwargs.get("timeout")
-    if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
-        return float(timeout) + _TIMEOUT_HEADROOM_S
-    return None
+    """The longest runtime a call declares through a numeric ``_RUNTIME_ARGS`` argument, plus headroom."""
+    declared = [
+        float(value)
+        for value in (kwargs.get(name) for name in _RUNTIME_ARGS)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    ]
+    return max(declared) + _TIMEOUT_HEADROOM_S if declared else None
 
 
 # Max concurrent tasks per category

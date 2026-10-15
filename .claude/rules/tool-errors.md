@@ -109,9 +109,11 @@ paths:
   - Windows OCR runs with `$ErrorActionPreference = 'Stop'`. A failing step can still exit 0
     with empty stdout, so "stderr and no text" is a failure as well.
 - **The stale-task sweep** (`_cleanup_old`, `STALE_AFTER_S` = 300) cancels a RUNNING task, and
-  a cancelled task's reply is an error. A call with a numeric `timeout` argument (Shell)
-  extends its own limit to `timeout + 60` s, so a long command that finishes inside its
-  timeout is never reported as cancelled.
+  a cancelled task's reply is an error. A call that declares its runtime through a numeric
+  argument in `taskmanager._RUNTIME_ARGS` (Shell's `timeout`, Wait's `seconds`) extends its
+  own limit to that runtime + 60 s, so a long command or wait that finishes inside it is never
+  reported as cancelled. A new tool that can legitimately run past 300 s must declare its
+  runtime the same way (round 8: `Wait(seconds=400)` was swept).
 - **Providers' clipboard functions raise on failure.** `text_entry.paste_text` catches the read
   (a failed read = nothing to restore). It wraps a failed write as "could not put the text on
   the clipboard: …". A failed restore after a good paste stays a successful reply with the
