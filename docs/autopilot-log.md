@@ -260,3 +260,31 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Out of scope, recorded on other tickets:**
   - #39: PowerShell `$()` injection in the Windows toast (Notification is tier 1).
   - #37: the AX tree needs a new `need`.
+
+## #48 — Shell output on Windows as lossless UTF-8 (0.7.0.dev29)
+
+- **Validated first:** Shell still ran `powershell -NoProfile -Command` decoded in the OEM page (live in #32: `Zlty kôn` on resolume-pp, cp437). The RED test reproduced the OEM decode of UTF-8 bytes as `┼╜lt├╜ k├┤┼ê …`.
+- **Design (the main's Approach 1):**
+  - `platform/command.py` owns starting and decoding a child: `powershell_argv` (a UTF-8 prefix line in `try/catch`), `own_console`, `decode_output`, `run_child`.
+  - Every PowerShell child (Shell, `_ps`, launch_app, show_notification, OCR) runs binary in its own console. `console_child` (text mode, OEM) is left only for ping.
+  - `decode_output` on Windows: strict UTF-8; otherwise per LINE UTF-8 or the OEM page (`errors="replace"`, one payload-free log line with counts). Off Windows: the locale, unchanged. Newlines as in text mode.
+  - `_get_system_language`: GetUserDefaultLocaleName → `locale.getlocale()` → `en_US`; the deprecated getter is gone.
+- **Decisions:**
+  - The fallback is per line (round 1), and a lone CR also breaks a line (round 2).
+  - The prefix uses `New-Object` (any PowerShell version) inside `try/catch` (a CLM box).
+  - The Shell docstring states the `param(...)`/`using` limit. Native output captured BY PowerShell is decoded by PowerShell as UTF-8 (documented limit; on the live list).
+  - System Language is now `sk-SK` (design).
+- **Commits:**
+  - `8569c41` bump.
+  - `1c3dbe8`: fakes keep subprocess's return type.
+  - `f07fc1d`/`31f2ef5` [red] → `3422348` [green].
+  - Locale: `187b4e9` → `8067ab0`.
+  - Round 1 (0🔴 2🟡 9🔵): `4a571fa`, `ef13ff5` → `071a3f8`, `14e4f69`.
+  - Round 2 (0🔴 1🟡 8🔵): `9b1cc6d`, `cc0de75` → `8185910`, `fefbccd`.
+  - Round 3 (0🔴 0🟡 5🔵): `af5a8ef`, `ba429a1` (new `.claude/rules/child-output.md`).
+- **Tests:**
+  - New: `tests/test_output_encoding.py`, `tests/test_win_system_language.py`, `tests/fake_console_child.py` (a REAL Python child through the real subprocess; a fake `oem` codec; `run_result`), and `conftest.windows_child`.
+  - Result: 671 pass, ruff clean.
+- **Live verification (supervisor, after install):** the design's list plus the extra items on #48:
+  - `Write-Error` and `cmd /c echo` on resolume-pp;
+  - PowerShell-captured native output and a cp852 `.bat` on win-pz-server.

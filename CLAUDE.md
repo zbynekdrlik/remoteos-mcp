@@ -28,3 +28,4 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 - **Never run ad-hoc `pip install` to upgrade.** Always use the OS-appropriate one-liner installer.
 - **Never commit `.mcp.json`** — it contains bearer tokens. Symlink from `~/.claude/mcp-configs/`.
 - **Deploy policy:** `python3 airuleset.py push` is not used here; after source changes push to git, then run the installer on each target machine via SSH.
+- **Local tests run in a dedicated venv**, never the user site-packages (on dev1 its fastmcp is broken and `.venv-test` is stale): `python3 -m venv <scratch>/venv && <scratch>/venv/bin/pip install -c constraints.txt -e '.[test,dev]'`, then `<scratch>/venv/bin/pytest` and `ruff check src/ tests/`.
