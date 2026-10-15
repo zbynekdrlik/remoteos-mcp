@@ -26,12 +26,17 @@ CREATE_NO_WINDOW = 0x08000000
 
 # The first line of every PowerShell child (#48). PowerShell writes its output through
 # [Console]::OutputEncoding, which is the console's OEM page: cp437 on resolume-pp best-fitted
-# "Žltý kôň" to "Zlty kôn", and cp852 has no "€" or "–". Setting it to UTF-8 also switches the
-# child's console, so native programs started from that PowerShell write UTF-8 too, and
-# $OutputEncoding is what PowerShell pipes INTO a native program. UTF-8 without a BOM.
-# New-Object works on every Windows PowerShell version ([…]::new needs 5.0).
+# "Žltý kôň" to "Zlty kôn", and cp852 has no "€" or "–".
+# - Setting it to UTF-8 also switches the child's console (SetConsoleOutputCP), so a native
+#   program that writes through the console's output page writes UTF-8 too. One that writes its
+#   own page regardless is read line by line by decode_output's OEM fallback.
+# - $OutputEncoding is what PowerShell pipes INTO a native program.
+# - UTF-8 without a BOM. New-Object works on every Windows PowerShell version ([…]::new needs 5.0).
+# - try/catch (review round 1): where the switch is refused (e.g. Constrained Language Mode), the
+#   command still runs, with no error text on every reply; its OEM output takes the fallback.
 UTF8_PREFIX = (
-    "$OutputEncoding = New-Object System.Text.UTF8Encoding $false; [Console]::OutputEncoding = $OutputEncoding"
+    "try { $OutputEncoding = New-Object System.Text.UTF8Encoding $false;"
+    " [Console]::OutputEncoding = $OutputEncoding } catch { }"
 )
 
 
@@ -87,33 +92,57 @@ def decode_output(raw: Optional[bytes], windows: Optional[bool] = None, stream: 
     """The text of a child's raw ``stdout`` / ``stderr`` bytes (#48).
 
     - **Windows:** strict UTF-8, which every PowerShell child writes after ``UTF8_PREFIX``.
-      Bytes that are not UTF-8 are read in the console's OEM page, ``errors="replace"``:
+      When the stream is not UTF-8, each LINE is read on its own: a UTF-8 line as UTF-8, any
+      other line in the console's OEM page with ``errors="replace"``. Such lines come from:
       - output written before the prefix ran, e.g. PowerShell's own PARSE error on a localized
         Windows, which the host prints before any statement executes;
-      - a native program started directly (tscon), which writes the OEM page.
-      That fallback is logged with ``stream`` and the count of replaced characters, never the
-      content: WARNING when a character was lost, INFO when nothing was.
+      - a native program started directly (tscon), which writes the OEM page;
+      - a native program started from PowerShell that writes its own page into the same pipe.
+      Line by line (review round 1), so one such line never turns PowerShell's UTF-8 lines into
+      mojibake. The fallback is logged with ``stream``, the count of fallback lines and of
+      replaced characters, never the content: WARNING when a character was lost, INFO when not.
+      A known limit: a short OEM line that happens to be valid UTF-8 (cp852 ``Ďá`` = D2 A0)
+      reads as UTF-8; real localized text practically never is.
     - **Elsewhere:** the locale's encoding, ``errors="replace"``. That is what a text-mode run
       decoded, so macOS/Linux output is unchanged.
     - **Newlines** as a text-mode run gave them: ``\\r\\n`` and a lone ``\\r`` become ``\\n``.
     """
     if not raw:
         return ""
-    if _on_windows(windows):
+    if not _on_windows(windows):
+        text = raw.decode(locale.getpreferredencoding(False), "replace")
+    else:
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
-            text = raw.decode("oem", "replace")
-            replaced = text.count("�")
-            log.log(
-                logging.WARNING if replaced else logging.INFO,
-                "%s is not UTF-8: read in the OEM code page, %d undecodable character(s) replaced",
-                stream,
-                replaced,
-            )
-    else:
-        text = raw.decode(locale.getpreferredencoding(False), "replace")
+            text = _decode_lines_utf8_or_oem(raw, stream)
     return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _decode_lines_utf8_or_oem(raw: bytes, stream: str) -> str:
+    """Each ``\\n``-separated line as UTF-8, or else in the OEM page; logs the counts, never the text.
+
+    0x0A is never part of a multi-byte character, neither in UTF-8 nor in a double-byte OEM page
+    (cp932/936/949/950 trail bytes are >= 0x40), so splitting the bytes there never cuts one.
+    """
+    lines: list[str] = []
+    fallback = replaced = 0
+    for chunk in raw.split(b"\n"):
+        try:
+            lines.append(chunk.decode("utf-8"))
+        except UnicodeDecodeError:
+            line = chunk.decode("oem", "replace")
+            fallback += 1
+            replaced += line.count("\ufffd")
+            lines.append(line)
+    log.log(
+        logging.WARNING if replaced else logging.INFO,
+        "%s: %d line(s) not UTF-8, read in the OEM code page; %d undecodable character(s) replaced",
+        stream,
+        fallback,
+        replaced,
+    )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
