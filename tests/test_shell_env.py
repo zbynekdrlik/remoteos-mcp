@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 
 import psutil
 import pytest
@@ -249,6 +250,31 @@ def test_shell_env_starts_from_the_servers_environment_and_never_changes_it(tree
     assert "XDG_RUNTIME_DIR" not in os.environ
 
 
+class _VanishingEnviron(Mapping):
+    """An environment from which another thread pops a key between listing and reading it, as
+    ``desktop._load_atspi``'s ``finally`` does to ``os.environ`` while a Shell call copies it."""
+
+    def __init__(self, data: dict[str, str], vanishing: str) -> None:
+        self._data = data
+        self._vanishing = vanishing
+
+    def __iter__(self):
+        return iter([*self._data, self._vanishing])
+
+    def __len__(self) -> int:
+        return len(self._data) + 1
+
+    def __getitem__(self, key: str) -> str:
+        return self._data[key]  # the vanishing key is gone by the time it is read: KeyError
+
+
+def test_a_key_that_vanishes_while_the_environment_is_copied_never_fails_the_call(tree, se):
+    # review round 4: dict(os.environ) lists the keys, then reads each one. A key popped in
+    # between raised KeyError and failed the Shell call; Popen(env=None) never could.
+    env = se.shell_env(_VanishingEnviron({"PATH": "/usr/bin", "KEPT": "1"}, vanishing="DISPLAY"))
+    assert (env["PATH"], env["KEPT"], "DISPLAY" in env) == ("/usr/bin", "1", False)
+
+
 # --------------------------------------------------------------------------- runtime dir and bus
 
 
@@ -315,7 +341,8 @@ def test_as_root_nothing_is_added(tree, se, loginctl, monkeypatch, caplog, euid)
 
 
 @pytest.mark.parametrize(
-    "display, number", [(":0", 0), (":0.1", 0), ("unix:0", 0), (":1", 1), (":1.0", 1), ("unix:1", 1)]
+    "display, number",
+    [(":0", 0), (":0.1", 0), ("unix:0", 0), (":1", 1), (":1.0", 1), ("unix:1", 1), (":10", 10)],
 )
 def test_every_local_display_form_is_given(tree, se, monkeypatch, display, number):
     # review round 2: `unix:N` is in the contract and was untested. Review round 3: and not only
@@ -501,6 +528,24 @@ def test_a_wayland_session_of_ours_gives_wayland_display(tree, se, monkeypatch):
         "WAYLAND_DISPLAY": "wayland-0",
     }
     assert desktop.get_session().mode == "wayland"
+
+
+def test_a_wayland_session_with_xwayland_gives_its_x_display_too(tree, se, monkeypatch):
+    # review round 4: the X socket of a Wayland session belongs to Xwayland, run as the euid. X
+    # programs started from Shell need its DISPLAY and cookie next to WAYLAND_DISPLAY.
+    runtime = tree.runtime_dir(os.geteuid())
+    tree.socket(os.path.join(runtime, "wayland-0"))
+    tree.x_display(0)
+    xauth = tree.file("Xauthority")
+    session = desktop.SessionInfo(mode="wayland", display=":0", xauthority=xauth, uid=os.geteuid(), user="someone")
+    monkeypatch.setattr(desktop, "_SESSION", session)
+    assert _added(se.shell_env(_base())) == {
+        "XDG_RUNTIME_DIR": runtime,
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus",
+        "DISPLAY": ":0",
+        "XAUTHORITY": xauth,
+        "WAYLAND_DISPLAY": "wayland-0",
+    }
 
 
 @pytest.mark.parametrize("mode, socket_there", [("wayland", False), ("x11", True)])
