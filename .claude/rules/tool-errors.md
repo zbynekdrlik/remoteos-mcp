@@ -85,7 +85,8 @@ paths:
   - The Windows provider's PowerShell calls (launch_app, show_notification) and `tscon` use it
     with `check=True` too.
 - **Starting a child and decoding its output** (Shell, `run_command`, OCR, Ping: the UTF-8
-  prefix, `decode_output`, the own console, the Windows system language) is in
+  console trampoline, `run_child` and its timeout tree kill, `decode_output`, the own console,
+  the Windows system language) is in
   `.claude/rules/child-output.md` (#48).
 - **The stale-task sweep** (`_cleanup_old`, `STALE_AFTER_S` = 300) cancels a RUNNING task, and
   a cancelled task's reply is an error. A call that declares its runtime through a numeric
