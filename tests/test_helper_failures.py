@@ -1,7 +1,7 @@
 """Helpers report a failure by raising, and only a failure (#32 review round 1).
 
-Each helper runs for real; only its OS boundary is faked (``subprocess.run``,
-the screen grab, ``psutil``). A command that CHANGES state (start/stop a
+Each helper runs for real; only its OS boundary is faked (the stdlib
+``subprocess.run``, the screen grab, ``psutil``). A command that CHANGES state (start/stop a
 service, create/delete a task, read/write a macOS default) and exits non-zero
 failed, so it raises and the tool reports an MCP error. A listing keeps the
 command's own answer, exit code included.
@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import subprocess
 import types
 
 import pytest
@@ -93,7 +94,7 @@ def test_windows_ocr_with_no_text_is_an_empty_result(windows_ocr):
 )
 def test_a_failed_state_changing_command_raises_with_its_stderr(monkeypatch, module, call):
     commands = _Commands(returncode=5, stderr="Unit nosuch.service not found.\n")
-    monkeypatch.setattr(module.subprocess, "run", commands)
+    monkeypatch.setattr(subprocess, "run", commands)
     with pytest.raises(RuntimeError, match="Unit nosuch.service not found"):
         call(module)
 
@@ -107,7 +108,7 @@ def test_a_failed_linux_task_enable_raises(monkeypatch, tmp_path):
         rc = 1 if cmd[:2] == ["systemctl", "enable"] else 0
         return types.SimpleNamespace(returncode=rc, stdout="", stderr="Failed to enable unit: Access denied")
 
-    monkeypatch.setattr(linux_services.subprocess, "run", _run)
+    monkeypatch.setattr(subprocess, "run", _run)
     with pytest.raises(RuntimeError, match="Access denied"):
         linux_services.task_create("t", "true", "DAILY")
 
@@ -123,14 +124,14 @@ def test_a_failed_linux_task_enable_raises(monkeypatch, tmp_path):
 )
 def test_a_listing_keeps_the_commands_own_answer(monkeypatch, module, call):
     # e.g. Get-WinEvent says "No events were found" with a non-zero exit: that is the answer
-    monkeypatch.setattr(module.subprocess, "run", _Commands(returncode=1, stdout="", stderr="No events were found"))
+    monkeypatch.setattr(subprocess, "run", _Commands(returncode=1, stdout="", stderr="No events were found"))
     out = call(module)
     assert "No events were found" in out and "[Exit code: 1]" in out
 
 
 def test_service_start_failure_reaches_the_client_as_an_mcp_error(monkeypatch):
     failed = _Commands(returncode=5, stderr="Unit nosuch.service not found.")
-    monkeypatch.setattr(linux_services.subprocess, "run", failed)
+    monkeypatch.setattr(subprocess, "run", failed)
 
     async def _go():
         async with Client(server.mcp) as client:
