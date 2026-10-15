@@ -14,7 +14,6 @@ fails are both "usable". Only a positive finding stops a tool.
 
 from __future__ import annotations
 
-import ctypes
 import importlib
 import logging
 import os
@@ -22,9 +21,8 @@ import sys
 import types
 
 import pytest
-from fake_windows_session import LOCK, UNLOCK, WTS_ACTIVE, WTS_DISCONNECTED, FakeWindowsSession
+from fake_windows_session import LOCK, UNLOCK, WTS_ACTIVE, WTS_DISCONNECTED
 from fastmcp.exceptions import ToolError
-from PIL import Image, ImageGrab
 
 import remoteos.__main__ as server
 from remoteos.platform.linux import desktop as linux_desktop
@@ -43,43 +41,8 @@ def _purge(name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Windows
+# Windows (the win_session fixture lives in conftest.py)
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def win_session(monkeypatch):
-    """The Windows provider imported against a fake Win32 API; yields ``(provider, session)``."""
-    session = FakeWindowsSession()
-    windll = types.SimpleNamespace(
-        user32=types.SimpleNamespace(
-            GetSystemMetrics=lambda i: {76: 0, 77: 0, 78: 1920, 79: 1080}[i],
-            SetProcessDpiAwarenessContext=lambda ctx: 1,
-            SetProcessDPIAware=lambda: 1,
-            SetCursorPos=lambda x, y: 1,
-        ),
-        shcore=types.SimpleNamespace(SetProcessDpiAwareness=lambda v: 0),
-    )
-    session.add_to(windll)
-    monkeypatch.setattr(ctypes, "windll", windll, raising=False)
-    from remoteos.platform.win import dpi
-
-    monkeypatch.setattr(dpi, "_MODE", None)
-    win32api = types.ModuleType("win32api")
-    win32api.EnumDisplayMonitors = lambda: [(0, 0, (0, 0, 1920, 1080))]
-    monkeypatch.setitem(sys.modules, "win32api", win32api)
-    win32gui = types.ModuleType("win32gui")
-    win32gui.EnumWindows = lambda cb, extra: None
-    win32gui.GetForegroundWindow = lambda: 0
-    monkeypatch.setitem(sys.modules, "win32gui", win32gui)
-    for name in ("win32clipboard", "win32con", "win32process"):
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    monkeypatch.setitem(sys.modules, "pyautogui", types.ModuleType("pyautogui"))
-    monkeypatch.setattr(ImageGrab, "grab", lambda bbox=None, all_screens=False, **kw: Image.new("RGB", (1920, 1080)))
-    _purge("remoteos.platform.win.desktop")
-    mod = importlib.import_module("remoteos.platform.win.desktop")
-    yield mod, session
-    _purge("remoteos.platform.win.desktop")
 
 
 def test_windows_healthy_desktop_is_no_diagnosis(win_session):

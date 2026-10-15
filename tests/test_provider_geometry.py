@@ -533,40 +533,6 @@ def test_windows_paste_restores_the_clipboard_when_the_paste_keys_fail(win_clipb
     assert clip.writes == ["ďakujem", "old clip"] and clip.text == "old clip"
 
 
-def test_windows_clipboard_without_text_reads_as_empty_not_an_error(win_clipboard):
-    # an empty clipboard, or one holding only an image, is "no text" (#32 review round 1)
-    server, clip, _ = win_clipboard
-    clip.text = None
-    assert server.GetClipboard() == ""
-    clip.text = "Error: this is just text"  # a failure is a raise, so text like this is ordinary text
-    assert server.GetClipboard() == "Error: this is just text"
-
-
-@pytest.mark.parametrize(
-    "call",
-    [lambda mod: mod.launch_app("zz_no_such_app_zz"), lambda mod: mod.show_notification("t", "m")],
-    ids=["launch_app", "show_notification"],
-)
-def test_windows_powershell_failure_is_an_error_not_a_success(win, monkeypatch, call):
-    # live on win-resolume: Start-Process of a missing app exits 1 (#32 review round 1)
-    import subprocess
-
-    mod, _ = win
-    failed = types.SimpleNamespace(returncode=1, stdout="", stderr="This command cannot be run: file not found.")
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: failed)
-    with pytest.raises(RuntimeError, match="file not found"):
-        call(mod)
-
-
-def test_windows_launch_app_success(win, monkeypatch):
-    import subprocess
-
-    mod, _ = win
-    ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: ok)
-    assert mod.launch_app("notepad") == "Launched notepad"
-
-
 def test_windows_provider_type_text_clicks_a_point_on_row_zero(pyautogui_branch):
     server, fake = pyautogui_branch
     mod = server.get_desktop()
@@ -654,16 +620,6 @@ def test_windows_capture_reports_failed_retry(monkeypatch, windows_tool_layer):
     _flaky_grab(monkeypatch, failures=2)
     with pytest.raises(RuntimeError, match="after session reconnect: screen grab failed"):
         server._capture_snapshot_frame(0, 1280)
-
-
-def test_windows_capture_on_an_attached_session_retries_once_and_says_so(monkeypatch, windows_tool_layer):
-    # review round 2: no reconnect happened, so neither the log nor the error may claim one
-    server, commands = windows_tool_layer
-    monkeypatch.setattr(server.subprocess, "run", lambda cmd, **kw: commands.append(list(cmd)))
-    _flaky_grab(monkeypatch, failures=2)  # the default fake session is attached
-    with pytest.raises(RuntimeError, match="^after a retry: screen grab failed"):
-        server._capture_snapshot_frame(0, 1280)
-    assert commands == []  # no tscon
 
 
 def test_session_reconnect_helper_is_defined_once():

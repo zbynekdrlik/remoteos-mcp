@@ -11,7 +11,9 @@ paths:
   - "tests/test_tool_errors.py"
   - "tests/test_desktop_diagnose.py"
   - "tests/test_helper_failures.py"
+  - "tests/test_windows_tool_errors.py"
   - "tests/fake_windows_session.py"
+  - "tests/conftest.py"
 ---
 
 # Tool errors as MCP errors, and the desktop diagnoses (#32) — gotchas
@@ -186,8 +188,13 @@ paths:
     xdotool input reaches it, which is the only remote way to unlock.
 - **Tests:**
   - `tests/fake_windows_session.py` is the shared fake logon session.
-  - The `test_provider_geometry` win fixture uses it HEALTHY, so its tool tests run the
-    preflight's real healthy path.
+  - `conftest.win_session` imports the Windows provider against it. It is used by
+    `test_desktop_diagnose.py` and `test_windows_tool_errors.py`.
+  - The `test_provider_geometry` win fixture also uses the fake session HEALTHY, so its tool
+    tests run the preflight's real healthy path.
+  - New Windows error tests go into `test_windows_tool_errors.py`, not into
+    `test_provider_geometry.py`. That module is about geometry and sits just under the
+    ~1000-line budget (974).
   - The helper tests fake the stdlib `subprocess.run`.
 - **Live check (supervisor, after deploy):**
   - `Shell(cwd="C:\\no such dir")` on a Windows box must show as a tool error in Claude.
