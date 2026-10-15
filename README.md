@@ -197,8 +197,10 @@ notifications and Windows OCR. On macOS and Linux, output is read in the locale'
 - A command that times out is stopped together with the processes it started (its process
   tree on Windows, its process group elsewhere; best effort).
 - A command never reads the server's own input: its stdin is empty.
-- The launcher takes about 650 characters of Windows' 32 767-character command line, so a
-  command that long is that much shorter than before.
+- The launcher takes about 700 characters, plus the working directory, of Windows'
+  32 767-character command line, so the longest possible command is that much shorter than
+  before.
+- If PowerShell cannot be started at all, the tool reports an error, never a command result.
 - Ping runs without PowerShell and is read in the OEM code page. `tscon` also runs without
   PowerShell; it is read UTF-8 first, and a line that is not UTF-8 in the OEM code page.
 - Real Windows PowerShell 5.1 checks in CI (`tests_windows`, an en-US runner whose OEM code

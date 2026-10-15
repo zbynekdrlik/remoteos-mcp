@@ -41,14 +41,16 @@ paths:
       - A refused page (never seen) writes one line naming it on stderr (`remoteos: the console
         output|input stays in the OEM code page …`) and still runs the command; refused output
         takes the OEM fallback. PowerShell that cannot be started (no powershell.exe, a cwd that
-        vanished after Shell checked it) is one `remoteos: could not start …` line and exit 1,
-        never a Python traceback.
+        vanished after Shell checked it) is one `remoteos: could not start …` line
+        (`_COULD_NOT_START`) and exit 1, never a Python traceback. `run_child` raises that
+        line as a `RuntimeError` (review round 3): PowerShell never ran, so it is a failure, an
+        MCP error for Shell, never `[Exit code: 1]`, which PowerShell's own failures use.
       - `-X utf8` (review round 2): the trampoline's own messages reach the pipe as UTF-8. A
         pipe would otherwise get the ANSI page, and a localized OSError text would be misread
         by the OEM fallback.
-    - **The trampoline costs about 650 characters** of Windows' 32 767-character command line
-      (python.exe's path, the flags, the program, the cwd). A script that fit the limit before
-      #48 by less than that now fails loudly (WinError 206).
+    - **The trampoline costs about 700 characters plus the cwd** of Windows' 32 767-character
+      command line (python.exe's path, the flags, the program). A script that fit the limit
+      before #48 by less than that now fails loudly (WinError 206).
     - **The cwd goes INTO the argv, never to `run_child` (review round 1).** `CreateProcess`
       looks for `powershell` in the PARENT's current directory first. The trampoline runs in
       the server's directory, as the server itself did when it was PowerShell's parent, so a
@@ -103,9 +105,15 @@ paths:
         `pythonw.exe`.
       - POSIX: the group whose id is the child's pid. The caller's group id is never that pid,
         and there is no `getpgid` probe.
-        - The tree is snapshotted (psutil), the group gets SIGTERM, the tree gets up to
+        - The group's members are snapshotted (`os.getpgid` over `psutil.process_iter()`,
+          plus the child's descendants), the group gets SIGTERM, the members get up to
           `KILL_GRACE_S` (2 s) to exit, then the group gets SIGKILL IN ANY CASE (review round 2).
           Whatever ignored SIGTERM dies, whether or not it holds our pipes.
+        - Members, not just descendants (review round 3): in the usual timeout the shell has
+          exited and a process it left behind (`x &`, `nohup x &`) holds the pipe. Reparented to
+          init, it is no longer a descendant, but it is in the group and needs its grace.
+        - "Exited" = gone, a zombie, or a reused pid (`is_running()` compares the start time;
+          `status()` alone does not).
         - Nothing is reaped before that SIGKILL: the child, by then a zombie, keeps its group id
           from being reused. Waiting uses psutil status, because CPython has no `os.waitid` on
           macOS and `Popen.poll()` would reap.
