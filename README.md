@@ -160,8 +160,12 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
 - **macOS:** no GUI session, the session is not on the screen (fast user switching), or the
   screen is locked. Also a missing permission: **Screen Recording** for the screen tools,
   **Accessibility** for the input tools. The message names the Python binary to allow.
-- **Linux:** no X11 session (the headless/Wayland text is unchanged). A locked X11 screen
-  is not refused: the screenshot shows the locker, and typed input reaches it.
+- **Linux:** no X11 session. The headless/Wayland stub text itself is unchanged, and
+  Snapshot, ScreenRecord and OCR now return the bare stub instead of `<Tool> error: <stub>`.
+  A locked X11 screen is not refused: the screenshot shows the locker, and typed input
+  reaches it.
+- `Snapshot(use_vision=False)` captures nothing, so it is never refused: the window list
+  works on a disconnected or locked Windows session too.
 - **It never refuses a working desktop.** A check that cannot run (an older OS, a missing
   API, a probe error) counts as "usable", and the tool goes ahead.
 
