@@ -9,7 +9,7 @@ the tool hands it are what is checked.
 from __future__ import annotations
 
 import pytest
-from fake_console_child import POWERSHELL_UTF8_PREFIX, returned
+from fake_console_child import assert_runs_powershell, returned
 from tool_test_support import tool_error
 
 import remoteos.__main__ as server
@@ -91,14 +91,14 @@ def popen(monkeypatch):
 @pytest.mark.parametrize(
     "windows, macos, argv",
     [
-        (True, False, ["powershell", "-NoProfile", "-Command", POWERSHELL_UTF8_PREFIX + "\nGet-ChildItem"]),
+        (True, False, None),  # PowerShell under the console trampoline (#48 round 2)
         (False, True, ["/bin/zsh", "-c", "Get-ChildItem"]),
         (False, False, ["/bin/bash", "-c", "Get-ChildItem"]),
     ],
     ids=["windows", "macos", "linux"],
 )
 def test_every_os_passes_cwd_to_the_process_and_leaves_the_command_alone(
-    tmp_path, monkeypatch, popen, windows, macos, argv
+    tmp_path, monkeypatch, popen, windows_python, windows, macos, argv
 ):
     work = tmp_path / "Program Files"
     work.mkdir()
@@ -106,15 +106,21 @@ def test_every_os_passes_cwd_to_the_process_and_leaves_the_command_alone(
     monkeypatch.setattr(server, "is_macos", lambda: macos)
     assert server.Shell("Get-ChildItem", cwd=str(work)) == "ok"
     [(args, kwargs)] = popen
-    assert args == argv
-    assert kwargs["cwd"] == str(work)
+    if windows:
+        # review round 1 (#48 round 2): the console trampoline starts in the server's directory, so
+        # "powershell" is never looked up in the user's; it starts PowerShell in `cwd`
+        assert_runs_powershell(args, windows_python, "Get-ChildItem", cwd=str(work))
+        assert kwargs["cwd"] is None
+    else:
+        assert args == argv
+        assert kwargs["cwd"] == str(work)
 
 
-def test_without_cwd_the_process_inherits_the_server_directory(monkeypatch, popen):
+def test_without_cwd_the_process_inherits_the_server_directory(monkeypatch, popen, windows_python):
     monkeypatch.setattr(server, "is_windows", lambda: True)
     assert server.Shell("Get-Location") == "ok"
     [(args, kwargs)] = popen
-    assert args == ["powershell", "-NoProfile", "-Command", POWERSHELL_UTF8_PREFIX + "\nGet-Location"]
+    assert_runs_powershell(args, windows_python, "Get-Location", cwd="")
     assert kwargs.get("cwd") is None
 
 

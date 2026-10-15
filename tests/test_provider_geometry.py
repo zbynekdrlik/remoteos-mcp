@@ -21,6 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
+from fake_console_child import popen_answered_by
 from fake_windows_session import WTS_DISCONNECTED, FakeClipboard, FakeWindowsSession
 from PIL import Image, ImageGrab
 from tool_test_support import purge_module, tool_error
@@ -550,7 +551,7 @@ def _session_tools(monkeypatch, server, commands, readable=True):
         commands.append(list(cmd))
         return session.tscon(cmd, **kwargs)  # only tscon may run
 
-    monkeypatch.setattr(server.subprocess, "run", _run)
+    monkeypatch.setattr(server.subprocess, "Popen", popen_answered_by(_run))
 
 
 def test_windows_capture_retries_after_session_reconnect(monkeypatch, windows_tool_layer):

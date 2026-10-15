@@ -59,6 +59,15 @@ def test_a_failing_locale_name_call_falls_back_to_getlocale(win_session, monkeyp
     assert mod._get_system_language() == "Slovak_Slovakia"
 
 
+def test_a_successful_call_with_an_empty_name_falls_back_to_getlocale(win_session, monkeypatch):
+    # round 2 🔵: a non-zero return with no name in the buffer is no locale name either; without
+    # the `and buf.value` guard "" was returned as the language
+    mod, _ = win_session
+    _locale_name_api(monkeypatch, _writes(""))  # returns 1 (the terminating null), the buffer empty
+    monkeypatch.setattr(locale, "getlocale", lambda category=locale.LC_CTYPE: ("Slovak_Slovakia", "1250"))
+    assert mod._get_system_language() == "Slovak_Slovakia"
+
+
 def _raises(buf, size):
     raise OSError("GetUserDefaultLocaleName failed")
 

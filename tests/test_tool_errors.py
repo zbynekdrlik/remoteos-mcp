@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from fake_console_child import popen_answered_by
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -53,7 +54,7 @@ def test_a_service_helper_failure_is_an_mcp_error(monkeypatch):
     def _no_systemctl(cmd, **kwargs):
         raise OSError("systemctl unavailable")
 
-    monkeypatch.setattr(subprocess, "run", _no_systemctl)
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(_no_systemctl))
     _, text = _error_text("ServiceList")
     assert text == "ServiceList error: systemctl unavailable"
 
@@ -66,7 +67,7 @@ def test_a_failure_is_logged_without_its_message(monkeypatch, caplog):
     def _fails(cmd, **kwargs):
         raise OSError(secret)
 
-    monkeypatch.setattr(subprocess, "run", _fails)
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(_fails))
     with caplog.at_level(logging.DEBUG, logger="remoteos"):
         _, text = _error_text("ServiceList")
     assert text == "ServiceList error: secret-marker-32"  # the client gets the whole message

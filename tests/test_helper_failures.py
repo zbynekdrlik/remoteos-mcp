@@ -18,7 +18,7 @@ import sys
 import types
 
 import pytest
-from fake_console_child import POWERSHELL_UTF8_PREFIX, TEXT_MODE, run_result
+from fake_console_child import TEXT_MODE, assert_runs_powershell, popen_answered_by, run_result
 from fastmcp import Client
 from PIL import Image
 
@@ -31,7 +31,7 @@ from remoteos.platform.win import services as win_services
 
 
 class _Commands:
-    """A fake ``subprocess.run``: records every argv and answers ``(returncode, stdout, stderr)``.
+    """A ``run``-style fake (for ``popen_answered_by``): records every argv, answers ``(returncode, stdout, stderr)``.
 
     The reply has the type subprocess returns for that call: text in text mode, else bytes (#48).
     """
@@ -54,10 +54,10 @@ class _Commands:
 
 
 @pytest.fixture
-def windows_ocr(monkeypatch):
+def windows_ocr(monkeypatch, windows_python):
     monkeypatch.setattr(ocr, "ImageGrab", types.SimpleNamespace(grab=lambda bbox=None: Image.new("RGB", (8, 8))))
     commands = _Commands()
-    monkeypatch.setattr(ocr.subprocess, "run", commands)
+    monkeypatch.setattr(ocr.subprocess, "Popen", popen_answered_by(commands))
     return commands
 
 
@@ -72,9 +72,7 @@ def test_windows_ocr_script_stops_on_its_first_error(windows_ocr):
     windows_ocr.reply = (0, "Hello", "")
     assert ocr.ocr_windows_builtin() == "Hello"
     (argv,) = windows_ocr.calls
-    prefix, script = argv[-1].split("\n", 1)  # #48: the shared UTF-8 prefix line comes first
-    assert prefix == POWERSHELL_UTF8_PREFIX
-    assert script.lstrip().startswith("$ErrorActionPreference = 'Stop'")
+    assert argv[-1].lstrip().startswith("$ErrorActionPreference = 'Stop'")  # #48 round 2: nothing before it
 
 
 def test_windows_ocr_with_no_text_is_an_empty_result(windows_ocr):
@@ -102,9 +100,9 @@ def test_windows_ocr_with_no_text_is_an_empty_result(windows_ocr):
         (mac_system, lambda m: m.reg_write("com.example", "k", "v")),
     ],
 )
-def test_a_failed_state_changing_command_raises_with_its_stderr(monkeypatch, module, call):
+def test_a_failed_state_changing_command_raises_with_its_stderr(monkeypatch, windows_python, module, call):
     commands = _Commands(returncode=5, stderr="Unit nosuch.service not found.\n")
-    monkeypatch.setattr(subprocess, "run", commands)
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(commands))
     with pytest.raises(RuntimeError, match="Unit nosuch.service not found"):
         call(module)
 
@@ -118,7 +116,7 @@ def test_a_failed_linux_task_enable_raises(monkeypatch, tmp_path):
         rc = 1 if cmd[:2] == ["systemctl", "enable"] else 0
         return run_result(kwargs, rc, "", "Failed to enable unit: Access denied")
 
-    monkeypatch.setattr(subprocess, "run", _run)
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(_run))
     with pytest.raises(RuntimeError, match="Access denied"):
         linux_services.task_create("t", "true", "DAILY")
 
@@ -132,16 +130,17 @@ def test_a_failed_linux_task_enable_raises(monkeypatch, tmp_path):
         (win_services, lambda m: m.event_log()),
     ],
 )
-def test_a_listing_keeps_the_commands_own_answer(monkeypatch, module, call):
+def test_a_listing_keeps_the_commands_own_answer(monkeypatch, windows_python, module, call):
     # e.g. Get-WinEvent says "No events were found" with a non-zero exit: that is the answer
-    monkeypatch.setattr(subprocess, "run", _Commands(returncode=1, stdout="", stderr="No events were found"))
+    no_events = _Commands(returncode=1, stdout="", stderr="No events were found")
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(no_events))
     out = call(module)
     assert "No events were found" in out and "[Exit code: 1]" in out
 
 
 def test_service_start_failure_reaches_the_client_as_an_mcp_error(monkeypatch):
     failed = _Commands(returncode=5, stderr="Unit nosuch.service not found.")
-    monkeypatch.setattr(subprocess, "run", failed)
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(failed))
 
     async def _go():
         async with Client(server.mcp) as client:
@@ -239,19 +238,19 @@ def test_a_windows_console_child_gets_its_own_console_in_the_oem_code_page():
     assert console_child(windows=False) == {"text": True, "encoding": None, "errors": "replace"}
 
 
-def test_windows_ocr_reads_its_own_console_losslessly_as_utf8(windows_ocr):
+def test_windows_ocr_reads_its_own_console_losslessly_as_utf8(windows_ocr, windows_python):
     # review round 5: through the OEM page PowerShell replaced € and – ("12,50 €" read as "12,50 ?",
-    # live "1€–č" -> "1?-č"). #48: OCR runs the shared UTF-8 prefix in its own console (its private
-    # copy is gone), and Python decodes the raw bytes as UTF-8: lossless, the server's console untouched.
+    # live "1€–č" -> "1?-č"). #48 round 2: OCR runs under the shared console trampoline in its own
+    # console, its script unchanged, and Python decodes the raw bytes as UTF-8: lossless, the
+    # server's console untouched.
     windows_ocr.reply = (0, "12,50 € – Žltý", "")
     assert ocr.ocr_windows_builtin() == "12,50 € – Žltý"
     (kwargs,) = windows_ocr.kwargs
     assert not any(kwargs.get(key) for key in TEXT_MODE), kwargs  # binary: the bytes are decoded by us
     assert kwargs["creationflags"] == _CREATE_NO_WINDOW
     (argv,) = windows_ocr.calls
-    assert argv[:3] == ["powershell", "-NoProfile", "-Command"]
-    assert argv[-1].startswith(POWERSHELL_UTF8_PREFIX + "\n")
-    assert argv[-1].count("[Console]::OutputEncoding") == 1  # only the shared prefix sets it
+    assert_runs_powershell(argv, windows_python, argv[-1])
+    assert "OutputEncoding" not in argv[-1]  # no encoding code in the script itself
 
 
 def test_ping_reads_a_windows_console_in_its_code_page(monkeypatch):
@@ -274,7 +273,7 @@ def test_ping_reads_a_windows_console_in_its_code_page(monkeypatch):
 
 
 def _replies(calls: list, failing: list[str], stderr: str):
-    """A fake ``subprocess.run``: a command starting with ``failing`` exits 1 with ``stderr``."""
+    """A ``run``-style fake (for ``popen_answered_by``): a command starting with ``failing`` exits 1 with ``stderr``."""
 
     def _run(cmd, **kwargs):
         calls.append(list(cmd))
@@ -288,7 +287,7 @@ def _replies(calls: list, failing: list[str], stderr: str):
 def test_linux_task_delete_of_a_missing_task_is_an_error(monkeypatch, tmp_path):
     monkeypatch.setattr(linux_services, "_SYSTEMD_DIR", str(tmp_path))
     commands = _Commands()
-    monkeypatch.setattr(subprocess, "run", commands)
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(commands))
     with pytest.raises(FileNotFoundError, match="No remoteos task 'gone'"):
         linux_services.task_delete("gone")
     assert commands.calls == []  # nothing was disabled or reloaded
@@ -301,7 +300,7 @@ def test_linux_task_delete_removes_the_units_when_systemd_no_longer_knows_the_ti
     service.write_text("[Service]\n")
     calls: list = []
     not_loaded = "Unit remoteos-t.timer not loaded."
-    monkeypatch.setattr(subprocess, "run", _replies(calls, ["systemctl", "disable"], not_loaded))
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(_replies(calls, ["systemctl", "disable"], not_loaded)))
     out = linux_services.task_delete("t")
     assert "not loaded" in out and "[Exit code: 1]" in out
     assert f"Deleted {timer}" in out and f"Deleted {service}" in out
@@ -312,7 +311,7 @@ def test_linux_task_delete_removes_the_units_when_systemd_no_longer_knows_the_ti
 def test_mac_task_delete_of_a_missing_plist_is_an_error(monkeypatch, tmp_path):
     monkeypatch.setattr(mac_services, "_AGENTS_DIR", str(tmp_path))
     commands = _Commands()
-    monkeypatch.setattr(subprocess, "run", commands)
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(commands))
     with pytest.raises(FileNotFoundError, match="Plist not found"):
         mac_services.task_delete("gone")
     assert commands.calls == []
@@ -323,7 +322,8 @@ def test_mac_task_delete_removes_the_plist_when_launchd_no_longer_has_it_loaded(
     plist = tmp_path / "com.remoteos.t.plist"
     plist.write_bytes(b"<plist/>")
     calls: list = []
-    monkeypatch.setattr(subprocess, "run", _replies(calls, ["launchctl", "unload"], "Could not find specified service"))
+    not_loaded = "Could not find specified service"
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(_replies(calls, ["launchctl", "unload"], not_loaded)))
     out = mac_services.task_delete("t")
     assert out.startswith(f"Unloaded and deleted {plist}") and "[Exit code: 1]" in out
     assert not plist.exists()

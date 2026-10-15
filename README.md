@@ -172,26 +172,41 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
   API, a probe error) counts as "usable", and the tool goes ahead.
 
 **Console output on Windows.** The output of PowerShell comes back as exact Unicode on every
-Windows code page: `Žltý kôň ďakuje – €` stays exactly that. This covers Shell, the service,
-task and EventLog helpers, and Windows OCR. On macOS and Linux, output is read in the locale's
-encoding (UTF-8 on the fleet).
+Windows code page: `Žltý kôň ďakuje – €` stays exactly that, error text (`Write-Error`) and
+parse errors included. This covers Shell, the service, task and EventLog helpers, app launch,
+notifications and Windows OCR. On macOS and Linux, output is read in the locale's encoding
+(UTF-8 on the fleet).
 
 - Each command runs in its own hidden console. So a `chcp` inside one Shell command cannot
   change how later replies are decoded.
-- Every PowerShell command first switches its own console to UTF-8, and its output is read as
-  UTF-8.
+- That console is switched to UTF-8 BEFORE PowerShell starts, by a small `python.exe` launcher
+  from the server's own Python folder. Your command reaches PowerShell unchanged: no code is
+  added to it, so error messages, exit codes, `param(...)` at the start of a script, and
+  Constrained Language Mode behave exactly as in plain PowerShell.
+- Programs started from the command share that console, so a program that writes through the
+  console (`cmd /c echo Žltý kôň`) is exact too.
+- Text that PowerShell pipes INTO a native program (`"čaká" | findstr "."`) uses Windows
+  PowerShell's default, ASCII: each non-ASCII character arrives as `?`.
 - A line that is not UTF-8 is read on its own in the system's OEM code page, so it is exact
-  only for the characters that page holds. Examples:
-  - PowerShell's own parse error, which is printed before the switch;
-  - a native program that writes the OEM page whatever the console's page is.
+  only for the characters that page holds. Example: a native program that writes the OEM page
+  whatever the console's page is.
 - Such a native program's output loses its non-ASCII text when PowerShell itself captures it,
   in a pipeline, an assignment or `| Out-String`. PowerShell decodes it as UTF-8 then.
-- The switch also applies to programs started from the command. For example, cmd.exe reads a
-  `.bat` file in the console's code page, which is now UTF-8.
+- The UTF-8 page also applies to programs started from the command. For example, cmd.exe reads
+  a `.bat` file in the console's code page, which is UTF-8.
+- A command that times out is stopped together with the processes it started (its process
+  tree on Windows, its process group elsewhere; best effort).
+- A command never reads the server's own input: its stdin is empty.
+- The launcher takes about 700 characters, plus the working directory, of Windows'
+  32 767-character command line, so the longest possible command is that much shorter than
+  before.
+- If PowerShell cannot be started at all, the tool reports an error, never a command result.
 - Ping runs without PowerShell and is read in the OEM code page. `tscon` also runs without
   PowerShell; it is read UTF-8 first, and a line that is not UTF-8 in the OEM code page.
-- A Windows `Shell` script that must begin with `param(...)` or a `using` statement cannot
-  run: PowerShell requires those first, and the switch comes before them.
+- Real Windows PowerShell 5.1 checks in CI (`tests_windows`, an en-US runner whose OEM code
+  page is 437): exact output, `cmd /c echo`, `Write-Error` text, exit codes, `param(...)`, a parse
+  error, and that a timed-out PowerShell is gone. The other points above are verified on the
+  fleet only.
 
 ## MCP gateway (dev1)
 
