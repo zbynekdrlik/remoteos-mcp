@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from remoteos.platform.command import console_child
+
 try:
     from PIL import ImageGrab
 except ImportError:
@@ -71,7 +73,13 @@ def ocr_windows_builtin(
         tmp.write(png_bytes)
         tmp_path = tmp.name
 
+    # Stop: a failing step ends the script with a non-zero exit. Without it a call on a null
+    # OcrEngine exits 0 with empty stdout, which read as "(no text detected)" (#32 review round 1).
+    # UTF-8: the child has its OWN console (console_child), so switching it is safe and lossless;
+    # through the OEM page PowerShell replaced € and – with "?" (#32 review round 5).
     ps_script = f"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
@@ -107,12 +115,14 @@ Write-Output $result.Text
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True,
-            text=True,
             timeout=30,
+            **{**console_child(windows=True), "encoding": "utf-8"},  # its own console, switched to UTF-8
         )
-        return result.stdout.strip()
-    except Exception as e:
-        return f"Windows OCR error: {e}"
+        text, problem = (result.stdout or "").strip(), (result.stderr or "").strip()
+        # a failure is a non-zero exit, or an error with no text: never "(no text detected)"
+        if result.returncode != 0 or (problem and not text):
+            raise RuntimeError(f"Windows OCR failed: {problem or f'exit code {result.returncode}'}")
+        return text
     finally:
         try:
             Path(tmp_path).unlink(missing_ok=True)
@@ -184,11 +194,10 @@ def ocr_macos_shortcuts(
             ],
             capture_output=True, text=True, timeout=30,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-        return "macOS OCR: No text extracted (Shortcuts OCR not available)"
-    except Exception as e:
-        return f"macOS OCR error: {e}"
+        if result.returncode != 0:  # e.g. the "Extract Text from Image" shortcut is not installed
+            reason = result.stderr.strip() or f"exit code {result.returncode}"
+            raise RuntimeError(f"macOS Shortcuts OCR failed: {reason}")
+        return result.stdout.strip()
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -228,13 +237,9 @@ def run_ocr(
     # Fallback to Windows built-in OCR
     if sys.platform == "win32":
         try:
-            result = ocr_windows_builtin(left, top, right, bottom)
-            if result and "error" not in result.lower()[:20]:
-                return result
-            if result:
-                errors.append(f"Windows OCR: {result}")
+            return ocr_windows_builtin(left, top, right, bottom)
         except Exception as e:
             errors.append(f"Windows OCR error: {e}")
 
-    # All failed
-    return "OCR failed. Errors:\n" + "\n".join(errors)
+    # All failed: an error, never a successful "text" (#32)
+    raise RuntimeError("OCR failed. Errors:\n" + "\n".join(errors))

@@ -5,9 +5,15 @@ Runtime session detection decides behavior:
 * **X11 session** (a graphical seat is active)  → real implementations backed by
   ``xdotool`` / ``scrot`` / ``wmctrl`` / ``xclip`` / ``notify-send`` / ``loginctl``.
 * **Wayland session**                           → not yet implemented (separate tier);
-  every function returns an honest "unavailable" message and never crashes.
-* **Headless** (no graphical session, e.g. cam1..4) → the original stub behavior,
+  every function raises an honest "unavailable" message and never crashes.
+* **Headless** (no graphical session, e.g. cam1..4) → the original stub message,
   byte-for-byte unchanged, so headless boxes see zero regression.
+
+The non-X11 message is RAISED as :class:`remoteos.errors.DesktopUnavailable`
+(#32): the tool layer passes its text through verbatim as an MCP error
+(``isError: true``) instead of a successful result. Every other failure raises
+too (``RuntimeError`` from :func:`_run_x`, ``LookupError`` for a window that is
+not there); no function returns error text.
 
 The MCP service may run either as *root* (borrowing the logged-in user's X session)
 or as the *session user itself* (the default systemd unit ``User=`` on our targets).
@@ -33,6 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 from remoteos.coords import CaptureGeometry, frame_for
+from remoteos.errors import DesktopUnavailable
 from remoteos.platform.linux.display import query_geometry
 from remoteos.scroll import wheel_steps
 from remoteos.snapshot import fit_to_frame
@@ -527,7 +534,7 @@ def capture_geometry(monitor: int = 0) -> CaptureGeometry:
     """Capture geometry (#28, see ``platform/linux/display.py``). Raises the stub
     message on a non-X11 session without shelling out (the headless contract)."""
     if get_session().mode != "x11":
-        raise RuntimeError(_unavailable())
+        raise DesktopUnavailable(_unavailable())
     return query_geometry(monitor, lambda cmd: (_run_x(cmd).stdout or b"").decode("utf-8", "replace"))
 
 
@@ -620,7 +627,7 @@ def record_screen(
     """
     s = get_session()
     if s.mode != "x11":
-        raise RuntimeError(_unavailable())
+        raise DesktopUnavailable(_unavailable())
 
     region: Optional[tuple[int, int, int, int]] = None
     if None not in (left, top, right, bottom):
@@ -1007,7 +1014,7 @@ def get_interactive_elements() -> list[dict]:
 def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> str:
     """Bring a window to the foreground. Fuzzy-match on title if given."""
     if get_session().mode != "x11":
-        return _unavailable()
+        raise DesktopUnavailable(_unavailable())
     win_id: Optional[int] = handle
     if not win_id and title:
         best_score = 0
@@ -1022,25 +1029,22 @@ def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> s
                 best_score = score
                 win_id = w.handle
         if best_score < 50:
-            return f"No window matching '{title}' (best score {best_score})"
+            raise LookupError(f"No window matching '{title}' (best score {best_score})")
     if not win_id:
-        return "No window found"
+        raise LookupError("No window found")
     try:
         _run_x(["wmctrl", "-i", "-a", hex(win_id)])
-        return f"Focused window handle={win_id}"
     except RuntimeError as e:
-        return f"Failed to focus: {e}"
+        raise RuntimeError(f"Failed to focus: {e}") from e
+    return f"Focused window handle={win_id}"
 
 
 def minimize_all() -> str:
     """Show the desktop (minimize all windows) via wmctrl."""
     if get_session().mode != "x11":
-        return _unavailable()
-    try:
-        _run_x(["wmctrl", "-k", "on"])
-        return "Minimized all windows"
-    except RuntimeError as e:
-        return f"Failed: {e}"
+        raise DesktopUnavailable(_unavailable())
+    _run_x(["wmctrl", "-k", "on"])
+    return "Minimized all windows"
 
 
 def _spawn_x(cmd: list[str], settle: float = 1.2) -> Optional[int]:
@@ -1079,7 +1083,7 @@ def launch_app(name: str, args: str = "") -> str:
     Each attempt is spawned detached so a long-running GUI process never blocks.
     """
     if get_session().mode != "x11":
-        return _unavailable()
+        raise DesktopUnavailable(_unavailable())
     arg_list = args.split() if args else []
     desktop_id = name[:-8] if name.endswith(".desktop") else name
     last_rc: Optional[int] = None
@@ -1089,18 +1093,15 @@ def launch_app(name: str, args: str = "") -> str:
             return f"Launched {name} (via {attempt[0]})"
         log.debug("launch attempt %s exited rc=%s", attempt[0], rc)
         last_rc = rc
-    return f"Failed to launch {name} (last rc={last_rc})"
+    raise RuntimeError(f"Failed to launch {name} (last rc={last_rc})")
 
 
 def resize_window(handle: int, width: int, height: int) -> str:
     """Resize a window by handle (via xdotool)."""
     if get_session().mode != "x11":
-        return _unavailable()
-    try:
-        _xdotool(["windowsize", str(handle), str(width), str(height)])
-        return f"Resized {handle} to {width}x{height}"
-    except RuntimeError as e:
-        return f"Failed: {e}"
+        raise DesktopUnavailable(_unavailable())
+    _xdotool(["windowsize", str(handle), str(width), str(height)])
+    return f"Resized {handle} to {width}x{height}"
 
 
 # ---------------------------------------------------------------------------
@@ -1113,19 +1114,16 @@ _BUTTONS = {"left": 1, "middle": 2, "right": 3}
 def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
     """Mouse click / double-click / hover at screen coordinates."""
     if get_session().mode != "x11":
-        return _unavailable()
+        raise DesktopUnavailable(_unavailable())
     btn = _BUTTONS.get(button, 1)
-    try:
-        if action == "hover":
-            _xdotool(["mousemove", str(x), str(y)])
-            return f"Hovered at ({x},{y})"
-        if action == "double":
-            _xdotool(["mousemove", str(x), str(y), "click", "--repeat", "2", "--delay", "120", str(btn)])
-            return f"Double-clicked {button} at ({x},{y})"
-        _xdotool(["mousemove", str(x), str(y), "click", str(btn)])
-        return f"Clicked {button} at ({x},{y})"
-    except RuntimeError as e:
-        return f"Click error: {e}"
+    if action == "hover":
+        _xdotool(["mousemove", str(x), str(y)])
+        return f"Hovered at ({x},{y})"
+    if action == "double":
+        _xdotool(["mousemove", str(x), str(y), "click", "--repeat", "2", "--delay", "120", str(btn)])
+        return f"Double-clicked {button} at ({x},{y})"
+    _xdotool(["mousemove", str(x), str(y), "click", str(btn)])
+    return f"Clicked {button} at ({x},{y})"
 
 
 def type_unicode(text: str) -> int:
@@ -1134,7 +1132,7 @@ def type_unicode(text: str) -> int:
     Returns the number of characters handed to xdotool; a failing xdotool raises.
     """
     if get_session().mode != "x11":
-        raise RuntimeError(_unavailable())
+        raise DesktopUnavailable(_unavailable())
     _xdotool(["type", "--delay", "20", "--", text])
     return len(text)
 
@@ -1153,26 +1151,23 @@ def type_text(
     ``"paste"`` = the clipboard (xclip + Ctrl+V), restoring its previous text (#30).
     """
     if get_session().mode != "x11":
-        return _unavailable()
-    try:
-        if x is not None and y is not None:
-            _xdotool(["mousemove", str(x), str(y), "click", "1"])
-        if clear:
-            _xdotool(["key", "--clearmodifiers", "ctrl+a"])
-            _xdotool(["key", "Delete"])
-        reply = enter_text(
-            text,
-            method,
-            type_unicode=type_unicode,
-            get_clipboard=get_clipboard,
-            set_clipboard=set_clipboard,
-            press_paste=lambda: _xdotool(["key", "--clearmodifiers", "ctrl+v"]),
-        )
-        if press_enter:
-            _xdotool(["key", "Return"])
-        return reply
-    except RuntimeError as e:
-        return f"Type error: {e}"
+        raise DesktopUnavailable(_unavailable())
+    if x is not None and y is not None:
+        _xdotool(["mousemove", str(x), str(y), "click", "1"])
+    if clear:
+        _xdotool(["key", "--clearmodifiers", "ctrl+a"])
+        _xdotool(["key", "Delete"])
+    reply = enter_text(
+        text,
+        method,
+        type_unicode=type_unicode,
+        get_clipboard=get_clipboard,
+        set_clipboard=set_clipboard,
+        press_paste=lambda: _xdotool(["key", "--clearmodifiers", "ctrl+v"]),
+    )
+    if press_enter:
+        _xdotool(["key", "Return"])
+    return reply
 
 
 _WHEEL_BUTTONS = {"up": "4", "down": "5", "left": "6", "right": "7"}  # X11 wheel buttons
@@ -1181,15 +1176,12 @@ _WHEEL_BUTTONS = {"up": "4", "down": "5", "left": "6", "right": "7"}  # X11 whee
 def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = None) -> str:
     """Turn the wheel ``clicks`` notches toward ``direction`` (#29): X11 button 4/5/6/7 × clicks."""
     if get_session().mode != "x11":
-        return _unavailable()
+        raise DesktopUnavailable(_unavailable())
     steps = wheel_steps(direction, clicks)
-    try:
-        if x is not None and y is not None:
-            _xdotool(["mousemove", str(x), str(y)])
-        _xdotool(["click", "--repeat", str(steps.clicks), _WHEEL_BUTTONS[steps.direction]])
-        return steps.summary()
-    except RuntimeError as e:
-        return f"Scroll error: {e}"
+    if x is not None and y is not None:
+        _xdotool(["mousemove", str(x), str(y)])
+    _xdotool(["click", "--repeat", str(steps.clicks), _WHEEL_BUTTONS[steps.direction]])
+    return steps.summary()
 
 
 def move(
@@ -1205,19 +1197,16 @@ def move(
     A start point is used only when it ``is not None``: x=0 / y=0 is a real screen column/row (#31).
     """
     if get_session().mode != "x11":
-        return _unavailable()
-    try:
-        if drag:
-            if start_x is not None and start_y is not None:
-                _xdotool(["mousemove", str(start_x), str(start_y)])
-            _xdotool(["mousedown", "1"])
-            _xdotool(["mousemove", str(x), str(y)])
-            _xdotool(["mouseup", "1"])
-            return f"Dragged to ({x},{y})"
+        raise DesktopUnavailable(_unavailable())
+    if drag:
+        if start_x is not None and start_y is not None:
+            _xdotool(["mousemove", str(start_x), str(start_y)])
+        _xdotool(["mousedown", "1"])
         _xdotool(["mousemove", str(x), str(y)])
-        return f"Moved to ({x},{y})"
-    except RuntimeError as e:
-        return f"Move error: {e}"
+        _xdotool(["mouseup", "1"])
+        return f"Dragged to ({x},{y})"
+    _xdotool(["mousemove", str(x), str(y)])
+    return f"Moved to ({x},{y})"
 
 
 # Map pyautogui-style key names to the X keysym names xdotool expects.
@@ -1260,46 +1249,45 @@ def _map_key(part: str) -> str:
 def shortcut(keys: str) -> str:
     """Execute a keyboard shortcut, e.g. ``ctrl+c`` / ``alt+Tab`` / ``super+e``."""
     if get_session().mode != "x11":
-        return _unavailable()
+        raise DesktopUnavailable(_unavailable())
     combo = "+".join(_map_key(k) for k in keys.split("+") if k.strip())
     if not combo:
-        return "No keys given"
-    try:
-        _xdotool(["key", combo])
-        return f"Executed shortcut: {keys}"
-    except RuntimeError as e:
-        return f"Shortcut error: {e}"
+        raise ValueError("No keys given")
+    _xdotool(["key", combo])
+    return f"Executed shortcut: {keys}"
 
 
 # ---------------------------------------------------------------------------
-# Clipboard — xclip
+# Clipboard — xclip (a failure raises, #32)
 # ---------------------------------------------------------------------------
 
 
 def get_clipboard() -> str:
     if get_session().mode != "x11":
-        return _unavailable()
+        raise DesktopUnavailable(_unavailable())
     try:
         r = _run_x(["xclip", "-selection", "clipboard", "-o"])
-        return (r.stdout or b"").decode("utf-8", "replace")
     except RuntimeError as e:
-        return f"Error: {e}"
+        # xclip -o exits 1 with "target STRING not available" when the clipboard is empty or
+        # holds no text (an image): that is "no text", not a failure
+        if "not available" in str(e):
+            log.debug("clipboard holds no text")
+            return ""
+        raise
+    return (r.stdout or b"").decode("utf-8", "replace")
 
 
 def set_clipboard(text: str) -> str:
     if get_session().mode != "x11":
-        return _unavailable()
-    try:
-        # xclip forks to stay resident serving the selection — discard_output so
-        # the inherited pipe doesn't keep subprocess.run blocked until timeout.
-        _run_x(
-            ["xclip", "-selection", "clipboard"],
-            input_bytes=text.encode("utf-8"),
-            discard_output=True,
-        )
-        return "Clipboard set"
-    except RuntimeError as e:
-        return f"Error: {e}"
+        raise DesktopUnavailable(_unavailable())
+    # xclip forks to stay resident serving the selection — discard_output so
+    # the inherited pipe doesn't keep subprocess.run blocked until timeout.
+    _run_x(
+        ["xclip", "-selection", "clipboard"],
+        input_bytes=text.encode("utf-8"),
+        discard_output=True,
+    )
+    return "Clipboard set"
 
 
 # ---------------------------------------------------------------------------
@@ -1311,22 +1299,23 @@ def lock_screen() -> str:
     """Lock the active graphical session via loginctl (needs no display)."""
     s = get_session()
     if s.mode not in ("x11", "wayland"):
-        return _unavailable()
+        raise DesktopUnavailable(_unavailable())
     target = ["loginctl", "lock-session"]
     if s.session_id:
         target.append(s.session_id)
     rc, _out, err = _run_capture(target)
-    if rc == 0:
-        return "Screen locked"
-    return f"Failed: {err.strip() or f'loginctl rc={rc}'}"
+    if rc != 0:
+        raise RuntimeError(f"loginctl lock-session failed: {err.strip() or f'rc={rc}'}")
+    return "Screen locked"
 
 
 def show_notification(title: str, message: str) -> str:
     """Show a desktop notification via notify-send (addresses the user's D-Bus)."""
     if get_session().mode not in ("x11", "wayland"):
-        return _unavailable()
-    try:
-        _run_x(["notify-send", title, message], timeout=10)
-        return "Notification shown"
-    except RuntimeError as e:
-        return f"Failed: {e}"
+        raise DesktopUnavailable(_unavailable())
+    _run_x(["notify-send", title, message], timeout=10)
+    return "Notification shown"
+
+
+# The provider's diagnose() (#32). Imported last: availability reads this module at call time.
+from remoteos.platform.linux.availability import diagnose  # noqa: E402,F401

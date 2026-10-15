@@ -128,13 +128,55 @@ diacritics, symbols and emoji. `\n` (also `\r\n`) presses Enter and `\t` presses
     the reply is an error that says how many got through.
   - **macOS:** refuses up front, when the process may not post keyboard events. Nothing is
     then clicked, typed or pasted.
-  - **macOS and Linux:** cannot confirm delivery to a locked console.
+  - **Windows and macOS:** a locked screen is refused before anything is typed (see
+    [Tool errors](#tool-errors-and-desktop-diagnoses)). On Linux X11, typed input reaches
+    the screen locker.
 - **`method="paste"` (opt-in):** for an app that ignores typed keystrokes.
   - It saves the clipboard text, pastes with Ctrl+V (Command+V on macOS), then restores the
     clipboard.
   - Only text can be restored. When the clipboard held none, the reply says so.
   - The reply means the paste keys were pressed; it does not confirm the app took the text.
   - Not for secrets: clipboard history and sync keep a copy.
+
+## Tool errors and desktop diagnoses
+
+A tool that fails returns an MCP **error result** (`isError: true`), never a successful
+reply with error text in it. The client shows it as a tool error. The text says what is
+wrong, and for a tool call it keeps the task id, e.g.
+`[task:1a2b3c4d5e6f] Shell error: working directory not found: C:\no such dir`.
+
+Before a desktop tool touches the screen, it checks that the desktop can be used:
+
+- **Screen tools** (Snapshot, AnnotatedSnapshot, OCR, ScreenRecord) and **input tools**
+  (Click, Move, Type, Scroll, Shortcut, MinimizeAll).
+- **Windows:**
+  - the server runs in session 0: start it with `schtasks /Run /TN RemoteOSMCP`;
+  - the server runs in a non-interactive window station;
+  - the session is disconnected: run **ReconnectSession**. It attaches the server's own
+    session to the console, then checks it worked. The screen and input tools refuse a
+    disconnected session instead of moving it, because a reconnect puts the user's desktop
+    on the machine's physical screen;
+  - the screen is locked, or a secure desktop (UAC prompt, Ctrl+Alt+Del) is showing.
+- **macOS:** no GUI session, the session is not on the screen (fast user switching), or the
+  screen is locked. Also a missing permission: **Screen Recording** for the screen tools,
+  **Accessibility** for the input tools. The message names the Python binary to allow.
+- **Linux:** no X11 session. The headless/Wayland stub text itself is unchanged, and
+  Snapshot, ScreenRecord and OCR now return the bare stub instead of `<Tool> error: <stub>`.
+  A locked X11 screen is not refused: the screenshot shows the locker, and typed input
+  reaches it.
+- `Snapshot(use_vision=False)` captures nothing, so it needs only the user's desktop, locked
+  or not. Its window list works on a disconnected or locked session too. It is refused only
+  in these cases: session 0, a non-interactive window station, no macOS GUI session, a macOS
+  session that is not on the screen, or no X11 session.
+- **It never refuses a working desktop.** A check that cannot run (an older OS, a missing
+  API, a probe error) counts as "usable", and the tool goes ahead.
+
+**Console output** (Shell, the service and task helpers, Ping, Windows OCR) is decoded in
+the code page it is written in, so on Windows `č` stays `č`.
+
+- On Windows each command runs in its own hidden console, at the system's OEM code page.
+  So a `chcp` inside one Shell command cannot change how later replies are decoded.
+- Windows OCR reads its text as UTF-8, so `€` and `–` survive.
 
 ## MCP gateway (dev1)
 
