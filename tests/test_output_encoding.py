@@ -283,7 +283,7 @@ def test_windows_run_command_reads_utf8_exactly_in_its_own_console(monkeypatch, 
     _binary_in_its_own_console(kwargs)
 
 
-def test_windows_native_program_output_in_the_oem_page_is_still_read_exactly(monkeypatch, windows_child):
+def test_windows_native_program_output_in_the_oem_page_is_still_read_exactly(monkeypatch, windows_child, caplog):
     # tscon started directly (no PowerShell) writes the console's OEM page: it takes the OEM fallback
     from remoteos.platform.command import run_command
 
@@ -291,8 +291,12 @@ def test_windows_native_program_output_in_the_oem_page_is_still_read_exactly(mon
     windows_child.oem = "cp852"
     windows_child.stderr = "Prístup odmietnutý.\r\n".encode("cp852")
     windows_child.returncode = 5
-    with pytest.raises(RuntimeError, match=r"^tscon failed \(exit 5\): Prístup odmietnutý\.$"):
-        run_command(["tscon", "2", "/dest:console"], check=True, label="tscon")
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
+        with pytest.raises(RuntimeError, match=r"^tscon failed \(exit 5\): Prístup odmietnutý\.$"):
+            run_command(["tscon", "2", "/dest:console"], check=True, label="tscon")
+    # review round 3: run_child names the stream that fell back (swapped labels survived)
+    [record] = _remoteos_records(caplog)
+    assert record.getMessage().startswith("stderr: 1 line(s) not UTF-8")
 
 
 def test_posix_run_command_reads_the_locale_exactly():
