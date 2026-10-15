@@ -1,13 +1,16 @@
-"""Fixtures shared by several test modules: the gateway harness, and the Windows provider on a fake Win32 API."""
+"""Fixtures shared by several test modules: the gateway harness, the Windows provider on a fake Win32 API, and a
+fake Windows console child (#48)."""
 
 from __future__ import annotations
 
 import ctypes
 import importlib
+import subprocess
 import sys
 import types
 
 import pytest
+from fake_console_child import FakeChild, oem_code_page
 from fake_windows_session import FakeWindowsSession
 from gateway_harness import MACHINE, OTHER_MACHINE, FakeMachine, Harness, _default_registry, _machines_file, _write_json
 from PIL import Image, ImageGrab
@@ -66,3 +69,18 @@ def win_session(monkeypatch):
     mod = importlib.import_module("remoteos.platform.win.desktop")
     yield mod, session
     purge_module("remoteos.platform.win.desktop")
+
+
+@pytest.fixture
+def windows_child(monkeypatch):
+    """A Windows console child at the OS boundary (#48); yields the ``fake_console_child.FakeChild``.
+
+    ``subprocess.Popen`` (and so ``subprocess.run``) starts a real Python child that writes
+    ``child.stdout`` / ``child.stderr`` bytes and exits ``child.returncode``. Python's Windows-only
+    ``oem`` codec stands for ``child.oem``: cp437 (resolume-pp) unless the test sets another page
+    before the first decode.
+    """
+    child = FakeChild()
+    monkeypatch.setattr(subprocess, "Popen", child)
+    with oem_code_page(lambda: child.oem):
+        yield child
