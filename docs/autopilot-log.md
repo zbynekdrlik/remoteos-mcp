@@ -288,3 +288,32 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Live verification (supervisor, after install):** the design's list plus the extra items on #48:
   - `Write-Error` and `cmd /c echo` on resolume-pp;
   - PowerShell-captured native output and a cp852 `.bat` on win-pz-server.
+
+## #48 round 2 — Windows PowerShell children in a UTF-8 console, no injected code (0.7.0.dev30)
+
+- **Why:** round 1's prefix was PowerShell code, and 5.1 printed it in every `Write-Error` record
+  (live on resolume-pp); a leading `param()` failed. A `[ScriptBlock]::Create` bootstrap only moved
+  the leak to the record's position line and lost the `$?` exit code (pwsh probes, Design-question
+  on #48). The main decided option E (ROZHODNUTÉ issuecomment-6187272301).
+- **Design:** every PowerShell child is `python.exe -I -S -X utf8 -c <fixed program> <cwd>
+  powershell -NoProfile -Command <script>`. The program switches its own hidden console to 65001,
+  runs PowerShell unchanged (the dev28 command line) in the same console, and exits with the exact
+  32-bit code. No PowerShell code is ours; `UTF8_PREFIX` is gone. Accepted cost: `$OutputEncoding`
+  (stdin into native programs) is ASCII again.
+- **Runner:** `run_child` (Popen, NUL stdin) is the one runner of Shell, `run_command` and OCR. A
+  timeout kills the tree: `taskkill /F /T` (hidden console) on Windows; on POSIX the group's
+  members are snapshotted, the group gets SIGTERM, up to 2 s grace without reaping, then SIGKILL
+  in any case. A never-started PowerShell raises.
+- **Decisions on the way:** the cwd is an argv element (the trampoline runs in the server's
+  directory, so `powershell` is never looked up in the user's cwd); fakes of a child answer at
+  `subprocess.Popen` (`popen_answered_by`); the trampoline stays a `-c` string (the decision).
+- **Commits:** `a114fd5` bump; `c9b60c0`/`496b872` round-1 🔵 leftovers; `e8368dc` fakes at Popen;
+  `f7c1e36` → `77097a8` tree kill; `47f248a` → `d0c92f1` the trampoline; review rounds 1-5 as
+  RED → GREEN: `5503558` → `e020efd`, `feda73a` → `dfbbff9` (+ `2c8349f` ci cmd shell),
+  `db3951d` → `c64a775`, `428f721` → `65f0c33`, `3fdc3e7` → `bd2fe78`; docs in between.
+  Reviews: 0🔴3🟡8🔵, 0🔴3🟡5🔵, 0🔴1🟡4🔵, 0🔴1🟡5🔵, 0🔴1🟡8🔵, 0🔴0🟡6🔵 (folded).
+- **Tests:** `tests/test_child_timeout.py` (real POSIX process trees), the trampoline program exec'd
+  against its kernel32/`subprocess.call` boundary, and `tests_windows/` in the new
+  `windows-powershell` CI job (real PowerShell 5.1, en-US cp437, no fakes). Result: 711 pass on
+  Linux, ruff clean.
+- **Follow-up candidate (supervisor):** split the pre-existing `__main__.py` (1883 lines).

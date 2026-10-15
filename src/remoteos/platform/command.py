@@ -40,9 +40,9 @@ CREATE_NO_WINDOW = 0x08000000
 #   and stderr handed down, and exits with the child's exact exit code (all 32 bits; sys.exit takes
 #   a C long, so a code >= 2**31 is passed as the same bits, signed).
 # - It runs in the SERVER's directory and starts PowerShell in <cwd> ("" = the server's), because
-#   CreateProcess looks for "powershell" in the PARENT's current directory first: a powershell.exe
-#   in the user's Shell cwd is never found, as before #48 when the server was the parent (review
-#   round 1).
+#   CreateProcess looks for "powershell" in the parent's exe directory, then the PARENT's current
+#   directory: a powershell.exe in the user's Shell cwd is never found, as before #48 when the
+#   server was the parent (review round 1; python.exe sits next to the server's interpreter).
 # - No PowerShell code is ours: the script reaches PowerShell exactly as before #48, so its error
 #   records, exit codes, param() and Constrained Language Mode are plain PowerShell. Round 1's
 #   prefix was PowerShell code, and 5.1 printed it in every Write-Error record.
@@ -141,7 +141,8 @@ def powershell_argv(script: str, cwd: Optional[str] = None) -> list[str]:
     ``subprocess.call`` quotes it the same way, so PowerShell gets the same command line as before.
 
     ``cwd`` is PowerShell's working directory. Pass it HERE, never to ``run_child``: the
-    trampoline must run in the server's directory, which is where "powershell" is looked up.
+    trampoline must run in the server's directory, the one (after the exe's own) where
+    "powershell" is looked up.
     """
     trampoline = [_console_python(), *_TRAMPOLINE_FLAGS, UTF8_CONSOLE_TRAMPOLINE, cwd or ""]
     return [*trampoline, "powershell", "-NoProfile", "-Command", script]
@@ -261,7 +262,8 @@ def _group(pgid: int) -> list[psutil.Process]:
     - Every member gets a FRESH ``psutil.Process`` (review round 4): ``process_iter()`` hands back
       a cached object for a pid it saw before, and if that pid was reused by a member since, its
       old start time makes ``is_running()`` say "exited".
-    - ``os.getpgid`` reads any process's group on Linux and macOS, a zombie's included.
+    - ``os.getpgid`` reads any process's group on Linux and macOS; a zombie's on Linux, while
+      macOS reports a zombie as gone, which counts as exited anyway.
     """
     found: list[psutil.Process] = []
     for pid in psutil.pids():

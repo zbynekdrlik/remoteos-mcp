@@ -53,10 +53,11 @@ paths:
       command line (python.exe's path, the flags, the program). A script that fit the limit
       before #48 by less than that now fails loudly (WinError 206).
     - **The cwd goes INTO the argv, never to `run_child` (review round 1).** `CreateProcess`
-      looks for `powershell` in the PARENT's current directory first. The trampoline runs in
-      the server's directory, as the server itself did when it was PowerShell's parent, so a
-      `powershell.exe` planted in the user's Shell `cwd` is never found. PowerShell starts in
-      `cwd`.
+      looks for `powershell` in the parent's exe directory, then the PARENT's current
+      directory. The trampoline runs in the server's directory, as the server itself did when
+      it was PowerShell's parent, so a `powershell.exe` planted in the user's Shell `cwd` is
+      never found. PowerShell starts in `cwd` (pinned on real Windows with spaces, diacritics
+      and a trailing backslash).
     - **The script reaches PowerShell unchanged**, the argv byte-identical to dev28's:
       `Popen` quotes it with `list2cmdline`, `python.exe` parses it back, and the trampoline's
       `subprocess.call` quotes it the same way. So error records, `$?` / `exit` /
