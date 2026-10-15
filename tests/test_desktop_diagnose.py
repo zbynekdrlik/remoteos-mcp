@@ -21,7 +21,7 @@ import sys
 import types
 
 import pytest
-from fake_windows_session import LOCK, UNLOCK, WTS_ACTIVE, WTS_DISCONNECTED
+from fake_windows_session import LOCK, UNLOCK, WTS_ACTIVE, WTS_DISCONNECTED, purge_module
 from fastmcp.exceptions import ToolError
 
 import remoteos.__main__ as server
@@ -31,13 +31,6 @@ _HEADLESS = "Not available on headless Linux (no display)"
 _WAYLAND = "Not available: Wayland session detected (X11 backend only — Wayland support is a separate tier)"
 _LOCKED_START = "The screen is locked: screenshots show the lock screen and mouse/keyboard input goes nowhere."
 _DESKTOP_HANDLE = 0x1A4
-
-
-def _purge(name: str) -> None:
-    sys.modules.pop(name, None)
-    parent, _, child = name.rpartition(".")
-    if parent in sys.modules and hasattr(sys.modules[parent], child):
-        delattr(sys.modules[parent], child)
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +152,10 @@ def mac_session(monkeypatch):
     quartz.CGPreflightPostEventAccess = lambda: state.post_events
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
     monkeypatch.setitem(sys.modules, "pyautogui", types.ModuleType("pyautogui"))
-    _purge("remoteos.platform.mac.desktop")
+    purge_module("remoteos.platform.mac.desktop")
     mod = importlib.import_module("remoteos.platform.mac.desktop")
     yield mod, state
-    _purge("remoteos.platform.mac.desktop")
+    purge_module("remoteos.platform.mac.desktop")
 
 
 def test_mac_healthy_desktop_is_no_diagnosis(mac_session):
@@ -506,6 +499,25 @@ def test_mac_click_with_accessibility_but_no_screen_recording_still_clicks(mac_t
     state.screen_recording = False  # only a capture needs it
     assert server.Click(100, 100, max_width=0).startswith("Clicked left at (100,100)")
     assert clicks == [(100, 100)]
+
+
+def test_mac_type_text_still_refuses_without_the_posting_permission_when_the_preflight_fails_open(
+    mac_tools, monkeypatch
+):
+    # review round 7: a probe that raises counts as "usable", so the provider's own
+    # CGPreflightPostEventAccess gate in type_text is what still stops a click, clear or paste
+    # that macOS would drop silently
+    state, clicks = mac_tools
+    state.post_events = False
+
+    def _window_server_unreachable():
+        raise RuntimeError("window server unreachable")
+
+    monkeypatch.setattr(sys.modules["Quartz"], "CGSessionCopyCurrentDictionary", _window_server_unreachable)
+    with pytest.raises(ToolError) as exc:
+        server.Type("Žltý", x=640, y=400, clear=True, method="paste")
+    assert str(exc.value).startswith("Type error: macOS does not let this process post keyboard events")
+    assert clicks == []
 
 
 def test_linux_ocr_without_a_display_is_the_unchanged_stub(monkeypatch, no_subprocess):

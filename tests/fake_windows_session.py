@@ -8,12 +8,16 @@ report for ONE session; ``add_to(windll)`` puts those functions on a fake
 ``subprocess.run``. The WTS buffers use the Win32 offsets as literals, never the
 provider's own struct. The default is a HEALTHY session (session 1, WinSta0,
 active, input desktop "Default", unlocked).
+
+Also shared by the provider tests: ``FakeClipboard`` (pywin32's clipboard) and
+``purge_module`` (re-import a provider against the current fakes).
 """
 
 from __future__ import annotations
 
 import ctypes
 import struct
+import sys
 import types
 
 WTS_CONNECT_STATE, WTS_SESSION_INFO_EX = 8, 25  # WTS_INFO_CLASS
@@ -117,3 +121,40 @@ class FakeWindowsSession:
             WTSQuerySessionInformationW=Fn(self.WTSQuerySessionInformationW),
             WTSFreeMemory=Fn(self.WTSFreeMemory),
         )
+
+
+class FakeClipboard:
+    """pywin32 ``win32clipboard`` with one CF_UNICODETEXT slot (``None`` = no text on it)."""
+
+    def __init__(self, text: str | None = None):
+        self.text = text
+        self.writes: list[str] = []
+
+    def OpenClipboard(self):
+        pass
+
+    def CloseClipboard(self):
+        pass
+
+    def IsClipboardFormatAvailable(self, fmt):
+        return self.text is not None
+
+    def EmptyClipboard(self):
+        self.text = None
+
+    def GetClipboardData(self, fmt):
+        if self.text is None:
+            raise TypeError("Specified clipboard format is not available")
+        return self.text
+
+    def SetClipboardText(self, text, fmt):
+        self.text = text
+        self.writes.append(text)
+
+
+def purge_module(name: str) -> None:
+    """Forget an imported provider module, so the next import runs against the current fakes."""
+    sys.modules.pop(name, None)
+    parent, _, child = name.rpartition(".")
+    if parent in sys.modules and hasattr(sys.modules[parent], child):
+        delattr(sys.modules[parent], child)

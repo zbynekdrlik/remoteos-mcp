@@ -8,7 +8,7 @@ import sys
 import types
 
 import pytest
-from fake_windows_session import FakeWindowsSession
+from fake_windows_session import FakeWindowsSession, purge_module
 from gateway_harness import MACHINE, OTHER_MACHINE, FakeMachine, Harness, _default_registry, _machines_file, _write_json
 from PIL import Image, ImageGrab
 
@@ -25,13 +25,6 @@ def gw(tmp_path) -> Harness:
     _write_json(h.registry_path, _default_registry())
     _machines_file(h.machines_path, [MACHINE, OTHER_MACHINE])
     return h
-
-
-def _purge(name: str) -> None:
-    sys.modules.pop(name, None)
-    parent, _, child = name.rpartition(".")
-    if parent in sys.modules and hasattr(sys.modules[parent], child):
-        delattr(sys.modules[parent], child)
 
 
 @pytest.fixture
@@ -68,7 +61,7 @@ def win_session(monkeypatch):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     monkeypatch.setitem(sys.modules, "pyautogui", types.ModuleType("pyautogui"))
     monkeypatch.setattr(ImageGrab, "grab", lambda bbox=None, all_screens=False, **kw: Image.new("RGB", (1920, 1080)))
-    _purge("remoteos.platform.win.desktop")
+    purge_module("remoteos.platform.win.desktop")
     mod = importlib.import_module("remoteos.platform.win.desktop")
     yield mod, session
-    _purge("remoteos.platform.win.desktop")
+    purge_module("remoteos.platform.win.desktop")

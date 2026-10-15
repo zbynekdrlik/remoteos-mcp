@@ -13,36 +13,16 @@ import sys
 import types
 
 import pytest
+from fake_windows_session import FakeClipboard
 from PIL import ImageGrab
 
 import remoteos.__main__ as server
 
 
-class _FakeClipboard:
-    """pywin32 ``win32clipboard`` with one CF_UNICODETEXT slot (``None`` = no text on it)."""
-
-    def __init__(self):
-        self.text: str | None = None
-
-    def OpenClipboard(self):
-        pass
-
-    def CloseClipboard(self):
-        pass
-
-    def IsClipboardFormatAvailable(self, fmt):
-        return self.text is not None
-
-    def GetClipboardData(self, fmt):
-        if self.text is None:
-            raise TypeError("Specified clipboard format is not available")
-        return self.text
-
-
 @pytest.fixture
 def clipboard_tool(monkeypatch, win_session):
     mod, _ = win_session
-    clip = _FakeClipboard()
+    clip = FakeClipboard()
     module = sys.modules["win32clipboard"]
     for name in ("OpenClipboard", "CloseClipboard", "IsClipboardFormatAvailable", "GetClipboardData"):
         monkeypatch.setattr(module, name, getattr(clip, name), raising=False)

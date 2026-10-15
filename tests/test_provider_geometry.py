@@ -21,7 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
-from fake_windows_session import WTS_DISCONNECTED, FakeWindowsSession
+from fake_windows_session import WTS_DISCONNECTED, FakeClipboard, FakeWindowsSession, purge_module
 from fastmcp.exceptions import ToolError
 from PIL import Image, ImageGrab
 
@@ -51,13 +51,6 @@ def _tool_error(call) -> str:
     with pytest.raises(ToolError) as exc:
         call()
     return str(exc.value)
-
-
-def _purge(name: str) -> None:
-    sys.modules.pop(name, None)
-    parent, _, child = name.rpartition(".")
-    if parent in sys.modules and hasattr(sys.modules[parent], child):
-        delattr(sys.modules[parent], child)
 
 
 class _FakeInput:
@@ -124,10 +117,10 @@ def win(monkeypatch):
         return Image.new("RGB", (bbox[2] - bbox[0], bbox[3] - bbox[1]))
 
     monkeypatch.setattr(ImageGrab, "grab", _grab)
-    _purge("remoteos.platform.win.desktop")
+    purge_module("remoteos.platform.win.desktop")
     mod = importlib.import_module("remoteos.platform.win.desktop")
     yield mod, grabs
-    _purge("remoteos.platform.win.desktop")
+    purge_module("remoteos.platform.win.desktop")
 
 
 def test_windows_import_sets_per_monitor_v2(win):
@@ -426,40 +419,11 @@ def test_type_tool_unknown_method_is_an_error_and_does_nothing(pyautogui_branch)
     assert fake.click.calls == [] and ctypes.windll.input.raw == []
 
 
-class _FakeClipboard:
-    """pywin32 ``win32clipboard`` with one CF_UNICODETEXT slot (``None`` = no text on it)."""
-
-    def __init__(self, text):
-        self.text = text
-        self.writes: list[str] = []
-
-    def OpenClipboard(self):
-        pass
-
-    def CloseClipboard(self):
-        pass
-
-    def IsClipboardFormatAvailable(self, fmt):
-        return self.text is not None
-
-    def EmptyClipboard(self):
-        self.text = None
-
-    def GetClipboardData(self, fmt):
-        if self.text is None:
-            raise TypeError("Specified clipboard format is not available")
-        return self.text
-
-    def SetClipboardText(self, text, fmt):
-        self.text = text
-        self.writes.append(text)
-
-
 @pytest.fixture
 def win_clipboard(monkeypatch, pyautogui_branch):
     """``method="paste"`` on Windows: a fake clipboard, and the paste keys see what it holds."""
     server, fake = pyautogui_branch
-    clip = _FakeClipboard("old clip")
+    clip = FakeClipboard("old clip")
     module = sys.modules["win32clipboard"]
     for name in (
         "OpenClipboard",
@@ -675,7 +639,7 @@ def mac(monkeypatch):
     quartz.CGEventPost = lambda tap, event: quartz.posted.append((tap, event))
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
     monkeypatch.setitem(sys.modules, "pyautogui", types.ModuleType("pyautogui"))
-    _purge("remoteos.platform.mac.desktop")
+    purge_module("remoteos.platform.mac.desktop")
     mod = importlib.import_module("remoteos.platform.mac.desktop")
 
     commands: list[list[str]] = []
@@ -688,7 +652,7 @@ def mac(monkeypatch):
 
     monkeypatch.setattr(mod.subprocess, "run", _run)
     yield mod, commands
-    _purge("remoteos.platform.mac.desktop")
+    purge_module("remoteos.platform.mac.desktop")
 
 
 def test_mac_retina_geometry_is_points_with_pixel_capture(mac):
