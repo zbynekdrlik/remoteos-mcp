@@ -21,6 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
+from fake_windows_session import WTS_DISCONNECTED, FakeWindowsSession
 from fastmcp.exceptions import ToolError
 from PIL import Image, ImageGrab
 
@@ -89,6 +90,7 @@ class _FakeInput:
 @pytest.fixture
 def win(monkeypatch):
     user_input = _FakeInput()
+    session = FakeWindowsSession()  # a HEALTHY session: the desktop tools' preflight (#32) passes for real
     windll = types.SimpleNamespace(
         user32=types.SimpleNamespace(
             GetSystemMetrics=lambda i: _METRICS[i],
@@ -99,7 +101,9 @@ def win(monkeypatch):
         ),
         shcore=types.SimpleNamespace(SetProcessDpiAwareness=lambda v: 0),
         input=user_input,  # not a DLL: the tests' handle on the recorded input
+        session=session,  # not a DLL: the tests' handle on the fake logon session
     )
+    session.add_to(windll)
     monkeypatch.setattr(ctypes, "windll", windll, raising=False)
     from remoteos.platform.win import dpi
 
@@ -435,6 +439,9 @@ class _FakeClipboard:
     def CloseClipboard(self):
         pass
 
+    def IsClipboardFormatAvailable(self, fmt):
+        return self.text is not None
+
     def EmptyClipboard(self):
         self.text = None
 
@@ -454,7 +461,14 @@ def win_clipboard(monkeypatch, pyautogui_branch):
     server, fake = pyautogui_branch
     clip = _FakeClipboard("old clip")
     module = sys.modules["win32clipboard"]
-    for name in ("OpenClipboard", "CloseClipboard", "EmptyClipboard", "GetClipboardData", "SetClipboardText"):
+    for name in (
+        "OpenClipboard",
+        "CloseClipboard",
+        "IsClipboardFormatAvailable",
+        "EmptyClipboard",
+        "GetClipboardData",
+        "SetClipboardText",
+    ):
         monkeypatch.setattr(module, name, getattr(clip, name), raising=False)
     monkeypatch.setattr(sys.modules["win32con"], "CF_UNICODETEXT", 13, raising=False)
     pressed: list[tuple] = []
@@ -519,6 +533,39 @@ def test_windows_paste_restores_the_clipboard_when_the_paste_keys_fail(win_clipb
     assert clip.writes == ["ďakujem", "old clip"] and clip.text == "old clip"
 
 
+def test_windows_clipboard_without_text_reads_as_empty_not_an_error(win_clipboard):
+    # an empty clipboard, or one holding only an image, is "no text" (#32 review round 1)
+    server, clip, _ = win_clipboard
+    clip.text = None
+    assert server.GetClipboard() == ""
+    clip.text = "Error: this is just text"  # a failure is a raise, so text like this is ordinary text
+    assert server.GetClipboard() == "Error: this is just text"
+
+
+@pytest.mark.parametrize(
+    "call",
+    [lambda mod: mod.launch_app("zz_no_such_app_zz"), lambda mod: mod.show_notification("t", "m")],
+    ids=["launch_app", "show_notification"],
+)
+def test_windows_powershell_failure_is_an_error_not_a_success(win, monkeypatch, call):
+    # live on win-resolume: Start-Process of a missing app exits 1 (#32 review round 1)
+    import subprocess
+
+    mod, _ = win
+    failed = types.SimpleNamespace(returncode=1, stdout="", stderr="This command cannot be run: file not found.")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: failed)
+    with pytest.raises(RuntimeError, match="file not found"):
+        call(mod)
+
+
+def test_windows_launch_app_success(win, monkeypatch):
+    import subprocess
+
+    mod, _ = win
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: types.SimpleNamespace(returncode=0, stderr=""))
+    assert mod.launch_app("notepad") == "Launched notepad"
+
+
 def test_windows_provider_type_text_clicks_a_point_on_row_zero(pyautogui_branch):
     server, fake = pyautogui_branch
     mod = server.get_desktop()
@@ -564,18 +611,20 @@ def windows_tool_layer(monkeypatch, win):
     return server, commands
 
 
-def _session_tools(monkeypatch, server, commands, query_rc=0):
-    """Fake ``query session`` (one disconnected RDP session, id 2) and ``tscon``."""
-    query_out = (
-        " SESSIONNAME       USERNAME                 ID  STATE   TYPE        DEVICE\n"
-        " rdp-tcp#5         newlevel                  2  Disc\n"
-    )
+def _session_tools(monkeypatch, server, commands, readable=True):
+    """The server's own session (id 2) is disconnected; ``tscon 2 /dest:console`` attaches it.
+
+    The session is read through ProcessIdToSessionId + WTSConnectState (#32 review round 1),
+    never parsed out of ``query session``: a real disconnected session's line there has a
+    blank SESSIONNAME (``>   drlikzbynek   2  Disc``), which the old parser skipped.
+    """
+    session = ctypes.windll.session
+    session.session_id, session.connect_state = 2, WTS_DISCONNECTED
+    session.fail_session_id = not readable
 
     def _run(cmd, **kwargs):
         commands.append(list(cmd))
-        if cmd[:2] == ["query", "session"]:
-            return types.SimpleNamespace(returncode=query_rc, stdout=query_out, stderr="boom")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")  # tscon
+        return session.tscon(cmd)  # only tscon may run
 
     monkeypatch.setattr(server.subprocess, "run", _run)
 
@@ -586,16 +635,16 @@ def test_windows_capture_retries_after_session_reconnect(monkeypatch, windows_to
     _flaky_grab(monkeypatch, failures=1)
     img, frame = server._capture_snapshot_frame(0, 1280)
     assert img.size == frame.image_size == (1280, 457)
-    assert ["tscon", "2", "/dest:console"] in commands
+    assert commands == [["tscon", "2", "/dest:console"]]
 
 
 def test_windows_capture_error_surfaces_when_not_a_session_issue(monkeypatch, windows_tool_layer):
     server, commands = windows_tool_layer
-    _session_tools(monkeypatch, server, commands, query_rc=1)  # query fails → no reconnect
+    _session_tools(monkeypatch, server, commands, readable=False)  # session state unreadable → no reconnect
     _flaky_grab(monkeypatch, failures=1)
     with pytest.raises(OSError, match="screen grab failed"):
         server._capture_snapshot_frame(0, 1280)
-    assert not [c for c in commands if c[:1] == ["tscon"]]
+    assert commands == []
 
 
 def test_windows_capture_reports_failed_retry(monkeypatch, windows_tool_layer):
@@ -916,7 +965,8 @@ def test_mac_paste_without_the_posting_permission_is_an_error_and_touches_nothin
     monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
     # pyautogui's Command+V is a CGEventPost too: macOS would drop it silently behind "Pasted 4 chars"
     out = _tool_error(lambda: server.Type("Žltý", x=640, y=400, clear=True, method="paste"))
-    assert out.startswith("Type error: macOS does not let this process post keyboard events")
+    # the Type tool's preflight (#32) refuses first, with the same CGPreflightPostEventAccess predicate
+    assert out.startswith("macOS does not let this process control the mouse and keyboard")
     assert board["writes"] == [] and board["pressed"] == []
     assert fake.click.calls == [] and fake.press.calls == []
 
@@ -925,7 +975,8 @@ def test_mac_keys_without_the_posting_permission_clicks_and_clears_nothing(mac_t
     server, fake, quartz = mac_tool_layer
     monkeypatch.setattr(quartz, "CGPreflightPostEventAccess", lambda: False)
     out = _tool_error(lambda: server.Type("Žltý", x=640, y=400, clear=True, press_enter=True))
-    assert out.startswith("Type error: macOS does not let this process post keyboard events")
+    # the Type tool's preflight (#32) refuses first, with the same CGPreflightPostEventAccess predicate
+    assert out.startswith("macOS does not let this process control the mouse and keyboard")
     assert fake.click.calls == [] and fake.hotkey.calls == [] and fake.press.calls == []
     assert quartz.posted == []
 

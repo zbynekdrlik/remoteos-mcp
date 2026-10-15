@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 import remoteos.__main__ as server
 from remoteos.platform.linux import desktop as linux_desktop
@@ -137,6 +139,50 @@ def test_the_error_text_is_not_masked_even_with_mask_error_details(monkeypatch, 
     missing = tmp_path / "nope"
     _, text = _error_text("Shell", {"command": "true", "cwd": str(missing)})
     assert text == f"Shell error: working directory not found: {missing}"
+
+
+def test_every_registered_tool_reports_its_failures_as_mcp_errors():
+    # a tool without @reports_errors would fall into FastMCP's own exception path, which
+    # logs the message (#31) and words it differently (#32 review round 1)
+    missing = []
+    for name, tool in server._get_registered_tools().items():
+        fn = tool.fn
+        while fn is not None and not getattr(fn, "__remoteos_reports_errors__", False):
+            fn = getattr(fn, "__wrapped__", None)
+        if fn is None:
+            missing.append(name)
+    assert missing == []
+
+
+def test_an_expected_failure_is_logged_at_warning_not_error(tmp_path):
+    # a direct ToolError ("File not found: …") is an expected failure, like the mapped ones
+    with pytest.raises(ToolError) as exc:
+        server.FileRead(str(tmp_path / "missing.txt"))
+    assert exc.value.log_level == logging.WARNING
+    with pytest.raises(ToolError) as exc:
+        server.Shell("true", cwd=str(tmp_path / "nope"))
+    assert exc.value.log_level == logging.WARNING
+
+
+def test_file_list_shows_an_entry_with_an_unconvertible_mtime_as_unknown(tmp_path, monkeypatch):
+    # one entry whose mtime datetime cannot convert lists as "?"; it never fails the listing
+    (tmp_path / "good.txt").write_text("x")
+    bad = tmp_path / "bad.txt"
+    bad.write_text("y")
+    os.utime(bad, (1_000_012_345, 1_000_012_345))
+    real = server.datetime
+
+    class _Datetime:
+        @staticmethod
+        def fromtimestamp(ts):
+            if ts == 1_000_012_345:
+                raise ValueError("year 99999 is out of range")
+            return real.fromtimestamp(ts)
+
+    monkeypatch.setattr(server, "datetime", _Datetime)
+    out = server.FileList(str(tmp_path))
+    assert re.search(r"^\?\s+bad\.txt\s+\?\s+\?\s*$", out, re.MULTILINE), out
+    assert re.search(r"^FILE\s+good\.txt", out, re.MULTILINE), out
 
 
 def test_cancel_task_with_an_unknown_id_is_an_mcp_error():

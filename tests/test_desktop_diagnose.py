@@ -2,15 +2,11 @@
 
 The providers run against FAKE OS APIs, the external boundary only:
 
-- Windows: ``ctypes.windll`` with kernel32 ``ProcessIdToSessionId``, user32
-  ``GetProcessWindowStation`` / ``OpenInputDesktop`` / ``GetUserObjectInformationW``
-  / ``CloseDesktop`` and wtsapi32 ``WTSQuerySessionInformationW`` /
-  ``WTSFreeMemory``. The WTS buffers are laid out with the Win32 offsets as
-  literals, never with the provider's own struct.
+- Windows: ``tests/fake_windows_session.py`` (kernel32 / user32 / wtsapi32 of one
+  session, WTS buffers with literal Win32 offsets) and a faked ``tscon``.
 - macOS: the ``Quartz`` framework (``CGSessionCopyCurrentDictionary``,
-  ``CGPreflightScreenCaptureAccess``) and the ApplicationServices library
-  (``AXIsProcessTrusted``).
-- Linux: the logind ``LockedHint`` query (``_run_capture``) and the cached session.
+  ``CGPreflightScreenCaptureAccess``, ``CGPreflightPostEventAccess``).
+- Linux: the cached session (and a guard that no subprocess runs).
 
 ``diagnose()`` must NEVER false-positive: a healthy desktop and a probe that
 fails are both "usable". Only a positive finding stops a tool.
@@ -22,11 +18,11 @@ import ctypes
 import importlib
 import logging
 import os
-import struct
 import sys
 import types
 
 import pytest
+from fake_windows_session import LOCK, UNLOCK, WTS_ACTIVE, WTS_DISCONNECTED, FakeWindowsSession
 from fastmcp.exceptions import ToolError
 from PIL import Image, ImageGrab
 
@@ -36,6 +32,7 @@ from remoteos.platform.linux import desktop as linux_desktop
 _HEADLESS = "Not available on headless Linux (no display)"
 _WAYLAND = "Not available: Wayland session detected (X11 backend only — Wayland support is a separate tier)"
 _LOCKED_START = "The screen is locked: screenshots show the lock screen and mouse/keyboard input goes nowhere."
+_DESKTOP_HANDLE = 0x1A4
 
 
 def _purge(name: str) -> None:
@@ -45,115 +42,25 @@ def _purge(name: str) -> None:
         delattr(sys.modules[parent], child)
 
 
-class _Fn:
-    """A fake DLL function: callable, records its calls, and takes restype/argtypes like a ctypes one."""
-
-    def __init__(self, impl):
-        self.impl = impl
-        self.calls: list[tuple] = []
-        self.restype = None
-        self.argtypes = None
-
-    def __call__(self, *args):
-        self.calls.append(args)
-        return self.impl(*args)
-
-
 # ---------------------------------------------------------------------------
 # Windows
 # ---------------------------------------------------------------------------
-
-_WTS_CONNECT_STATE, _WTS_SESSION_INFO_EX = 8, 25  # WTS_INFO_CLASS
-_WTS_ACTIVE, _WTS_DISCONNECTED = 0, 4  # WTS_CONNECTSTATE_CLASS
-_LOCK, _UNLOCK = 0, 1  # WTSINFOEX_LEVEL1_W.SessionFlags
-_DESKTOP_HANDLE, _WINSTA_HANDLE = 0x1A4, 0x2C8
-
-
-class _FakeWindowsSession:
-    """One Windows logon session as the Win32 / WTS APIs report it."""
-
-    def __init__(self):
-        self.session_id = 1
-        self.window_station = "WinSta0"
-        self.connect_state = _WTS_ACTIVE
-        self.input_desktop: str | None = "Default"  # None = OpenInputDesktop fails (lock screen / UAC)
-        self.lock_flags: int | None = _UNLOCK  # None = WTSSessionInfoEx fails
-        self.fail_session_id = False
-        self.buffers: list = []  # keeps the WTS buffers alive until freed
-        self.freed: list[int] = []
-        self.closed: list[int] = []
-        self.open_access: list[int] = []
-
-    # kernel32
-    def ProcessIdToSessionId(self, pid, sid_ref):
-        if self.fail_session_id:
-            raise OSError("ProcessIdToSessionId is gone")
-        sid_ref._obj.value = self.session_id
-        return 1
-
-    # user32
-    def OpenInputDesktop(self, flags, inherit, access):
-        self.open_access.append(access)
-        return _DESKTOP_HANDLE if self.input_desktop is not None else None
-
-    def GetUserObjectInformationW(self, handle, index, buf, size, needed_ref):
-        assert index == 2  # UOI_NAME
-        name = {_DESKTOP_HANDLE: self.input_desktop, _WINSTA_HANDLE: self.window_station}[handle.value]
-        buf.value = name
-        return 1
-
-    def CloseDesktop(self, handle):
-        self.closed.append(handle.value)
-        return 1
-
-    # wtsapi32
-    def WTSQuerySessionInformationW(self, server_handle, sid, info_class, buf_ref, size_ref):
-        assert sid == self.session_id
-        if info_class == _WTS_CONNECT_STATE:
-            raw = struct.pack("<i", self.connect_state)
-        elif info_class == _WTS_SESSION_INFO_EX:
-            if self.lock_flags is None:
-                return 0
-            # WTSINFOEXW: DWORD Level; then an 8-aligned union (it holds LARGE_INTEGERs) whose
-            # WTSINFOEX_LEVEL1_W starts with SessionId, SessionState, SessionFlags.
-            raw = struct.pack("<IIIii", 1, 0, sid, self.connect_state, self.lock_flags) + bytes(200)
-        else:
-            return 0
-        buf = ctypes.create_string_buffer(raw, len(raw))
-        self.buffers.append(buf)
-        buf_ref._obj.value = ctypes.addressof(buf)
-        size_ref._obj.value = len(raw)
-        return 1
-
-    def WTSFreeMemory(self, pointer):
-        self.freed.append(pointer.value if hasattr(pointer, "value") else pointer)
 
 
 @pytest.fixture
 def win_session(monkeypatch):
     """The Windows provider imported against a fake Win32 API; yields ``(provider, session)``."""
-    session = _FakeWindowsSession()
+    session = FakeWindowsSession()
     windll = types.SimpleNamespace(
-        kernel32=types.SimpleNamespace(
-            GetCurrentProcessId=_Fn(lambda: 4242),
-            ProcessIdToSessionId=_Fn(session.ProcessIdToSessionId),
-        ),
         user32=types.SimpleNamespace(
             GetSystemMetrics=lambda i: {76: 0, 77: 0, 78: 1920, 79: 1080}[i],
             SetProcessDpiAwarenessContext=lambda ctx: 1,
             SetProcessDPIAware=lambda: 1,
             SetCursorPos=lambda x, y: 1,
-            GetProcessWindowStation=_Fn(lambda: _WINSTA_HANDLE),
-            OpenInputDesktop=_Fn(session.OpenInputDesktop),
-            GetUserObjectInformationW=_Fn(session.GetUserObjectInformationW),
-            CloseDesktop=_Fn(session.CloseDesktop),
-        ),
-        wtsapi32=types.SimpleNamespace(
-            WTSQuerySessionInformationW=_Fn(session.WTSQuerySessionInformationW),
-            WTSFreeMemory=_Fn(session.WTSFreeMemory),
         ),
         shcore=types.SimpleNamespace(SetProcessDpiAwareness=lambda v: 0),
     )
+    session.add_to(windll)
     monkeypatch.setattr(ctypes, "windll", windll, raising=False)
     from remoteos.platform.win import dpi
 
@@ -201,7 +108,7 @@ def test_windows_non_interactive_window_station_is_no_interactive_desktop(win_se
 
 def test_windows_disconnected_session_points_to_reconnect_session(win_session):
     mod, session = win_session
-    session.connect_state = _WTS_DISCONNECTED
+    session.connect_state = WTS_DISCONNECTED
     reason = mod.diagnose()
     assert "disconnected" in reason and "ReconnectSession" in reason
 
@@ -209,7 +116,7 @@ def test_windows_disconnected_session_points_to_reconnect_session(win_session):
 def test_windows_locked_screen(win_session):
     mod, session = win_session
     session.input_desktop = None  # the lock screen runs on the Winlogon desktop: OpenInputDesktop fails
-    session.lock_flags = _LOCK
+    session.lock_flags = LOCK
     assert mod.diagnose().startswith(_LOCKED_START)
     assert mod.diagnose(capture=True).startswith(_LOCKED_START)
     assert len(session.freed) == len(session.buffers)
@@ -218,7 +125,7 @@ def test_windows_locked_screen(win_session):
 def test_windows_secure_desktop_is_the_uac_prompt_when_the_session_is_not_locked(win_session):
     mod, session = win_session
     session.input_desktop = None
-    session.lock_flags = _UNLOCK
+    session.lock_flags = UNLOCK
     reason = mod.diagnose()
     assert reason.startswith("The screen shows a secure desktop (a UAC prompt, Ctrl+Alt+Del or the sign-in screen)")
 
@@ -226,7 +133,7 @@ def test_windows_secure_desktop_is_the_uac_prompt_when_the_session_is_not_locked
 def test_windows_secure_desktop_is_named_when_it_can_be_opened(win_session):
     mod, session = win_session
     session.input_desktop = "Winlogon"  # running as SYSTEM opens it
-    session.lock_flags = _UNLOCK
+    session.lock_flags = UNLOCK
     assert mod.diagnose().startswith("The screen shows the 'Winlogon' desktop")
     assert session.closed == [_DESKTOP_HANDLE]
 
@@ -262,8 +169,7 @@ class _FakeMac:
     def __init__(self):
         self.session: dict | None = {"kCGSSessionOnConsoleKey": True}
         self.screen_recording = True
-        self.accessibility = True
-        self.ax_library = True
+        self.post_events = True  # CGPreflightPostEventAccess: Privacy & Security › Accessibility
 
 
 @pytest.fixture
@@ -273,20 +179,11 @@ def mac_session(monkeypatch):
     quartz.kCGSessionOnConsoleKey = "kCGSSessionOnConsoleKey"
     quartz.CGSessionCopyCurrentDictionary = lambda: state.session
     quartz.CGPreflightScreenCaptureAccess = lambda: state.screen_recording
-    quartz.CGPreflightPostEventAccess = lambda: True
+    quartz.CGPreflightPostEventAccess = lambda: state.post_events
     monkeypatch.setitem(sys.modules, "Quartz", quartz)
     monkeypatch.setitem(sys.modules, "pyautogui", types.ModuleType("pyautogui"))
     _purge("remoteos.platform.mac.desktop")
     mod = importlib.import_module("remoteos.platform.mac.desktop")
-
-    def _application_services():
-        if not state.ax_library:
-            raise OSError("dlopen(ApplicationServices) failed")
-        return types.SimpleNamespace(AXIsProcessTrusted=_Fn(lambda: state.accessibility))
-
-    from remoteos.platform.mac import availability
-
-    monkeypatch.setattr(availability, "_load_application_services", _application_services)
     yield mod, state
     _purge("remoteos.platform.mac.desktop")
 
@@ -306,8 +203,9 @@ def test_mac_without_screen_recording_cannot_capture(mac_session):
 
 
 def test_mac_without_accessibility_cannot_send_input(mac_session):
+    # the same predicate the event-posting code gates on (CGPreflightPostEventAccess), review round 1
     mod, state = mac_session
-    state.accessibility = False
+    state.post_events = False
     reason = mod.diagnose(capture=False)
     assert "Accessibility" in reason and os.path.realpath(sys.executable) in reason
     assert mod.diagnose(capture=True) is None  # a screenshot does not need Accessibility
@@ -332,9 +230,9 @@ def test_mac_session_not_on_the_console(mac_session):
     assert "not on the screen" in mod.diagnose()
 
 
-def test_mac_unreadable_accessibility_state_is_usable(mac_session):
-    mod, state = mac_session
-    state.ax_library = False
+def test_mac_without_the_post_event_preflight_is_usable(mac_session, monkeypatch):
+    mod, _ = mac_session
+    monkeypatch.delattr(sys.modules["Quartz"], "CGPreflightPostEventAccess")  # before macOS 10.15
     assert mod.diagnose(capture=False) is None
 
 
@@ -354,52 +252,31 @@ def _x11(session_id: str | None = "7"):
 
 
 @pytest.fixture
-def logind(monkeypatch):
-    """``loginctl show-session <id> -p LockedHint --value``: records the argv, answers ``reply``."""
-    state = {"calls": [], "reply": (0, "no\n", "")}
+def no_subprocess(monkeypatch):
+    def _boom(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("the Linux diagnosis must not run a subprocess")
 
-    def _run_capture(cmd, timeout=10):
-        state["calls"].append(list(cmd))
-        return state["reply"]
-
-    monkeypatch.setattr(linux_desktop, "_run_capture", _run_capture)
-    return state
+    monkeypatch.setattr(linux_desktop, "_run_capture", _boom)
+    monkeypatch.setattr(linux_desktop, "_run_x", _boom)
 
 
-def test_linux_headless_and_wayland_diagnoses_are_the_unchanged_stubs(monkeypatch, logind):
+def test_linux_headless_and_wayland_diagnoses_are_the_unchanged_stubs(monkeypatch, no_subprocess):
     monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="headless"))
     assert linux_desktop.diagnose(capture=True) == _HEADLESS
     monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="wayland"))
     assert linux_desktop.diagnose(capture=False) == _WAYLAND
-    assert logind["calls"] == []
 
 
-def test_linux_unlocked_x11_session_is_no_diagnosis(monkeypatch, logind):
+def test_linux_x11_session_is_no_diagnosis_even_when_a_locker_runs(monkeypatch, no_subprocess):
+    # review round 1: a locked X11 screen is no silent failure. The screenshot shows the locker
+    # and xdotool input reaches it (the only remote way to unlock), so it is never refused.
     monkeypatch.setattr(linux_desktop, "_SESSION", _x11())
-    assert linux_desktop.diagnose() is None
-    assert logind["calls"] == [["loginctl", "show-session", "7", "-p", "LockedHint", "--value"]]
-
-
-def test_linux_locked_x11_session(monkeypatch, logind):
-    monkeypatch.setattr(linux_desktop, "_SESSION", _x11())
-    logind["reply"] = (0, "yes\n", "")
-    assert linux_desktop.diagnose(capture=True).startswith(_LOCKED_START)
-
-
-def test_linux_unreadable_lock_hint_is_usable(monkeypatch, logind):
-    monkeypatch.setattr(linux_desktop, "_SESSION", _x11())
-    logind["reply"] = (1, "", "Failed to get session: No session '7' known")
-    assert linux_desktop.diagnose() is None
-
-
-def test_linux_session_without_a_logind_id_is_not_probed(monkeypatch, logind):
-    monkeypatch.setattr(linux_desktop, "_SESSION", _x11(session_id=None))
-    assert linux_desktop.diagnose() is None
-    assert logind["calls"] == []
+    assert linux_desktop.diagnose(capture=True) is None
+    assert linux_desktop.diagnose(capture=False) is None
 
 
 # ---------------------------------------------------------------------------
-# The preflight: which tools run it, and with which kind
+# The preflight: which tools run it, with which kind, and that it fails open
 # ---------------------------------------------------------------------------
 
 _CAPTURE_TOOLS = {
@@ -427,15 +304,17 @@ _NO_PREFLIGHT_TOOLS = {
 
 
 class _DiagnosingProvider(types.SimpleNamespace):
-    """A provider whose diagnose() always finds a problem, and records how it was asked."""
+    """A provider whose diagnose() always finds a problem (or raises), and records how it was asked."""
 
     HAS_WIN32 = True
 
-    def __init__(self):
-        super().__init__(asked=[])
+    def __init__(self, explode: bool = False):
+        super().__init__(asked=[], explode=explode)
 
     def diagnose(self, capture=False):
         self.asked.append(capture)
+        if self.explode:
+            raise RuntimeError("probe exploded")
         return f"diagnosed (capture={capture})"
 
     def __getattr__(self, name):  # every other provider function "works"
@@ -479,6 +358,16 @@ def test_the_preflight_logs_its_result(diagnosing, caplog):
     assert "desktop unavailable (input): diagnosed (capture=False)" in caplog.text
 
 
+def test_a_diagnose_that_raises_never_blocks_the_tool(monkeypatch, caplog):
+    # fail open at the one shared call site too, whatever a provider's diagnose() does (review round 1)
+    provider = _DiagnosingProvider(explode=True)
+    monkeypatch.setattr(server, "get_desktop", lambda: provider)
+    with caplog.at_level(logging.WARNING, logger="remoteos"):
+        assert server.Shortcut("ctrl+c") == "ok"
+    assert provider.asked == [False]
+    assert "desktop probe failed" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # The preflight end to end on each OS
 # ---------------------------------------------------------------------------
@@ -498,12 +387,19 @@ def windows_tools(monkeypatch, win_session):
     monkeypatch.setattr(server, "is_linux", lambda: False)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
     monkeypatch.setattr(server.time, "sleep", lambda s: None)
-    return session, clicks
+    commands: list[list[str]] = []
+
+    def _run(cmd, **kwargs):  # only tscon may run
+        commands.append(list(cmd))
+        return session.tscon(cmd)
+
+    monkeypatch.setattr(server.subprocess, "run", _run)
+    return session, clicks, commands
 
 
 def test_windows_click_on_a_locked_screen_is_refused_before_any_input(windows_tools):
-    session, clicks = windows_tools
-    session.input_desktop, session.lock_flags = None, _LOCK
+    session, clicks, _ = windows_tools
+    session.input_desktop, session.lock_flags = None, LOCK
     with pytest.raises(ToolError) as exc:
         server.Click(640, 360)
     assert str(exc.value).startswith(_LOCKED_START)
@@ -511,44 +407,48 @@ def test_windows_click_on_a_locked_screen_is_refused_before_any_input(windows_to
 
 
 def test_windows_click_on_a_healthy_desktop_still_clicks(windows_tools):
-    session, clicks = windows_tools
+    _, clicks, _ = windows_tools
     assert server.Click(640, 360, max_width=0).startswith("Clicked left at (640,360)")
     assert clicks == [((640, 360), {"button": "left"})]
 
 
-def _fake_session_commands(monkeypatch, session, commands):
-    """``query session`` lists the server's own session as disconnected; ``tscon`` reattaches it."""
-
-    def _run(cmd, **kwargs):
-        commands.append(list(cmd))
-        if cmd[:2] == ["query", "session"]:
-            out = " SESSIONNAME   USERNAME   ID  STATE\n rdp-tcp#5     newlevel    1  Disc\n"
-            return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
-        session.connect_state = _WTS_ACTIVE  # tscon <id> /dest:console
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(server.subprocess, "run", _run)
-
-
-def test_windows_snapshot_reconnects_a_disconnected_session_then_captures(monkeypatch, windows_tools):
-    session, _ = windows_tools
-    session.connect_state = _WTS_DISCONNECTED
-    commands: list[list[str]] = []
-    _fake_session_commands(monkeypatch, session, commands)
-    parts = server.Snapshot()
-    assert ["tscon", "1", "/dest:console"] in commands
-    assert any(getattr(p, "type", None) == "image" for p in parts)
-
-
-def test_windows_click_on_a_disconnected_session_is_refused_without_moving_the_session(monkeypatch, windows_tools):
-    session, clicks = windows_tools
-    session.connect_state = _WTS_DISCONNECTED
-    commands: list[list[str]] = []
-    _fake_session_commands(monkeypatch, session, commands)
-    with pytest.raises(ToolError) as exc:
-        server.Click(640, 360)
-    assert "ReconnectSession" in str(exc.value)
+def test_windows_tools_on_a_disconnected_session_are_refused_without_moving_the_session(windows_tools):
+    # review round 1: no tool moves a session onto the physical console on its own
+    session, clicks, commands = windows_tools
+    session.connect_state = WTS_DISCONNECTED
+    for call in (server.Snapshot, lambda: server.Click(640, 360)):
+        with pytest.raises(ToolError) as exc:
+            call()
+        assert "ReconnectSession" in str(exc.value)
     assert commands == [] and clicks == []
+
+
+def test_reconnect_session_attaches_the_servers_own_session_to_the_console(windows_tools):
+    # the server's OWN session (ProcessIdToSessionId), never one parsed out of `query session`
+    session, _, commands = windows_tools
+    session.session_id, session.connect_state = 2, WTS_DISCONNECTED
+    (reply,) = server.ReconnectSession()
+    assert reply.text == "Session connected to console"
+    assert commands == [["tscon", "2", "/dest:console"]]
+    assert session.connect_state == WTS_ACTIVE
+    assert server.Snapshot()  # and the desktop is usable again
+
+
+def test_reconnect_session_that_leaves_the_session_disconnected_is_an_error(windows_tools):
+    session, _, commands = windows_tools
+    session.connect_state, session.tscon_attaches = WTS_DISCONNECTED, False
+    with pytest.raises(ToolError) as exc:
+        server.ReconnectSession()
+    assert str(exc.value).startswith("ReconnectSession failed:")
+    assert "still disconnected" in str(exc.value)
+    assert commands == [["tscon", "1", "/dest:console"]]
+
+
+def test_reconnect_session_on_a_connected_session_does_nothing(windows_tools):
+    _, _, commands = windows_tools
+    (reply,) = server.ReconnectSession()
+    assert reply.text == "Session connected to console"
+    assert commands == []
 
 
 @pytest.fixture
@@ -570,7 +470,7 @@ def mac_tools(monkeypatch, mac_session):
 
 def test_mac_click_without_accessibility_is_refused_before_any_input(mac_tools):
     state, clicks = mac_tools
-    state.accessibility = False
+    state.post_events = False
     with pytest.raises(ToolError) as exc:
         server.Click(100, 100)
     assert "Accessibility" in str(exc.value)
@@ -584,21 +484,8 @@ def test_mac_click_with_accessibility_but_no_screen_recording_still_clicks(mac_t
     assert clicks == [(100, 100)]
 
 
-def test_linux_ocr_without_a_display_is_the_unchanged_stub(monkeypatch, logind):
+def test_linux_ocr_without_a_display_is_the_unchanged_stub(monkeypatch, no_subprocess):
     monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="headless"))
     with pytest.raises(ToolError) as exc:
         server.OCR()
     assert str(exc.value) == _HEADLESS
-
-
-def test_linux_click_on_a_locked_x11_session_is_refused_before_xdotool(monkeypatch, logind):
-    monkeypatch.setattr(linux_desktop, "_SESSION", _x11())
-    logind["reply"] = (0, "yes\n", "")
-
-    def _no_x(*args, **kwargs):  # pragma: no cover - must not be called
-        raise AssertionError("an X command ran on a locked session")
-
-    monkeypatch.setattr(linux_desktop, "_run_x", _no_x)
-    with pytest.raises(ToolError) as exc:
-        server.Click(10, 10)
-    assert str(exc.value).startswith(_LOCKED_START)

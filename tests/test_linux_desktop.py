@@ -395,6 +395,27 @@ def test_x11_get_clipboard(x11):
     assert mod.get_clipboard() == "clip-content"
 
 
+def _xclip_fails(monkeypatch, message):
+    def _run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+        raise RuntimeError(message)  # _run_x's own wording of a non-zero xclip exit
+
+    monkeypatch.setattr(d, "_run_x", _run_x)
+
+
+def test_x11_clipboard_without_text_reads_as_empty_not_an_error(x11, monkeypatch):
+    # xclip -o exits 1 for an empty clipboard or one holding only an image (#32 review round 1)
+    mod, _ = x11
+    _xclip_fails(monkeypatch, "xclip failed (rc=1): Error: target STRING not available")
+    assert mod.get_clipboard() == ""
+
+
+def test_x11_clipboard_that_cannot_be_read_is_still_an_error(x11, monkeypatch):
+    mod, _ = x11
+    _xclip_fails(monkeypatch, "xclip failed (rc=1): Error: Can't open display: :0")
+    with pytest.raises(RuntimeError, match="Can't open display"):
+        mod.get_clipboard()
+
+
 def test_x11_enumerate_windows(x11):
     mod, _calls = x11
     wins = mod.enumerate_windows()
