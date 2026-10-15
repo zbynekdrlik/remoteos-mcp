@@ -69,19 +69,29 @@ paths:
     DISPLAY back. A new session on ANOTHER display reaches Shell when the X tools' retry
     re-detects it, or at the next start. Never call `get_session(force=True)` from a consumer of
     the cache.
-    - A live root-owned socket proves the display is up, not whose session it is: a display
-      manager (lightdm, sddm) that reuses `:N` for ANOTHER user's login gets the euid's DISPLAY
-      and its stale cookie, which X auth refuses. No access is gained (review round 3).
+    - An existing root-owned socket shows at most that a root X server created it: not that it
+      is live (a crashed Xorg leaves its file; review round 4), nor whose session it is. A display
+      manager (lightdm, sddm) that reuses `:N` for ANOTHER user's login gets the euid's DISPLAY and
+      its stale cookie, which X auth refuses. No access is gained (review round 3).
     - Limitation (provider-wide): the cache is filled at start-up, and the unit starts at boot. A
       graphical login after that start is seen neither by Shell's DISPLAY nor by the display-tool
       gating until the service restarts. The runtime dir and the bus do not depend on the session.
   - A failing session lookup (even an unimportable provider) costs only the display variables:
     one WARNING per exception TYPE, not one per call. One INFO line per change names the added
-    variables, never a value.
+    variables, never a value. Both de-dups run under one lock (`_log_lock`): up to 3 Shell calls
+    run at once.
+  - **Copy `os.environ` key by key, never `dict(os.environ)`** (`_snapshot`, review round 4).
+    `dict()` lists the keys, then reads each; `desktop._load_atspi`'s `finally` pops keys in
+    another thread, and a key gone in between raised KeyError and failed the Shell call.
+    `Popen(env=None)` copied the C environ and never could.
   - Known exception to "never another user's session" (it predates #52): `desktop._load_atspi`
     writes the session user's `DBUS_SESSION_BUS_ADDRESS` / `DISPLAY` / `XAUTHORITY` into
     `os.environ` for a moment. A Shell call that copies `os.environ` in that window (a root
     service included) passes them on. Closing it needs a lock shared with `desktop.py`.
+  - With DISPLAY set, a command that would prompt (`ssh` host key / passphrase, `sudo -A`) may
+    open `ssh-askpass` on the session's screen and wait there until the Shell timeout, where it
+    used to fail at once (review round 4). The README and the Shell description tell clients to
+    run prompting commands non-interactively (`ssh -o BatchMode=yes`).
   - **A GUI program started from Shell must be detached**: `setsid -f obs >/dev/null 2>&1` (or
     `systemd-run --user obs`, which works now that the bus is set). A plain `obs &` keeps the
     call's stdout/stderr pipes, so the call runs to its timeout and `run_child`'s process-group
@@ -96,8 +106,9 @@ paths:
     is `pwd.getpwuid` raising. A logout is `tree.unbind(path)`: the socket closes and its file
     goes. Positive display tests use more than display 0 (a GDM Xorg session is often `:1`), and
     every "never override" branch has a case where only that check keeps the value (review
-    round 3). A scratch mutation pass is a sample, not a proof: 31 chosen mutants of
-    `shell_env.py` were all caught at round 3, after round 3's own 41 found gaps.
+    round 3); a Wayland session's Xwayland display and a two-digit display are pinned too (round
+    4). A mutation pass is a sample, not a proof: each review round ran its own and found gaps the
+    lane's had not; the lane's 34 chosen mutants of `shell_env.py` were all caught at round 4.
   - `conftest._linux_session_detected_at_start_up` gives EVERY test a headless session cache, as
     a started server has. With an empty cache, the first Linux Shell call ran the host's real
     `loginctl`, and a test that records `subprocess.Popen` caught those calls.

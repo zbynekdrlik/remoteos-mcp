@@ -214,9 +214,10 @@ as, so `systemctl --user`, `journalctl --user` and GUI programs work through MCP
 
 - `XDG_RUNTIME_DIR`, when `/run/user/<uid>` exists (any login or linger);
 - `DBUS_SESSION_BUS_ADDRESS`, when its `bus` socket exists too;
-- `DISPLAY` and `XAUTHORITY` (or `WAYLAND_DISPLAY`) of that same user's graphical session, the
-  one found when the service started, when its display socket exists. The service starts at
-  boot, so after a reboot a login that came later is picked up only when the service restarts.
+- `DISPLAY` and `XAUTHORITY` of that same user's graphical session (the one found when the
+  service started) when its X socket exists, plus `WAYLAND_DISPLAY` in a Wayland session. The
+  service starts at boot, so after a reboot a login that came later is picked up only when the
+  service restarts.
 
 A variable the service already has with a value is never changed; an empty one is filled in. A
 service running as root gets none of them: it never borrows another user's session.
@@ -224,6 +225,11 @@ service running as root gets none of them: it never borrows another user's sessi
 Start a GUI program detached, so it outlives the Shell call: `setsid -f obs >/dev/null 2>&1`, or
 `systemd-run --user obs`. A plain `obs &` keeps the call's output open: the call waits until its
 timeout and is then stopped together with everything it started, the program included.
+
+With `DISPLAY` set, a command that would prompt (an `ssh` host-key question or passphrase,
+`sudo -A`) may open a dialog on the screen (`ssh-askpass`) and wait there until the timeout,
+instead of failing at once. Run such commands non-interactively: `ssh -o BatchMode=yes`, or
+`SSH_ASKPASS_REQUIRE=never` before the command.
 
 ## MCP gateway (dev1)
 

@@ -592,7 +592,8 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     service lacks (XDG_RUNTIME_DIR, the D-Bus session bus, DISPLAY), so ``systemctl --user``
     works. Start a GUI program detached (``setsid -f prog >/dev/null 2>&1``): a plain
     ``prog &`` keeps the output open, so the call runs to its timeout and the program is
-    stopped with it.
+    stopped with it. With DISPLAY set, a prompt (ssh, sudo -A) may open a dialog on the screen
+    instead of failing: run it non-interactively (``ssh -o BatchMode=yes``).
 
     Args:
         command: Command to execute.

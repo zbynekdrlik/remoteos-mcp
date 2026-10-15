@@ -33,11 +33,12 @@ The session is the provider's cache, detected at start-up. A Shell call never fo
 re-detection (review round 1): re-detecting at a logout wrote "headless" into the shared cache,
 and after a re-login the desktop tools stayed refused until a restart. Only an EMPTY cache (the
 start-up detection failed) is filled by ``get_session()``'s own first use. The socket checks
-above keep a logout honest: no X socket, no DISPLAY; the same display back, DISPLAY back. A live
-root-owned socket proves the display is up, not whose session it is: a display manager that
-reuses ``:N`` for another user's login gets the euid's DISPLAY and stale cookie, which X auth
-refuses. A new session on another display reaches Shell when the X tools' own retry re-detects
-it, or at the next start.
+above keep a logout honest: no X socket, no DISPLAY; the same display back, DISPLAY back. An
+existing root-owned socket shows at most that a root X server created it, not that it is live
+(a crashed Xorg leaves its file) nor whose session it is: a display manager that reuses ``:N``
+for another user's login gets the euid's DISPLAY and stale cookie, which X auth refuses. A new
+session on another display reaches Shell when the X tools' own retry re-detects it, or at the
+next start.
 
 Logs name the added variables, once per change, never their values. A failing session lookup is
 one WARNING per exception type.
