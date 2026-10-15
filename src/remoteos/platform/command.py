@@ -50,10 +50,12 @@ CREATE_NO_WINDOW = 0x08000000
 #   back to its default, ASCII (non-ASCII becomes "?"), as before #48.
 # - A console that refuses a page (never seen) still runs the command and says which page on
 #   stderr; refused output is read by decode_output's OEM fallback. PowerShell that cannot be
-#   started (no powershell.exe, a vanished cwd) is one "remoteos: could not start" line and exit 1.
+#   started (no powershell.exe, a vanished cwd) is one _COULD_NOT_START line and exit 1, which
+#   run_child raises as a failure (review round 3: a command that never ran is no answer).
 # - Fixed text: never any user data (that is the argv after it). -I -S: isolated, no site import.
 #   -X utf8 (review round 2): its own messages reach the pipe as UTF-8, a localized OSError included
 #   (the pipe would otherwise get the ANSI page, which the OEM fallback misreads).
+_COULD_NOT_START = "remoteos: could not start "
 UTF8_CONSOLE_TRAMPOLINE = "\n".join(
     [
         "import ctypes, subprocess, sys",
@@ -65,7 +67,7 @@ UTF8_CONSOLE_TRAMPOLINE = "\n".join(
         "try:",
         "    code = subprocess.call(sys.argv[2:], cwd=sys.argv[1] or None, stdout=1, stderr=2)",
         "except OSError as e:",
-        "    sys.stderr.write('remoteos: could not start %s: %s\\n' % (sys.argv[2], e))",
+        "    sys.stderr.write('" + _COULD_NOT_START + "%s: %s\\n' % (sys.argv[2], e))",
         "    code = 1",
         "sys.exit(code - 2**32 if code >= 2**31 else code)",
     ]
@@ -144,12 +146,15 @@ def powershell_argv(script: str, cwd: Optional[str] = None) -> list[str]:
     return [*trampoline, "powershell", "-NoProfile", "-Command", script]
 
 
+def _trampolined(cmd: list[str]) -> bool:
+    """``cmd`` is a ``powershell_argv``: python.exe, the flags, the program, the cwd, then PowerShell."""
+    head = [*_TRAMPOLINE_FLAGS, UTF8_CONSOLE_TRAMPOLINE]
+    return len(cmd) > len(head) + 2 and cmd[1 : len(head) + 1] == head
+
+
 def _shown(cmd: list[str]) -> list[str]:
     """``cmd`` as the user knows it: a trampolined PowerShell child is its PowerShell argv (review round 1)."""
-    head = [*_TRAMPOLINE_FLAGS, UTF8_CONSOLE_TRAMPOLINE]
-    if len(cmd) > len(head) + 2 and cmd[1 : len(head) + 1] == head:
-        return cmd[len(head) + 2 :]
-    return cmd
+    return cmd[len(_TRAMPOLINE_FLAGS) + 3 :] if _trampolined(cmd) else cmd
 
 
 def decode_output(raw: Optional[bytes], windows: Optional[bool] = None, stream: str = "output") -> str:
@@ -237,19 +242,35 @@ class ChildOutput:
 KILL_GRACE_S = 2.0
 
 
-def _tree(pid: int) -> list[psutil.Process]:
-    """The process ``pid`` and its descendants now (empty when unreadable); psutil detects pid reuse."""
+def _group(pgid: int) -> list[psutil.Process]:
+    """The processes now in process group ``pgid`` and the descendants of process ``pgid``.
+
+    The group (review round 3): in the usual timeout the shell has already exited, and a process
+    it left behind (``x &``, ``nohup x &``) holds the pipe. Reparented to init, it is no longer a
+    descendant, but it is still in the group the SIGTERM reaches. ``os.getpgid`` reads a zombie's
+    group on Linux; where it is refused (another session on some BSDs) the descendants still count.
+    """
+    found: dict[int, psutil.Process] = {}
+    for process in psutil.process_iter():
+        try:
+            if os.getpgid(process.pid) == pgid:
+                found[process.pid] = process
+        except (OSError, psutil.Error):
+            continue
     try:
-        leader = psutil.Process(pid)
-        return [leader, *leader.children(recursive=True)]
+        leader = psutil.Process(pgid)
+        for process in (leader, *leader.children(recursive=True)):
+            found.setdefault(process.pid, process)
     except psutil.Error:
-        return []
+        pass
+    return list(found.values())
 
 
 def _running(process: psutil.Process) -> bool:
-    """Not exited: gone (psutil also reports a reused pid as gone) and a zombie both count as exited."""
+    """Not exited. Gone, a zombie, or a pid now used by another process (``is_running`` compares the
+    start time; ``status()`` alone would not) all count as exited."""
     try:
-        return process.status() != psutil.STATUS_ZOMBIE
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
     except psutil.Error:
         return False
 
@@ -312,7 +333,7 @@ def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) ->
         except Exception as e:
             log.debug("taskkill of %s failed (%s)", proc.pid, type(e).__name__)
     else:
-        started = _tree(proc.pid)  # before any signal: the tree is still intact
+        started = _group(proc.pid)  # before any signal; the unreaped child keeps the group id
         _signal_group(proc.pid, signal.SIGTERM)
         _wait_exited(started, KILL_GRACE_S)
         _signal_group(proc.pid, signal.SIGKILL)
@@ -356,10 +377,14 @@ def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd:
     except BaseException:
         kill_process_tree(proc, windows)
         raise
+    stderr = decode_output(raw_err, windows, "stderr")
+    if proc.returncode == 1 and _trampolined(cmd) and stderr.startswith(_COULD_NOT_START):
+        # the trampoline never started PowerShell: a failure, not the command's answer (review round 3)
+        raise RuntimeError(stderr.strip())
     return ChildOutput(
         proc.returncode,
         decode_output(raw_out, windows, "stdout"),
-        decode_output(raw_err, windows, "stderr"),
+        stderr,
     )
 
 
