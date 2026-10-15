@@ -80,10 +80,17 @@ paths:
     - a Linux TaskDelete with no unit files is an error.
   - The Windows provider's PowerShell calls (launch_app, show_notification) and `tscon` use it
     with `check=True` too.
-  - It decodes with `errors="replace"`: a localized console writes the OEM code page
-    (cp852), and strict decoding turned the real failure into a `UnicodeDecodeError`. The
-    Shell tool's `Popen` does the same, so a command that ran never loses its output to a
-    codec error.
+- **Console output is decoded by `platform.command.console_decoding()`.**
+  - Users: `run_command`, the Shell tool's `Popen`, Windows OCR and Ping.
+  - On Windows it reads the console's OEM code page (`encoding="oem"`; cp852 on the Slovak
+    fleet). PowerShell and native tools write that page, but Python's default for a pipe is
+    the ANSI page (cp1250). Live on win-pz-server, `AčšžB` came back as `Aźç§B`.
+  - Elsewhere it reads the locale. `errors="replace"` always applies.
+  - Linux: strict decoding of a stray byte raised a `utf-8 codec` error.
+  - Windows: a decode error in subprocess's reader thread leaves `stdout` None. Shell then
+    said "(no output)", and OCR and Ping crashed on `None.strip()`. Read
+    `result.stdout or ""` after a text-mode run.
+  - Never pass a bare `text=True` to a new console call.
   - Windows OCR runs with `$ErrorActionPreference = 'Stop'`. A failing step can still exit 0
     with empty stdout, so "stderr and no text" is a failure as well.
 - **The stale-task sweep** (`_cleanup_old`, `STALE_AFTER_S` = 300) cancels a RUNNING task, and
@@ -99,9 +106,12 @@ paths:
   - `need` is one of three values:
     - `"capture"`: read the screen;
     - `"input"`: send events;
-    - `"windows"`: only the window list. That means the user's desktop, locked or not: on
-      Windows only session 0 and a non-interactive window station; on macOS only "no GUI
-      session"; on Linux the stub.
+    - `"windows"`: only the window list. That means the user's desktop, locked or not:
+      - Windows: refused only in session 0 and a non-interactive window station;
+      - macOS: refused only for "no GUI session" and a session that is not on the screen (fast
+        user switching lists nothing on screen). Without Screen Recording, macOS hides other
+        apps' window titles, so the list shows their app names;
+      - Linux: the stub.
   - The tools call it through `_desktop_preflight(need)`, the decorator's `preflight=` hook.
   - `@_capture_tool` = AnnotatedSnapshot, OCR, ScreenRecord.
   - Snapshot calls it itself: `"capture"` for the screenshot (`use_vision`), else `"windows"`.

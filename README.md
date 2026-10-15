@@ -166,8 +166,10 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
   reaches it.
 - `Snapshot(use_vision=False)` captures nothing, so it needs only the user's desktop, locked
   or not. Its window list works on a disconnected or locked session too. It is refused only
-  in session 0, a non-interactive window station, without a macOS GUI session, or without
-  X11.
+  in these cases: session 0, a non-interactive window station, no macOS GUI session, a macOS
+  session that is not on the screen, or no X11 session.
+- **Console output** (Shell, the service and task helpers, Ping, Windows OCR) is read in
+  the console's own code page, so on Windows `č` stays `č`.
 - **It never refuses a working desktop.** A check that cannot run (an older OS, a missing
   API, a probe error) counts as "usable", and the tool goes ahead.
 
