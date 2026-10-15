@@ -46,7 +46,7 @@ from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
-from remoteos.platform.command import decode_output, own_console, powershell_argv
+from remoteos.platform.command import powershell_argv, run_child
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, window_lines
@@ -615,52 +615,15 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     else:
         shell_cmd = ["/bin/bash", "-c", command]
 
-    proc = subprocess.Popen(
-        shell_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=workdir,
-        start_new_session=not windows,
-        # binary, in its own console (Windows, #32 review round 5): decode_output reads the bytes,
-        # and an undecodable byte never loses the output of a command that ran
-        **own_console(windows),
-    )
+    # the shared runner (#48 round 2): binary, in its own console (Windows) or session (POSIX);
+    # decode_output reads the bytes, and a timeout kills everything the command started
     try:
-        raw_out, raw_err = proc.communicate(timeout=timeout)
+        result = run_child(shell_cmd, timeout, windows, cwd=workdir)
     except subprocess.TimeoutExpired:
-        _kill_process_tree(proc)
-        log.warning("Shell command timed out after %ss (pid %s killed)", timeout, proc.pid)
+        log.warning("Shell command timed out after %ss", timeout)
         raise failure(f"Command timed out after {timeout}s") from None
-    stdout = decode_output(raw_out, windows, "stdout")
-    stderr = decode_output(raw_err, windows, "stderr")
     # A non-zero exit is the command's own answer (it ran), not a tool failure.
-    output = stdout
-    if stderr:
-        output += f"\n[STDERR] {stderr}"
-    if proc.returncode != 0:
-        output += f"\n[Exit code: {proc.returncode}]"
-    return output.strip() or "(no output)"
-
-
-def _kill_process_tree(proc: subprocess.Popen) -> None:
-    """Best-effort kill of a timed-out Shell command and its children; never raises."""
-    if is_windows():
-        try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5)
-        except Exception as e:
-            log.debug("taskkill of %s failed: %s", proc.pid, e)
-    else:
-        import signal
-
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except Exception as e:
-            log.debug("killpg of %s failed: %s", proc.pid, e)
-    proc.kill()
-    try:
-        proc.communicate(timeout=5)
-    except Exception as e:
-        log.debug("reaping %s failed: %s", proc.pid, e)
+    return result.reply()
 
 
 @mcp.tool(

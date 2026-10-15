@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import locale
 import logging
+import os
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -160,15 +162,76 @@ class ChildOutput:
     stdout: str
     stderr: str
 
+    def reply(self) -> str:
+        """The tool reply: stdout, then ``[STDERR] …`` and ``[Exit code: N]`` when there are any."""
+        output = self.stdout
+        if self.stderr:
+            output += f"\n[STDERR] {self.stderr}"
+        if self.returncode != 0:
+            output += f"\n[Exit code: {self.returncode}]"
+        return output.strip() or "(no output)"
 
-def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None) -> ChildOutput:
-    """Run ``cmd`` in binary mode in its own console and decode both streams with ``decode_output``."""
+
+def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) -> None:
+    """Kill a timed-out child AND everything it started; best effort, never raises (#48 round 2).
+
+    - **Windows:** ``taskkill /F /T``. A PowerShell child runs under the console trampoline
+      (``powershell_argv``), so the process the server started is not the one doing the work.
+      Killing only it would leave PowerShell, and anything it started, running with our pipes
+      open, and ``communicate()`` would never return (CPython's ``run()`` waits there with no
+      timeout, gh-81605).
+    - **POSIX:** the child's process group, but only when the child leads one (``run_child``
+      starts it in a new session). A child in the caller's own group is never group-killed: that
+      would kill the server.
+
+    Then the child itself is killed and reaped, waiting at most 5 s.
+    """
+    if _on_windows(windows):
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=5)
+        except Exception as e:
+            log.debug("taskkill of %s failed: %s", proc.pid, e)
+    else:
+        try:
+            if os.getpgid(proc.pid) == proc.pid:
+                os.killpg(proc.pid, signal.SIGTERM)
+        except Exception as e:
+            log.debug("killpg of %s failed: %s", proc.pid, e)
+    try:
+        proc.kill()
+        proc.communicate(timeout=5)
+    except Exception as e:
+        log.debug("reaping %s failed: %s", proc.pid, e)
+
+
+def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd: Optional[str] = None) -> ChildOutput:
+    """Run ``cmd`` in binary mode and decode both streams with ``decode_output``.
+
+    - The child gets its own hidden console on Windows (``own_console``) and its own session on
+      POSIX, so a timeout can kill its whole process tree.
+    - ``cwd``: the working directory (Shell); ``None`` inherits the server's.
+    - A timeout kills the tree (``kill_process_tree``) and raises ``subprocess.TimeoutExpired``.
+    """
     windows = _on_windows(windows)
-    result = subprocess.run(cmd, capture_output=True, timeout=timeout, **own_console(windows))
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        start_new_session=not windows,
+        **own_console(windows),
+    )
+    try:
+        raw_out, raw_err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # never the argv: it carries the user's command (#31)
+        log.warning("a child timed out after %ss: pid %s and everything it started are killed", timeout, proc.pid)
+        kill_process_tree(proc, windows)
+        raise
     return ChildOutput(
-        result.returncode,
-        decode_output(result.stdout, windows, "stdout"),
-        decode_output(result.stderr, windows, "stderr"),
+        proc.returncode,
+        decode_output(raw_out, windows, "stdout"),
+        decode_output(raw_err, windows, "stderr"),
     )
 
 
@@ -187,9 +250,4 @@ def run_command(cmd: list[str], timeout: int = 30, check: bool = False, label: O
     if check and result.returncode != 0:
         reason = result.stderr.strip() or result.stdout.strip() or "(no output)"
         raise RuntimeError(f"{label or ' '.join(cmd[:2])} failed (exit {result.returncode}): {reason}")
-    output = result.stdout
-    if result.stderr:
-        output += f"\n[STDERR] {result.stderr}"
-    if result.returncode != 0:
-        output += f"\n[Exit code: {result.returncode}]"
-    return output.strip() or "(no output)"
+    return result.reply()
