@@ -49,6 +49,7 @@ import logging
 import os
 import re
 import stat
+import threading
 from collections.abc import Mapping
 from typing import Optional
 
@@ -64,12 +65,14 @@ _LOCAL_DISPLAY = re.compile(r"(?:unix)?:(\d+)(?:\.\d+)?")
 # The variable names last logged, and the session-lookup failure types already warned about.
 _last_added: Optional[tuple[str, ...]] = None
 _warned: set[str] = set()
+# Up to 3 Shell calls run at once (taskmanager): each compare-set-log is one step (review round 4).
+_log_lock = threading.Lock()
 
 
 def shell_env(base: Optional[Mapping[str, str]] = None) -> dict[str, str]:
     """The environment of a Linux Shell child: ``base`` (the server's own by default) plus the
     session variables of the server's own user that ``base`` lacks. ``base`` is never changed."""
-    env = dict(os.environ if base is None else base)
+    env = _snapshot(os.environ if base is None else base)
     euid = os.geteuid()
     added: list[str] = []
     if euid != 0:
@@ -83,6 +86,21 @@ def shell_env(base: Optional[Mapping[str, str]] = None) -> dict[str, str]:
         if session is not None:
             _add_display(env, added, session, runtime, euid)
     _log_change(added, euid)
+    return env
+
+
+def _snapshot(source: Mapping[str, str]) -> dict[str, str]:
+    """A copy of ``source`` that skips a key popped while it is copied (review round 4).
+
+    ``dict(os.environ)`` lists the keys, then reads each one. ``desktop._load_atspi`` pops its
+    temporary session keys from ``os.environ`` in another thread, and a key gone in between
+    raised KeyError, failing the Shell call. ``Popen(env=None)`` never could.
+    """
+    env: dict[str, str] = {}
+    for key in list(source):
+        value = source.get(key)
+        if value is not None:
+            env[key] = value
     return env
 
 
@@ -117,8 +135,8 @@ def _add_display(env: dict[str, str], added: list[str], session, runtime: str, e
 def _own_session(euid: int):
     """The provider's cached session when it belongs to ``euid``, else ``None``.
 
-    Only read, never re-detected or written (review round 1). Never raises: a failing lookup
-    costs the display variables, never the Shell call, and is warned about once per type.
+    Never a forced re-detection (review round 1). Never raises: a failing lookup costs the display
+    variables, never the Shell call, and is warned about once per type.
     """
     try:
         # Linux-only (pwd, the X helpers), and imported only when a Linux Shell runs
@@ -127,9 +145,10 @@ def _own_session(euid: int):
         session = desktop.get_session()
     except Exception as e:
         kind = type(e).__name__
-        if kind not in _warned:
-            _warned.add(kind)
-            log.warning("Shell environment: the session lookup failed (%s); no display variables", kind)
+        with _log_lock:
+            if kind not in _warned:
+                _warned.add(kind)
+                log.warning("Shell environment: the session lookup failed (%s); no display variables", kind)
         return None
     return session if session.uid == euid else None
 
@@ -164,10 +183,11 @@ def _log_change(added: list[str], euid: int) -> None:
     """One INFO line whenever the added names change: names only, never a value (#31)."""
     global _last_added
     names = tuple(added)
-    if names == _last_added:
-        return
-    _last_added = names
-    if euid == 0:
-        log.info("Shell environment: running as root, no session variable is added")
-    else:
-        log.info("Shell environment: the children get %s", ", ".join(names) if names else "no session variable")
+    with _log_lock:
+        if names == _last_added:
+            return
+        _last_added = names
+        if euid == 0:
+            log.info("Shell environment: running as root, no session variable is added")
+        else:
+            log.info("Shell environment: the children get %s", ", ".join(names) if names else "no session variable")
