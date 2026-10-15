@@ -48,28 +48,40 @@ paths:
     - `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<euid>/bus`: that dir, and `bus` is a socket;
     - `DISPLAY`: the provider's cached session (`desktop.get_session()`) when its `uid` is the
       euid, and only a local display (`:N`, `:N.S`, `unix:N`) whose `/tmp/.X11-unix/X<N>` socket
-      exists;
+      exists AND is owned by root (Xorg) or the euid (rootless Xorg, Xwayland). That directory is
+      world-writable: after a logout another local user could bind `X0` and collect the cookie;
     - `XAUTHORITY`: that session's file, if it exists and the child's DISPLAY is the session's;
     - `WAYLAND_DISPLAY=wayland-0`: a Wayland session of the euid whose `wayland-0` socket is in
       the child's runtime dir. `SessionInfo` has no Wayland name; `wayland-0` is libwayland's own
       default. Do not grow `desktop.py` for it (#49).
   - As root (euid 0) NOTHING is added and the session is never read: never another user's bus or
     display (the X tools' `sudo -u` wrap exists for that).
-  - Re-detection: only a cached X11 session of the euid whose X socket is gone (a logout), at most
-    once per change of the names in `/tmp/.X11-unix`. A headless cache is never re-detected, so a
-    Shell call on cam1..4 runs no `loginctl`.
-    - Known gap: the cache is filled at start-up, and the unit starts at boot. A graphical login
-      after that start is not seen by Shell's DISPLAY nor by the display-tool gating until the
-      service restarts. The runtime dir and bus do not depend on it.
-  - A failing session lookup (even an unimportable provider) costs only the display variables,
-    logged with its exception TYPE. One INFO line per change names the added variables, never a
-    value.
+  - **Shell only READS the provider's cache; it never re-detects or writes it** (review round 1).
+    The design's "re-detect when the cached display's X socket is gone" was removed:
+    `get_session(force=True)` at a logout wrote `headless` into the SHARED cache, and every desktop
+    tool then refused on `mode != "x11"` before `_run_x`'s own self-heal retry could run, until
+    the service restarted. The socket checks keep a logout honest: no socket, no DISPLAY; the same
+    display back, DISPLAY back. A new session on ANOTHER display reaches Shell when the X tools'
+    retry re-detects it, or at the next start. Never call `get_session(force=True)` from a
+    consumer of the cache.
+    - Limitation: the cache is filled at start-up, and the unit starts at boot. A graphical login
+      after that start is seen neither by Shell's DISPLAY nor by the display-tool gating until the
+      service restarts (provider-wide; returned as a follow-up candidate on #52). The runtime dir
+      and the bus do not depend on the session.
+  - A failing session lookup (even an unimportable provider) costs only the display variables:
+    one WARNING per exception TYPE, not one per call. One INFO line per change names the added
+    variables, never a value.
+  - **A GUI program started from Shell must be detached**: `setsid -f obs >/dev/null 2>&1` (or
+    `systemd-run --user obs`, which works now that the bus is set). A plain `obs &` keeps the
+    call's stdout/stderr pipes, so the call runs to its timeout and `run_child`'s process-group
+    kill takes the program with it. `test_a_gui_program_outlives_the_shell_call_only_when_detached`
+    pins the recipe.
   - Tests (`tests/test_shell_env.py`): a fake `/run/user` + X socket dir under a SHORT
     `mkdtemp(dir="/tmp")` with REAL AF_UNIX sockets (an AF_UNIX path must fit in 108 bytes; pytest's
-    `tmp_path` may not), `loginctl` faked at `subprocess.run`, the effective uid and `os.stat`'s
-    owner faked only where a test needs another uid. A re-detection that must find a session uses
-    the provider's env branch (a non-root `DISPLAY` / `XDG_SESSION_TYPE` in `os.environ`), never
-    the real `/proc` scan.
+    `tmp_path` may not), `loginctl` faked at `subprocess.run` to prove a Shell call never reaches
+    it, the effective uid and `os.stat`'s owner faked only where a test needs another uid (root,
+    another user's dir or socket). A logout is `tree.unbind(path)`: the socket closes and its file
+    goes.
   - `conftest._linux_session_detected_at_start_up` gives EVERY test a headless session cache, as
     a started server has. With an empty cache, the first Linux Shell call ran the host's real
     `loginctl`, and a test that records `subprocess.Popen` caught those calls.

@@ -74,12 +74,18 @@ cam1..4) with NO login-session environment. Since 0.7.0.dev31 a Linux `Shell` ch
 `platform/linux/shell_env.shell_env()`: the server's environment plus, for the server's OWN
 effective uid only, `XDG_RUNTIME_DIR` + `DBUS_SESSION_BUS_ADDRESS` (from `/run/user/<euid>` and its
 `bus` socket) and `DISPLAY` / `XAUTHORITY` / `WAYLAND_DISPLAY` from THIS provider's
-`get_session()` when `session.uid == euid` and the socket exists. A root service (cam1) adds
-nothing. So `systemctl --user`, `journalctl --user`, `gsettings` and `obs &` work from Shell, with
-no SSH fallback. Full contract, re-detection and tests: `.claude/rules/server-startup.md`.
+`get_session()` when `session.uid == euid` and the socket exists (an X socket only when root or
+the euid owns it). A root service (cam1) adds nothing. So `systemctl --user`, `journalctl --user`
+and `gsettings` work from Shell, with no SSH fallback. Full contract and tests:
+`.claude/rules/server-startup.md`.
 
-- `shell_env` reads this module's `_SESSION` cache, so the cache is now on the Shell path too.
-  Keep `get_session()` cheap and never raising; `shell_env` catches anything anyway.
+- A GUI program from Shell must be DETACHED: `setsid -f obs >/dev/null 2>&1` or
+  `systemd-run --user obs`. A plain `obs &` keeps the call's pipes, runs to the Shell timeout and
+  dies in `run_child`'s process-group kill (review round 1, pinned by a real-bash test).
+- `shell_env` only READS this module's `_SESSION` cache; it never calls `get_session(force=True)`.
+  A re-detect at a logout once wrote `headless` here and every desktop tool refused until a
+  restart (review round 1). Keep `get_session()` cheap and never raising; `shell_env` catches
+  anything anyway.
 - `SessionInfo` has no Wayland socket name; `shell_env` uses libwayland's default `wayland-0`.
 - Live check (supervisor, after install): stream-pp `Shell("systemctl --user is-system-running")`
   → `running` / `degraded`, never the bus error; `Shell("echo $DISPLAY")` → the X11 session's

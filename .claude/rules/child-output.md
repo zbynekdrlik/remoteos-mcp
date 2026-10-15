@@ -96,9 +96,11 @@ paths:
     `start-remoteos.bat`), one `chcp 65001` or `[Console]::OutputEncoding = …UTF8` in a Shell
     call garbled every later reply for every client (live, #32 round 5: `A─Ź┼í┼żB`). Never
     switch the encoding in a child that shares the server's console.
-  - **`run_child(cmd, timeout, windows, cwd)`** is the one runner of Shell, `run_command` and
+  - **`run_child(cmd, timeout, windows, cwd, env)`** is the one runner of Shell, `run_command` and
     Windows OCR: `Popen` in binary mode, its own console (Windows) or session (POSIX), then
     `decode_output` and `ChildOutput.reply()` (stdout, `[STDERR] …`, `[Exit code: N]`).
+    - `env` is the child's WHOLE environment, `None` = the server's. Only the Linux Shell passes
+      one: `shell_env()`, the server user's session variables (#52, `.claude/rules/server-startup.md`).
     - **A timeout kills the whole tree** (`kill_process_tree`) and re-raises
       `subprocess.TimeoutExpired`. It names the PowerShell argv, never the trampoline: the
       client's error text is what it was before round 2. Any other exception while waiting kills

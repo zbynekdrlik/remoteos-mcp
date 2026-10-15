@@ -220,6 +220,10 @@ as, so `systemctl --user`, `journalctl --user` and GUI programs work through MCP
 A variable the service already has is never changed. A service running as root gets none of
 them: it never borrows another user's session.
 
+Start a GUI program detached, so it outlives the Shell call: `setsid -f obs >/dev/null 2>&1`, or
+`systemd-run --user obs`. A plain `obs &` keeps the call's output open: the call waits until its
+timeout and is then stopped together with everything it started, the program included.
+
 ## MCP gateway (dev1)
 
 The machines are reachable only from boxes with a LAN route to them. `remoteos-gateway`
