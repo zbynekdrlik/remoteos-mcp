@@ -9,6 +9,7 @@ the tool hands it are what is checked.
 from __future__ import annotations
 
 import pytest
+from fake_console_child import returned
 from tool_test_support import tool_error
 
 import remoteos.__main__ as server
@@ -77,9 +78,11 @@ def popen(monkeypatch):
 
         def __init__(self, args, **kwargs):
             calls.append((list(args), kwargs))
+            self.kwargs = kwargs
 
         def communicate(self, timeout=None):
-            return ("ok\n", "")
+            # the type subprocess returns: text in text mode, else bytes (#48)
+            return (returned(self.kwargs, "ok\n"), returned(self.kwargs, ""))
 
     monkeypatch.setattr(server.subprocess, "Popen", _Proc)
     return calls

@@ -548,7 +548,7 @@ def _session_tools(monkeypatch, server, commands, readable=True):
 
     def _run(cmd, **kwargs):
         commands.append(list(cmd))
-        return session.tscon(cmd)  # only tscon may run
+        return session.tscon(cmd, **kwargs)  # only tscon may run
 
     monkeypatch.setattr(server.subprocess, "run", _run)
 

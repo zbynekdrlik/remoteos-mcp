@@ -18,6 +18,7 @@ import sys
 import types
 
 import pytest
+from fake_console_child import run_result
 from fastmcp import Client
 from PIL import Image
 
@@ -30,7 +31,10 @@ from remoteos.platform.win import services as win_services
 
 
 class _Commands:
-    """A fake ``subprocess.run``: records every argv and answers ``(returncode, stdout, stderr)``."""
+    """A fake ``subprocess.run``: records every argv and answers ``(returncode, stdout, stderr)``.
+
+    The reply has the type subprocess returns for that call: text in text mode, else bytes (#48).
+    """
 
     def __init__(self, returncode=0, stdout="", stderr=""):
         self.calls: list[list[str]] = []
@@ -41,7 +45,7 @@ class _Commands:
         self.calls.append(list(cmd))
         self.kwargs.append(kwargs)
         rc, out, err = self.reply
-        return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+        return run_result(kwargs, rc, out, err)
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +114,7 @@ def test_a_failed_linux_task_enable_raises(monkeypatch, tmp_path):
     def _run(cmd, **kwargs):
         commands.calls.append(list(cmd))
         rc = 1 if cmd[:2] == ["systemctl", "enable"] else 0
-        return types.SimpleNamespace(returncode=rc, stdout="", stderr="Failed to enable unit: Access denied")
+        return run_result(kwargs, rc, "", "Failed to enable unit: Access denied")
 
     monkeypatch.setattr(subprocess, "run", _run)
     with pytest.raises(RuntimeError, match="Access denied"):
@@ -276,8 +280,8 @@ def _replies(calls: list, failing: list[str], stderr: str):
     def _run(cmd, **kwargs):
         calls.append(list(cmd))
         if cmd[: len(failing)] == failing:
-            return types.SimpleNamespace(returncode=1, stdout="", stderr=stderr)
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+            return run_result(kwargs, 1, "", stderr)
+        return run_result(kwargs)
 
     return _run
 
