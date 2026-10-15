@@ -10,6 +10,7 @@ command's own answer, exit code included.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import subprocess
@@ -361,20 +362,30 @@ def test_linux_lock_screen_that_loginctl_refuses_is_an_error(monkeypatch, linux_
     assert commands.calls == [["loginctl", "lock-session", "7"]]
 
 
-@pytest.fixture
-def windows_registry(monkeypatch):
+@pytest.fixture(params=["key", "value"])
+def windows_registry(request, monkeypatch):
+    """winreg where the key is missing (OpenKey raises) or only the value is (QueryValueEx raises)."""
     from remoteos.platform.win import registry
 
-    def _open_key(root, subkey, reserved, access):
-        raise FileNotFoundError(2, "The system cannot find the file specified")
+    def _missing():
+        return FileNotFoundError(2, "The system cannot find the file specified")
 
+    def _open_key(root, subkey, reserved, access):
+        if request.param == "key":
+            raise _missing()
+        return contextlib.nullcontext("hkey")
+
+    def _query_value(key, value_name):
+        raise _missing()
+
+    fake = types.SimpleNamespace(OpenKey=_open_key, QueryValueEx=_query_value, KEY_READ=0x20019)
     monkeypatch.setattr(registry, "HAS_WINREG", True)
-    monkeypatch.setattr(registry, "winreg", types.SimpleNamespace(OpenKey=_open_key, KEY_READ=0x20019), raising=False)
+    monkeypatch.setattr(registry, "winreg", fake, raising=False)
     monkeypatch.setitem(registry._ROOT_KEYS, "HKLM", 0x80000002)  # HKEY_LOCAL_MACHINE
     return registry
 
 
-def test_windows_registry_read_of_a_missing_value_is_an_error(windows_registry):
+def test_windows_registry_read_of_a_missing_key_or_value_is_an_error(windows_registry):
     with pytest.raises(FileNotFoundError, match=r"^Key or value not found: HKLM\\SOFTWARE\\Nope\\Missing$"):
         windows_registry.reg_read("HKLM\\SOFTWARE\\Nope", "Missing")
 

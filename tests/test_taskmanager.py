@@ -9,14 +9,19 @@ moment the task was cancelled.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import threading
 import time
 
 import pytest
+from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
+import remoteos.__main__ as server
 from remoteos.taskmanager import TaskManager, TaskStatus, ToolCategory
+from remoteos.taskmanager import manager as task_manager
 
 
 class _LockProbeEvent(threading.Event):
@@ -274,6 +279,31 @@ def test_a_long_wait_within_its_own_seconds_is_not_auto_cancelled():
     [task] = [t for t in tm._tasks.values() if t.tool_name == "Wait"]
     assert out == f"[task:{task.task_id}] done"
     assert task.status is TaskStatus.COMPLETED
+
+
+def test_a_short_declared_runtime_still_gets_the_300_s_floor():
+    # review round 9: every call now declares a runtime (FastMCP fills in Wait's default
+    # seconds=1.0, i.e. 61 s), and the sweep must still wait STALE_AFTER_S before cancelling it
+    tm = TaskManager()
+    out = tm.wrap_sync_tool("Wait", _runs_for(tm, 200))(seconds=1)
+    [task] = [t for t in tm._tasks.values() if t.tool_name == "Wait"]
+    assert out == f"[task:{task.task_id}] done"
+    assert task.status is TaskStatus.COMPLETED
+
+
+def test_the_mcp_client_path_declares_waits_seconds_as_its_runtime(monkeypatch):
+    # review round 9: the sweep reads keyword arguments, so this locks in that FastMCP passes
+    # Wait's `seconds` by keyword (coerced to float) through the real in-process client
+    monkeypatch.setattr(server.time, "sleep", lambda seconds: None)
+
+    async def _go():
+        async with Client(server.mcp) as client:
+            return await client.call_tool("Wait", {"seconds": 400})
+
+    (block,) = asyncio.run(_go()).content
+    match = re.match(r"^\[task:([0-9a-f]{12})\] Waited 400\.0s$", block.text)
+    assert match, block.text
+    assert task_manager._tasks[match.group(1)].max_runtime == 460
 
 
 def test_a_wait_past_its_own_seconds_and_the_stale_limit_is_auto_cancelled():

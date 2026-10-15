@@ -230,7 +230,7 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **FastMCP 4.0.3 finding:** `call_tool` re-raises a `FastMCPError` before its masking branch, so a `ToolError` message is never masked. `_on_call_tool` returns it as `CallToolResult(isError=True)`.
 - **Design (the main's Approach 1):**
   - `errors.py`: `ToolError`, `DesktopUnavailable` (verbatim text), `@reports_errors` on all 44 tools, `failure()` at WARNING, payload-free `stack_frames`, and `RedactInvalidArguments` for FastMCP's own argument-value warning.
-  - `wrap_sync_tool` raises with `[task:<id>]` on a failure, the lock timeout and a cancel. The stale sweep respects a call's own `timeout`.
+  - `wrap_sync_tool` raises with `[task:<id>]` on a failure, the lock timeout and a cancel. The stale sweep respects a call's declared runtime (`_RUNTIME_ARGS`: Shell's `timeout`, Wait's `seconds`), never below 300 s.
   - The helpers and providers raise instead of returning error text. `platform/command.run_command(check=)` is for commands that change state.
   - `console_child()`: on Windows each child gets its own hidden console (CREATE_NO_WINDOW) at the OEM page, decoded with errors='replace'.
   - `platform/<os>/availability.diagnose(need)` with the needs capture / input / windows.
@@ -253,9 +253,10 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   - Round 6 (0🔴 0🟡 1🔵): `1318664` test move.
   - Round 7 (0🔴 1🟡 2🔵): `ad21f74`.
   - Round 8 (0🔴 2🟡 5🔵): `2d1c3d4` → `a37e496` (the stale sweep honours Wait's `seconds`), `06e8dfd` + `3e19e52` tests.
+  - Round 9 (0🔴 0🟡 6🔵): tests for the 300 s floor, the client-path `seconds` and a missing registry value; doc drifts.
 - **Tests:**
   - New: `tests/test_tool_errors.py` (real client), `test_desktop_diagnose.py` (per-OS fakes plus the preflight contract), `test_helper_failures.py`, `test_windows_tool_errors.py`, and the shared `fake_windows_session.py` / `tool_test_support.py` / `conftest.win_session`.
-  - Existing error-text tests now expect the raised ToolError with the same texts. Result: 628 pass, ruff clean.
+  - Existing error-text tests now expect the raised ToolError with the same texts. Result: 631 pass, ruff clean.
 - **Out of scope, recorded on other tickets:**
   - #39: PowerShell `$()` injection in the Windows toast (Notification is tier 1).
   - #37: the AX tree needs a new `need`.
