@@ -123,7 +123,16 @@ def test_without_cwd_the_process_inherits_the_server_directory(monkeypatch, pope
 
 
 def test_output_that_is_not_utf8_is_still_the_commands_answer():
-    # review round 3: a native command writing its console code page (cp852 on the Slovak Windows
-    # fleet) produced a 'utf-8 codec' Shell error and lost the output of a command that ran
+    # review round 3: bytes outside the expected encoding produced a 'utf-8 codec' Shell error on
+    # Linux (on Windows the reader thread dropped stdout: "(no output)") and lost the output
     out = server.Shell("printf 'ok \\220 done'")
     assert out.startswith("ok ") and out.endswith(" done")
+
+
+def test_windows_shell_reads_powershell_in_the_console_oem_code_page(monkeypatch, popen):
+    # review round 4: PowerShell writes the OEM code page (852 on the Slovak fleet); read as the
+    # ANSI page (1250) "AčšžB" came back as "Aźç§B" (live on win-pz-server)
+    monkeypatch.setattr(server, "is_windows", lambda: True)
+    assert server.Shell("Write-Output AčšžB") == "ok"
+    [(_args, kwargs)] = popen
+    assert (kwargs["text"], kwargs["encoding"], kwargs["errors"]) == (True, "oem", "replace")

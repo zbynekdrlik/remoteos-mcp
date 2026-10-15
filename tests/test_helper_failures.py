@@ -33,10 +33,12 @@ class _Commands:
 
     def __init__(self, returncode=0, stdout="", stderr=""):
         self.calls: list[list[str]] = []
+        self.kwargs: list[dict] = []
         self.reply = (returncode, stdout, stderr)
 
     def __call__(self, cmd, **kwargs):
         self.calls.append(list(cmd))
+        self.kwargs.append(kwargs)
         rc, out, err = self.reply
         return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
 
@@ -198,3 +200,49 @@ def test_undecodable_command_output_still_reports_the_failure():
     with pytest.raises(RuntimeError, match="service refused"):
         run_command([sys.executable, "-c", script], check=True, label="probe")
     assert "service refused" in run_command([sys.executable, "-c", script])
+
+
+# ---------------------------------------------------------------------------
+# Review round 4: a Windows console's output is read in its OEM code page
+# ---------------------------------------------------------------------------
+#
+# Live on win-pz-server: PowerShell and native tools write the OEM code page (852), but Python
+# reads a pipe as ANSI (1250), so "AčšžB" came back as "Aźç§B"; and on Windows a decode error
+# in subprocess's reader thread leaves stdout None: Shell said "(no output)", OCR and Ping
+# crashed on None.strip(). "oem" is Python's codec for the console's OEM code page (Windows only).
+
+_OEM = {"text": True, "encoding": "oem", "errors": "replace"}
+
+
+def test_console_decoding_is_the_oem_code_page_on_windows_and_the_locale_elsewhere():
+    from remoteos.platform.command import console_decoding
+
+    assert console_decoding(windows=True) == _OEM
+    assert console_decoding(windows=False) == {"text": True, "encoding": None, "errors": "replace"}
+
+
+def test_run_command_reads_a_windows_console_in_its_code_page(monkeypatch):
+    from remoteos.platform.command import run_command
+
+    commands = _Commands(stdout="ok")
+    monkeypatch.setattr(subprocess, "run", commands)
+    monkeypatch.setattr(sys, "platform", "win32")
+    run_command(["schtasks", "/Query"])
+    assert {key: commands.kwargs[0][key] for key in _OEM} == _OEM
+
+
+def test_windows_ocr_reads_powershell_in_its_code_page(windows_ocr):
+    windows_ocr.reply = (0, "text", "")
+    ocr.ocr_windows_builtin()
+    assert {key: windows_ocr.kwargs[0][key] for key in _OEM} == _OEM
+
+
+def test_ping_reads_a_windows_console_in_its_code_page(monkeypatch):
+    from remoteos import network
+
+    commands = _Commands(stdout="Odpoveď od 10.0.0.1")
+    monkeypatch.setattr(subprocess, "run", commands)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert network.ping("10.0.0.1", count=1) == "Odpoveď od 10.0.0.1"
+    assert commands.calls == [["ping", "-n", "1", "10.0.0.1"]]
+    assert {key: commands.kwargs[0][key] for key in _OEM} == _OEM

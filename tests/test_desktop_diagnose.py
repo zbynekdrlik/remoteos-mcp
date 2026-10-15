@@ -250,11 +250,16 @@ def test_mac_without_the_post_event_preflight_is_usable(mac_session, monkeypatch
     assert mod.diagnose("input") is None
 
 
-def test_mac_window_list_needs_only_a_gui_session(mac_session):
+def test_mac_window_list_needs_a_gui_session_on_the_screen(mac_session):
     mod, state = mac_session
     state.session = {"kCGSSessionOnConsoleKey": True, "CGSSessionScreenIsLocked": True}
     state.screen_recording = state.post_events = False
-    assert mod.diagnose("windows") is None  # the window list works without either permission
+    # listed without either permission (without Screen Recording macOS hides other apps' window
+    # titles, so the list shows their app names), and on the lock screen too
+    assert mod.diagnose("windows") is None
+    # review round 4: a switched-out session lists nothing on screen, a hollow success like session 0
+    state.session = {"kCGSSessionOnConsoleKey": False}
+    assert "not on the screen" in mod.diagnose("windows")
     state.session = None
     assert mod.diagnose("windows").startswith("No macOS GUI session")
 
