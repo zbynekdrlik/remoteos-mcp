@@ -16,6 +16,8 @@
   - cp437 = resolume-pp (en_150);
   - cp852 = the Slovak fleet;
   - cp932 = a double-byte page, where a byte sequence can be undecodable.
+- ``POWERSHELL_UTF8_PREFIX``: the line every PowerShell child runs before its script, as a
+  literal (never imported from the code under test).
 """
 
 from __future__ import annotations
@@ -28,6 +30,11 @@ import types
 from typing import Callable, Union
 
 _TEXT_MODE = ("text", "encoding", "errors", "universal_newlines")
+
+# UTF-8 without a BOM, for the child's console output and for what PowerShell pipes to native programs
+POWERSHELL_UTF8_PREFIX = (
+    "$OutputEncoding = New-Object System.Text.UTF8Encoding $false; [Console]::OutputEncoding = $OutputEncoding"
+)
 
 # The real Popen, taken when this module is imported (at test collection), before any test patches it.
 _REAL_POPEN = subprocess.Popen

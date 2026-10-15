@@ -18,7 +18,7 @@ import sys
 import types
 
 import pytest
-from fake_console_child import run_result
+from fake_console_child import POWERSHELL_UTF8_PREFIX, run_result
 from fastmcp import Client
 from PIL import Image
 
@@ -72,7 +72,9 @@ def test_windows_ocr_script_stops_on_its_first_error(windows_ocr):
     windows_ocr.reply = (0, "Hello", "")
     assert ocr.ocr_windows_builtin() == "Hello"
     (argv,) = windows_ocr.calls
-    assert argv[-1].lstrip().startswith("$ErrorActionPreference = 'Stop'")
+    prefix, script = argv[-1].split("\n", 1)  # #48: the shared UTF-8 prefix line comes first
+    assert prefix == POWERSHELL_UTF8_PREFIX
+    assert script.lstrip().startswith("$ErrorActionPreference = 'Stop'")
 
 
 def test_windows_ocr_with_no_text_is_an_empty_result(windows_ocr):
@@ -208,7 +210,7 @@ def test_undecodable_command_output_still_reports_the_failure():
 
 
 # ---------------------------------------------------------------------------
-# Review round 4: a Windows console's output is read in its OEM code page
+# Review round 4: a native Windows console program is read in its OEM code page
 # ---------------------------------------------------------------------------
 #
 # Live on win-pz-server: PowerShell and native tools write the OEM code page (852), but Python
@@ -220,9 +222,14 @@ def test_undecodable_command_output_still_reports_the_failure():
 # child shared the server's own console, so one `chcp 65001` in a Shell call garbled every later
 # reply for every client (live: 'A─Ź┼í┼żB'). CREATE_NO_WINDOW (0x08000000) gives each child its
 # own hidden console at the default OEM page, which is exactly what "oem" decodes.
+#
+# #48: a PowerShell child switches its own console to UTF-8 and is read as exact UTF-8 (Shell,
+# run_command, OCR: tests/test_output_encoding.py). console_child() stays for ping, a native
+# program started directly, whose localized text fits the OEM page.
 
 _CREATE_NO_WINDOW = 0x08000000
 _OEM = {"text": True, "encoding": "oem", "errors": "replace", "creationflags": _CREATE_NO_WINDOW}
+_TEXT_MODE = ("text", "encoding", "errors", "universal_newlines")
 
 
 def test_a_windows_console_child_gets_its_own_console_in_the_oem_code_page():
@@ -233,26 +240,19 @@ def test_a_windows_console_child_gets_its_own_console_in_the_oem_code_page():
     assert console_child(windows=False) == {"text": True, "encoding": None, "errors": "replace"}
 
 
-def test_run_command_reads_a_windows_console_in_its_code_page(monkeypatch):
-    from remoteos.platform.command import run_command
-
-    commands = _Commands(stdout="ok")
-    monkeypatch.setattr(subprocess, "run", commands)
-    monkeypatch.setattr(sys, "platform", "win32")
-    run_command(["schtasks", "/Query"])
-    assert {key: commands.kwargs[0][key] for key in _OEM} == _OEM
-
-
 def test_windows_ocr_reads_its_own_console_losslessly_as_utf8(windows_ocr):
     # review round 5: through the OEM page PowerShell replaced € and – ("12,50 €" read as "12,50 ?",
-    # live "1€–č" -> "1?-č"). The script is ours and its child has its own console, so it switches
-    # that console to UTF-8 and Python decodes UTF-8: lossless, and the server's console is untouched.
-    windows_ocr.reply = (0, "12,50 €", "")
-    assert ocr.ocr_windows_builtin() == "12,50 €"
+    # live "1€–č" -> "1?-č"). #48: OCR runs the shared UTF-8 prefix in its own console (its private
+    # copy is gone), and Python decodes the raw bytes as UTF-8: lossless, the server's console untouched.
+    windows_ocr.reply = (0, "12,50 € – Žltý", "")
+    assert ocr.ocr_windows_builtin() == "12,50 € – Žltý"
     (kwargs,) = windows_ocr.kwargs
-    assert (kwargs["encoding"], kwargs["errors"], kwargs["creationflags"]) == ("utf-8", "replace", _CREATE_NO_WINDOW)
+    assert not any(kwargs.get(key) for key in _TEXT_MODE), kwargs  # binary: the bytes are decoded by us
+    assert kwargs["creationflags"] == _CREATE_NO_WINDOW
     (argv,) = windows_ocr.calls
-    assert "[Console]::OutputEncoding = [Text.Encoding]::UTF8" in argv[-1]
+    assert argv[:3] == ["powershell", "-NoProfile", "-Command"]
+    assert argv[-1].startswith(POWERSHELL_UTF8_PREFIX + "\n")
+    assert argv[-1].count("[Console]::OutputEncoding") == 1  # only the shared prefix sets it
 
 
 def test_ping_reads_a_windows_console_in_its_code_page(monkeypatch):

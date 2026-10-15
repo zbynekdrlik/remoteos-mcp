@@ -9,7 +9,7 @@ the tool hands it are what is checked.
 from __future__ import annotations
 
 import pytest
-from fake_console_child import returned
+from fake_console_child import POWERSHELL_UTF8_PREFIX, returned
 from tool_test_support import tool_error
 
 import remoteos.__main__ as server
@@ -91,7 +91,7 @@ def popen(monkeypatch):
 @pytest.mark.parametrize(
     "windows, macos, argv",
     [
-        (True, False, ["powershell", "-NoProfile", "-Command", "Get-ChildItem"]),
+        (True, False, ["powershell", "-NoProfile", "-Command", POWERSHELL_UTF8_PREFIX + "\nGet-ChildItem"]),
         (False, True, ["/bin/zsh", "-c", "Get-ChildItem"]),
         (False, False, ["/bin/bash", "-c", "Get-ChildItem"]),
     ],
@@ -114,7 +114,7 @@ def test_without_cwd_the_process_inherits_the_server_directory(monkeypatch, pope
     monkeypatch.setattr(server, "is_windows", lambda: True)
     assert server.Shell("Get-Location") == "ok"
     [(args, kwargs)] = popen
-    assert args == ["powershell", "-NoProfile", "-Command", "Get-Location"]
+    assert args == ["powershell", "-NoProfile", "-Command", POWERSHELL_UTF8_PREFIX + "\nGet-Location"]
     assert kwargs.get("cwd") is None
 
 
@@ -125,13 +125,5 @@ def test_output_that_is_not_utf8_is_still_the_commands_answer():
     assert out.startswith("ok ") and out.endswith(" done")
 
 
-def test_windows_shell_reads_powershell_in_the_console_oem_code_page(monkeypatch, popen):
-    # review round 4: PowerShell writes the OEM code page (852 on the Slovak fleet); read as the
-    # ANSI page (1250) "AčšžB" came back as "Aźç§B" (live on win-pz-server)
-    monkeypatch.setattr(server, "is_windows", lambda: True)
-    assert server.Shell("Write-Output AčšžB") == "ok"
-    [(_args, kwargs)] = popen
-    assert (kwargs["text"], kwargs["encoding"], kwargs["errors"]) == (True, "oem", "replace")
-    # review round 5: its own hidden console (CREATE_NO_WINDOW), so a `chcp 65001` in one command
-    # can never change the code page every later command's output is written in
-    assert kwargs["creationflags"] == 0x08000000
+# The Windows output encoding (#32 rounds 4-5: its own console; #48: UTF-8, exact) is tested in
+# tests/test_output_encoding.py.
