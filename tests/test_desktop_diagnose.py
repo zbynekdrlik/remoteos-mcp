@@ -1,4 +1,4 @@
-"""Desktop diagnoses (#32): every provider's ``diagnose(capture)`` and the desktop tools' preflight.
+"""Desktop diagnoses (#32): every provider's ``diagnose(need)`` and the desktop tools' preflight.
 
 The providers run against FAKE OS APIs, the external boundary only:
 
@@ -84,8 +84,8 @@ def win_session(monkeypatch):
 
 def test_windows_healthy_desktop_is_no_diagnosis(win_session):
     mod, session = win_session
-    assert mod.diagnose(capture=True) is None
-    assert mod.diagnose(capture=False) is None
+    assert mod.diagnose("capture") is None
+    assert mod.diagnose("input") is None
     assert session.closed == [_DESKTOP_HANDLE, _DESKTOP_HANDLE]  # the input desktop handle is closed again
     assert session.open_access == [0x0001, 0x0001]  # DESKTOP_READOBJECTS: enough to read its name
     assert len(session.freed) == len(session.buffers)  # every WTS buffer is freed
@@ -118,7 +118,7 @@ def test_windows_locked_screen(win_session):
     session.input_desktop = None  # the lock screen runs on the Winlogon desktop: OpenInputDesktop fails
     session.lock_flags = LOCK
     assert mod.diagnose().startswith(_LOCKED_START)
-    assert mod.diagnose(capture=True).startswith(_LOCKED_START)
+    assert mod.diagnose("capture").startswith(_LOCKED_START)
     assert len(session.freed) == len(session.buffers)
 
 
@@ -190,32 +190,32 @@ def mac_session(monkeypatch):
 
 def test_mac_healthy_desktop_is_no_diagnosis(mac_session):
     mod, _ = mac_session
-    assert mod.diagnose(capture=True) is None
-    assert mod.diagnose(capture=False) is None
+    assert mod.diagnose("capture") is None
+    assert mod.diagnose("input") is None
 
 
 def test_mac_without_screen_recording_cannot_capture(mac_session):
     mod, state = mac_session
     state.screen_recording = False
-    reason = mod.diagnose(capture=True)
+    reason = mod.diagnose("capture")
     assert "Screen Recording" in reason and os.path.realpath(sys.executable) in reason
-    assert mod.diagnose(capture=False) is None  # input does not need Screen Recording
+    assert mod.diagnose("input") is None  # input does not need Screen Recording
 
 
 def test_mac_without_accessibility_cannot_send_input(mac_session):
     # the same predicate the event-posting code gates on (CGPreflightPostEventAccess), review round 1
     mod, state = mac_session
     state.post_events = False
-    reason = mod.diagnose(capture=False)
+    reason = mod.diagnose("input")
     assert "Accessibility" in reason and os.path.realpath(sys.executable) in reason
-    assert mod.diagnose(capture=True) is None  # a screenshot does not need Accessibility
+    assert mod.diagnose("capture") is None  # a screenshot does not need Accessibility
 
 
 def test_mac_locked_screen(mac_session):
     mod, state = mac_session
     state.session = {"kCGSSessionOnConsoleKey": True, "CGSSessionScreenIsLocked": True}
-    assert mod.diagnose(capture=True).startswith(_LOCKED_START)
-    assert mod.diagnose(capture=False).startswith(_LOCKED_START)
+    assert mod.diagnose("capture").startswith(_LOCKED_START)
+    assert mod.diagnose("input").startswith(_LOCKED_START)
 
 
 def test_mac_without_a_gui_session(mac_session):
@@ -233,13 +233,13 @@ def test_mac_session_not_on_the_console(mac_session):
 def test_mac_without_the_post_event_preflight_is_usable(mac_session, monkeypatch):
     mod, _ = mac_session
     monkeypatch.delattr(sys.modules["Quartz"], "CGPreflightPostEventAccess")  # before macOS 10.15
-    assert mod.diagnose(capture=False) is None
+    assert mod.diagnose("input") is None
 
 
 def test_mac_without_the_screen_capture_preflight_is_usable(mac_session, monkeypatch):
     mod, _ = mac_session
     monkeypatch.delattr(sys.modules["Quartz"], "CGPreflightScreenCaptureAccess")  # before macOS 10.15
-    assert mod.diagnose(capture=True) is None
+    assert mod.diagnose("capture") is None
 
 
 # ---------------------------------------------------------------------------
@@ -262,17 +262,17 @@ def no_subprocess(monkeypatch):
 
 def test_linux_headless_and_wayland_diagnoses_are_the_unchanged_stubs(monkeypatch, no_subprocess):
     monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="headless"))
-    assert linux_desktop.diagnose(capture=True) == _HEADLESS
+    assert linux_desktop.diagnose("capture") == _HEADLESS
     monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="wayland"))
-    assert linux_desktop.diagnose(capture=False) == _WAYLAND
+    assert linux_desktop.diagnose("input") == _WAYLAND
 
 
 def test_linux_x11_session_is_no_diagnosis_even_when_a_locker_runs(monkeypatch, no_subprocess):
     # review round 1: a locked X11 screen is no silent failure. The screenshot shows the locker
     # and xdotool input reaches it (the only remote way to unlock), so it is never refused.
     monkeypatch.setattr(linux_desktop, "_SESSION", _x11())
-    assert linux_desktop.diagnose(capture=True) is None
-    assert linux_desktop.diagnose(capture=False) is None
+    assert linux_desktop.diagnose("capture") is None
+    assert linux_desktop.diagnose("input") is None
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +311,11 @@ class _DiagnosingProvider(types.SimpleNamespace):
     def __init__(self, explode: bool = False):
         super().__init__(asked=[], explode=explode)
 
-    def diagnose(self, capture=False):
-        self.asked.append(capture)
+    def diagnose(self, need="input"):
+        self.asked.append(need)
         if self.explode:
             raise RuntimeError("probe exploded")
-        return f"diagnosed (capture={capture})"
+        return f"diagnosed ({need})"
 
     def __getattr__(self, name):  # every other provider function "works"
         return lambda *args, **kwargs: "ok"
@@ -332,16 +332,16 @@ def diagnosing(monkeypatch):
 def test_capture_tools_stop_on_a_capture_diagnosis(diagnosing, name):
     with pytest.raises(ToolError) as exc:
         getattr(server, name)(**_CAPTURE_TOOLS[name])
-    assert str(exc.value) == "diagnosed (capture=True)"
-    assert diagnosing.asked == [True]
+    assert str(exc.value) == "diagnosed (capture)"
+    assert diagnosing.asked == ["capture"]
 
 
 @pytest.mark.parametrize("name", sorted(_INPUT_TOOLS))
 def test_input_tools_stop_on_an_input_diagnosis(diagnosing, name):
     with pytest.raises(ToolError) as exc:
         getattr(server, name)(**_INPUT_TOOLS[name])
-    assert str(exc.value) == "diagnosed (capture=False)"
-    assert diagnosing.asked == [False]
+    assert str(exc.value) == "diagnosed (input)"
+    assert diagnosing.asked == ["input"]
 
 
 @pytest.mark.parametrize("name", sorted(_NO_PREFLIGHT_TOOLS))
@@ -355,7 +355,7 @@ def test_the_preflight_logs_its_result(diagnosing, caplog):
     with caplog.at_level(logging.DEBUG, logger="remoteos"):
         with pytest.raises(ToolError):
             server.Click(1, 1)
-    assert "desktop unavailable (input): diagnosed (capture=False)" in caplog.text
+    assert "desktop unavailable (input): diagnosed (input)" in caplog.text
 
 
 def test_a_diagnose_that_raises_never_blocks_the_tool(monkeypatch, caplog):
@@ -364,7 +364,7 @@ def test_a_diagnose_that_raises_never_blocks_the_tool(monkeypatch, caplog):
     monkeypatch.setattr(server, "get_desktop", lambda: provider)
     with caplog.at_level(logging.WARNING, logger="remoteos"):
         assert server.Shortcut("ctrl+c") == "ok"
-    assert provider.asked == [False]
+    assert provider.asked == ["input"]
     assert "desktop probe failed" in caplog.text
 
 

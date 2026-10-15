@@ -33,8 +33,8 @@ def _binary() -> str:
     return os.path.realpath(sys.executable)
 
 
-def diagnose(capture: bool = False) -> Optional[str]:
-    """Why the desktop cannot be seen (``capture``) or driven (input) now, or None when it can (#32).
+def diagnose(need: str = "input") -> Optional[str]:
+    """Why the desktop cannot be seen (``"capture"``) or driven (``"input"``) now, or None when it can (#32).
 
     The window-server session first (none, not on the console, locked), then the
     permission this use needs. Without it macOS fails SILENTLY (a wallpaper-only
@@ -49,13 +49,13 @@ def diagnose(capture: bool = False) -> Optional[str]:
     macOS) or a probe that fails means "usable" (fail open).
     """
     try:
-        return _diagnose(capture)
+        return _diagnose(need)
     except Exception as e:
         log.warning("desktop probe failed (%s: %s): assuming the desktop is usable", type(e).__name__, e)
         return None
 
 
-def _diagnose(capture: bool) -> Optional[str]:
+def _diagnose(need: str) -> Optional[str]:
     quartz = _quartz()
     if quartz is None:
         return None  # the capture / input functions raise their own "Quartz not available"
@@ -69,13 +69,13 @@ def _diagnose(capture: bool) -> Optional[str]:
             return errors.MAC_NOT_ON_CONSOLE
         if info.get(_SCREEN_IS_LOCKED, False):
             return errors.LOCKED
-    if capture:
+    if need == "capture":
         screen_access = getattr(quartz, "CGPreflightScreenCaptureAccess", None)  # macOS 10.15+
         if screen_access is not None and not screen_access():
             return errors.mac_screen_recording(_binary())
-    else:
+    elif need == "input":
         post_access = getattr(quartz, "CGPreflightPostEventAccess", None)  # macOS 10.15+
         if post_access is not None and not post_access():
             return errors.mac_accessibility(_binary())
-    log.debug("desktop probe: macOS session usable (capture=%s)", capture)
+    log.debug("desktop probe: macOS session usable (%s)", need)
     return None

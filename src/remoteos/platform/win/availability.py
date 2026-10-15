@@ -94,15 +94,16 @@ def _wts_query(session_id: int, info_class: int, ctype):
         wtsapi32.WTSFreeMemory(buf)
 
 
-def diagnose(capture: bool = False) -> Optional[str]:
+def diagnose(need: str = "input") -> Optional[str]:
     """Why the desktop cannot be seen or driven now, or None when it can (#32).
 
     Cheap, read-only probes with no side effects, in this order: session 0, a
     non-interactive window station, a disconnected session, then the input
     desktop (the secure desktop = locked screen, UAC prompt or Ctrl+Alt+Del).
-    ``capture`` does not matter on Windows: each of these blocks screenshots and
-    input alike. Only a positive finding is a diagnosis. A probe that fails is
-    logged and the desktop is taken as usable (fail open), never blocked.
+    ``need`` ("capture" / "input") does not matter on Windows: each of these
+    blocks screenshots and input alike. Only a positive finding is a diagnosis.
+    A probe that fails is logged and the desktop is taken as usable (fail open),
+    never blocked.
     """
     try:
         return _diagnose()

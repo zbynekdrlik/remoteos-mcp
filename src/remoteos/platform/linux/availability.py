@@ -13,11 +13,11 @@ from __future__ import annotations
 from typing import Optional
 
 
-def diagnose(capture: bool = False) -> Optional[str]:
+def diagnose(need: str = "input") -> Optional[str]:
     """Why the desktop cannot be seen or driven now, or None when it can (#32).
 
     No X11 session → the exact headless/Wayland stub (the cam1..4 contract).
-    ``capture`` does not matter on Linux. No subprocess, no side effects.
+    ``need`` does not matter on Linux. No subprocess, no side effects.
     """
     from remoteos.platform.linux import desktop
 

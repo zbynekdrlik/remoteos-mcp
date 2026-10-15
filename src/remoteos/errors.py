@@ -60,7 +60,7 @@ class DesktopUnavailable(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# Diagnoses: what a provider's diagnose(capture) returns (None = the desktop is usable)
+# Diagnoses: what a provider's diagnose(need) returns (None = the desktop is usable)
 # ---------------------------------------------------------------------------
 
 LOCKED = (

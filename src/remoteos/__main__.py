@@ -163,31 +163,32 @@ def _to_screen(points: list[tuple[int, int]], monitor: int, max_width: int, coor
     return mapped, note
 
 
-def _desktop_preflight(capture: bool) -> None:
+def _desktop_preflight(need: str) -> None:
     """Stop a desktop tool before it touches a desktop that cannot be used (#32).
 
-    The provider's ``diagnose(capture)`` is cheap and read-only. Only a positive
-    finding raises, as :class:`DesktopUnavailable`, its text verbatim to the
-    client. A diagnose() that itself fails is logged and the tool goes ahead:
-    a probe never blocks a desktop it could not read. Nothing here changes the
-    session. A disconnected Windows session is reported, and reattaching it
-    (``tscon``) is the explicit ReconnectSession tool's job (#32 review round 1).
+    ``need`` is what the tool needs from the desktop: ``"capture"`` (read the
+    screen) or ``"input"`` (send mouse/keyboard events). The provider's
+    ``diagnose(need)`` is cheap and read-only. Only a positive finding raises,
+    as :class:`DesktopUnavailable`, its text verbatim to the client. A
+    diagnose() that itself fails is logged and the tool goes ahead: a probe
+    never blocks a desktop it could not read. Nothing here changes the session.
+    A disconnected Windows session is reported, and reattaching it (``tscon``)
+    is the explicit ReconnectSession tool's job (#32 review round 1).
     """
-    kind = "capture" if capture else "input"
     try:
-        reason = get_desktop().diagnose(capture=capture)
+        reason = get_desktop().diagnose(need)
     except Exception as e:
         log.warning("desktop probe failed (%s: %s): assuming the desktop is usable", type(e).__name__, e)
         return
     if reason:
-        log.warning("desktop unavailable (%s): %s", kind, reason)
+        log.warning("desktop unavailable (%s): %s", need, reason)
         raise DesktopUnavailable(reason)
-    log.debug("desktop preflight (%s): usable", kind)
+    log.debug("desktop preflight (%s): usable", need)
 
 
 # A tool that reads the screen / one that sends input: @reports_errors with the matching preflight.
-_capture_tool = reports_errors(preflight=functools.partial(_desktop_preflight, True))
-_input_tool = reports_errors(preflight=functools.partial(_desktop_preflight, False))
+_capture_tool = reports_errors(preflight=functools.partial(_desktop_preflight, "capture"))
+_input_tool = reports_errors(preflight=functools.partial(_desktop_preflight, "input"))
 
 
 @mcp.tool(
@@ -225,7 +226,7 @@ def Snapshot(
     """
     parts = []
     if _tobool(use_vision):
-        _desktop_preflight(True)
+        _desktop_preflight("capture")
         img, frame = _capture_snapshot_frame(monitor, max_width)
         parts.append(ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"))
     else:
