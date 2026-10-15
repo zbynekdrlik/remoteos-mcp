@@ -46,13 +46,14 @@ _REAL_PYTHON = sys.executable
 def assert_runs_powershell(argv: list[str], python, script: str, cwd: str = "") -> None:
     """``argv`` runs ``script`` unchanged under the console trampoline of ``python`` (#48 round 2).
 
-    ``[<python.exe>, "-I", "-S", "-c", <program>, cwd, "powershell", "-NoProfile", "-Command", script]``:
-    ``cwd`` is PowerShell's working directory ("" = the server's), and the PowerShell part is exactly
-    the argv a PowerShell child had before #48, with nothing added.
+    ``[<python.exe>, "-I", "-S", "-X", "utf8", "-c", <program>, cwd, "powershell", "-NoProfile",
+    "-Command", script]``: ``cwd`` is PowerShell's working directory ("" = the server's), and the
+    PowerShell part is exactly the argv a PowerShell child had before #48, with nothing added.
+    ``-X utf8`` (review round 2): the trampoline's own messages reach the pipe as UTF-8.
     """
-    assert argv[:4] == [str(python), "-I", "-S", "-c"], argv[:4]
-    assert argv[5] == cwd, argv[5]
-    assert argv[6:] == ["powershell", "-NoProfile", "-Command", script], argv[6:]
+    assert argv[:6] == [str(python), "-I", "-S", "-X", "utf8", "-c"], argv[:6]
+    assert argv[7] == cwd, argv[7]
+    assert argv[8:] == ["powershell", "-NoProfile", "-Command", script], argv[8:]
 
 
 def returned(kwargs: dict, value: str | bytes) -> str | bytes:

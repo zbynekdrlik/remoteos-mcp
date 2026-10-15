@@ -134,7 +134,7 @@ def test_powershell_argv_keeps_the_script_verbatim_under_the_console_trampoline(
     script = "param($a = 'x')\nWrite-Output \"a; b\"\n$x = 'it''s'; Get-ChildItem 'C:\\Program Files'"
     argv = powershell_argv(script)
     assert_runs_powershell(argv, windows_python, script)
-    assert powershell_argv("exit 3")[4] == argv[4]  # one fixed program: no user data in it
+    assert powershell_argv("exit 3")[6] == argv[6]  # one fixed program: no user data in it
 
 
 def test_the_trampoline_is_the_console_python_even_when_the_server_runs_as_pythonw(windows_python, monkeypatch):
@@ -206,9 +206,9 @@ def _run_trampoline(monkeypatch, windows_python, *, cwd=None, child_exit=0, refu
     fake_subprocess.call = _call
     monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
     monkeypatch.setitem(sys.modules, "subprocess", fake_subprocess)
-    monkeypatch.setattr(sys, "argv", ["-c", *argv[5:]])  # what python.exe -c <program> <args…> sets
+    monkeypatch.setattr(sys, "argv", ["-c", *argv[7:]])  # what python.exe -c <program> <args…> sets
     with pytest.raises(SystemExit) as done:
-        exec(argv[4], {"__name__": "__main__"})
+        exec(argv[6], {"__name__": "__main__"})
     return events, done.value.code, argv
 
 
@@ -235,7 +235,7 @@ def test_the_trampoline_starts_powershell_in_the_users_cwd_but_finds_it_from_the
     # The trampoline runs in the server's (run_child gets no cwd), so a powershell.exe planted in the
     # user's working directory is never found; PowerShell itself starts in that directory.
     events, _, argv = _run_trampoline(monkeypatch, windows_python, cwd="C:\\Users\\Žltý kôň\\repo")
-    assert argv[5] == "C:\\Users\\Žltý kôň\\repo"
+    assert argv[7] == "C:\\Users\\Žltý kôň\\repo"
     assert events[-1] == ("call", _POWERSHELL, {"cwd": "C:\\Users\\Žltý kôň\\repo", "stdout": 1, "stderr": 2})
 
 
@@ -465,6 +465,19 @@ def test_windows_run_command_reads_utf8_exactly_in_its_own_console(monkeypatch, 
     [(argv, kwargs)] = windows_child.calls
     assert argv == ["schtasks", "/Query"]
     _binary_in_its_own_console(kwargs)
+
+
+def test_an_unlabeled_powershell_failure_names_powershell_not_the_trampoline(
+    monkeypatch, windows_child, windows_python
+):
+    # review round 2: the label fallback is the command as the user knows it, never "python.exe -I"
+    from remoteos.platform.command import powershell_argv, run_command
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    windows_child.stderr = b"Get-Thing: not found\r\n"
+    windows_child.returncode = 1
+    with pytest.raises(RuntimeError, match=r"^powershell -NoProfile failed \(exit 1\): Get-Thing: not found$"):
+        run_command(powershell_argv("Get-Thing"), check=True)
 
 
 def test_windows_native_program_output_in_the_oem_page_is_still_read_exactly(monkeypatch, windows_child, caplog):

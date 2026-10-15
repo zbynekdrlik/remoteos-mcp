@@ -183,8 +183,9 @@ def windows_never_finishing(monkeypatch):
 
 def test_a_timed_out_windows_child_is_killed_with_taskkill_of_its_tree(windows_never_finishing):
     started, taskkills, _ = windows_never_finishing
-    with pytest.raises(subprocess.TimeoutExpired):
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
         run_command(["tscon", "2", "/dest:console"], timeout=3)
+    assert exc.value.cmd == ["tscon", "2", "/dest:console"]  # review round 2: no trampoline, kept as is
     [(argv, kwargs)] = taskkills
     assert argv == ["taskkill", "/F", "/T", "/PID", "31337"]
     # review round 1: its own hidden console, so no window flashes up when the server runs as pythonw.exe
@@ -244,6 +245,54 @@ def test_a_grandchild_that_ignores_sigterm_is_killed_too(grandchild_pid_file):
         run_command(cmd, timeout=2)
     assert time.monotonic() - started < 15
     assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the grandchild survived the timeout"
+
+
+# Review round 2: a grandchild that ignores SIGTERM and does NOT hold our pipes, so the reap
+# succeeds; the SIGKILL to the group must come anyway.
+_DETACHED_GRANDCHILD_THAT_IGNORES_SIGTERM = f"""
+import subprocess, sys, time
+grandchild = subprocess.Popen(
+    [sys.executable, "-c", {_GRANDCHILD_THAT_IGNORES_SIGTERM!r}],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+open(sys.argv[1], "w").write(str(grandchild.pid))
+time.sleep(60)
+"""
+
+
+def test_a_grandchild_that_ignores_sigterm_without_our_pipes_is_killed_too(grandchild_pid_file):
+    cmd = [sys.executable, "-c", _DETACHED_GRANDCHILD_THAT_IGNORES_SIGTERM, str(grandchild_pid_file)]
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command(cmd, timeout=2)
+    assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the grandchild survived the timeout"
+
+
+# Review round 2: SIGTERM comes first, so a process that handles it can clean up (a removed SIGTERM
+# step survived the suite). The handler leaves a marker, then exits.
+_GRANDCHILD_THAT_CLEANS_UP_ON_SIGTERM = (
+    "import signal, sys, time\n"
+    "def done(*_):\n"
+    "    open(sys.argv[1], 'w').write('cleaned up')\n"
+    "    sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, done)\n"
+    "time.sleep(60)\n"
+)
+_PARENT_OF_A_GRANDCHILD_THAT_CLEANS_UP = f"""
+import subprocess, sys, time
+grandchild = subprocess.Popen([sys.executable, "-c", {_GRANDCHILD_THAT_CLEANS_UP_ON_SIGTERM!r}, sys.argv[2]])
+open(sys.argv[1], "w").write(str(grandchild.pid))
+time.sleep(60)
+"""
+
+
+def test_the_group_gets_sigterm_before_sigkill(grandchild_pid_file):
+    marker = grandchild_pid_file.parent / "cleaned-up"
+    cmd = [sys.executable, "-c", _PARENT_OF_A_GRANDCHILD_THAT_CLEANS_UP, str(grandchild_pid_file), str(marker)]
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command(cmd, timeout=2)
+    assert _gone_within(int(grandchild_pid_file.read_text()), 5)
+    assert marker.read_text() == "cleaned up"
 
 
 _RUNS_A_CHILD_THAT_READS_STDIN = """
