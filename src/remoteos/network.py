@@ -12,7 +12,7 @@ import socket
 import subprocess
 import sys
 
-from remoteos.platform.command import console_decoding
+from remoteos.platform.command import console_child
 
 
 def ping(host: str, count: int = 4) -> str:
@@ -24,7 +24,7 @@ def ping(host: str, count: int = 4) -> str:
             ["ping", flag, str(count), host],
             capture_output=True,
             timeout=timeout,
-            **console_decoding(),  # Windows ping writes the console's OEM code page (#32)
+            **console_child(),  # Windows: its own console, in the OEM page Python decodes (#32)
         )
     except subprocess.TimeoutExpired:
         raise TimeoutError(f"ping timed out after {timeout}s") from None

@@ -46,7 +46,7 @@ from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
-from remoteos.platform.command import console_decoding
+from remoteos.platform.command import console_child
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, window_lines
@@ -614,9 +614,9 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
         stderr=subprocess.PIPE,
         cwd=workdir,
         start_new_session=not is_windows(),
-        # PowerShell writes the console's OEM code page (cp852), which is not Python's default for
-        # a pipe; an undecodable byte must never lose the output of a command that ran (#32)
-        **console_decoding(windows=is_windows()),
+        # its own console (Windows) in the OEM code page Python decodes; an undecodable byte never
+        # loses the output of a command that ran (#32 review rounds 4-5)
+        **console_child(windows=is_windows()),
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
