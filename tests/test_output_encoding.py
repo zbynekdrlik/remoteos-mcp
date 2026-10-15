@@ -213,6 +213,20 @@ def test_decode_output_keeps_undecodable_bytes_as_replacement_characters_and_log
     assert "Zz-marker" not in caplog.text
 
 
+def test_decode_output_counts_every_fallback_line_and_every_replaced_character(caplog):
+    # round 2 🔵: with one fallback line per test, `fallback = 1` and `replaced = <this line's count>`
+    # survived as mutants; two cp932 lines, each with one undecodable lead byte, pin both totals
+    from remoteos.platform.command import decode_output
+
+    with oem_code_page("cp932"), caplog.at_level(logging.DEBUG, logger="remoteos"):
+        out = decode_output(b"a \x81\r\nb \x81", windows=True, stream="stdout")
+    assert out == "a �\nb �"
+    [record] = _remoteos_records(caplog)
+    message = record.getMessage()
+    assert record.levelno == logging.WARNING
+    assert "stdout: 2 line(s) not UTF-8" in message and "; 2 undecodable" in message
+
+
 def test_decode_output_falls_back_line_by_line_so_utf8_lines_stay_exact(caplog):
     # review round 1: a native program started from PowerShell may write its own page into the same
     # pipe; that one line must not turn PowerShell's UTF-8 lines around it into mojibake
