@@ -28,8 +28,11 @@ CREATE_NO_WINDOW = 0x08000000
 # [Console]::OutputEncoding, which is the console's OEM page: cp437 on resolume-pp best-fitted
 # "Žltý kôň" to "Zlty kôn", and cp852 has no "€" or "–".
 # - Setting it to UTF-8 also switches the child's console (SetConsoleOutputCP), so a native
-#   program that writes through the console's output page writes UTF-8 too. One that writes its
-#   own page regardless is read line by line by decode_output's OEM fallback.
+#   program that writes through the console's output page writes UTF-8 too. One that writes the
+#   OEM page regardless: straight into our pipe, decode_output's per-line OEM fallback reads it;
+#   CAPTURED by PowerShell (a pipeline, an assignment, | Out-String), PowerShell itself decodes it
+#   as UTF-8 and its non-ASCII text is lost (review round 2; verified live only). The switched
+#   page also governs grandchildren, e.g. how cmd.exe reads a .bat file.
 # - $OutputEncoding is what PowerShell pipes INTO a native program.
 # - UTF-8 without a BOM. New-Object works on every Windows PowerShell version ([…]::new needs 5.0).
 # - try/catch (review round 1): where the switch is refused (e.g. Constrained Language Mode), the

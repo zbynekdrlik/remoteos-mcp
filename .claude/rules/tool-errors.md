@@ -88,7 +88,9 @@ paths:
     - a Linux TaskDelete with no unit files is an error.
   - The Windows provider's PowerShell calls (launch_app, show_notification) and `tscon` use it
     with `check=True` too.
-- **A child process is started and decoded in `platform/command.py`, nowhere else (#32, #48).**
+- **A Windows console child whose output is a tool reply is started and decoded in
+  `platform/command.py` (#32, #48).** (Other children, e.g. taskkill, install/uninstall,
+  the Linux/macOS OCR and desktop helpers, have their own runs.)
   - **Every PowerShell child = `powershell_argv(script)`**: `powershell -NoProfile -Command`
     with `UTF8_PREFIX` on its own first line, then the script verbatim. Users: Shell,
     services/tasks/EventLog `_ps`, `launch_app`, `show_notification`, Windows OCR.
@@ -96,7 +98,9 @@ paths:
       BOM. It uses `New-Object`, so it runs on every Windows PowerShell version.
     - It is wrapped in `try { … } catch { }`, so a box that refuses the switch (Constrained
       Language Mode) still runs the command with no error on every reply. That output takes
-      the OEM fallback.
+      the OEM fallback. The caught error stays in `$Error`, which only a script that reads
+      `$Error` sees. It is not cleared, because `$Error.Clear()` is itself a method call that
+      CLM may refuse, which would bring the stderr noise back (review round 2).
     - Never hand-build a PowerShell argv. `test_every_powershell_child_is_started_by_the_one_builder`
       AST-scans for an argv list/tuple starting with powershell/pwsh(.exe), or a
       `"powershell -…"` string, outside `command.py`.
@@ -104,9 +108,18 @@ paths:
       OEM page. cp437 (resolume-pp, en_150) best-fitted `Žltý kôň` to `Zlty kôn`, and cp852
       has no `€` or `–`.
     - Setting it also switches the child's console (SetConsoleOutputCP). A native program that
-      writes through the console's output page then writes UTF-8 too. One that writes its own
-      page regardless (e.g. a Python child: its ANSI page) is caught line by line by the
-      fallback. Which programs follow the switch is verified live only, not in the tests.
+      writes through the console's output page then writes UTF-8 too.
+    - **A native program that writes the OEM page regardless** (review round 2):
+      - Written straight into our pipe, it is read line by line by the OEM fallback.
+      - CAPTURED by PowerShell (a pipeline, an assignment, `| Out-String`, `2>&1`), PowerShell
+        itself decodes it with the switched `[Console]::OutputEncoding` = UTF-8, and its
+        non-ASCII text becomes U+FFFD before `decode_output` sees it. Nothing is logged.
+      - A program that writes the ANSI page (e.g. a Python child) is not exact either way.
+      - Which fleet tools follow the switch is verified live only, never in the tests. The
+        live list is on #48: ping/cmd through `| Out-String`, `net user`, schtasks stderr.
+    - The switched page also governs grandchildren: cmd.exe reads a `.bat` file in the
+      console page, so a cp852 batch file with a diacritic is now read as UTF-8, and a UTF-8
+      one now reads correctly. Verified live only.
     - The limit: a script that must begin with `param(...)` or a `using` statement cannot
       follow the prefix, because PowerShell requires those first. The Shell docstring says so.
       PowerShell error positions are one line lower (`At line:2`).

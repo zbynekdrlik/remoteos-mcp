@@ -183,7 +183,11 @@ encoding (UTF-8 on the fleet).
 - A line that is not UTF-8 is read on its own in the system's OEM code page, so it is exact
   only for the characters that page holds. Examples:
   - PowerShell's own parse error, which is printed before the switch;
-  - a native program that writes its own code page.
+  - a native program that writes the OEM page whatever the console's page is.
+- Such a native program's output loses its non-ASCII text when PowerShell itself captures it,
+  in a pipeline, an assignment or `| Out-String`. PowerShell decodes it as UTF-8 then.
+- The switch also applies to programs started from the command. For example, cmd.exe reads a
+  `.bat` file in the console's code page, which is now UTF-8.
 - Ping and `tscon` run without PowerShell and are read in the OEM code page.
 - A Windows `Shell` script that must begin with `param(...)` or a `using` statement cannot
   run: PowerShell requires those first, and the switch comes before them.

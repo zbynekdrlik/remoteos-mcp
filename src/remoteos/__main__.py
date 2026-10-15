@@ -608,7 +608,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             raise ValueError(f"working directory {problem}: {cwd}")
     windows = is_windows()
     if windows:
-        # its console switched to UTF-8 first, so the output is lossless (#48)
+        # its console switched to UTF-8 first, so PowerShell's own output is exact (#48)
         shell_cmd = powershell_argv(command)
     elif is_macos():
         shell_cmd = ["/bin/zsh", "-c", command]
