@@ -31,6 +31,7 @@ import ast
 import locale
 import logging
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -45,9 +46,13 @@ _CREATE_NO_WINDOW = 0x08000000
 
 
 def _binary_in_its_own_console(kwargs: dict) -> None:
-    """The child's bytes come back raw (decoded by us), and it has its own hidden console (#32 round 5)."""
+    """The child's bytes come back raw (decoded by us), and it has its own hidden console (#32 round 5).
+
+    Review round 1: its stdin is NUL, never the server's (the MCP stream under the stdio transport).
+    """
     assert not any(kwargs.get(key) for key in TEXT_MODE), kwargs
     assert kwargs["creationflags"] == _CREATE_NO_WINDOW
+    assert kwargs["stdin"] == subprocess.DEVNULL
 
 
 def _remoteos_records(caplog) -> list[logging.LogRecord]:
@@ -156,33 +161,37 @@ def test_a_missing_console_python_is_a_loud_error(windows_python, monkeypatch):
 
 
 class _Kernel32:
-    """kernel32's code-page calls, recorded; ``ok=False`` makes SetConsoleOutputCP fail."""
+    """kernel32's code-page calls, recorded; ``refuse`` names the calls that fail (return 0)."""
 
-    def __init__(self, events: list, ok: bool) -> None:
-        self.events, self.ok = events, ok
+    def __init__(self, events: list, refuse: tuple) -> None:
+        self.events, self.refuse = events, refuse
 
     def SetConsoleOutputCP(self, page):
         self.events.append(("SetConsoleOutputCP", page))
-        return 1 if self.ok else 0
+        return 0 if "SetConsoleOutputCP" in self.refuse else 1
 
     def SetConsoleCP(self, page):
         self.events.append(("SetConsoleCP", page))
-        return 1
+        return 0 if "SetConsoleCP" in self.refuse else 1
 
 
-def _run_trampoline(monkeypatch, windows_python, *, child_exit: int = 0, kernel32_ok: bool = True):
-    """Run the trampoline program of ``powershell_argv`` as python.exe would; returns (events, exit code)."""
+def _run_trampoline(monkeypatch, windows_python, *, cwd=None, child_exit=0, refuse=(), start_error=None):
+    """Run the trampoline program of ``powershell_argv`` as python.exe would.
+
+    Returns ``(events, exit code, argv)``. ``child_exit`` is PowerShell's exit code; ``refuse`` the
+    kernel32 calls that fail; ``start_error`` an ``OSError`` that starting PowerShell raises.
+    """
     import types
 
     from remoteos.platform.command import powershell_argv
 
-    argv = powershell_argv("Write-Error 'chyba ťava'; exit 3")
+    argv = powershell_argv("Write-Error 'chyba ťava'; exit 3", cwd=cwd)
     events: list = []
     fake_ctypes = types.ModuleType("ctypes")
 
     def _windll(name, use_last_error=False):
         events.append(("WinDLL", name, use_last_error))
-        return _Kernel32(events, kernel32_ok)
+        return _Kernel32(events, refuse)
 
     fake_ctypes.WinDLL = _windll
     fake_ctypes.get_last_error = lambda: 87
@@ -190,6 +199,8 @@ def _run_trampoline(monkeypatch, windows_python, *, child_exit: int = 0, kernel3
 
     def _call(args, **kwargs):
         events.append(("call", list(args), kwargs))
+        if start_error:
+            raise start_error
         return child_exit
 
     fake_subprocess.call = _call
@@ -201,39 +212,73 @@ def _run_trampoline(monkeypatch, windows_python, *, child_exit: int = 0, kernel3
     return events, done.value.code, argv
 
 
+_POWERSHELL = ["powershell", "-NoProfile", "-Command", "Write-Error 'chyba ťava'; exit 3"]
+
+
 def test_the_trampoline_switches_its_own_console_to_utf8_then_runs_powershell_unchanged(monkeypatch, windows_python):
     events, code, _ = _run_trampoline(monkeypatch, windows_python)
-    powershell = ["powershell", "-NoProfile", "-Command", "Write-Error 'chyba ťava'; exit 3"]
     assert events == [
         ("WinDLL", "kernel32", True),
         ("SetConsoleOutputCP", 65001),
         ("SetConsoleCP", 65001),
-        # the same console (no creationflags) and the trampoline's own stdout/stderr handed down
-        ("call", powershell, {"stdout": 1, "stderr": 2}),
+        # the same console (no creationflags), the trampoline's own stdout/stderr handed down, and
+        # no working directory of its own: PowerShell starts in the server's
+        ("call", _POWERSHELL, {"cwd": None, "stdout": 1, "stderr": 2}),
     ]
     assert code == 0
 
 
+def test_the_trampoline_starts_powershell_in_the_users_cwd_but_finds_it_from_the_servers(
+    monkeypatch, windows_python
+):
+    # review round 1: CreateProcess looks for "powershell" in the PARENT's current directory first.
+    # The trampoline runs in the server's (run_child gets no cwd), so a powershell.exe planted in the
+    # user's working directory is never found; PowerShell itself starts in that directory.
+    events, _, argv = _run_trampoline(monkeypatch, windows_python, cwd="C:\\Users\\Žltý kôň\\repo")
+    assert argv[5] == "C:\\Users\\Žltý kôň\\repo"
+    assert events[-1] == ("call", _POWERSHELL, {"cwd": "C:\\Users\\Žltý kôň\\repo", "stdout": 1, "stderr": 2})
+
+
 @pytest.mark.parametrize(
     ("child_exit", "process_exit"),
-    [(3, 3), (1, 1), (0xC000013A, -1073741510), (0xFFFFFFFF, -1)],
-    ids=["exit-3", "exit-1", "ctrl-c-status", "exit-minus-1"],
+    [(3, 3), (1, 1), (0x7FFFFFFF, 0x7FFFFFFF), (0x80000000, -0x80000000), (0xC000013A, -1073741510), (0xFFFFFFFF, -1)],
+    ids=["exit-3", "exit-1", "largest-positive", "first-negative", "ctrl-c-status", "exit-minus-1"],
 )
 def test_the_trampoline_exits_with_powershells_exact_exit_code(monkeypatch, windows_python, child_exit, process_exit):
     # Windows exit codes are 32-bit unsigned; sys.exit takes a C long, so a code >= 2**31 is handed
-    # over as the same 32 bits, signed (sys.exit(-1) ends the process with 0xFFFFFFFF)
+    # over as the same 32 bits, signed (sys.exit(-1) ends the process with 0xFFFFFFFF). Review round 1:
+    # both sides of the 2**31 boundary are pinned.
     _, code, _ = _run_trampoline(monkeypatch, windows_python, child_exit=child_exit)
     assert code == process_exit
     assert code & 0xFFFFFFFF == child_exit
 
 
-def test_a_console_that_refuses_utf8_still_runs_the_command_and_says_so(monkeypatch, windows_python, capsys):
-    # never seen (the child always has its own console); the output then takes the OEM fallback
-    events, code, _ = _run_trampoline(monkeypatch, windows_python, child_exit=3, kernel32_ok=False)
-    assert [e[0] for e in events] == ["WinDLL", "SetConsoleOutputCP", "call"]
+@pytest.mark.parametrize(
+    ("refuse", "said"),
+    [
+        (("SetConsoleOutputCP",), "remoteos: the console output stays in the OEM code page (error 87)\n"),
+        (("SetConsoleCP",), "remoteos: the console input stays in the OEM code page (error 87)\n"),
+    ],
+    ids=["output-page", "input-page"],
+)
+def test_a_console_that_refuses_utf8_still_runs_the_command_and_says_which_page(
+    monkeypatch, windows_python, capsys, refuse, said
+):
+    # never seen (the child always has its own console); refused output takes the OEM fallback.
+    # Review round 1: each page has its own message, so an input refusal never claims the output
+    events, code, _ = _run_trampoline(monkeypatch, windows_python, child_exit=3, refuse=refuse)
+    assert [e[0] for e in events] == ["WinDLL", "SetConsoleOutputCP", "SetConsoleCP", "call"]
     assert code == 3
+    assert capsys.readouterr().err == said
+
+
+def test_powershell_that_cannot_be_started_is_one_line_never_a_traceback(monkeypatch, windows_python, capsys):
+    # review round 1: no powershell.exe, or a working directory that vanished after Shell checked it
+    start_error = FileNotFoundError(2, "The system cannot find the file specified")
+    _, code, _ = _run_trampoline(monkeypatch, windows_python, start_error=start_error)
+    assert code == 1
     assert capsys.readouterr().err == (
-        "remoteos: could not switch the console to UTF-8 (error 87); the output is read in the OEM code page\n"
+        "remoteos: could not start powershell: [Errno 2] The system cannot find the file specified\n"
     )
 
 

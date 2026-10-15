@@ -15,7 +15,9 @@ from __future__ import annotations
 import ctypes
 import subprocess
 import time
+from pathlib import Path
 
+import psutil
 import pytest
 
 import remoteos.__main__ as server
@@ -23,14 +25,15 @@ from remoteos.platform.command import powershell_argv, run_command
 
 SLOVAK = "Žltý kôň ďakuje – €"
 
-# Text of OUR machinery that must never appear in a reply: round 1's prefix, the trampoline program.
-_OURS = ("OutputEncoding", "SetConsole", "ScriptBlock", "REMOTEOS", "kernel32", "subprocess", "65001", "-NoProfile")
+# Text of OUR machinery that must never appear in a reply: round 1's prefix, the trampoline program
+# and its own messages. Compared case-insensitively (review round 1: "REMOTEOS" missed "remoteos:").
+_OURS = ("outputencoding", "setconsole", "scriptblock", "remoteos", "kernel32", "subprocess", "65001", "-noprofile")
 
 
 def _only_the_users_text(reply: str) -> None:
     for marker in _OURS:
-        assert marker not in reply, f"{marker!r} leaked into the reply: {reply!r}"
-    assert "�" not in reply
+        assert marker not in reply.lower(), f"{marker!r} leaked into the reply: {reply!r}"
+    assert "\ufffd" not in reply
 
 
 def test_the_runner_is_windows_powershell_5_1_on_oem_code_page_437():
@@ -94,17 +97,35 @@ def test_a_parse_error_is_reported_with_the_scripts_exact_text():
     _only_the_users_text(reply)
 
 
-def test_a_timed_out_powershell_child_is_killed_with_its_tree():
-    # only the trampoline is the server's child: killing just it would leave PowerShell holding the
-    # pipes, and communicate() would wait the full 60 s
+def _gone_within(pid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not psutil.pid_exists(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _sleeps_after_writing_its_pid(pid_file: Path) -> str:
+    """A PowerShell script that writes its own $PID, then hangs."""
+    return f"$PID | Set-Content -LiteralPath '{pid_file}'; Start-Sleep -Seconds 120"
+
+
+def test_a_timed_out_powershell_child_is_killed_with_its_tree(tmp_path):
+    # Only the trampoline is the server's child. Review round 1: PowerShell ITSELF must be gone; the
+    # bounded reap would otherwise still return in time and hide a missing tree kill.
+    pid_file = tmp_path / "powershell.pid"
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
-        run_command(powershell_argv("Start-Sleep -Seconds 60"), timeout=5)
-    assert time.monotonic() - started < 30
+        run_command(powershell_argv(_sleeps_after_writing_its_pid(pid_file)), timeout=15)
+    assert time.monotonic() - started < 60
+    assert _gone_within(int(pid_file.read_text().strip()), 10), "PowerShell survived the timeout"
 
 
-def test_a_timed_out_shell_command_is_an_error_within_its_timeout():
+def test_a_timed_out_shell_command_is_an_error_and_powershell_is_killed(tmp_path):
+    pid_file = tmp_path / "powershell.pid"
     started = time.monotonic()
-    with pytest.raises(Exception, match=r"^Command timed out after 5s$"):
-        server.Shell("Start-Sleep -Seconds 60", timeout=5)
-    assert time.monotonic() - started < 30
+    with pytest.raises(Exception, match=r"^Command timed out after 15s$"):
+        server.Shell(_sleeps_after_writing_its_pid(pid_file), timeout=15)
+    assert time.monotonic() - started < 60
+    assert _gone_within(int(pid_file.read_text().strip()), 10), "PowerShell survived the timeout"

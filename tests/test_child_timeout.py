@@ -6,15 +6,19 @@ does on a timeout) would leave PowerShell, and anything it started, running with
 pipes open. On Windows ``subprocess.run`` then waits in ``communicate()`` for those pipes with no
 timeout at all (CPython gh-81605), and the tool call never returns. So ``run_child`` kills the
 whole tree, as Shell already did:
-- Windows: ``taskkill /F /T /PID <child>``;
-- POSIX: the child's own process group (it is started in a new session), never the caller's.
+- Windows: ``taskkill /F /T /PID <child>``, in its own hidden console;
+- POSIX: the child's own process group (it is started in a new session), never the caller's:
+  SIGTERM, then SIGKILL after a short grace (review round 1).
+Review round 1 also: the reap never logs the command, an interrupted wait kills the tree too, a
+timeout names the PowerShell command rather than the trampoline, and a child's stdin is NUL.
 
-The POSIX cases run real processes. The Windows case fakes only ``subprocess.Popen`` (a child
+The POSIX cases run real processes. The Windows cases fake only ``subprocess.Popen`` (a child
 that never finishes) and the ``taskkill`` run.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -24,7 +28,7 @@ from pathlib import Path
 import pytest
 
 import remoteos.__main__ as server
-from remoteos.platform.command import run_command
+from remoteos.platform.command import powershell_argv, run_child, run_command
 
 # A child that starts a grandchild sharing its stdout, writes the grandchild's pid to a file, then
 # hangs. The grandchild hangs too, holding the pipe open.
@@ -112,18 +116,25 @@ def test_killing_a_child_that_shares_the_callers_group_never_kills_the_caller():
 
 
 class _NeverFinishes:
-    """A Windows child at the Popen boundary that is still running when the timeout expires."""
+    """A Windows child at the Popen boundary that is still running when the timeout expires.
+
+    ``mode``: "timeout" = it ends once killed; "unreapable" = even the reap after the kill times out
+    (a grandchild holds the pipe); "interrupt" = ``communicate`` is interrupted (KeyboardInterrupt).
+    """
 
     pid = 31337
     returncode = None
 
-    def __init__(self, args, **kwargs):
+    def __init__(self, args, mode="timeout", **kwargs):
         self.args = args
         self.kwargs = kwargs
+        self.mode = mode
         self.killed = False
 
     def communicate(self, input=None, timeout=None):
-        if timeout is not None and not self.killed:
+        if self.mode == "interrupt" and not self.killed:
+            raise KeyboardInterrupt
+        if timeout is not None and (self.mode == "unreapable" or not self.killed):
             raise subprocess.TimeoutExpired(self.args, timeout)
         return (b"", b"")
 
@@ -144,27 +155,115 @@ class _NeverFinishes:
         pass
 
 
-def test_a_timed_out_windows_child_is_killed_with_taskkill_of_its_tree(monkeypatch):
+@pytest.fixture
+def windows_never_finishing(monkeypatch):
+    """Windows, a child that never finishes, and a recorded taskkill; yields ``(started, taskkills, set_mode)``."""
     monkeypatch.setattr(sys, "platform", "win32")
     started: list[_NeverFinishes] = []
+    mode = {"value": "timeout"}
 
     def _popen(args, **kwargs):
-        child = _NeverFinishes(args, **kwargs)
+        child = _NeverFinishes(args, mode["value"], **kwargs)
         started.append(child)
         return child
 
-    killed: list[list[str]] = []
+    taskkills: list[tuple[list[str], dict]] = []
     real_run = subprocess.run
 
     def _run(cmd, **kwargs):
         if cmd[0] == "taskkill":
-            killed.append(list(cmd))
+            taskkills.append((list(cmd), kwargs))
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
         return real_run(cmd, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", _popen)
     monkeypatch.setattr(subprocess, "run", _run)
+    yield started, taskkills, lambda value: mode.__setitem__("value", value)
+
+
+def test_a_timed_out_windows_child_is_killed_with_taskkill_of_its_tree(windows_never_finishing):
+    started, taskkills, _ = windows_never_finishing
     with pytest.raises(subprocess.TimeoutExpired):
         run_command(["tscon", "2", "/dest:console"], timeout=3)
-    assert killed == [["taskkill", "/F", "/T", "/PID", "31337"]]
+    [(argv, kwargs)] = taskkills
+    assert argv == ["taskkill", "/F", "/T", "/PID", "31337"]
+    # review round 1: its own hidden console, so no window flashes up when the server runs as pythonw.exe
+    assert kwargs.get("creationflags") == 0x08000000
     assert started[0].killed
+
+
+def test_a_timeout_names_the_powershell_command_not_the_trampoline(windows_never_finishing, windows_python):
+    # review round 1: the error the client sees names the command as before round 2, without the
+    # ~425 characters of the console trampoline in front of it
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
+        run_command(powershell_argv("Start-Sleep 60"), timeout=3)
+    assert exc.value.cmd == ["powershell", "-NoProfile", "-Command", "Start-Sleep 60"]
+    shown = "['powershell', '-NoProfile', '-Command', 'Start-Sleep 60']"
+    assert str(exc.value) == f"Command '{shown}' timed out after 3 seconds"
+
+
+def test_a_failed_reap_never_logs_the_command(windows_never_finishing, caplog):
+    # review round 1: TimeoutExpired's text is the whole argv, the user's command included (#31: logs
+    # carry no tool arguments). The marker is built at run time, so no source line in a logged frame has it.
+    _, _, set_mode = windows_never_finishing
+    set_mode("unreapable")
+    marker = "secret-" + "marker-48"
+    with caplog.at_level(logging.DEBUG, logger="remoteos"):
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_child(["tool", marker], timeout=1, windows=True)
+    assert "reaping 31337 failed: TimeoutExpired" in caplog.text
+    assert marker not in caplog.text
+
+
+def test_an_interrupted_wait_still_kills_the_childs_tree(windows_never_finishing):
+    # review round 1: subprocess.run killed its child on any exception, not only on a timeout
+    started, taskkills, set_mode = windows_never_finishing
+    set_mode("interrupt")
+    with pytest.raises(KeyboardInterrupt):
+        run_command(["tscon", "2", "/dest:console"], timeout=3)
+    assert [argv for argv, _ in taskkills] == [["taskkill", "/F", "/T", "/PID", "31337"]]
+    assert started[0].killed
+
+
+_GRANDCHILD_THAT_IGNORES_SIGTERM = (
+    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+)
+_PARENT_OF_A_GRANDCHILD_THAT_IGNORES_SIGTERM = f"""
+import subprocess, sys, time
+grandchild = subprocess.Popen([sys.executable, "-c", {_GRANDCHILD_THAT_IGNORES_SIGTERM!r}])
+open(sys.argv[1], "w").write(str(grandchild.pid))
+time.sleep(60)
+"""
+
+
+def test_a_grandchild_that_ignores_sigterm_is_killed_too(grandchild_pid_file):
+    # review round 1: SIGTERM to the group first, then SIGKILL after a short grace
+    started = time.monotonic()
+    cmd = [sys.executable, "-c", _PARENT_OF_A_GRANDCHILD_THAT_IGNORES_SIGTERM, str(grandchild_pid_file)]
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command(cmd, timeout=2)
+    assert time.monotonic() - started < 15
+    assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the grandchild survived the timeout"
+
+
+_RUNS_A_CHILD_THAT_READS_STDIN = """
+import sys
+from remoteos.platform.command import run_command
+print(run_command([sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"]))
+"""
+
+
+def test_a_child_never_reads_the_servers_stdin():
+    # review round 1: under --transport stdio the server's stdin is the MCP JSON-RPC stream; a child
+    # that reads stdin (bash `read`, PowerShell `$input`) must get NUL, never the protocol's frames
+    env = dict(os.environ, PYTHONPATH=str(Path(server.__file__).parents[1]))
+    done = subprocess.run(
+        [sys.executable, "-c", _RUNS_A_CHILD_THAT_READS_STDIN],
+        input='{"jsonrpc": "2.0", "id": 7}\n',
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "''"

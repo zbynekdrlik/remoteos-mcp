@@ -43,14 +43,16 @@ _REAL_POPEN = subprocess.Popen
 _REAL_PYTHON = sys.executable
 
 
-def assert_runs_powershell(argv: list[str], python, script: str) -> None:
+def assert_runs_powershell(argv: list[str], python, script: str, cwd: str = "") -> None:
     """``argv`` runs ``script`` unchanged under the console trampoline of ``python`` (#48 round 2).
 
-    ``[<python.exe>, "-I", "-S", "-c", <program>, "powershell", "-NoProfile", "-Command", script]``:
-    the PowerShell part is exactly the argv a PowerShell child had before #48, with nothing added.
+    ``[<python.exe>, "-I", "-S", "-c", <program>, cwd, "powershell", "-NoProfile", "-Command", script]``:
+    ``cwd`` is PowerShell's working directory ("" = the server's), and the PowerShell part is exactly
+    the argv a PowerShell child had before #48, with nothing added.
     """
     assert argv[:4] == [str(python), "-I", "-S", "-c"], argv[:4]
-    assert argv[5:] == ["powershell", "-NoProfile", "-Command", script], argv[5:]
+    assert argv[5] == cwd, argv[5]
+    assert argv[6:] == ["powershell", "-NoProfile", "-Command", script], argv[6:]
 
 
 def returned(kwargs: dict, value: str | bytes) -> str | bytes:

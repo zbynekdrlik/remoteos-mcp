@@ -107,17 +107,20 @@ def test_every_os_passes_cwd_to_the_process_and_leaves_the_command_alone(
     assert server.Shell("Get-ChildItem", cwd=str(work)) == "ok"
     [(args, kwargs)] = popen
     if windows:
-        assert_runs_powershell(args, windows_python, "Get-ChildItem")
+        # review round 1 (#48 round 2): the console trampoline starts in the server's directory, so
+        # "powershell" is never looked up in the user's; it starts PowerShell in `cwd`
+        assert_runs_powershell(args, windows_python, "Get-ChildItem", cwd=str(work))
+        assert kwargs["cwd"] is None
     else:
         assert args == argv
-    assert kwargs["cwd"] == str(work)
+        assert kwargs["cwd"] == str(work)
 
 
 def test_without_cwd_the_process_inherits_the_server_directory(monkeypatch, popen, windows_python):
     monkeypatch.setattr(server, "is_windows", lambda: True)
     assert server.Shell("Get-Location") == "ok"
     [(args, kwargs)] = popen
-    assert_runs_powershell(args, windows_python, "Get-Location")
+    assert_runs_powershell(args, windows_python, "Get-Location", cwd="")
     assert kwargs.get("cwd") is None
 
 
