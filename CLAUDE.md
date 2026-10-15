@@ -18,8 +18,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | Mouse wheel / Scroll: clicks + direction, Windows SendInput, Quartz wheel2 sign, xdotool 4-7 | `.claude/rules/scroll.md` (auto-loads on its `paths:`) + README "Scroll units" |
 | Typing text / Type: Unicode keystrokes (SendInput `KEYEVENTF_UNICODE`, Quartz Unicode string), delivered count, `method="paste"` | `.claude/rules/typing.md` (auto-loads on its `paths:`) + README "Typing text (Unicode)" |
 | Server start flags (`uvicorn_config`, payload-free `--debug`, stdio stdout), Shell `cwd`, FileUpload, task states | `.claude/rules/server-startup.md` (auto-loads on its `paths:`) |
-| Tool errors (`@reports_errors`, raise vs. answer), desktop diagnoses, and starting/decoding a child (`platform/command.py`: `powershell_argv` UTF-8 prefix, `decode_output`, own console) | `.claude/rules/tool-errors.md` (auto-loads on its `paths:`) + README "Console output" |
-| Tool failures as MCP errors (`ToolError`, `@reports_errors`, `[task:<id>]`), desktop `diagnose()` preflight (locked / secure desktop / session 0 / macOS permissions) | `.claude/rules/tool-errors.md` (auto-loads on its `paths:`) + README "Tool errors and desktop diagnoses" |
+| Tool failures as MCP errors (`ToolError`, `@reports_errors`, `[task:<id>]`), desktop `diagnose()` preflight (locked / secure desktop / session 0 / macOS permissions), starting and decoding a child (`platform/command.py`: the `powershell_argv` UTF-8 prefix, `decode_output`, its own console), Windows system language | `.claude/rules/tool-errors.md` (auto-loads on its `paths:`) + README "Tool errors and desktop diagnoses" / "Console output on Windows" |
 | Which MCP server belongs to which project | memory: `reference_mcp_project_mapping.md` |
 | SSH credentials for managed machines | memory: `reference_ssh_credentials.md` |
 

@@ -584,9 +584,10 @@ def App(
 def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     """Execute a shell command (PowerShell on Windows, zsh on macOS, bash on Linux).
 
-    The output comes back as exact Unicode on every OS. On Windows the command runs after a
-    one-line prefix that switches its console to UTF-8, so a script that must begin with
+    On Windows the command runs after a one-line prefix that switches its console to UTF-8, so
+    PowerShell's output comes back as exact Unicode. A script that must begin with
     ``param(...)`` or a ``using`` statement cannot run here (PowerShell requires those first).
+    On macOS/Linux the output is read in the locale's encoding.
 
     Args:
         command: Command to execute.

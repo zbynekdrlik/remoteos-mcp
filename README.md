@@ -171,15 +171,21 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
 - **It never refuses a working desktop.** A check that cannot run (an older OS, a missing
   API, a probe error) counts as "usable", and the tool goes ahead.
 
-**Console output** (Shell, the service and task helpers, EventLog, Ping, Windows OCR) comes
-back as exact Unicode: `Žltý kôň ďakuje – €` stays exactly that, on every Windows code page.
+**Console output on Windows.** The output of PowerShell comes back as exact Unicode on every
+Windows code page: `Žltý kôň ďakuje – €` stays exactly that. This covers Shell, the service,
+task and EventLog helpers, and Windows OCR. On macOS and Linux, output is read in the locale's
+encoding (UTF-8 on the fleet).
 
-- On Windows each command runs in its own hidden console. So a `chcp` inside one Shell
-  command cannot change how later replies are decoded.
+- Each command runs in its own hidden console. So a `chcp` inside one Shell command cannot
+  change how later replies are decoded.
 - Every PowerShell command first switches its own console to UTF-8, and its output is read as
-  UTF-8. Output that is not UTF-8 is read in the system's OEM code page, for example
-  PowerShell's own parse error, which is printed before that switch, or Ping.
-- So a Windows `Shell` script that must begin with `param(...)` or a `using` statement cannot
+  UTF-8.
+- A line that is not UTF-8 is read on its own in the system's OEM code page, so it is exact
+  only for the characters that page holds. Examples:
+  - PowerShell's own parse error, which is printed before the switch;
+  - a native program that writes its own code page.
+- Ping and `tscon` run without PowerShell and are read in the OEM code page.
+- A Windows `Shell` script that must begin with `param(...)` or a `using` statement cannot
   run: PowerShell requires those first, and the switch comes before them.
 
 ## MCP gateway (dev1)

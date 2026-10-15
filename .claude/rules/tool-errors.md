@@ -90,17 +90,23 @@ paths:
     with `check=True` too.
 - **A child process is started and decoded in `platform/command.py`, nowhere else (#32, #48).**
   - **Every PowerShell child = `powershell_argv(script)`**: `powershell -NoProfile -Command`
-    with `UTF8_PREFIX` on its own first line (`$OutputEncoding` and `[Console]::OutputEncoding`
-    = UTF-8 without a BOM, via `New-Object` so it runs on every Windows PowerShell version),
-    then the script verbatim. Users: Shell, services/tasks/EventLog `_ps`, `launch_app`,
-    `show_notification`, Windows OCR.
-    - Never hand-build a `["powershell", …]` argv:
-      `test_every_powershell_child_is_started_by_the_one_builder` fails on one.
+    with `UTF8_PREFIX` on its own first line, then the script verbatim. Users: Shell,
+    services/tasks/EventLog `_ps`, `launch_app`, `show_notification`, Windows OCR.
+    - The prefix sets `$OutputEncoding` and `[Console]::OutputEncoding` to UTF-8 without a
+      BOM. It uses `New-Object`, so it runs on every Windows PowerShell version.
+    - It is wrapped in `try { … } catch { }`, so a box that refuses the switch (Constrained
+      Language Mode) still runs the command with no error on every reply. That output takes
+      the OEM fallback.
+    - Never hand-build a PowerShell argv. `test_every_powershell_child_is_started_by_the_one_builder`
+      AST-scans for an argv list/tuple starting with powershell/pwsh(.exe), or a
+      `"powershell -…"` string, outside `command.py`.
     - PowerShell writes its output through `[Console]::OutputEncoding`, which is the console's
       OEM page. cp437 (resolume-pp, en_150) best-fitted `Žltý kôň` to `Zlty kôn`, and cp852
-      has no `€` or `–`. Setting it also switches the child's console (SetConsoleOutputCP),
-      so a native program started FROM that PowerShell (`cmd /c echo`, `schtasks`) writes
-      UTF-8 too.
+      has no `€` or `–`.
+    - Setting it also switches the child's console (SetConsoleOutputCP). A native program that
+      writes through the console's output page then writes UTF-8 too. One that writes its own
+      page regardless (e.g. a Python child: its ANSI page) is caught line by line by the
+      fallback. Which programs follow the switch is verified live only, not in the tests.
     - The limit: a script that must begin with `param(...)` or a `using` statement cannot
       follow the prefix, because PowerShell requires those first. The Shell docstring says so.
       PowerShell error positions are one line lower (`At line:2`).
@@ -112,13 +118,22 @@ paths:
     switch the encoding in a child that shares the server's console.
   - **Binary mode + `decode_output(raw, windows, stream)`**, used by Shell's `Popen` and by
     `run_child`, which `run_command` and Windows OCR share:
-    - Windows: strict UTF-8 first. Bytes that are not UTF-8 are read in the OEM page
-      (`"oem"`, `errors="replace"`), for two cases:
-      - output written before the prefix ran: PowerShell's own PARSE error, printed in OEM
-        before any statement executes;
-      - a native program started directly: `tscon` via `run_command`.
-      The fallback is decided per stream and logged with the stream and the replaced count,
-      never the content: INFO when nothing was lost, WARNING when something was.
+    - Windows: the stream is tried as strict UTF-8 first. If it is not UTF-8, each
+      `\n`-separated LINE is read on its own: UTF-8, or else the OEM page (`"oem"`,
+      `errors="replace"`).
+      - It goes line by line (review round 1): a per-stream fallback turned PowerShell's valid
+        UTF-8 lines into mojibake as soon as one native line in the same pipe was not UTF-8.
+      - 0x0A is never inside a UTF-8 or double-byte OEM character, so the split is safe.
+      - Lines come back non-UTF-8 from PowerShell's own PARSE error (printed before the prefix
+        runs), from a native program started directly (`tscon` via `run_command`), and from a
+        native program started from PowerShell that writes its own page.
+      - One log line per stream gives the fallback lines and the replaced characters, never
+        the content: INFO when nothing was lost, WARNING when something was.
+      - Known limit: a short OEM line that happens to be valid UTF-8 (cp852 `Ďá` = D2 A0) is
+        read as UTF-8.
+      - Whether PowerShell's error stream (`Write-Error`) follows the switch depends on when
+        ConsoleHost made its stderr writer, so verify it live. If it does not, it is OEM:
+        lossy outside that page, but never garbled.
     - Elsewhere: `locale.getpreferredencoding(False)` with `errors="replace"`, which is what
       a text-mode run used. macOS/Linux output is unchanged.
     - Newlines: `\r\n` and a lone `\r` become `\n`, as a text-mode run gave them. Binary
