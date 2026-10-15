@@ -287,6 +287,7 @@ def test_a_short_declared_runtime_still_gets_the_300_s_floor():
     tm = TaskManager()
     out = tm.wrap_sync_tool("Wait", _runs_for(tm, 200))(seconds=1)
     [task] = [t for t in tm._tasks.values() if t.tool_name == "Wait"]
+    assert task.max_runtime == 61  # the precondition: a real (short) declaration, not None
     assert out == f"[task:{task.task_id}] done"
     assert task.status is TaskStatus.COMPLETED
 

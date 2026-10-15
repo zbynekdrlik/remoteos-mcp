@@ -130,7 +130,7 @@ class TaskInfo:
     completed_at: float | None = None
     result: Any = None
     error: str | None = None
-    # how long it may run before the stale sweep cancels it (None = STALE_AFTER_S)
+    # the declared runtime + headroom; the sweep waits max(STALE_AFTER_S, this) (None = STALE_AFTER_S)
     max_runtime: float | None = None
     _cancel_event: threading.Event = field(default_factory=threading.Event)
 
@@ -236,9 +236,9 @@ class TaskManager:
     def _cleanup_old(self) -> None:
         """Remove old completed tasks beyond max_history, and cancel stale running tasks."""
         now = time.time()
-        # Cancel tasks running longer than 5 minutes (they're likely stuck), or longer than their own
-        # declared runtime: a cancelled task's reply is an error (#32), so a command that is still
-        # inside its own timeout must never be swept (review round 2).
+        # A RUNNING task is swept (likely stuck) only once it outlives BOTH STALE_AFTER_S and its
+        # declared runtime + headroom; a short declaration never lowers the 300 s floor. A cancelled
+        # task's reply is an error (#32), so a call still inside its own runtime is never swept.
         for t in list(self._tasks.values()):
             limit = max(STALE_AFTER_S, t.max_runtime or 0)
             if t.status == TaskStatus.RUNNING and t.started_at and (now - t.started_at) > limit:
