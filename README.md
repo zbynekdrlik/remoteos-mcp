@@ -153,8 +153,9 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
   - the server runs in session 0: start it with `schtasks /Run /TN RemoteOSMCP`;
   - the server runs in a non-interactive window station;
   - the session is disconnected: run **ReconnectSession**. It attaches the server's own
-    session to the console, then checks it worked. No other tool moves the session, since
-    that puts the user's desktop on the machine's physical screen;
+    session to the console, then checks it worked. The screen and input tools refuse a
+    disconnected session instead of moving it, because a reconnect puts the user's desktop
+    on the machine's physical screen;
   - the screen is locked, or a secure desktop (UAC prompt, Ctrl+Alt+Del) is showing.
 - **macOS:** no GUI session, the session is not on the screen (fast user switching), or the
   screen is locked. Also a missing permission: **Screen Recording** for the screen tools,
