@@ -244,40 +244,33 @@ KILL_GRACE_S = 2.0
 
 
 def _pgid(pid: int) -> Optional[int]:
-    """The process group of ``pid``; ``None`` when it is gone or its group cannot be read."""
+    """The process group of ``pid``; ``None`` when it is gone."""
     try:
         return os.getpgid(pid)
-    except OSError:  # ESRCH, or refused (another session on some BSDs)
+    except OSError:
         return None
 
 
 def _group(pgid: int) -> list[psutil.Process]:
-    """The processes now in process group ``pgid``: the ones the group's SIGTERM reaches.
+    """The processes now in process group ``pgid``: exactly the ones the group's signals reach.
 
     - Members, not just descendants (review round 3): in the usual timeout the shell has already
       exited, and a process it left behind (``x &``, ``nohup x &``) holds the pipe. Reparented to
-      init, it is no longer a descendant, but it is still in the group.
+      init, it is no longer a descendant, but it is still in the group. A process that left the
+      group (``setsid``) is never signalled, so it is never waited for.
     - Every member gets a FRESH ``psutil.Process`` (review round 4): ``process_iter()`` hands back
       a cached object for a pid it saw before, and if that pid was reused by a member since, its
       old start time makes ``is_running()`` say "exited".
-    - Descendants of ``pgid`` count too where their group cannot be read; a descendant that left
-      the group (``setsid``) is never signalled, so it is never waited for.
-    - ``os.getpgid`` reads a zombie's group on Linux.
+    - ``os.getpgid`` reads any process's group on Linux and macOS, a zombie's included.
     """
-    pids = [pid for pid in psutil.pids() if _pgid(pid) == pgid]
-    try:
-        leader = psutil.Process(pgid)
-        pids += [p.pid for p in leader.children(recursive=True) if _pgid(p.pid) in (pgid, None)]
-    except psutil.Error:
-        pass
-    found: dict[int, psutil.Process] = {}
-    for pid in [pgid, *pids]:
-        if pid not in found:
+    found: list[psutil.Process] = []
+    for pid in psutil.pids():
+        if _pgid(pid) == pgid:
             try:
-                found[pid] = psutil.Process(pid)
+                found.append(psutil.Process(pid))
             except psutil.Error:
                 continue
-    return list(found.values())
+    return found
 
 
 def _running(process: psutil.Process) -> bool:
@@ -331,8 +324,8 @@ def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) ->
       pid, so the server is never signalled.
       - SIGTERM to the group, then up to ``KILL_GRACE_S`` for the group's members (``_group``)
         to exit, then SIGKILL to the group in any case: whatever ignored SIGTERM dies, whether
-        or not it holds our pipes (review round 2). A member scan that fails only skips the wait;
-        the signals still go out (review round 4).
+        or not it holds our pipes (review round 2). A member scan or a wait that fails only
+        cuts the grace short; the signals still go out (review rounds 4 and 5).
       - Nothing is reaped before that SIGKILL: the child, a zombie by then, keeps the group id
         from being reused, so the SIGKILL can only reach the child's own group.
 
@@ -354,8 +347,12 @@ def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) ->
             log.debug("scanning the group of %s failed (%s)", proc.pid, type(e).__name__)
             started = []
         _signal_group(proc.pid, signal.SIGTERM)
-        _wait_exited(started, KILL_GRACE_S)
-        _signal_group(proc.pid, signal.SIGKILL)
+        try:
+            _wait_exited(started, KILL_GRACE_S)
+        except Exception as e:  # review round 5: a failing wait never costs the SIGKILL
+            log.debug("waiting for the group of %s failed (%s)", proc.pid, type(e).__name__)
+        finally:
+            _signal_group(proc.pid, signal.SIGKILL)
     try:
         proc.kill()  # Popen polls first: an exited child is reaped here, never signalled
     except Exception as e:
