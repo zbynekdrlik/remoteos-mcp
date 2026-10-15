@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from fake_console_child import POWERSHELL_UTF8_PREFIX, TEXT_MODE, oem_code_page, run_result
+from fake_console_child import POWERSHELL_UTF8_PREFIX, TEXT_MODE, oem_code_page, popen_answered_by, run_result
 
 import remoteos.__main__ as server
 from remoteos.platform.win import services as win_services
@@ -352,7 +352,7 @@ def test_windows_launch_app_runs_powershell_after_the_utf8_prefix(win_session, m
         calls.append(list(cmd))
         return run_result(kwargs)
 
-    monkeypatch.setattr("subprocess.run", _run)
+    monkeypatch.setattr("subprocess.Popen", popen_answered_by(_run))
     assert mod.launch_app("notepad", "C:\\Users\\Žltý kôň.txt") == "Launched notepad"
     assert calls == [
         [
@@ -372,7 +372,7 @@ def test_windows_notification_runs_powershell_after_the_utf8_prefix(win_session,
         calls.append(list(cmd))
         return run_result(kwargs)
 
-    monkeypatch.setattr("subprocess.run", _run)
+    monkeypatch.setattr("subprocess.Popen", popen_answered_by(_run))
     assert mod.show_notification("Titulok", "Žltý kôň") == "Notification shown"
     [argv] = calls
     assert argv[:3] == ["powershell", "-NoProfile", "-Command"]

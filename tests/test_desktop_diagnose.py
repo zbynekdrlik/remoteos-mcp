@@ -21,6 +21,7 @@ import sys
 import types
 
 import pytest
+from fake_console_child import popen_answered_by
 from fake_windows_session import LOCK, UNLOCK, WTS_ACTIVE, WTS_DISCONNECTED
 from fastmcp.exceptions import ToolError
 from tool_test_support import purge_module
@@ -378,7 +379,7 @@ def windows_tools(monkeypatch, win_session):
         commands.append(list(cmd))
         return session.tscon(cmd, **kwargs)
 
-    monkeypatch.setattr(server.subprocess, "run", _run)
+    monkeypatch.setattr(server.subprocess, "Popen", popen_answered_by(_run))
     return session, clicks, commands
 
 

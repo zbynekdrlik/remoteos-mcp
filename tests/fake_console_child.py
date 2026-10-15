@@ -6,6 +6,9 @@
   call is encoded as UTF-8, which is what a UTF-8 child writes (a Linux tool, or a PowerShell
   child after its prefix). So a faked ``subprocess.run`` / ``Popen.communicate`` keeps the real
   return type, whichever mode the code under test uses.
+- ``popen_answered_by(run)``: ``subprocess.Popen`` answered by such a ``run``-style fake. The
+  boundary for every child started through ``platform.command.run_child`` (which uses ``Popen``)
+  and through the real ``subprocess.run`` (which starts its child with ``Popen`` too).
 - ``FakeChild``: stands in for ``subprocess.Popen``, through which ``subprocess.run`` starts its
   child too. It records each call's argv and keyword arguments, then starts a REAL Python child
   that writes the given bytes. So subprocess's own text-mode or binary-mode handling (decoding,
@@ -57,6 +60,49 @@ def run_result(kwargs: dict, returncode: int = 0, stdout: str | bytes = "", stde
     return types.SimpleNamespace(
         returncode=returncode, stdout=returned(kwargs, stdout), stderr=returned(kwargs, stderr)
     )
+
+
+class AnsweredChild:
+    """A finished child, as ``subprocess.Popen`` returns it, holding the answer of a ``run``-style fake."""
+
+    def __init__(self, args, answer) -> None:
+        self.args = args
+        self.pid = 4242
+        self.returncode = answer.returncode
+        self._output = (answer.stdout, answer.stderr)
+
+    def communicate(self, input=None, timeout=None):
+        return self._output
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
+
+
+def popen_answered_by(run: Callable) -> Callable:
+    """``subprocess.Popen`` whose children are answered by ``run(argv, **popen_kwargs)``, a ``run``-style fake.
+
+    ``platform.command.run_child`` starts its child through ``Popen`` (#48 round 2: a timeout kills
+    the child's whole process tree), and the real ``subprocess.run`` starts its child through
+    ``Popen`` too, so a fake at this boundary answers both. ``run`` returns a ``run_result`` or raises
+    (e.g. ``OSError`` for a program that cannot be started).
+    """
+
+    def _popen(args, **kwargs):
+        return AnsweredChild(list(args), run(args, **kwargs))
+
+    return _popen
 
 
 class FakeChild:

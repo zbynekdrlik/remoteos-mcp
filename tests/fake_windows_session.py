@@ -4,8 +4,8 @@
 ``GetProcessWindowStation`` / ``OpenInputDesktop`` / ``GetUserObjectInformationW`` /
 ``CloseDesktop`` and wtsapi32 ``WTSQuerySessionInformationW`` / ``WTSFreeMemory``
 report for ONE session; ``add_to(windll)`` puts those functions on a fake
-``ctypes.windll``. ``tscon(cmd, **kwargs)`` plays ``tscon <id> /dest:console`` for a faked
-``subprocess.run``. The WTS buffers use the Win32 offsets as literals, never the
+``ctypes.windll``. ``tscon(cmd, **kwargs)`` plays ``tscon <id> /dest:console`` as a ``run``-style fake
+(``fake_console_child.popen_answered_by``). The WTS buffers use the Win32 offsets as literals, never the
 provider's own struct. The default is a HEALTHY session (session 1, WinSta0,
 active, input desktop "Default", unlocked).
 
@@ -99,7 +99,7 @@ class FakeWindowsSession:
     def WTSFreeMemory(self, pointer):
         self.freed.append(pointer.value if hasattr(pointer, "value") else pointer)
 
-    # tscon <id> /dest:console, for a faked subprocess.run(cmd, **kwargs)
+    # tscon <id> /dest:console, as a run-style fake (fake_console_child.popen_answered_by)
     def tscon(self, cmd, **kwargs):
         assert cmd[0] == "tscon" and cmd[2] == "/dest:console"
         if self.tscon_attaches and int(cmd[1]) == self.session_id:

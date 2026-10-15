@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 import pytest
-from fake_console_child import run_result
+from fake_console_child import popen_answered_by, run_result
 from fake_windows_session import FakeClipboard
 from PIL import ImageGrab
 
@@ -49,14 +49,14 @@ def test_windows_powershell_failure_is_an_error_not_a_success(win_session, monke
     # live on win-resolume: Start-Process of a missing app exits 1 (#32 review round 1)
     mod, _ = win_session
     stderr = "This command cannot be run: file not found."
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: run_result(kwargs, 1, "", stderr))
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(lambda cmd, **kwargs: run_result(kwargs, 1, "", stderr)))
     with pytest.raises(RuntimeError, match="file not found"):
         call(mod)
 
 
 def test_windows_launch_app_success(win_session, monkeypatch):
     mod, _ = win_session
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: run_result(kwargs))
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(lambda cmd, **kwargs: run_result(kwargs)))
     assert mod.launch_app("notepad") == "Launched notepad"
 
 
@@ -78,7 +78,7 @@ def test_windows_capture_on_an_attached_session_retries_once_and_says_so(monkeyp
     monkeypatch.setattr(server, "is_windows", lambda: True)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
     commands: list[list[str]] = []
-    monkeypatch.setattr(server.subprocess, "run", lambda cmd, **kw: commands.append(list(cmd)))
+    monkeypatch.setattr(server.subprocess, "Popen", popen_answered_by(lambda cmd, **kw: commands.append(list(cmd))))
     grabs: list[bool] = []
 
     def _failing_grab(bbox=None, all_screens=False, **kwargs):
