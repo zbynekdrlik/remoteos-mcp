@@ -212,13 +212,13 @@ notifications and Windows OCR. On macOS and Linux, output is read in the locale'
 login-session environment. A Shell command still gets the session of the user the service runs
 as, so `systemctl --user`, `journalctl --user` and GUI programs work through MCP (no SSH needed):
 
-- `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS`, when `/run/user/<uid>` and its `bus` socket
-  exist (any login or linger);
+- `XDG_RUNTIME_DIR`, when `/run/user/<uid>` exists (any login or linger);
+- `DBUS_SESSION_BUS_ADDRESS`, when its `bus` socket exists too;
 - `DISPLAY` and `XAUTHORITY` (or `WAYLAND_DISPLAY`) of that same user's graphical session, when
   its display socket exists.
 
-A variable the service already has is never changed. A service running as root gets none of
-them: it never borrows another user's session.
+A variable the service already has with a value is never changed; an empty one is filled in. A
+service running as root gets none of them: it never borrows another user's session.
 
 Start a GUI program detached, so it outlives the Shell call: `setsid -f obs >/dev/null 2>&1`, or
 `systemd-run --user obs`. A plain `obs &` keeps the call's output open: the call waits until its
