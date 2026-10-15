@@ -12,7 +12,8 @@ Only the OS boundary is faked:
   pytest's ``tmp_path`` may not);
 - the effective uid (``os.geteuid``) where a test needs another one, and the owner ``os.stat``
   reports for a directory only root could really own;
-- ``loginctl``, at ``subprocess.run``: it lists no session unless a test says so;
+- ``loginctl``, at ``subprocess.run``: it lists no session (a re-detection that reaches it finds
+  none; a test that needs a session found again gets it from the provider's env branch);
 - the provider's cached session (``desktop._SESSION``), as the provider's own tests do.
 
 The Shell tests run a real ``/bin/bash``.
@@ -49,32 +50,22 @@ LOGGER = "remoteos.platform.linux.shell_env"
 
 
 class FakeLoginctl:
-    """``loginctl`` at the stdlib boundary (``subprocess.run``): the sessions it lists.
+    """``loginctl`` at the stdlib boundary (``subprocess.run``): a box with no login session.
 
-    ``_run_capture`` swallows any exception, so an unexpected command is recorded, not raised, and
-    the fixture fails the test on it.
+    ``listed`` counts the detections that reached it. ``_run_capture`` swallows any exception, so
+    an unexpected command is recorded, not raised, and the fixture fails the test on it.
     """
 
     def __init__(self) -> None:
-        self.sessions: list[dict[str, str]] = []
         self.listed = 0
         self.unexpected: list[list[str]] = []
 
     def run(self, cmd, **kwargs):
         if cmd[:2] == ["loginctl", "list-sessions"]:
             self.listed += 1
-            out = "".join(f"{s['Id']} {s['User']} {s['Name']} seat0\n" for s in self.sessions)
-            return subprocess.CompletedProcess(cmd, 0, out, "")
-        if cmd[:2] == ["loginctl", "show-session"]:
-            [props] = [s for s in self.sessions if s["Id"] == cmd[2]]
-            return subprocess.CompletedProcess(cmd, 0, "".join(f"{k}={v}\n" for k, v in props.items()), "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
         self.unexpected.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 1, "", "unexpected")
-
-    def add_x11_session(self, uid: int, name: str) -> None:
-        self.sessions.append(
-            {"Id": "7", "User": str(uid), "Name": name, "Type": "x11", "Class": "user", "Active": "yes"}
-        )
 
 
 class FakeTree:
@@ -298,10 +289,8 @@ def test_another_users_session_gives_no_display(tree, se, loginctl, monkeypatch)
     other = os.geteuid() + 4321
     tree.x_display(0)
     monkeypatch.setattr(desktop, "_SESSION", _x11(other, ":0", tree.file("Xauthority")))
-    loginctl.add_x11_session(other, "someone-else-52")  # re-detection finds the same session
-    env = se.shell_env(_base())
-    assert _added(env) == {}
-    assert desktop.get_session().uid == other
+    assert _added(se.shell_env(_base())) == {}
+    assert loginctl.listed == 0  # not ours: nothing to re-detect either
 
 
 def test_a_missing_xauthority_file_is_not_given(tree, se, monkeypatch):
@@ -325,7 +314,7 @@ def test_a_display_that_is_not_a_local_x_socket_is_not_given(tree, se, monkeypat
     tree.x_display(10)
     xauth = tree.file("Xauthority")
     monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), display, xauth))
-    # re-detection (no live X11 session) finds the same session through the env branch
+    # there is no X socket for it, so it is re-detected: the env branch finds the same session
     monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
     monkeypatch.setenv("XAUTHORITY", xauth)
     if display is not None:
@@ -354,26 +343,26 @@ def test_a_gone_display_with_no_new_session_gives_none(tree, se, loginctl, monke
     assert desktop.get_session().mode == "headless"
 
 
-def test_a_session_that_appears_after_start_up_is_found(tree, se, loginctl, monkeypatch):
-    # cached headless at start-up (the unit starts at boot, before the graphical login)
-    assert _added(se.shell_env(_base())) == {}
-    assert loginctl.listed == 1
-    # the user logs in on :0: the X socket appears, the provider's detection now finds the session
+def test_a_cache_without_a_graphical_session_is_never_re_detected(tree, se, loginctl):
+    # a headless box (cam1..4): every Shell call reads the start-up cache, no loginctl
     tree.x_display(0)
-    xauth = tree.file("Xauthority")
-    monkeypatch.setenv("DISPLAY", ":0")
-    monkeypatch.setenv("XAUTHORITY", xauth)
-    assert _added(se.shell_env(_base())) == {"DISPLAY": ":0", "XAUTHORITY": xauth}
+    for _ in range(3):
+        assert "DISPLAY" not in se.shell_env(_base())
+    assert loginctl.listed == 0
 
 
-def test_re_detection_runs_at_most_once_per_change_of_the_x_sockets(tree, se, loginctl):
+def test_a_gone_display_is_re_detected_at_most_once_per_change_of_the_x_sockets(tree, se, monkeypatch, caplog):
+    # the detection keeps finding :3, whose socket stays gone: one look, not one per Shell call
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":3"))
+    monkeypatch.setenv("DISPLAY", ":3")  # the provider's env branch finds :3 again
+    for _ in range(3):
+        assert "DISPLAY" not in se.shell_env(_base())
+    tree.x_display(1)  # the X sockets change (another X server starts): one more look
     for _ in range(3):
         se.shell_env(_base())
-    assert loginctl.listed == 1
-    tree.x_display(1)  # another user's X server starts: a change, still no session of ours
-    for _ in range(3):
-        se.shell_env(_base())
-    assert loginctl.listed == 2
+    looks = [r for r in caplog.records if r.name == LOGGER and "re-detecting" in r.getMessage()]
+    assert len(looks) == 2
 
 
 def test_a_failing_session_lookup_never_fails_the_shell_call(tree, se, monkeypatch, caplog):
@@ -399,8 +388,6 @@ def test_a_wayland_session_of_ours_gives_wayland_display(tree, se, monkeypatch):
     tree.socket(os.path.join(runtime, "wayland-0"))
     session = desktop.SessionInfo(mode="wayland", display=":0", uid=os.geteuid(), user="someone")
     monkeypatch.setattr(desktop, "_SESSION", session)
-    # re-detection (no live X11 session) finds the same Wayland session through its env branch
-    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
     env = se.shell_env(_base())
     assert _added(env) == {
         "XDG_RUNTIME_DIR": runtime,

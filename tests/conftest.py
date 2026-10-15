@@ -103,12 +103,15 @@ def windows_child(monkeypatch, windows_python):
 
 
 @pytest.fixture(autouse=True)
-def _linux_session_cache_per_test(monkeypatch):
-    """A Linux Shell call reads the provider's cached session (#52), and may detect one.
+def _linux_session_detected_at_start_up(monkeypatch):
+    """A Linux Shell call reads the provider's cached session (#52).
 
-    Whatever a test detects or sets in that cache is dropped after the test, so no later test
-    sees the host's real session or another test's fake one.
+    The server detects it at start-up, so a Shell call never has to. Each test starts from such
+    a cache, holding what CI's start-up finds (no graphical session); a test that needs another
+    session sets its own. Without it, the first Linux Shell call would run the host's real
+    ``loginctl`` (through ``subprocess``, which some tests record), and whatever it found would
+    leak into later tests.
     """
     from remoteos.platform.linux import desktop
 
-    monkeypatch.setattr(desktop, "_SESSION", desktop._SESSION)
+    monkeypatch.setattr(desktop, "_SESSION", desktop.SessionInfo(mode="headless"))
