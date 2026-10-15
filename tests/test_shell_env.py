@@ -313,7 +313,8 @@ def test_a_missing_xauthority_file_is_not_given(tree, se, monkeypatch):
 def test_xauthority_goes_only_with_the_sessions_display(tree, se, monkeypatch):
     tree.x_display(0)
     monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", tree.file("Xauthority")))
-    assert _added(se.shell_env({**_base(), "DISPLAY": ":9"})) == {}
+    env = se.shell_env({**_base(), "DISPLAY": ":9"})
+    assert (env["DISPLAY"], "XAUTHORITY" in env) == (":9", False)
 
 
 @pytest.mark.parametrize("display", ["localhost:10.0", "", None, ":x"])
@@ -386,7 +387,8 @@ def test_a_failing_session_lookup_never_fails_the_shell_call(tree, se, monkeypat
     out = server.Shell('echo "$XDG_RUNTIME_DIR|$DISPLAY|"')
     assert out == f"{runtime}||"
     [record] = [r for r in caplog.records if r.name == LOGGER and r.levelno == logging.WARNING]
-    assert "ImportError" in record.getMessage()
+    # a None entry in sys.modules is ModuleNotFoundError, ImportError's subclass; only the type is logged
+    assert "(ModuleNotFoundError)" in record.getMessage()
 
 
 # --------------------------------------------------------------------------- Wayland
