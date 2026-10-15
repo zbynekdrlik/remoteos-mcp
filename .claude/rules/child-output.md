@@ -38,6 +38,12 @@ paths:
       has no `€` or `–`.
     - Setting it also switches the child's console (SetConsoleOutputCP). A native program that
       writes through the console's output page then writes UTF-8 too.
+    - **`$OutputEncoding` is what PowerShell pipes INTO a native program's stdin**, so stdin now
+      gets UTF-8 (Windows PowerShell's default was ASCII: every non-ASCII character became `?`).
+      A reader that decodes UTF-8 (git, node, Python with `-X utf8`) gets exact text. Live on
+      resolume-pp (cp437, 0.7.0.dev29), `"čaká" | findstr "."` came back exact. A program that
+      decodes its stdin in the OEM or ANSI page shows mojibake instead of `?`. Verified live
+      only.
     - **A native program that writes the OEM page regardless** (review round 2):
       - Written straight into our pipe, it is read line by line by the OEM fallback.
       - CAPTURED by PowerShell (a pipeline, an assignment, `| Out-String`, `2>&1`), PowerShell
@@ -77,9 +83,8 @@ paths:
         `run_child`.
       - Known limit: a short OEM line that happens to be valid UTF-8 (cp852 `Ďá` = D2 A0) is
         read as UTF-8.
-      - Whether PowerShell's error stream (`Write-Error`) follows the switch depends on when
-        ConsoleHost made its stderr writer, so verify it live. If it does not, it is OEM:
-        lossy outside that page, but never garbled.
+      - PowerShell's error stream follows the switch: live on resolume-pp (cp437, 0.7.0.dev29),
+        `Write-Error "chyba ťava"` came back with an exact `ť`, which cp437 does not have.
     - Elsewhere: `locale.getpreferredencoding(False)` with `errors="replace"`, which is what
       a text-mode run used. macOS/Linux output is unchanged.
     - Newlines: `\r\n` and a lone `\r` become `\n`, as a text-mode run gave them. Binary

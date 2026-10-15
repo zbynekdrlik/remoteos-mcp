@@ -172,14 +172,19 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
   API, a probe error) counts as "usable", and the tool goes ahead.
 
 **Console output on Windows.** The output of PowerShell comes back as exact Unicode on every
-Windows code page: `Žltý kôň ďakuje – €` stays exactly that. This covers Shell, the service,
-task and EventLog helpers, and Windows OCR. On macOS and Linux, output is read in the locale's
-encoding (UTF-8 on the fleet).
+Windows code page, on any machine where PowerShell allows the switch to UTF-8 (all but
+Constrained Language Mode): `Žltý kôň ďakuje – €` stays exactly that. This covers Shell, the
+service, task and EventLog helpers, and Windows OCR. On macOS and Linux, output is read in the
+locale's encoding (UTF-8 on the fleet).
 
 - Each command runs in its own hidden console. So a `chcp` inside one Shell command cannot
   change how later replies are decoded.
 - Every PowerShell command first switches its own console to UTF-8, and its output is read as
-  UTF-8.
+  UTF-8. Its error text (`Write-Error`) follows the switch too.
+- Under Constrained Language Mode PowerShell refuses the switch. The command still runs, and
+  its output is read in the system's OEM code page, as described next.
+- Text that PowerShell pipes into a native program (`"čaká" | findstr "."`) is sent as UTF-8.
+  A program that reads its input in the OEM code page shows the non-ASCII characters wrong.
 - A line that is not UTF-8 is read on its own in the system's OEM code page, so it is exact
   only for the characters that page holds. Examples:
   - PowerShell's own parse error, which is printed before the switch;
