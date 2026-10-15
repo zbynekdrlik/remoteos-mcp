@@ -196,6 +196,20 @@ paths:
       checks vacuous;
     - the Linux job never collects the directory (`testpaths = tests`), and its conftest
       refuses to run off Windows. No skips anywhere.
+    - The job runs in `shell: cmd`. Under GitHub's default pwsh 7, `PSModulePath` starts with
+      pwsh's own module folders, and a powershell.exe 5.1 started below python inherits them
+      and fails to load `Microsoft.PowerShell.Utility`. The fleet starts from cmd too.
+  - **Probing PowerShell semantics without a Windows box** (what decided round 2): the official
+    pwsh linux-x64 tarball in the scratchpad (check its sha256 against the release's
+    `hashes.sha256`), driven from a small Python harness that sets the child-only env, with
+    `$ErrorView = "NormalView"` to get 5.1's error records. The engine shows the same
+    `$MyInvocation` / `Write-Error` / `$?` behaviour. Gotchas:
+    - `-EncodedCommand` with a redirected stderr writes the error stream as CLIXML
+      (`#< CLIXML`): never start a PowerShell child that way;
+    - `Write-Error` takes its caller's `$MyInvocation`, so ANY in-process wrapper around the
+      user's script (a prefix, `& $sb`, `. $sb`, `Invoke-Expression`) puts our code in the
+      record's header or position. Only a console that is UTF-8 before PowerShell starts
+      avoids that.
 - **The Snapshot "System Language"** comes from kernel32 `GetUserDefaultLocaleName` (an
   85-wchar buffer), then `locale.getlocale()[0]`, then `en_US`. A successful call with an
   empty name also falls back. The `locale` module's default-locale getter is removed in
