@@ -153,6 +153,20 @@ def test_windows_failing_probe_is_usable_and_logged(win_session, caplog):
     assert "desktop probe failed" in caplog.text
 
 
+def test_windows_window_list_needs_only_the_users_desktop(win_session):
+    # review round 3: the window list (Snapshot without vision) works on a disconnected or locked
+    # session, but not from session 0 or a non-interactive window station: those are no user desktop
+    mod, session = win_session
+    session.connect_state = WTS_DISCONNECTED
+    assert mod.diagnose("windows") is None
+    session.connect_state, session.input_desktop, session.lock_flags = WTS_ACTIVE, None, LOCK
+    assert mod.diagnose("windows") is None
+    session.window_station = "Service-0x0-3e7$"
+    assert "'Service-0x0-3e7$'" in mod.diagnose("windows")
+    session.session_id = 0
+    assert "`schtasks /Run /TN RemoteOSMCP`" in mod.diagnose("windows")
+
+
 def test_windows_wtsinfoex_head_keeps_the_win32_offsets():
     from remoteos.platform.win import availability
 
@@ -234,6 +248,15 @@ def test_mac_without_the_post_event_preflight_is_usable(mac_session, monkeypatch
     mod, _ = mac_session
     monkeypatch.delattr(sys.modules["Quartz"], "CGPreflightPostEventAccess")  # before macOS 10.15
     assert mod.diagnose("input") is None
+
+
+def test_mac_window_list_needs_only_a_gui_session(mac_session):
+    mod, state = mac_session
+    state.session = {"kCGSSessionOnConsoleKey": True, "CGSSessionScreenIsLocked": True}
+    state.screen_recording = state.post_events = False
+    assert mod.diagnose("windows") is None  # the window list works without either permission
+    state.session = None
+    assert mod.diagnose("windows").startswith("No macOS GUI session")
 
 
 def test_mac_without_the_screen_capture_preflight_is_usable(mac_session, monkeypatch):
@@ -450,6 +473,23 @@ def test_reconnect_session_on_a_connected_session_does_nothing_and_says_so(windo
     (reply,) = server.ReconnectSession()
     assert reply.text == "Session already attached (console or remote desktop): nothing to do"
     assert commands == []
+
+
+@pytest.mark.parametrize(
+    ("setup", "expected"),
+    [
+        (lambda s: setattr(s, "session_id", 0), "`schtasks /Run /TN RemoteOSMCP`"),
+        (lambda s: setattr(s, "window_station", "Service-0x0-3e7$"), "'Service-0x0-3e7$'"),
+    ],
+    ids=["session-0", "non-interactive-window-station"],
+)
+def test_snapshot_without_vision_outside_the_users_desktop_is_an_error(windows_tools, setup, expected):
+    # review round 3: there the window list is a hollow success (an empty list), never the user's windows
+    session, _, _ = windows_tools
+    setup(session)
+    with pytest.raises(ToolError) as exc:
+        server.Snapshot(use_vision=False)
+    assert expected in str(exc.value)
 
 
 def test_snapshot_without_vision_still_lists_windows_on_a_disconnected_session(windows_tools, monkeypatch):

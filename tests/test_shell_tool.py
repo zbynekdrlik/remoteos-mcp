@@ -120,3 +120,10 @@ def test_without_cwd_the_process_inherits_the_server_directory(monkeypatch, pope
     [(args, kwargs)] = popen
     assert args == ["powershell", "-NoProfile", "-Command", "Get-Location"]
     assert kwargs.get("cwd") is None
+
+
+def test_output_that_is_not_utf8_is_still_the_commands_answer():
+    # review round 3: a native command writing its console code page (cp852 on the Slovak Windows
+    # fleet) produced a 'utf-8 codec' Shell error and lost the output of a command that ran
+    out = server.Shell("printf 'ok \\220 done'")
+    assert out.startswith("ok ") and out.endswith(" done")
