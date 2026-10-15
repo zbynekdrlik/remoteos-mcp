@@ -120,14 +120,18 @@ def decode_output(raw: Optional[bytes], windows: Optional[bool] = None, stream: 
 
 
 def _decode_lines_utf8_or_oem(raw: bytes, stream: str) -> str:
-    """Each ``\\n``-separated line as UTF-8, or else in the OEM page; logs the counts, never the text.
+    """Each line as UTF-8, or else in the OEM page; logs the counts, never the text.
 
-    0x0A is never part of a multi-byte character, neither in UTF-8 nor in a double-byte OEM page
-    (cp932/936/949/950 trail bytes are >= 0x40), so splitting the bytes there never cuts one.
+    A line ends at ``\\r\\n``, ``\\n`` or a lone ``\\r``, the breaks ``decode_output`` turns into
+    ``\\n`` (review round 2: splitting at ``\\n`` only read a UTF-8 line and an OEM line separated
+    by a lone ``\\r`` together as OEM). 0x0A and 0x0D are never part of a multi-byte character,
+    neither in UTF-8 nor in a double-byte OEM page (cp932/936/949/950 trail bytes are >= 0x40), so
+    splitting the bytes there never cuts one. Two encodings on the SAME line (``Write-Host
+    -NoNewline`` and then a native program) are read together in the OEM page.
     """
     lines: list[str] = []
     fallback = replaced = 0
-    for chunk in raw.split(b"\n"):
+    for chunk in raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n"):
         try:
             lines.append(chunk.decode("utf-8"))
         except UnicodeDecodeError:
