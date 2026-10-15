@@ -214,6 +214,20 @@ def test_a_variable_the_server_has_is_never_overridden(tree, se, monkeypatch):
     assert se.shell_env(base) == base
 
 
+def test_the_servers_own_xauthority_and_wayland_display_are_kept(tree, se, monkeypatch):
+    # review round 3: in the test above both branches stop before writing anything, so it could
+    # not fail for these two. Here everything else matches, so only "never override" keeps them.
+    runtime = tree.runtime_dir(os.geteuid())
+    tree.socket(os.path.join(runtime, "wayland-0"))
+    tree.x_display(0)
+    xauth = tree.file("Xauthority")
+    session = desktop.SessionInfo(mode="wayland", display=":0", xauthority=xauth, uid=os.geteuid(), user="someone")
+    monkeypatch.setattr(desktop, "_SESSION", session)
+    base = {**_base(), "XDG_RUNTIME_DIR": runtime, "DISPLAY": ":0", "XAUTHORITY": "/srv/xa", "WAYLAND_DISPLAY": "w-9"}
+    env = se.shell_env(base)
+    assert (env["XAUTHORITY"], env["WAYLAND_DISPLAY"]) == ("/srv/xa", "w-9")
+
+
 def test_the_servers_own_value_reaches_the_shell_child(tree, monkeypatch):
     runtime = tree.runtime_dir(os.geteuid())
     monkeypatch.setenv("XDG_RUNTIME_DIR", "/srv/rt")
@@ -270,7 +284,7 @@ def test_a_runtime_dir_owned_by_another_user_adds_nothing(tree, se, monkeypatch)
 
 
 @pytest.mark.parametrize("euid", [0, 4242], ids=["root", "a-user"])
-def test_as_root_nothing_is_added(tree, se, loginctl, monkeypatch, euid):
+def test_as_root_nothing_is_added(tree, se, loginctl, monkeypatch, caplog, euid):
     # root's own runtime dir, bus, X display and session all exist: root still gets none of them,
     # and the session is never consulted. The same tree for a user is the positive control.
     runtime = tree.runtime_dir(euid)
@@ -279,10 +293,15 @@ def test_as_root_nothing_is_added(tree, se, loginctl, monkeypatch, euid):
     xauth = tree.file("Xauthority")
     monkeypatch.setattr(desktop, "_SESSION", _x11(euid, ":0", xauth))
     monkeypatch.setattr(os, "geteuid", lambda: euid)
+    caplog.set_level(logging.INFO, logger=LOGGER)
     added = _added(se.shell_env(_base()))
     if euid == 0:
         assert added == {}
         assert loginctl.listed == 0
+        # review round 3: the log says why nothing is added
+        assert [r.getMessage() for r in caplog.records if r.name == LOGGER] == [
+            "Shell environment: running as root, no session variable is added"
+        ]
     else:
         assert added == {
             "XDG_RUNTIME_DIR": runtime,
@@ -295,12 +314,22 @@ def test_as_root_nothing_is_added(tree, se, loginctl, monkeypatch, euid):
 # --------------------------------------------------------------------------- the display
 
 
-@pytest.mark.parametrize("display", [":0", ":0.1", "unix:0"])
-def test_every_local_display_form_is_given(tree, se, monkeypatch, display):
-    # review round 2: `unix:N` is in the contract and was untested
-    tree.x_display(0)
+@pytest.mark.parametrize(
+    "display, number", [(":0", 0), (":0.1", 0), ("unix:0", 0), (":1", 1), (":1.0", 1), ("unix:1", 1)]
+)
+def test_every_local_display_form_is_given(tree, se, monkeypatch, display, number):
+    # review round 2: `unix:N` is in the contract and was untested. Review round 3: and not only
+    # display 0 (a GDM box's Xorg session is often :1); only that display's socket exists here
+    tree.x_display(number)
     monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), display))
     assert _added(se.shell_env(_base())) == {"DISPLAY": display}
+
+
+def test_a_display_is_checked_against_its_own_socket(tree, se, monkeypatch):
+    # review round 3: the session is on :1, and only X0 exists
+    tree.x_display(0)
+    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":1"))
+    assert _added(se.shell_env(_base())) == {}
 
 
 def test_xauthority_goes_with_the_servers_own_display_when_it_is_the_sessions(tree, se, monkeypatch):
@@ -370,7 +399,7 @@ def test_xauthority_goes_only_with_the_sessions_display(tree, se, monkeypatch):
     assert (env["DISPLAY"], "XAUTHORITY" in env) == (":9", False)
 
 
-@pytest.mark.parametrize("display", ["localhost:10.0", "", None, ":x"])
+@pytest.mark.parametrize("display", ["localhost:10.0", "", None, ":x", ":0x", ":0.0.0"])
 def test_a_display_that_is_not_a_local_x_socket_is_not_given(tree, se, monkeypatch, display):
     # nor its XAUTHORITY: with no session display, "the child's DISPLAY is the session's" must
     # never hold just because both are missing
