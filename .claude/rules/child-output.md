@@ -23,8 +23,8 @@ paths:
   `platform/command.py` (#32, #48).** (Other children, e.g. taskkill, install/uninstall,
   the Linux/macOS OCR and desktop helpers, have their own runs.)
   - **Every PowerShell child = `powershell_argv(script)`, the console trampoline (#48 round 2):**
-    `[<python.exe>, "-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE, "powershell", "-NoProfile",
-    "-Command", script]`. Users: Shell, services/tasks/EventLog `_ps`, `launch_app`,
+    `[<python.exe>, "-I", "-S", "-c", UTF8_CONSOLE_TRAMPOLINE, cwd or "", "powershell",
+    "-NoProfile", "-Command", script]`. Users: Shell, services/tasks/EventLog `_ps`, `launch_app`,
     `show_notification`, Windows OCR.
     - **Why:** PowerShell 5.1 takes `[Console]::OutputEncoding` from its console's output page
       AT START-UP. That page is the OEM page: cp437 (resolume-pp, en_150) best-fitted `Žltý kôň`
@@ -33,13 +33,21 @@ paths:
       `C5 BD E2 82 AC 0D 0A`).
     - **The program** (fixed text, never any user data) runs in the child's OWN hidden console:
       - `SetConsoleOutputCP(65001)` and `SetConsoleCP(65001)` on that console;
-      - `subprocess.call(argv[1:], stdout=1, stderr=2)`: the same console (no creationflags),
-        and its own stdout/stderr handed down explicitly;
+      - `subprocess.call(argv[2:], cwd=argv[1] or None, stdout=1, stderr=2)`: the same
+        console (no creationflags), its own stdout/stderr handed down explicitly;
       - `sys.exit` with PowerShell's exact exit code. Windows codes are 32-bit unsigned and
         `sys.exit` takes a C long, so a code >= 2**31 goes over as the same bits, signed
-        (`exit -1` → 4294967295, as before).
-      - A refused switch (never seen) writes one line on stderr (`remoteos: could not switch
-        the console to UTF-8 …`), still runs the command, and the OEM fallback reads it.
+        (`exit -1` → 4294967295, as before). Both sides of 2**31 are pinned.
+      - A refused page (never seen) writes one line naming it on stderr (`remoteos: the console
+        output|input stays in the OEM code page …`) and still runs the command; refused output
+        takes the OEM fallback. PowerShell that cannot be started (no powershell.exe, a cwd that
+        vanished after Shell checked it) is one `remoteos: could not start …` line and exit 1,
+        never a Python traceback.
+    - **The cwd goes INTO the argv, never to `run_child` (review round 1).** `CreateProcess`
+      looks for `powershell` in the PARENT's current directory first. The trampoline runs in
+      the server's directory, as the server itself did when it was PowerShell's parent, so a
+      `powershell.exe` planted in the user's Shell `cwd` is never found. PowerShell starts in
+      `cwd`.
     - **The script reaches PowerShell unchanged**, the argv byte-identical to dev28's:
       `Popen` quotes it with `list2cmdline`, `python.exe` parses it back, and the trampoline's
       `subprocess.call` quotes it the same way. So error records, `$?` / `exit` /
@@ -82,8 +90,19 @@ paths:
     Windows OCR: `Popen` in binary mode, its own console (Windows) or session (POSIX), then
     `decode_output` and `ChildOutput.reply()` (stdout, `[STDERR] …`, `[Exit code: N]`).
     - **A timeout kills the whole tree** (`kill_process_tree`) and re-raises
-      `subprocess.TimeoutExpired`. On Windows it uses `taskkill /F /T`. On POSIX it kills the
-      child's own process group, never the caller's.
+      `subprocess.TimeoutExpired`. It names the PowerShell argv, never the trampoline: the
+      client's error text is what it was before round 2. Any other exception while waiting kills
+      the tree too, as `subprocess.run` did.
+      - Windows: `taskkill /F /T`, in its own hidden console, so no window flashes up under
+        `pythonw.exe`.
+      - POSIX: the group whose id is the child's pid. The caller's group id is never that pid.
+        SIGTERM, then SIGKILL after `KILL_GRACE_S` (2 s) for what ignored it; there is no
+        `getpgid` probe.
+      - Kill-path log lines carry exception TYPES only. `TimeoutExpired`'s text is the whole
+        argv, the user's command included (#31).
+    - **Every child's stdin is NUL** (`stdin=DEVNULL`, review round 1). Under
+      `--transport stdio` the server's stdin is the MCP JSON-RPC stream, and a child that read it
+      would eat protocol frames.
     - Why: under the trampoline the server's child is not the process doing the work. Killing
       only it, as `subprocess.run` does, leaves PowerShell holding our pipes, and on Windows
       `run()` then waits in `communicate()` with no timeout (CPython gh-81605).
@@ -141,7 +160,8 @@ paths:
     windows-latest: PowerShell 5.1, en-US, OEM cp437, no fakes):
     - exact Slovak output, `cmd /c echo` exact, `Write-Error` with only the user's text and
       exit 1, `exit 3` / `exit -1`, a failing native program, `param()`, a parse error with
-      exact text, and a timeout that kills the tree;
+      exact text, and a timeout after which the PowerShell process itself (its `$PID`, written
+      first) is gone;
     - the first test asserts OEM 437 and PowerShell 5, so an image change cannot turn the
       checks vacuous;
     - the Linux job never collects the directory (`testpaths = tests`), and its conftest

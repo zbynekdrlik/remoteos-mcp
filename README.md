@@ -194,11 +194,15 @@ notifications and Windows OCR. On macOS and Linux, output is read in the locale'
   in a pipeline, an assignment or `| Out-String`. PowerShell decodes it as UTF-8 then.
 - The UTF-8 page also applies to programs started from the command. For example, cmd.exe reads
   a `.bat` file in the console's code page, which is UTF-8.
-- A command that times out is stopped together with everything it started.
+- A command that times out is stopped together with the processes it started (its process
+  tree on Windows, its process group elsewhere; best effort).
+- A command never reads the server's own input: its stdin is empty.
 - Ping runs without PowerShell and is read in the OEM code page. `tscon` also runs without
   PowerShell; it is read UTF-8 first, and a line that is not UTF-8 in the OEM code page.
-- Real Windows PowerShell 5.1 checks all of this in CI (`tests_windows`, on an en-US runner
-  whose OEM code page is 437).
+- Real Windows PowerShell 5.1 checks in CI (`tests_windows`, an en-US runner whose OEM code
+  page is 437): exact output, `cmd /c echo`, `Write-Error` text, exit codes, `param(...)`, a parse
+  error, and that a timed-out PowerShell is gone. The other points above are verified on the
+  fleet only.
 
 ## MCP gateway (dev1)
 
