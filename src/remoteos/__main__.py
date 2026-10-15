@@ -46,7 +46,7 @@ from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
-from remoteos.platform.command import console_child
+from remoteos.platform.command import decode_output, own_console, powershell_argv
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
 from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, window_lines
@@ -584,6 +584,10 @@ def App(
 def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     """Execute a shell command (PowerShell on Windows, zsh on macOS, bash on Linux).
 
+    The output comes back as exact Unicode on every OS. On Windows the command runs after a
+    one-line prefix that switches its console to UTF-8, so a script that must begin with
+    ``param(...)`` or a ``using`` statement cannot run here (PowerShell requires those first).
+
     Args:
         command: Command to execute.
         timeout: Timeout in seconds (default 30).
@@ -601,8 +605,10 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
             problem = "is not a directory" if os.path.exists(workdir) else "not found"
             log.warning("Shell refused: working directory %s", problem)  # never the path (#31)
             raise ValueError(f"working directory {problem}: {cwd}")
-    if is_windows():
-        shell_cmd = ["powershell", "-NoProfile", "-Command", command]
+    windows = is_windows()
+    if windows:
+        # its console switched to UTF-8 first, so the output is lossless (#48)
+        shell_cmd = powershell_argv(command)
     elif is_macos():
         shell_cmd = ["/bin/zsh", "-c", command]
     else:
@@ -613,19 +619,21 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=workdir,
-        start_new_session=not is_windows(),
-        # its own console (Windows) in the OEM code page Python decodes; an undecodable byte never
-        # loses the output of a command that ran (#32 review rounds 4-5)
-        **console_child(windows=is_windows()),
+        start_new_session=not windows,
+        # binary, in its own console (Windows, #32 review round 5): decode_output reads the bytes,
+        # and an undecodable byte never loses the output of a command that ran
+        **own_console(windows),
     )
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        raw_out, raw_err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_process_tree(proc)
         log.warning("Shell command timed out after %ss (pid %s killed)", timeout, proc.pid)
         raise failure(f"Command timed out after {timeout}s") from None
+    stdout = decode_output(raw_out, windows, "stdout")
+    stderr = decode_output(raw_err, windows, "stderr")
     # A non-zero exit is the command's own answer (it ran), not a tool failure.
-    output = stdout or ""
+    output = stdout
     if stderr:
         output += f"\n[STDERR] {stderr}"
     if proc.returncode != 0:

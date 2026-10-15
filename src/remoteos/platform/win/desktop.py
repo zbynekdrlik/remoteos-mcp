@@ -36,7 +36,7 @@ except ImportError:
 from PIL import ImageGrab  # noqa: E402
 
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
-from remoteos.platform.command import run_command  # noqa: E402
+from remoteos.platform.command import powershell_argv, run_command  # noqa: E402
 from remoteos.platform.win.availability import diagnose, reconnect_to_console  # noqa: E402,F401  (#32)
 from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
@@ -425,7 +425,7 @@ def launch_app(name: str, args: str = "") -> str:
     cmd = f'Start-Process "{name}"'
     if args:
         cmd += f' -ArgumentList "{args}"'
-    run_command(["powershell", "-Command", cmd], timeout=10, check=True, label="PowerShell")
+    run_command(powershell_argv(cmd), timeout=10, check=True, label="PowerShell")
     return f"Launched {name}"
 
 
@@ -516,5 +516,5 @@ $xml.LoadXml($template)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("remoteos-mcp").Show($toast)
 """
-    run_command(["powershell", "-Command", ps], timeout=10, check=True, label="PowerShell")
+    run_command(powershell_argv(ps), timeout=10, check=True, label="PowerShell")
     return "Notification shown"
