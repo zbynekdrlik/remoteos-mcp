@@ -44,7 +44,8 @@ paths:
         vanished after Shell checked it) is one `remoteos: could not start …` line
         (`_COULD_NOT_START`) and exit 1, never a Python traceback. `run_child` raises that
         line as a `RuntimeError` (review round 3): PowerShell never ran, so it is a failure, an
-        MCP error for Shell, never `[Exit code: 1]`, which PowerShell's own failures use.
+        MCP error for Shell, never `[Exit code: 1]`, which PowerShell's own failures use. Only a
+        trampolined argv with exit 1 qualifies; page-refusal lines before it are skipped (round 4).
       - `-X utf8` (review round 2): the trampoline's own messages reach the pipe as UTF-8. A
         pipe would otherwise get the ANSI page, and a localized OSError text would be misread
         by the OEM fallback.
@@ -104,11 +105,15 @@ paths:
       - Windows: `taskkill /F /T`, in its own hidden console, so no window flashes up under
         `pythonw.exe`.
       - POSIX: the group whose id is the child's pid. The caller's group id is never that pid,
-        and there is no `getpgid` probe.
-        - The group's members are snapshotted (`os.getpgid` over `psutil.process_iter()`,
-          plus the child's descendants), the group gets SIGTERM, the members get up to
+        so the signals need no check of the child's own group first.
+        - The group's members are snapshotted (`_group`: `os.getpgid` over `psutil.pids()`, plus
+          descendants whose group cannot be read), the group gets SIGTERM, the members get up to
           `KILL_GRACE_S` (2 s) to exit, then the group gets SIGKILL IN ANY CASE (review round 2).
-          Whatever ignored SIGTERM dies, whether or not it holds our pipes.
+          Whatever ignored SIGTERM dies, whether or not it holds our pipes. A failing scan only
+          skips the wait (review round 4).
+        - Each member is a FRESH `psutil.Process`, never `process_iter()`'s cached one: a cached
+          object for a pid reused by a member since has an old start time, and `is_running()`
+          would cut that member's grace (review round 4).
         - Members, not just descendants (review round 3): in the usual timeout the shell has
           exited and a process it left behind (`x &`, `nohup x &`) holds the pipe. Reparented to
           init, it is no longer a descendant, but it is in the group and needs its grace.
