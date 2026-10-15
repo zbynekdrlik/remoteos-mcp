@@ -590,7 +590,9 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     ``param(...)`` are plain PowerShell's. On macOS/Linux the output is read in the locale's
     encoding. On Linux the command also gets the server user's own session variables the
     service lacks (XDG_RUNTIME_DIR, the D-Bus session bus, DISPLAY), so ``systemctl --user``
-    works.
+    works. Start a GUI program detached (``setsid -f prog >/dev/null 2>&1``): a plain
+    ``prog &`` keeps the output open, so the call runs to its timeout and the program is
+    stopped with it.
 
     Args:
         command: Command to execute.

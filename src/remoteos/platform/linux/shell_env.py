@@ -15,9 +15,12 @@ empty value counts as not set), and only after what it names is checked:
   is a socket. The user's systemd manager serves it with any login or linger, no desktop needed;
 - ``DISPLAY``: the provider's session (``desktop.get_session()``, loginctl plus the ``/proc``
   scan, the one the X tools use) when its uid is the euid, and only a local display whose X
-  socket (``/tmp/.X11-unix/X<n>``) exists and is owned by root or the euid. That directory is
-  world-writable: after a logout another local user could bind ``X0`` and collect the cookie;
-- ``XAUTHORITY``: that session's file, when it exists and the child's DISPLAY is the session's;
+  socket (``/tmp/.X11-unix/X<n>``) exists, is owned by root or the euid, and is no symlink. That
+  directory is world-writable: after a logout another local user could plant a socket file
+  there. (An ABSTRACT socket of the same name, which libxcb tries first, is beyond any file
+  check.);
+- ``XAUTHORITY``: that session's file, when it exists and the child's DISPLAY is the session's
+  checked display, also when that DISPLAY is the server's own;
 - ``WAYLAND_DISPLAY=wayland-0``: a Wayland session of the euid whose ``wayland-0`` socket is in
   the child's runtime dir. The provider does not resolve the name; ``wayland-0`` is libwayland's
   own default when the variable is unset.
@@ -88,10 +91,13 @@ def _add(env: dict[str, str], added: list[str], name: str, value: str) -> None:
 
 def _add_display(env: dict[str, str], added: list[str], session, runtime: str, euid: int) -> None:
     """DISPLAY / XAUTHORITY / WAYLAND_DISPLAY of a session of the euid, each one checked."""
-    if _display_alive(session.display, euid):
+    display_ok = _display_alive(session.display, euid)
+    if display_ok:
         _add(env, added, "DISPLAY", session.display)
+    # the cookie only for the session's checked display, even when that DISPLAY is the server's
+    # own (review round 2: an `ssh -X` server's localhost:10.0 got the guessed gdm cookie)
     if (
-        session.display
+        display_ok
         and session.xauthority
         and env.get("DISPLAY") == session.display
         and os.path.isfile(session.xauthority)
@@ -127,7 +133,7 @@ def _own_session(euid: int):
 
 def _display_alive(display: Optional[str], euid: int) -> bool:
     """A local display (``:N``, ``:N.S``, ``unix:N``) whose X socket exists and is root's (Xorg)
-    or the euid's (a rootless Xorg, Xwayland), never another user's."""
+    or the euid's (a rootless Xorg, Xwayland), never another user's, and is no symlink."""
     m = _LOCAL_DISPLAY.fullmatch(display or "")
     return bool(m) and _is_socket(os.path.join(X11_SOCKET_DIR, f"X{m.group(1)}"), owners=(0, euid))
 
@@ -141,9 +147,11 @@ def _owned_dir(path: str, uid: int) -> bool:
 
 
 def _is_socket(path: str, owners: Optional[tuple[int, ...]] = None) -> bool:
-    """``path`` is a socket, owned by one of ``owners`` when they are given."""
+    """``path`` is a socket. With ``owners`` (a world-writable directory) it must also be owned by
+    one of them and be the socket itself: ``lstat``, so a planted symlink to a trusted socket
+    fails (review round 2)."""
     try:
-        st = os.stat(path)
+        st = os.stat(path) if owners is None else os.lstat(path)
     except OSError:
         return False
     return stat.S_ISSOCK(st.st_mode) and (owners is None or st.st_uid in owners)
