@@ -11,9 +11,9 @@ from __future__ import annotations
 import ctypes
 import subprocess
 import sys
-import types
 
 import pytest
+from fake_console_child import run_result
 from fake_windows_session import FakeClipboard
 from PIL import ImageGrab
 
@@ -48,16 +48,15 @@ def test_windows_clipboard_without_text_reads_as_empty_not_an_error(clipboard_to
 def test_windows_powershell_failure_is_an_error_not_a_success(win_session, monkeypatch, call):
     # live on win-resolume: Start-Process of a missing app exits 1 (#32 review round 1)
     mod, _ = win_session
-    failed = types.SimpleNamespace(returncode=1, stdout="", stderr="This command cannot be run: file not found.")
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: failed)
+    stderr = "This command cannot be run: file not found."
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: run_result(kwargs, 1, "", stderr))
     with pytest.raises(RuntimeError, match="file not found"):
         call(mod)
 
 
 def test_windows_launch_app_success(win_session, monkeypatch):
     mod, _ = win_session
-    ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: ok)
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: run_result(kwargs))
     assert mod.launch_app("notepad") == "Launched notepad"
 
 

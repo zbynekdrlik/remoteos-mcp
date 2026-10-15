@@ -171,12 +171,27 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
 - **It never refuses a working desktop.** A check that cannot run (an older OS, a missing
   API, a probe error) counts as "usable", and the tool goes ahead.
 
-**Console output** (Shell, the service and task helpers, Ping, Windows OCR) is decoded in
-the code page it is written in, so on Windows `č` stays `č`.
+**Console output on Windows.** The output of PowerShell comes back as exact Unicode on every
+Windows code page: `Žltý kôň ďakuje – €` stays exactly that. This covers Shell, the service,
+task and EventLog helpers, and Windows OCR. On macOS and Linux, output is read in the locale's
+encoding (UTF-8 on the fleet).
 
-- On Windows each command runs in its own hidden console, at the system's OEM code page.
-  So a `chcp` inside one Shell command cannot change how later replies are decoded.
-- Windows OCR reads its text as UTF-8, so `€` and `–` survive.
+- Each command runs in its own hidden console. So a `chcp` inside one Shell command cannot
+  change how later replies are decoded.
+- Every PowerShell command first switches its own console to UTF-8, and its output is read as
+  UTF-8.
+- A line that is not UTF-8 is read on its own in the system's OEM code page, so it is exact
+  only for the characters that page holds. Examples:
+  - PowerShell's own parse error, which is printed before the switch;
+  - a native program that writes the OEM page whatever the console's page is.
+- Such a native program's output loses its non-ASCII text when PowerShell itself captures it,
+  in a pipeline, an assignment or `| Out-String`. PowerShell decodes it as UTF-8 then.
+- The switch also applies to programs started from the command. For example, cmd.exe reads a
+  `.bat` file in the console's code page, which is now UTF-8.
+- Ping runs without PowerShell and is read in the OEM code page. `tscon` also runs without
+  PowerShell; it is read UTF-8 first, and a line that is not UTF-8 in the OEM code page.
+- A Windows `Shell` script that must begin with `param(...)` or a `using` statement cannot
+  run: PowerShell requires those first, and the switch comes before them.
 
 ## MCP gateway (dev1)
 

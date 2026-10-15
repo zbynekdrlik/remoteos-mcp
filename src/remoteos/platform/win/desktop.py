@@ -36,7 +36,7 @@ except ImportError:
 from PIL import ImageGrab  # noqa: E402
 
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
-from remoteos.platform.command import run_command  # noqa: E402
+from remoteos.platform.command import powershell_argv, run_command  # noqa: E402
 from remoteos.platform.win.availability import diagnose, reconnect_to_console  # noqa: E402,F401  (#32)
 from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
@@ -58,11 +58,27 @@ def _tobool(v: bool | str) -> bool:
     return str(v).lower() in ("true", "1", "yes")
 
 
+_LOCALE_NAME_MAX_LENGTH = 85  # winnls.h, including the terminating null
+
+
 def _get_system_language() -> str:
-    """Return current Windows display language."""
+    """The user's Windows locale name (e.g. ``sk-SK``) for Snapshot's "System Language" line.
+
+    kernel32 ``GetUserDefaultLocaleName`` (Vista+), then ``locale.getlocale()``, then ``en_US``.
+    The ``locale`` module's default-locale getter, used before, is deprecated since Python 3.11
+    and removed in 3.15 (#48).
+    """
     try:
-        return locale.getdefaultlocale()[0] or "en_US"
-    except Exception:
+        buf = ctypes.create_unicode_buffer(_LOCALE_NAME_MAX_LENGTH)
+        if ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, _LOCALE_NAME_MAX_LENGTH) and buf.value:
+            return buf.value
+        log.debug("GetUserDefaultLocaleName returned no name")
+    except Exception as e:
+        log.debug("GetUserDefaultLocaleName failed (%s)", type(e).__name__)
+    try:
+        return locale.getlocale()[0] or "en_US"
+    except Exception as e:
+        log.debug("locale.getlocale failed (%s)", type(e).__name__)
         return "en_US"
 
 
@@ -425,7 +441,7 @@ def launch_app(name: str, args: str = "") -> str:
     cmd = f'Start-Process "{name}"'
     if args:
         cmd += f' -ArgumentList "{args}"'
-    run_command(["powershell", "-Command", cmd], timeout=10, check=True, label="PowerShell")
+    run_command(powershell_argv(cmd), timeout=10, check=True, label="PowerShell")
     return f"Launched {name}"
 
 
@@ -516,5 +532,5 @@ $xml.LoadXml($template)
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("remoteos-mcp").Show($toast)
 """
-    run_command(["powershell", "-Command", ps], timeout=10, check=True, label="PowerShell")
+    run_command(powershell_argv(ps), timeout=10, check=True, label="PowerShell")
     return "Notification shown"

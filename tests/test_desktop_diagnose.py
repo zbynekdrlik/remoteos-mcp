@@ -376,7 +376,7 @@ def windows_tools(monkeypatch, win_session):
 
     def _run(cmd, **kwargs):  # only tscon may run
         commands.append(list(cmd))
-        return session.tscon(cmd)
+        return session.tscon(cmd, **kwargs)
 
     monkeypatch.setattr(server.subprocess, "run", _run)
     return session, clicks, commands
