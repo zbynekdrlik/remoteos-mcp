@@ -80,17 +80,29 @@ paths:
     - a Linux TaskDelete with no unit files is an error.
   - The Windows provider's PowerShell calls (launch_app, show_notification) and `tscon` use it
     with `check=True` too.
-- **Console output is decoded by `platform.command.console_decoding()`.**
+- **A console program is started with `platform.command.console_child()`.**
   - Users: `run_command`, the Shell tool's `Popen`, Windows OCR and Ping.
-  - On Windows it reads the console's OEM code page (`encoding="oem"`; cp852 on the Slovak
-    fleet). PowerShell and native tools write that page, but Python's default for a pipe is
-    the ANSI page (cp1250). Live on win-pz-server, `AčšžB` came back as `Aźç§B`.
-  - Elsewhere it reads the locale. `errors="replace"` always applies.
+  - On Windows it sets `creationflags=CREATE_NO_WINDOW` (0x08000000), so the child gets its
+    OWN hidden console at the system OEM code page. It also sets `encoding="oem"` (cp852 on
+    the Slovak fleet).
+    - A child writes the CURRENT page of the console it is attached to.
+    - When every child shared the server's console (the hidden cmd console of
+      `start-remoteos.bat`), one `chcp 65001` or `[Console]::OutputEncoding = …UTF8` in a
+      Shell call garbled every later reply for every client (live, round 5: `A─Ź┼í┼żB`).
+    - Python's default for a pipe, the ANSI page (cp1250), turned `AčšžB` into `Aźç§B`
+      (round 4).
+  - Elsewhere: the locale, and no creationflags (POSIX rejects a non-zero value).
+    `errors="replace"` applies on every OS.
   - Linux: strict decoding of a stray byte raised a `utf-8 codec` error.
   - Windows: a decode error in subprocess's reader thread leaves `stdout` None. Shell then
     said "(no output)", and OCR and Ping crashed on `None.strip()`. Read
     `result.stdout or ""` after a text-mode run.
   - Never pass a bare `text=True` to a new console call.
+  - Windows OCR switches its OWN console to UTF-8 (`[Console]::OutputEncoding =
+    [Text.Encoding]::UTF8`) and decodes UTF-8, which is lossless for `€` and `–` (the OEM page
+    turned them into `?`).
+    - This is safe only because of the console isolation. Never switch the encoding in a
+      child that shares the server's console.
   - Windows OCR runs with `$ErrorActionPreference = 'Stop'`. A failing step can still exit 0
     with empty stdout, so "stderr and no text" is a failure as well.
 - **The stale-task sweep** (`_cleanup_old`, `STALE_AFTER_S` = 300) cancels a RUNNING task, and

@@ -168,10 +168,15 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
   or not. Its window list works on a disconnected or locked session too. It is refused only
   in these cases: session 0, a non-interactive window station, no macOS GUI session, a macOS
   session that is not on the screen, or no X11 session.
-- **Console output** (Shell, the service and task helpers, Ping, Windows OCR) is read in
-  the console's own code page, so on Windows `č` stays `č`.
 - **It never refuses a working desktop.** A check that cannot run (an older OS, a missing
   API, a probe error) counts as "usable", and the tool goes ahead.
+
+**Console output** (Shell, the service and task helpers, Ping, Windows OCR) is decoded in
+the code page it is written in, so on Windows `č` stays `č`.
+
+- On Windows each command runs in its own hidden console, at the system's OEM code page.
+  So a `chcp` inside one Shell command cannot change how later replies are decoded.
+- Windows OCR reads its text as UTF-8, so `€` and `–` survive.
 
 ## MCP gateway (dev1)
 
