@@ -100,3 +100,15 @@ def windows_child(monkeypatch, windows_python):
     monkeypatch.setattr(subprocess, "Popen", child)
     with oem_code_page(lambda: child.oem):
         yield child
+
+
+@pytest.fixture(autouse=True)
+def _linux_session_cache_per_test(monkeypatch):
+    """A Linux Shell call reads the provider's cached session (#52), and may detect one.
+
+    Whatever a test detects or sets in that cache is dropped after the test, so no later test
+    sees the host's real session or another test's fake one.
+    """
+    from remoteos.platform.linux import desktop
+
+    monkeypatch.setattr(desktop, "_SESSION", desktop._SESSION)
