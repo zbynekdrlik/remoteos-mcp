@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from remoteos.platform.command import run_command
+from remoteos.platform.command import powershell_argv, run_command
 
 
 def _ps(command: str, timeout: int = 30, check: bool = False) -> str:
-    """Run a PowerShell command; ``check=True`` for one that changes state (see ``run_command``)."""
-    return run_command(["powershell", "-NoProfile", "-Command", command], timeout, check=check, label="PowerShell")
+    """Run a PowerShell command, its output as exact UTF-8 (#48); ``check=True`` for one that changes state."""
+    return run_command(powershell_argv(command), timeout, check=check, label="PowerShell")
 
 
 # ---------------------------------------------------------------------------

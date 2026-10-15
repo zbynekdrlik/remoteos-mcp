@@ -8,7 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from remoteos.platform.command import console_child
+from remoteos.platform.command import powershell_argv, run_child
 
 try:
     from PIL import ImageGrab
@@ -75,11 +75,10 @@ def ocr_windows_builtin(
 
     # Stop: a failing step ends the script with a non-zero exit. Without it a call on a null
     # OcrEngine exits 0 with empty stdout, which read as "(no text detected)" (#32 review round 1).
-    # UTF-8: the child has its OWN console (console_child), so switching it is safe and lossless;
-    # through the OEM page PowerShell replaced € and – with "?" (#32 review round 5).
+    # UTF-8 comes from powershell_argv's prefix, in the child's OWN console: through the OEM page
+    # PowerShell replaced € and – with "?" (#32 review round 5, shared since #48).
     ps_script = f"""
 $ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 $null = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
 $null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType = WindowsRuntime]
@@ -112,13 +111,8 @@ $stream.Close()
 Write-Output $result.Text
 """
     try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps_script],
-            capture_output=True,
-            timeout=30,
-            **{**console_child(windows=True), "encoding": "utf-8"},  # its own console, switched to UTF-8
-        )
-        text, problem = (result.stdout or "").strip(), (result.stderr or "").strip()
+        result = run_child(powershell_argv(ps_script), timeout=30, windows=True)
+        text, problem = result.stdout.strip(), result.stderr.strip()
         # a failure is a non-zero exit, or an error with no text: never "(no text detected)"
         if result.returncode != 0 or (problem and not text):
             raise RuntimeError(f"Windows OCR failed: {problem or f'exit code {result.returncode}'}")

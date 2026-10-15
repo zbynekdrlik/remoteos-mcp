@@ -19,6 +19,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | Typing text / Type: Unicode keystrokes (SendInput `KEYEVENTF_UNICODE`, Quartz Unicode string), delivered count, `method="paste"` | `.claude/rules/typing.md` (auto-loads on its `paths:`) + README "Typing text (Unicode)" |
 | Server start flags (`uvicorn_config`, payload-free `--debug`, stdio stdout), Shell `cwd`, FileUpload, task states | `.claude/rules/server-startup.md` (auto-loads on its `paths:`) |
 | Tool failures as MCP errors (`ToolError`, `@reports_errors`, `[task:<id>]`), desktop `diagnose()` preflight (locked / secure desktop / session 0 / macOS permissions) | `.claude/rules/tool-errors.md` (auto-loads on its `paths:`) + README "Tool errors and desktop diagnoses" |
+| Starting a child and decoding its output: the PowerShell UTF-8 prefix (`powershell_argv`), `decode_output` (per-line OEM fallback), its own console, Ping's OEM read, the Windows system language | `.claude/rules/child-output.md` (auto-loads on its `paths:`) + README "Console output on Windows" |
 | Which MCP server belongs to which project | memory: `reference_mcp_project_mapping.md` |
 | SSH credentials for managed machines | memory: `reference_ssh_credentials.md` |
 
@@ -27,3 +28,4 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 - **Never run ad-hoc `pip install` to upgrade.** Always use the OS-appropriate one-liner installer.
 - **Never commit `.mcp.json`** — it contains bearer tokens. Symlink from `~/.claude/mcp-configs/`.
 - **Deploy policy:** `python3 airuleset.py push` is not used here; after source changes push to git, then run the installer on each target machine via SSH.
+- **Local tests run in a dedicated venv**, never the user site-packages (on dev1 its fastmcp is broken and `.venv-test` is stale): `python3 -m venv <scratch>/venv && <scratch>/venv/bin/pip install -c constraints.txt -e '.[test,dev]'`, then `<scratch>/venv/bin/pytest` and `ruff check src/ tests/`.
