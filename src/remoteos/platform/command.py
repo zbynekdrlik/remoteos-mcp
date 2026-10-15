@@ -56,13 +56,14 @@ CREATE_NO_WINDOW = 0x08000000
 #   -X utf8 (review round 2): its own messages reach the pipe as UTF-8, a localized OSError included
 #   (the pipe would otherwise get the ANSI page, which the OEM fallback misreads).
 _COULD_NOT_START = "remoteos: could not start "
+_REFUSED_PAGE = "remoteos: the console "
 UTF8_CONSOLE_TRAMPOLINE = "\n".join(
     [
         "import ctypes, subprocess, sys",
         "kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)",
         "for name, switch in (('output', kernel32.SetConsoleOutputCP), ('input', kernel32.SetConsoleCP)):",
         "    if not switch(65001):",
-        "        sys.stderr.write('remoteos: the console %s stays in the OEM code page (error %d)\\n'"
+        "        sys.stderr.write('" + _REFUSED_PAGE + "%s stays in the OEM code page (error %d)\\n'"
         " % (name, ctypes.get_last_error()))",
         "try:",
         "    code = subprocess.call(sys.argv[2:], cwd=sys.argv[1] or None, stdout=1, stderr=2)",
@@ -242,27 +243,40 @@ class ChildOutput:
 KILL_GRACE_S = 2.0
 
 
-def _group(pgid: int) -> list[psutil.Process]:
-    """The processes now in process group ``pgid`` and the descendants of process ``pgid``.
+def _pgid(pid: int) -> Optional[int]:
+    """The process group of ``pid``; ``None`` when it is gone or its group cannot be read."""
+    try:
+        return os.getpgid(pid)
+    except OSError:  # ESRCH, or refused (another session on some BSDs)
+        return None
 
-    The group (review round 3): in the usual timeout the shell has already exited, and a process
-    it left behind (``x &``, ``nohup x &``) holds the pipe. Reparented to init, it is no longer a
-    descendant, but it is still in the group the SIGTERM reaches. ``os.getpgid`` reads a zombie's
-    group on Linux; where it is refused (another session on some BSDs) the descendants still count.
+
+def _group(pgid: int) -> list[psutil.Process]:
+    """The processes now in process group ``pgid``: the ones the group's SIGTERM reaches.
+
+    - Members, not just descendants (review round 3): in the usual timeout the shell has already
+      exited, and a process it left behind (``x &``, ``nohup x &``) holds the pipe. Reparented to
+      init, it is no longer a descendant, but it is still in the group.
+    - Every member gets a FRESH ``psutil.Process`` (review round 4): ``process_iter()`` hands back
+      a cached object for a pid it saw before, and if that pid was reused by a member since, its
+      old start time makes ``is_running()`` say "exited".
+    - Descendants of ``pgid`` count too where their group cannot be read; a descendant that left
+      the group (``setsid``) is never signalled, so it is never waited for.
+    - ``os.getpgid`` reads a zombie's group on Linux.
     """
-    found: dict[int, psutil.Process] = {}
-    for process in psutil.process_iter():
-        try:
-            if os.getpgid(process.pid) == pgid:
-                found[process.pid] = process
-        except (OSError, psutil.Error):
-            continue
+    pids = [pid for pid in psutil.pids() if _pgid(pid) == pgid]
     try:
         leader = psutil.Process(pgid)
-        for process in (leader, *leader.children(recursive=True)):
-            found.setdefault(process.pid, process)
+        pids += [p.pid for p in leader.children(recursive=True) if _pgid(p.pid) in (pgid, None)]
     except psutil.Error:
         pass
+    found: dict[int, psutil.Process] = {}
+    for pid in [pgid, *pids]:
+        if pid not in found:
+            try:
+                found[pid] = psutil.Process(pid)
+            except psutil.Error:
+                continue
     return list(found.values())
 
 
@@ -315,9 +329,10 @@ def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) ->
     - **POSIX:** the process group whose id is the child's pid: the child's own, when it leads
       one (``run_child`` starts it in a new session). The caller's group id is never the child's
       pid, so the server is never signalled.
-      - SIGTERM to the group, then up to ``KILL_GRACE_S`` for the child and its descendants to
-        exit, then SIGKILL to the group in any case: whatever ignored SIGTERM dies, whether or
-        not it holds our pipes (review round 2).
+      - SIGTERM to the group, then up to ``KILL_GRACE_S`` for the group's members (``_group``)
+        to exit, then SIGKILL to the group in any case: whatever ignored SIGTERM dies, whether
+        or not it holds our pipes (review round 2). A member scan that fails only skips the wait;
+        the signals still go out (review round 4).
       - Nothing is reaped before that SIGKILL: the child, a zombie by then, keeps the group id
         from being reused, so the SIGKILL can only reach the child's own group.
 
@@ -333,7 +348,11 @@ def kill_process_tree(proc: subprocess.Popen, windows: Optional[bool] = None) ->
         except Exception as e:
             log.debug("taskkill of %s failed (%s)", proc.pid, type(e).__name__)
     else:
-        started = _group(proc.pid)  # before any signal; the unreaped child keeps the group id
+        try:
+            started = _group(proc.pid)  # before any signal; the unreaped child keeps the group id
+        except Exception as e:
+            log.debug("scanning the group of %s failed (%s)", proc.pid, type(e).__name__)
+            started = []
         _signal_group(proc.pid, signal.SIGTERM)
         _wait_exited(started, KILL_GRACE_S)
         _signal_group(proc.pid, signal.SIGKILL)
@@ -356,6 +375,9 @@ def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd:
     - A timeout kills the tree (``kill_process_tree``) and raises ``subprocess.TimeoutExpired``
       naming the command as the user knows it (``_shown``). Any other exception while waiting
       kills the tree too, as ``subprocess.run`` did.
+    - A trampolined PowerShell that was never started (exit 1, and the trampoline's own
+      ``_COULD_NOT_START`` line, after any page-refusal lines) raises ``RuntimeError``: a command
+      that never ran is a failure, never an answer (review round 3).
     """
     windows = _on_windows(windows)
     proc = subprocess.Popen(
@@ -378,7 +400,7 @@ def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd:
         kill_process_tree(proc, windows)
         raise
     stderr = decode_output(raw_err, windows, "stderr")
-    if proc.returncode == 1 and _trampolined(cmd) and stderr.startswith(_COULD_NOT_START):
+    if proc.returncode == 1 and _trampolined(cmd) and _never_started(stderr):
         # the trampoline never started PowerShell: a failure, not the command's answer (review round 3)
         raise RuntimeError(stderr.strip())
     return ChildOutput(
@@ -388,6 +410,13 @@ def run_child(cmd: list[str], timeout: int, windows: Optional[bool] = None, cwd:
     )
 
 
+def _never_started(stderr: str) -> bool:
+    """The trampoline's stderr says it could not start PowerShell: its ``_COULD_NOT_START`` line,
+    after any page-refusal lines it wrote first (review round 4)."""
+    lines = [line for line in stderr.splitlines() if not line.startswith(_REFUSED_PAGE)]
+    return bool(lines) and lines[0].startswith(_COULD_NOT_START)
+
+
 def run_command(cmd: list[str], timeout: int = 30, check: bool = False, label: Optional[str] = None) -> str:
     """Run ``cmd`` and return stdout, then ``[STDERR] …`` and ``[Exit code: N]`` when there are any.
 
@@ -395,7 +424,8 @@ def run_command(cmd: list[str], timeout: int = 30, check: bool = False, label: O
     delete, write): a non-zero exit means it failed, so it raises
     ``RuntimeError("<label> failed (exit N): <stderr>")``, which the tool reports
     as an MCP error. Without it, the exit code is part of the answer, the way a
-    listing reports it (e.g. Get-WinEvent's "No events were found").
+    listing reports it (e.g. Get-WinEvent's "No events were found"). Either way a PowerShell that
+    was never started raises (``run_child``).
 
     A PowerShell command is ``powershell_argv(script)``; ``run_child`` decodes the output.
     """
