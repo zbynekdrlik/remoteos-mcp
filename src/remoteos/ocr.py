@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from remoteos.platform.command import console_decoding
+
 try:
     from PIL import ImageGrab
 except ImportError:
@@ -110,10 +112,10 @@ Write-Output $result.Text
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True,
-            text=True,
             timeout=30,
+            **console_decoding(windows=True),  # PowerShell writes the console's OEM code page (#32)
         )
-        text, problem = result.stdout.strip(), result.stderr.strip()
+        text, problem = (result.stdout or "").strip(), (result.stderr or "").strip()
         # a failure is a non-zero exit, or an error with no text: never "(no text detected)"
         if result.returncode != 0 or (problem and not text):
             raise RuntimeError(f"Windows OCR failed: {problem or f'exit code {result.returncode}'}")

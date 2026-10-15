@@ -12,6 +12,8 @@ import socket
 import subprocess
 import sys
 
+from remoteos.platform.command import console_decoding
+
 
 def ping(host: str, count: int = 4) -> str:
     """Ping a host: ping's own output, also when the host does not answer."""
@@ -21,12 +23,12 @@ def ping(host: str, count: int = 4) -> str:
         result = subprocess.run(
             ["ping", flag, str(count), host],
             capture_output=True,
-            text=True,
             timeout=timeout,
+            **console_decoding(),  # Windows ping writes the console's OEM code page (#32)
         )
     except subprocess.TimeoutExpired:
         raise TimeoutError(f"ping timed out after {timeout}s") from None
-    return result.stdout.strip() or result.stderr.strip() or "(no output)"
+    return (result.stdout or "").strip() or (result.stderr or "").strip() or "(no output)"
 
 
 def port_check(host: str, port: int, timeout: float = 5.0) -> str:

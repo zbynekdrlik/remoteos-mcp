@@ -39,7 +39,8 @@ def diagnose(need: str = "input") -> Optional[str]:
     The window-server session first (none, not on the console, locked), then the
     permission this use needs. Without it macOS fails SILENTLY (a wallpaper-only
     screenshot, dropped events). ``"windows"`` (the window list) needs only a GUI
-    session.
+    session that is on the screen. Without Screen Recording macOS hides other
+    apps' window titles, so the list then shows their app names.
 
     - Screen Recording, to capture: ``CGPreflightScreenCaptureAccess``.
     - Posting events, for input: ``CGPreflightPostEventAccess``, the same check the
@@ -65,11 +66,11 @@ def _diagnose(need: str) -> Optional[str]:
         info = session_info()
         if info is None:  # NULL outside a window-server (GUI) session
             return errors.MAC_NO_GUI_SESSION
-        if need == "windows":  # the window list needs only a GUI session
-            return None
         on_console = getattr(quartz, "kCGSessionOnConsoleKey", "kCGSSessionOnConsoleKey")
-        if not info.get(on_console, True):
+        if not info.get(on_console, True):  # switched out: nothing of it is on screen to list either
             return errors.MAC_NOT_ON_CONSOLE
+        if need == "windows":  # the window list works on the lock screen and without either permission
+            return None
         if info.get(_SCREEN_IS_LOCKED, False):
             return errors.LOCKED
     if need == "capture":
