@@ -112,20 +112,23 @@ class FakeTree:
         return path
 
     def report_owner(self, path: str, uid: int) -> None:
-        """``os.stat(path)`` reports ``uid`` as the owner (only root can really chown)."""
+        """``os.stat(path)`` and ``os.lstat(path)`` report ``uid`` as the owner (only root can
+        really chown)."""
         if not self._owners:
-            real_stat = os.stat
-
-            def fake_stat(p, *args, **kwargs):
-                st = real_stat(p, *args, **kwargs)
-                if isinstance(p, str) and p in self._owners:
-                    fields = list(st[:10])
-                    fields[4] = self._owners[p]  # st_uid
-                    return os.stat_result(fields)
-                return st
-
-            self._monkeypatch.setattr(os, "stat", fake_stat)
+            for name in ("stat", "lstat"):
+                self._monkeypatch.setattr(os, name, self._owner_reporting(getattr(os, name)))
         self._owners[path] = uid
+
+    def _owner_reporting(self, real):
+        def fake(p, *args, **kwargs):
+            st = real(p, *args, **kwargs)
+            if isinstance(p, str) and p in self._owners:
+                fields = list(st[:10])
+                fields[4] = self._owners[p]  # st_uid
+                return os.stat_result(fields)
+            return st
+
+        return fake
 
     def close(self) -> None:
         for s in self._sockets.values():
