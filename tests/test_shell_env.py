@@ -13,7 +13,8 @@ Only the OS boundary is faked:
 - the effective uid (``os.geteuid``) where a test needs another one, and the owner ``os.stat``
   reports for a directory only root could really own;
 - ``loginctl``, at ``subprocess.run``: it lists no session, and counts the detections that reach
-  it (a Shell call must never run one; review round 1);
+  it (a Shell call never forces one, review round 1; only an EMPTY cache is filled by
+  ``get_session()``'s own first use);
 - the provider's cached session (``desktop._SESSION``), as the provider's own tests do.
 
 The Shell tests run a real ``/bin/bash``.
@@ -244,8 +245,9 @@ def test_an_empty_value_counts_as_not_set(tree, se):
 def test_shell_env_starts_from_the_servers_environment_and_never_changes_it(tree, se, monkeypatch):
     runtime = tree.runtime_dir(os.geteuid())
     monkeypatch.setenv("REMOTEOS_T52", "kept")
+    monkeypatch.setenv("REMOTEOS_T52_EMPTY", "")  # review round 5: an empty variable reaches the child too
     env = se.shell_env()
-    assert env["REMOTEOS_T52"] == "kept"
+    assert (env["REMOTEOS_T52"], env["REMOTEOS_T52_EMPTY"]) == ("kept", "")
     assert env["XDG_RUNTIME_DIR"] == runtime
     assert "XDG_RUNTIME_DIR" not in os.environ
 
@@ -318,6 +320,9 @@ def test_as_root_nothing_is_added(tree, se, loginctl, monkeypatch, caplog, euid)
     tree.report_owner(tree.x_display(0), euid)
     xauth = tree.file("Xauthority")
     monkeypatch.setattr(desktop, "_SESSION", _x11(euid, ":0", xauth))
+    if euid == 0:
+        # review round 5: an EMPTY cache, so consulting the session would run the fake loginctl
+        monkeypatch.setattr(desktop, "_SESSION", None)
     monkeypatch.setattr(os, "geteuid", lambda: euid)
     caplog.set_level(logging.INFO, logger=LOGGER)
     added = _added(se.shell_env(_base()))
