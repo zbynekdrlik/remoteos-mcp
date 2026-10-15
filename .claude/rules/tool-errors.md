@@ -81,7 +81,9 @@ paths:
   - The Windows provider's PowerShell calls (launch_app, show_notification) and `tscon` use it
     with `check=True` too.
   - It decodes with `errors="replace"`: a localized console writes the OEM code page
-    (cp852), and strict decoding turned the real failure into a `UnicodeDecodeError`.
+    (cp852), and strict decoding turned the real failure into a `UnicodeDecodeError`. The
+    Shell tool's `Popen` does the same, so a command that ran never loses its output to a
+    codec error.
   - Windows OCR runs with `$ErrorActionPreference = 'Stop'`. A failing step can still exit 0
     with empty stdout, so "stderr and no text" is a failure as well.
 - **The stale-task sweep** (`_cleanup_old`, `STALE_AFTER_S` = 300) cancels a RUNNING task, and
@@ -92,20 +94,26 @@ paths:
   (a failed read = nothing to restore). It wraps a failed write as "could not put the text on
   the clipboard: …". A failed restore after a good paste stays a successful reply with the
   warning.
-- **`diagnose(capture: bool) -> str | None`** lives in `platform/<os>/availability.py`. Each
+- **`diagnose(need: str) -> str | None`** lives in `platform/<os>/availability.py`. Each
   desktop provider re-exports it, so `get_desktop().diagnose` works.
-  - The tools call it through `_desktop_preflight`, the decorator's `preflight=` hook.
+  - `need` is one of three values:
+    - `"capture"`: read the screen;
+    - `"input"`: send events;
+    - `"windows"`: only the window list. That means the user's desktop, locked or not: on
+      Windows only session 0 and a non-interactive window station; on macOS only "no GUI
+      session"; on Linux the stub.
+  - The tools call it through `_desktop_preflight(need)`, the decorator's `preflight=` hook.
   - `@_capture_tool` = AnnotatedSnapshot, OCR, ScreenRecord.
-  - Snapshot calls `_desktop_preflight(True)` itself, only for the screenshot (`use_vision`).
-    `use_vision=False` reads only geometry and windows, which work on a disconnected or locked
-    session (live on win-pz-server).
+  - Snapshot calls it itself: `"capture"` for the screenshot (`use_vision`), else `"windows"`.
+    The window list works on a disconnected or locked session (live on win-pz-server), but
+    outside the user's desktop it would be a hollow empty success.
   - `@_input_tool` = Click, Move, Type, Scroll, Shortcut, MinimizeAll.
   - The clipboard, notification, LockScreen, FocusWindow and App tools have NO preflight. The
     clipboard and notifications work on a locked session. FocusWindow and App switch/resize
     fail there with their own `SetForegroundWindow` error.
-- **A preflight for another need** (e.g. #37's AX-tree tools, which need `AXIsProcessTrusted`)
-  means turning `capture: bool` into a kind (capture / input / accessibility). Do not
-  overload the bool.
+- **A new need** (e.g. #37's AX-tree tools, which need `AXIsProcessTrusted`) is a new `need`
+  value, handled in each `availability.py`. An unknown need passes every session check that
+  applies to all needs.
 - **Never a false positive.** Only a positive finding is a diagnosis. A probe that raises, an
   API that is missing (an older OS) or an unreadable state = "usable". Each `diagnose()`
   wraps its probes, AND `_desktop_preflight` catches a raising `diagnose()`. Both log

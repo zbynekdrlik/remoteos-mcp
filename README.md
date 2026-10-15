@@ -164,8 +164,10 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
   Snapshot, ScreenRecord and OCR now return the bare stub instead of `<Tool> error: <stub>`.
   A locked X11 screen is not refused: the screenshot shows the locker, and typed input
   reaches it.
-- `Snapshot(use_vision=False)` captures nothing, so it is never refused: the window list
-  works on a disconnected or locked Windows session too.
+- `Snapshot(use_vision=False)` captures nothing, so it needs only the user's desktop, locked
+  or not. Its window list works on a disconnected or locked session too. It is refused only
+  in session 0, a non-interactive window station, without a macOS GUI session, or without
+  X11.
 - **It never refuses a working desktop.** A check that cannot run (an older OS, a missing
   API, a probe error) counts as "usable", and the tool goes ahead.
 
