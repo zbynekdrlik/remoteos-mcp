@@ -119,12 +119,17 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
      daemon-reload, restart); otherwise (a fresh box, a switch an earlier run left pending) it
      stops and disables the service and keeps the files + the pending marker for a re-run. An
      unproven state may be an agent with authentication off (a full shell on 0.0.0.0): it is
-     never "rolled back" into running (review round 3).
+     never "rolled back" into running (review round 3). **enable-only never starts or stops
+     anything**: its failure puts the previous files back with no restart (a fresh box: the unit is
+     only disabled) and leaves the running process alone (review round 4). `restore_previous`
+     puts `.switch-pending` back to its pre-run state (removed only when this run created it).
+     The pending mark is written AFTER `arm`, and `undo_switch` removes a build nothing points at
+     yet (a signal between `arm` and the swap).
   8. DISARM, then print the proof. Only then `remove_legacy_system_copy` (the pre-venv
      system-python `remoteos-mcp fastmcp fastmcp-slim`, `--break-system-packages`) and
      `prune_builds`.
   - While ARMED, any exit (a failed step, HUP/INT/TERM, a lost console: SIGPIPE is ignored, so
-    the write fails and set -e exits) goes through the EXIT trap → `restore_previous`. Never arm
+    the write fails and set -e exits) goes through the EXIT trap → `undo_switch`. Never arm
     on a list of signals alone: a no-tty `ssh … | sudo bash` drop sends no signal.
   - **The proof decides, not the console.** Before it, a lost console rolls back; during it,
     its result decides (a failure rolls back with no console); after it, the proven switch stays
