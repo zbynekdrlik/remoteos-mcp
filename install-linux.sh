@@ -7,6 +7,15 @@
 #   REMOTEOS_MCP_AUTH_KEY  the auth key to install (1-128 letters/digits). Default: keep the key
 #                          the box has (the running unit's, else config.json's), else a new one.
 #   GH_TOKEN               sent as the download's Authorization header on curl's stdin (a fork)
+#   REMOTEOS_MCP_MODE      desktop | headless (default: the existing unit's, else the session check)
+#   REMOTEOS_MCP_USER      the account the service runs as (default: the existing unit's User=,
+#                          else SUDO_USER, else root)
+#   REMOTEOS_MCP_POLICY    restart (default: restart and prove the new install) | enable-only
+#                          (install + enable for the next boot, never start: camera-box's cams)
+# A secret never goes on a command line, sudo's included: `sudo REMOTEOS_MCP_AUTH_KEY=… bash`
+# shows it in `ps`. Export it in your shell and keep it across sudo instead:
+#   read -rs REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY
+#   curl -fsSL …/install-linux.sh | sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash
 #
 # Layout (#12: the one camera-box's scripts/lib/remoteos-mcp.sh runs on strih-snv, strih-pp,
 # stream-pp and the cams, so both installers produce the same box):
@@ -18,13 +27,14 @@
 #   /etc/systemd/system/remoteos-mcp.service  0644, never carries the key
 # The key is never in the unit, in an argv or in this installer's output.
 #
-# Order: validate the inputs → read the key → download ONE tarball of the ref → build a fresh
-# venv side by side (pip under an env allowlist) → swap the venv link, write the key files and
-# the unit, restart → prove the new install (/health = the built version, an authenticated
-# initialize answers 200, an unauthenticated request 401) → only then remove the old
-# system-python copy and the old builds. A failed download or build changes nothing. A switch
-# that does not prove itself, or is interrupted (a signal, a lost console), is rolled back to
-# the previous unit, key files and venv.
+# Order: validate the inputs, take the lock → read the key → download ONE tarball of the ref →
+# (desktop) install the desktop tools → build a fresh venv side by side (pip under an env
+# allowlist) unless the installed one is exactly that source → swap the venv link, write the
+# key files and the unit, enable, restart → prove the new install (/health = the built version,
+# an authenticated initialize answers 200, an unauthenticated request 401) → only then remove
+# the old system-python copy and the old builds. A failed download or build changes nothing. A
+# switch that does not prove itself, or is interrupted before the proof (a signal, a lost
+# console), is rolled back to the previous unit, key files and venv; once proven it stays.
 set -euo pipefail
 
 say() { echo "        $*"; }
@@ -110,7 +120,9 @@ generate_key() {
 
 # Sets AUTH_KEY, and KEY_SOURCE (where it came from, never the value; empty = new). The key
 # precedence is camera-box's: explicit, the running unit's (a legacy --auth-key, else its
-# EnvironmentFile), config.json, new. A re-run never changes the key.
+# EnvironmentFile), config.json, new. A re-run never changes the key: the first key the box
+# has decides, and one this installer cannot carry (not 1-128 letters/digits) is refused,
+# never silently replaced by a new one.
 resolve_key() {
     local unit_key env_key cfg_key
     cfg_key=$(key_from_config_text "$(cat "$CONFIG_FILE" 2>/dev/null || true)")
@@ -122,18 +134,21 @@ resolve_key() {
     else
         unit_key=$(key_from_unit_text "$OLD_UNIT")
         env_key=$(key_from_env_text "$(cat "$ENV_FILE" 2>/dev/null || true)")
-        if key_ok "$unit_key"; then
+        if [[ -n "$unit_key" ]]; then
             AUTH_KEY=$unit_key
             KEY_SOURCE="the running unit (moved out of its ExecStart)"
-        elif key_ok "$env_key"; then
+        elif [[ -n "$env_key" ]]; then
             AUTH_KEY=$env_key
             KEY_SOURCE="$ENV_FILE"
-        elif key_ok "$cfg_key"; then
+        elif [[ -n "$cfg_key" ]]; then
             AUTH_KEY=$cfg_key
             KEY_SOURCE="$CONFIG_FILE"
         else
             AUTH_KEY=$(generate_key)
             KEY_SOURCE=""
+        fi
+        if [[ -n "$KEY_SOURCE" ]] && ! key_ok "$AUTH_KEY"; then
+            fail "the key in ${KEY_SOURCE} is not 1-128 letters/digits, so it cannot be carried over; pass the key the clients use as REMOTEOS_MCP_AUTH_KEY — nothing was changed on this box"
         fi
     fi
     key_ok "$AUTH_KEY" || fail "could not make an auth key"
@@ -213,15 +228,20 @@ user_from_unit_text() {
     done <<<"${1-}"
 }
 
-# Sets OLD_UNIT, MODE (desktop | headless), SERVICE_USER, SERVICE_UID. The existing unit wins,
-# so a re-run never changes the box's shape or moves the agent to another account.
+# Sets OLD_UNIT, MODE (desktop | headless), SERVICE_USER, SERVICE_UID. An explicit
+# REMOTEOS_MCP_MODE / REMOTEOS_MCP_USER wins (camera-box's provisioning passes them), else the
+# existing unit, so a re-run never changes the box's shape or moves the agent to another
+# account; else the session check / SUDO_USER / root.
 detect_layout() {
     local session u
     OLD_UNIT=$(cat "$UNIT_PATH" 2>/dev/null || true)
     if [[ -e "$VENV_LINK" && ! -L "$VENV_LINK" && ! -d "$VENV_LINK" ]]; then
         fail "$VENV_LINK is neither a venv directory nor a link — nothing was changed on this box"
     fi
-    if grep -q '^Environment=DISPLAY=' <<<"$OLD_UNIT"; then
+    if [[ -n "$GIVEN_MODE" ]]; then
+        MODE=$GIVEN_MODE
+        say "Mode: ${MODE} (REMOTEOS_MCP_MODE)"
+    elif grep -q '^Environment=DISPLAY=' <<<"$OLD_UNIT"; then
         MODE=desktop
         say "Mode: desktop (the existing unit's)"
     else
@@ -235,15 +255,37 @@ detect_layout() {
         fi
     fi
     SERVICE_USER=""
-    for u in "$(user_from_unit_text "$OLD_UNIT")" "${SUDO_USER:-}"; do
-        if name_ok "$u"; then
-            SERVICE_USER=$u
-            break
-        fi
-    done
+    if [[ -n "$GIVEN_USER" ]]; then
+        SERVICE_USER=$GIVEN_USER
+    else
+        for u in "$(user_from_unit_text "$OLD_UNIT")" "${SUDO_USER:-}"; do
+            if name_ok "$u"; then
+                SERVICE_USER=$u
+                break
+            fi
+        done
+    fi
     SERVICE_USER=${SERVICE_USER:-root}
-    SERVICE_UID=$(id -u "$SERVICE_USER") || fail "the service account '${SERVICE_USER}' does not exist"
+    SERVICE_UID=$(id -u "$SERVICE_USER" 2>/dev/null) \
+        || fail "REMOTEOS_MCP_USER / the service account '${SERVICE_USER}' does not exist — nothing was changed on this box"
     say "Service account: ${SERVICE_USER}"
+}
+
+# Validate the optional inputs before anything changes.
+check_inputs() {
+    ref_ok "$REF" \
+        || fail "REMOTEOS_MCP_REF must be a commit sha, a tag or a branch name — nothing was changed on this box"
+    case "$GIVEN_MODE" in
+        '' | desktop | headless) ;;
+        *) fail "REMOTEOS_MCP_MODE must be desktop or headless — nothing was changed on this box" ;;
+    esac
+    if [[ -n "$GIVEN_USER" ]] && ! name_ok "$GIVEN_USER"; then
+        fail "REMOTEOS_MCP_USER must be an account name — nothing was changed on this box"
+    fi
+    case "$POLICY" in
+        restart | enable-only) ;;
+        *) fail "REMOTEOS_MCP_POLICY must be restart or enable-only — nothing was changed on this box" ;;
+    esac
 }
 
 # --- the source and the venv -------------------------------------------------------------------
@@ -294,9 +336,29 @@ venv_import_check() {
     venv_python "$1" -c 'import remoteos.__main__, fastmcp; from fastmcp import FastMCP' 2>&1
 }
 
-# The source id the installed venv records (ours, or camera-box's marker), or nothing.
+# The source id the installed venv records, or nothing: ours (.remoteos-mcp-source) or, for a
+# venv camera-box's lib built, its .camera-box-source. Both in one venv = camera-box's lib
+# upgraded our build in place (it writes into whatever /opt/remoteos-mcp-venv points at), so
+# our marker no longer says what is installed: nothing.
 installed_source() {
-    cat "$VENV_LINK/.remoteos-mcp-source" 2>/dev/null || cat "$VENV_LINK/.camera-box-source" 2>/dev/null || true
+    local ours="$VENV_LINK/.remoteos-mcp-source" theirs="$VENV_LINK/.camera-box-source"
+    if [[ -f "$ours" && -f "$theirs" ]]; then
+        return 0
+    fi
+    cat "$ours" 2>/dev/null || cat "$theirs" 2>/dev/null || true
+}
+
+# The version in the downloaded source's pyproject.toml.
+source_version() {
+    sed -n '/^version *= *"/{s/^version *= *"\([^"]*\)".*/\1/p;q;}' "$SRC_DIR/pyproject.toml"
+}
+
+# Is the installed venv exactly the downloaded source, working? Its marker, its version and
+# the import check must all agree; anything else is rebuilt.
+venv_is_current() {
+    [[ -n "$SOURCE_ID" && "$(installed_source)" == "$SOURCE_ID" ]] || return 1
+    [[ "$(venv_version "$VENV_LINK")" == "$(source_version)" ]] || return 1
+    venv_import_check "$VENV_LINK" >/dev/null
 }
 
 # A build that failed: print why, remove it, change nothing else.
@@ -312,19 +374,34 @@ build_failed() {
 }
 
 # Desktop mode: let the venv import the system python's GI bindings (python3-gi), which
-# AnnotatedSnapshot's AT-SPI tree needs. One .pth naming the directory that holds `gi`,
-# after the venv's own site-packages, so every pinned package still comes from the venv.
+# AnnotatedSnapshot's AT-SPI tree needs, and nothing else of the system's packages: a
+# directory in the build holding one link to the system `gi` package, named by a .pth after
+# the venv's own site-packages. Returns 1 when the system python has no gi.
 link_system_gi() {
-    local build="$1" gi_dir purelib
-    gi_dir=$("$PYTHON" -c 'import os, gi; print(os.path.dirname(os.path.dirname(os.path.abspath(gi.__file__))))' \
-        2>/dev/null) || gi_dir=""
-    if [[ -z "$gi_dir" ]]; then
+    local build="$1" gi_pkg purelib
+    gi_pkg=$("$PYTHON" -c 'import os, gi; print(os.path.dirname(os.path.abspath(gi.__file__)))' 2>/dev/null) \
+        || gi_pkg=""
+    if [[ -z "$gi_pkg" || ! -d "$gi_pkg" ]]; then
         say "[!] The system python has no gi (python3-gi): AnnotatedSnapshot's element tree will be empty"
-        return 0
+        return 1
     fi
+    mkdir -p "$build/system-gi"
+    ln -sfn "$gi_pkg" "$build/system-gi/gi"
     purelib=$(venv_python "$build" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
-    printf '%s\n' "$gi_dir" >"$purelib/remoteos-system-gi.pth"
-    say "System GI bindings linked from ${gi_dir}"
+    printf '%s\n' "$build/system-gi" >"$purelib/remoteos-system-gi.pth"
+    say "System GI bindings linked: ${gi_pkg}"
+}
+
+# An unchanged desktop build of ours that cannot import gi yet (python3-gi came later): link
+# it now. camera-box's venv directory is adopted as it is and never written.
+ensure_system_gi() {
+    local build
+    [[ "$MODE" == desktop && -L "$VENV_LINK" ]] || return 0
+    venv_python "$VENV_LINK" -c 'import gi' >/dev/null 2>&1 && return 0
+    build=$(readlink -f "$VENV_LINK")
+    if link_system_gi "$build"; then
+        CHANGED=1
+    fi
 }
 
 # Build a fresh venv for SOURCE_ID in the store, next to the running one. Sets NEW_BUILD and
@@ -373,7 +450,7 @@ build_venv() {
     fi
     printf '%s\n' "$SOURCE_ID" >"$NEW_BUILD/.remoteos-mcp-source"
     if [[ "$MODE" == desktop ]]; then
-        link_system_gi "$NEW_BUILD"
+        link_system_gi "$NEW_BUILD" || true
     fi
     say "Built v${PKG_VER}"
 }
@@ -472,23 +549,48 @@ previous_path() {
 }
 
 # Point VENV_LINK at NEW_BUILD with one rename(2) of a new link over the old one. A real venv
-# directory there (camera-box's lib, or a hand-made one) is moved into the store first.
+# directory there (camera-box's lib, or a hand-made one) is moved into the store first. SWAPPED
+# is set FIRST: a signal can land between any two steps, and restore_previous reads the state
+# each step leaves, so every point of the swap can be undone.
 swap_venv() {
-    local tmp_link="$VENV_STORE/.link.$$"
+    TMP_LINK="$VENV_STORE/.link.$$"
+    SWAPPED=1
+    CHANGED=1
     if [[ -L "$VENV_LINK" ]]; then
         PREV_LINK_TARGET=$(readlink "$VENV_LINK")
     elif [[ -d "$VENV_LINK" ]]; then
         ADOPTED_DIR=$(mktemp -u "$VENV_STORE/adopted.XXXXXX")
         mv -T "$VENV_LINK" "$ADOPTED_DIR"
     fi
+    local tmp_link="$TMP_LINK"
     ln -sfn "$NEW_BUILD" "$tmp_link"
     mv -Tf "$tmp_link" "$VENV_LINK"
-    SWAPPED=1
-    CHANGED=1
     say "Switched ${VENV_LINK} -> ${NEW_BUILD}"
 }
 
-# Put the previous unit, key files and venv back, and restart what they run. Never exits.
+# Undo swap_venv from whatever step it reached.
+restore_venv() {
+    if [[ -n "$ADOPTED_DIR" && -d "$ADOPTED_DIR" ]]; then
+        # the real directory was moved aside: VENV_LINK is our link, or nothing yet
+        if [[ -L "$VENV_LINK" ]]; then
+            rm -f "$VENV_LINK"
+        fi
+        mv -T "$ADOPTED_DIR" "$VENV_LINK"
+    elif [[ -n "$PREV_LINK_TARGET" ]]; then
+        ln -sfn "$PREV_LINK_TARGET" "$TMP_LINK"
+        mv -Tf "$TMP_LINK" "$VENV_LINK"
+    elif [[ -L "$VENV_LINK" && "$(readlink "$VENV_LINK")" == "$NEW_BUILD" ]]; then
+        rm -f "$VENV_LINK"  # there was no venv before
+    fi
+    rm -f "$TMP_LINK"
+    rm -rf "$NEW_BUILD"
+    if [[ -n "$STORE_CREATED" ]]; then
+        rmdir "$VENV_STORE" 2>/dev/null || true
+    fi
+}
+
+# Put the previous unit, key files and venv back, and restart what they run. Never exits; never
+# stops on a failed write (it runs with SIGPIPE ignored and set +e, the console may be gone).
 restore_previous() {
     local name path
     for name in unit env config; do
@@ -501,27 +603,23 @@ restore_previous() {
         fi
     done
     if [[ -n "$SWAPPED" ]]; then
-        rm -f "$VENV_LINK"
-        if [[ -n "$PREV_LINK_TARGET" ]]; then
-            ln -sfn "$PREV_LINK_TARGET" "$VENV_LINK"
-        elif [[ -n "$ADOPTED_DIR" ]]; then
-            mv -T "$ADOPTED_DIR" "$VENV_LINK"
-        fi
-        rm -rf "$NEW_BUILD"
-        if [[ -n "$STORE_CREATED" ]]; then
-            rmdir "$VENV_STORE" 2>/dev/null || true
-        fi
+        restore_venv
     fi
     systemctl daemon-reload || true
-    systemctl restart "$SERVICE_NAME" || true
+    if [[ "$POLICY" == restart ]]; then
+        systemctl restart "$SERVICE_NAME" || true
+    fi
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         echo "        Rolled back: the previous install runs again; the old system copy was kept"
-    else
+    elif [[ "$POLICY" == restart ]]; then
         echo "        [X] Rolled back, but the previous install is not running either: journalctl -u ${SERVICE_NAME} -n 50"
+    else
+        echo "        Rolled back to the previous unit, key files and venv (enable-only: nothing started)"
     fi
 }
 
-# Is the new install what answers, and does it enforce the key? Sets HEALTH_FAILURE.
+# Is the new install what answers, and does it enforce the key? Sets HEALTH_FAILURE. It writes
+# nothing to the console: the proof's result alone decides what happens next.
 prove_health() {
     local i=0 body ver code
     local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"install-linux.sh","version":"1"}}}'
@@ -556,12 +654,15 @@ prove_health() {
         HEALTH_FAILURE="authentication is not enforced: an unauthenticated /mcp request answered ${code:-nothing} (want 401)"
         return 1
     fi
-    say "Health check OK: v${PKG_VER}; an authenticated request answered 200, an unauthenticated one 401"
 }
 
-# The new install did not prove itself: back to the previous one (a box that had one).
+# The new install did not prove itself (HEALTH_FAILURE): back to the previous one, on a box that
+# had one. It stays immune to signals and to a lost console (SIGPIPE ignored, set +e) until the
+# previous install is back: disarming first let the next echo kill bash before the restore.
 health_failed() {
-    disarm
+    trap '' PIPE HUP INT TERM
+    ARMED=""
+    set +e
     echo "        [X] The new install did not prove itself: ${HEALTH_FAILURE}"
     if [[ -n "$HAD_UNIT" ]]; then
         echo "        Rolling back to the previous install..."
@@ -610,15 +711,26 @@ on_exit() {
     exit "$rc"
 }
 
-# Write the key files and the unit, then (re)start the service.
+# Write the key files and the unit, enable the unit (camera-box's verify wants the literal
+# `enabled`), then (re)start the service unless the policy is enable-only.
 switch_to_new_install() {
+    local enabled
     mkdir -p "$CONFIG_DIR"
     chmod 755 "$CONFIG_DIR"
     write_if_changed "$CONFIG_FILE" 600 "config.json" <<<"$(config_json_text "$AUTH_KEY")"
     write_if_changed "$ENV_FILE" 600 "EnvironmentFile" <<<"$(env_file_text "$AUTH_KEY")"
     write_if_changed "$UNIT_PATH" 644 "unit" <<<"$(unit_text)"
     systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+    systemctl enable "$SERVICE_NAME" >"$WORK_DIR/enable.log" 2>&1 || true
+    enabled=$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true)
+    if [[ "${enabled%%$'\n'*}" != enabled ]]; then
+        HEALTH_FAILURE="${SERVICE_NAME}.service is not enabled (is-enabled: '${enabled}'): $(tr '\n' ' ' <"$WORK_DIR/enable.log")"
+        health_failed
+    fi
+    if [[ "$POLICY" == enable-only ]]; then
+        say "Enabled for the next boot (enable-only: not started)"
+        return 0
+    fi
     if [[ -n "$CHANGED" ]]; then
         say "Restarting ${SERVICE_NAME}..."
         systemctl restart "$SERVICE_NAME" || true
@@ -687,6 +799,7 @@ main() {
     UNIT_PATH="/etc/systemd/system/remoteos-mcp.service"
     VENV_LINK="/opt/remoteos-mcp-venv"
     VENV_STORE="/opt/remoteos-mcp-venvs"
+    LOCK_FILE="/run/lock/remoteos-mcp-install.lock"
     HEALTH_TRIES=12
     HEALTH_SLEEP=5
     CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -701,8 +814,12 @@ main() {
     GH_TOKEN_VALUE="${GH_TOKEN:-}"
     unset REMOTEOS_MCP_AUTH_KEY GH_TOKEN
     REF="${REMOTEOS_MCP_REF:-main}"
+    GIVEN_MODE="${REMOTEOS_MCP_MODE:-}"
+    GIVEN_USER="${REMOTEOS_MCP_USER:-}"
+    POLICY="${REMOTEOS_MCP_POLICY:-restart}"
 
     WORK_DIR=""
+    TMP_LINK=""
     ARMED=""
     INTERRUPTED=""
     CHANGED=""
@@ -734,7 +851,11 @@ main() {
             exit 1
         fi
     fi
-    ref_ok "$REF" || fail "REMOTEOS_MCP_REF must be a commit sha, a tag or a branch name — nothing was changed on this box"
+    check_inputs
+    # One run at a time: a second run's prune could delete the build this one just swapped in.
+    mkdir -p "$(dirname "$LOCK_FILE")"
+    exec 9>"$LOCK_FILE"
+    flock -n 9 || fail "another install-linux.sh run holds ${LOCK_FILE} — nothing was changed on this box"
 
     echo "  [1/6] Checking Python and the box..."
     find_python
@@ -752,14 +873,15 @@ main() {
     fetch_source
 
     echo "  [4/6] The venv..."
-    if [[ "$(installed_source)" == "$SOURCE_ID" ]] && venv_import_check "$VENV_LINK" >/dev/null; then
+    # The desktop tools first: they bring python3-gi, which the venv links (camera-box's order).
+    if [[ "$MODE" == desktop ]]; then
+        install_desktop_tools
+    fi
+    if venv_is_current; then
         PKG_VER=$(venv_version "$VENV_LINK")
         say "${SOURCE_ID} (v${PKG_VER}) is already installed in ${VENV_LINK}"
     else
         build_venv
-    fi
-    if [[ "$MODE" == desktop ]]; then
-        install_desktop_tools
     fi
 
     echo "  [5/6] Switching to the new install..."
@@ -769,13 +891,26 @@ main() {
     fi
     if [[ -n "$NEW_BUILD" ]]; then
         swap_venv
+    else
+        ensure_system_gi
     fi
     switch_to_new_install
-    prove_health || health_failed
+    if [[ "$POLICY" == restart ]]; then
+        if ! prove_health; then
+            health_failed
+        fi
+    fi
     disarm
     exec 3>&- 4>&-
-    remove_legacy_system_copy
-    prune_builds
+    if [[ "$POLICY" == restart ]]; then
+        say "Health check OK: v${PKG_VER}; an authenticated request answered 200, an unauthenticated one 401"
+        remove_legacy_system_copy
+        prune_builds
+    else
+        # Nothing was started: the running process (if any) still uses the old build and the
+        # old system copy, so neither goes before the next proven start.
+        say "Not started (enable-only): the old builds and any old system-python copy stay until a restart run"
+    fi
 
     echo "  [6/6] Configuring firewall and getting network info..."
     configure_firewall
