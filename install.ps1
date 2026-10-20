@@ -3,6 +3,10 @@
 
 $ErrorActionPreference = "Stop"
 $Port = 8092
+# The explicit key is read once and dropped from the environment BEFORE the first child process
+# (query user, python --version, winget, curl.exe): a child inherits $env: (#12 review round 9).
+$explicitKey = $env:REMOTEOS_MCP_AUTH_KEY
+Remove-Item Env:REMOTEOS_MCP_AUTH_KEY -ErrorAction SilentlyContinue
 
 # --- The auth key (#12): never on a command line, never printed ---------------------------------
 # The key precedence is the Linux/macOS one: an explicit REMOTEOS_MCP_AUTH_KEY, else the key the
@@ -269,9 +273,7 @@ if (-not $python) {
 
 # --- The auth key: resolved before anything changes (the old winremote config is deleted
 # below, and an invalid explicit key must be refused first) ---
-$explicitKey = $env:REMOTEOS_MCP_AUTH_KEY
-Remove-Item Env:REMOTEOS_MCP_AUTH_KEY -ErrorAction SilentlyContinue
-$tomlPath = "$desktopProfile\.config\remoteos\remoteos.toml"
+$tomlPath ="$desktopProfile\.config\remoteos\remoteos.toml"
 $oldConfigDir = "$desktopProfile\.winremote-mcp"
 $foundKeys = Get-RemoteOSExistingKeys -ConfigDir $ConfigDir -TomlPath $tomlPath -OldConfigDir $oldConfigDir
 try {

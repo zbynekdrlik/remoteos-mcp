@@ -606,6 +606,7 @@ await_proven() {
 stop_unproven() {
     systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
     systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
+    [[ ! -e "$PENDING_FILE" ]] || invocation_id >"$PENDING_FILE"  # still pending: not started since
     echo "        [X] $1: ${SERVICE_NAME} is stopped and disabled; fix the cause and rerun. Logs: journalctl -u ${SERVICE_NAME} -n 50"
 }
 
@@ -712,8 +713,7 @@ undo_switch() {
     [[ -z "$NEW_BUILD" || -n "$SWAPPED" ]] || remove_new_build
 }
 
-# This run's build (nothing points at it: the run ended before the swap, or the swap was undone),
-# and a store this run created.
+# This run's build (nothing points at it: no swap yet, or undone) and a store this run created.
 remove_new_build() {
     rm -rf "$NEW_BUILD"
     [[ -z "$STORE_CREATED" ]] || rmdir "$VENV_STORE" 2>/dev/null || true

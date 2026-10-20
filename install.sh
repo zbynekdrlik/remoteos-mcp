@@ -17,6 +17,10 @@ PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 # bash keeps the export flag of a name the caller exported (globals AND locals): unset every
 # name that ever holds the key, so none of them reaches a child's environment (#12).
 unset AUTH_KEY EXPLICIT_KEY CFG_KEY PLIST_KEY KEY_SOURCE k key
+# The explicit key is read once and dropped from the environment BEFORE the first child
+# (`python3 --version`, a brew fallback): every child inherits it (review round 9).
+EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
+unset REMOTEOS_MCP_AUTH_KEY
 
 echo ""
 echo "  RemoteOS MCP Installer (macOS)"
@@ -110,8 +114,6 @@ elif isinstance(p.get("EnvironmentVariables"), dict):
 print(key if isinstance(key, str) else "", end="")' "$1" 2>/dev/null || true
 }
 
-EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
-unset REMOTEOS_MCP_AUTH_KEY
 KEY_SOURCE=""
 CFG_KEY=$(key_from_config "$CONFIG_FILE")
 if [[ -n "$EXPLICIT_KEY" ]]; then
