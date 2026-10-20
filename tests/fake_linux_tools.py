@@ -33,7 +33,8 @@ Config keys (JSON):
                      the installer, as an ssh drop / timeout / Ctrl-C would),
                  "restart_waits_for": path  (the first restart waits for the file),
                  "health_waits_for": path  (/health waits for the file),
-                 "enable_fails": bool  (`systemctl enable` fails, the unit stays disabled)}
+                 "enable_fails": bool  (the unit is masked: `systemctl enable` fails and
+                     `is-enabled` answers `masked`)}
   uids          {"account": uid}
 """
 
@@ -269,8 +270,12 @@ def systemctl(cfg: dict, args: list[str]) -> int:
             print("active" if state["active"] else "inactive")
         rc = 0 if state["active"] else 3
     elif verb == "is-enabled":
-        print("enabled" if state["enabled"] else "disabled")
-        rc = 0 if state["enabled"] else 1
+        if cfg.get("service", {}).get("enable_fails"):
+            print("masked")  # what makes `systemctl enable` fail
+            rc = 1
+        else:
+            print("enabled" if state["enabled"] else "disabled")
+            rc = 0 if state["enabled"] else 1
     Path(cfg["state"]).write_text(json.dumps(state, indent=1))
     return rc
 

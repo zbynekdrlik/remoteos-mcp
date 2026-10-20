@@ -535,9 +535,9 @@ class TestDesktopMode:
         assert _without_description(box.unit()) == _without_description(
             camera_box_unit(box.venv_link, box.env_file, mode="desktop"))
         assert f"Environment=XDG_RUNTIME_DIR=/run/user/{SERVICE_UID}" in box.unit().splitlines()
-        gi = box.venv_python("import gi; print(gi.SYSTEM_GI, gi.__file__)")
+        gi = box.venv_python("import gi, os; print(gi.SYSTEM_GI, os.path.realpath(gi.__file__))")
         assert gi.returncode == 0, gi.stderr
-        assert gi.stdout.split()[0] == "True" and str(box.system_extra) in gi.stdout
+        assert gi.stdout.split()[0] == "True" and str(box.system_extra.resolve()) in gi.stdout
         assert any("xdotool" in a for a in box.calls("apt-get")), box.calls("apt-get")
 
     def test_a_headless_box_gets_the_headless_unit_and_no_system_packages(self, tmp_path: Path) -> None:
