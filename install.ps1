@@ -43,7 +43,7 @@ function Get-RemoteOSKeyFromStartScript([string]$Path) {
     # `... -m remoteos ... --auth-key "<key>"`
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     foreach ($line in Get-Content -LiteralPath $Path) {
-        if ($line -match '^\s*set\s+"REMOTEOS_AUTH_KEY=([^"]*)"') { return $Matches[1] }
+        if ($line -match '^\s*set\s+"REMOTEOS_AUTH_KEY=([^"]+)"') { return $Matches[1] }  # not the clearing line
         if ($line -match '\s--auth-key\s+"?([^"\s]+)"?') { return $Matches[1] }
     }
     return $null
@@ -98,14 +98,14 @@ function Resolve-RemoteOSAuthKey([string]$Explicit, $Found) {
 }
 
 function New-RemoteOSStartScript([string]$PythonPath, [int]$Port, [string]$AuthKey) {
-    # The start script: an auto-restart loop with a crash guard. The key is in its environment
-    # (`set "REMOTEOS_AUTH_KEY=..."`), never on the server's command line.
+    # The start script: an auto-restart loop with a crash guard. The key is in the server's
+    # environment (`set "REMOTEOS_AUTH_KEY=..."`), never on its command line, and set only around
+    # the server line: every other program cmd.exe starts (netstat, findstr, timeout) inherits it.
     if (-not (Test-RemoteOSKey $AuthKey)) { throw "refusing to write an invalid auth key into the start script" }
     return @"
 @echo off
 title RemoteOS MCP (port $Port)
-REM remoteos reads its auth key from REMOTEOS_AUTH_KEY, so it is never on the command line.
-set "REMOTEOS_AUTH_KEY=$AuthKey"
+REM remoteos reads its auth key from REMOTEOS_AUTH_KEY, set only for the server itself.
 echo.
 echo  RemoteOS MCP Server
 echo  Port: $Port
@@ -120,8 +120,10 @@ if %errorlevel%==0 (
 )
 echo  [%date% %time%] Starting server...
 set START_TIME=%time%
+set "REMOTEOS_AUTH_KEY=$AuthKey"
 "$PythonPath" -m remoteos --transport streamable-http --enable-all --host 0.0.0.0 --port $Port
 set EXIT_CODE=%errorlevel%
+set "REMOTEOS_AUTH_KEY="
 echo  [%date% %time%] Server exited (code %EXIT_CODE%).
 REM Crash guard: if server ran less than 30 seconds, count as rapid failure
 call :elapsed_check
@@ -273,7 +275,7 @@ if (-not $python) {
 
 # --- The auth key: resolved before anything changes (the old winremote config is deleted
 # below, and an invalid explicit key must be refused first) ---
-$tomlPath ="$desktopProfile\.config\remoteos\remoteos.toml"
+$tomlPath = "$desktopProfile\.config\remoteos\remoteos.toml"
 $oldConfigDir = "$desktopProfile\.winremote-mcp"
 $foundKeys = Get-RemoteOSExistingKeys -ConfigDir $ConfigDir -TomlPath $tomlPath -OldConfigDir $oldConfigDir
 try {

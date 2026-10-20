@@ -17,9 +17,8 @@
 #   read -rs k
 #   curl -fsSL …/install-linux.sh | REMOTEOS_MCP_AUTH_KEY="$k" sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash
 #
-# camera-box's layout (/opt/remoteos-mcp-venv → a build in /opt/remoteos-mcp-venvs/); the key
-# only in 0600 files under /etc/remoteos-mcp, never in the unit, an argv or this output. The
-# layout, the order and the rollback rules: README "Install" and .claude/rules/installers.md.
+# camera-box's venv layout; the key only in 0600 files under /etc/remoteos-mcp, never in the unit,
+# an argv or this output. Layout, order and rollback: README "Install", .claude/rules/installers.md.
 set -euo pipefail
 
 say() { echo "        $*"; }
@@ -591,22 +590,22 @@ restore_previous() {
     fi
 }
 
-# Wait until what runs proves itself again (check_running_install: read-only, no key sent).
-await_proven() {
+# poll_running_install await|read: check_running_install up to HEALTH_TRIES times, until proven
+# (await), or while the unit is active but does not answer yet (read: it may be binding).
+poll_running_install() {
     local i
     for ((i = 0; i < HEALTH_TRIES; i++)); do
         check_running_install
-        [[ -z "$PREV_PROVEN" ]] || return 0
+        [[ -z "$PREV_PROVEN" && ( "$1" == await || -n "$NO_ANSWER" ) ]] || return 0
         sleep "$HEALTH_SLEEP"
     done
-    return 1
 }
 
 # stop_unproven WHY: nothing proven runs, so nothing runs (it may be an agent with auth off).
 stop_unproven() {
     systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
     systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
-    [[ ! -e "$PENDING_FILE" ]] || invocation_id >"$PENDING_FILE"  # still pending: not started since
+    [[ ! -e "$PENDING_FILE" ]] || invocation_id >"$PENDING_FILE"  # after the disable: still pending
     echo "        [X] $1: ${SERVICE_NAME} is stopped and disabled; fix the cause and rerun. Logs: journalctl -u ${SERVICE_NAME} -n 50"
 }
 
@@ -627,11 +626,12 @@ unauth_code() {
 # version, an unauthenticated request refused. Read-only, no key sent. Only that is restored.
 check_running_install() {
     local py running
-    PREV_PROVEN=""
+    PREV_PROVEN="" NO_ANSWER=""
     [[ -n "$HAD_UNIT" && -z "$WAS_PENDING" ]] || return 0
     py=$(first_value 'ExecStart=' "$OLD_UNIT" | awk '{ print $1; exit }')
     [[ "${py##*/}" == python* ]] || return 0
-    systemctl is-active --quiet "$SERVICE_NAME" && running=$(health_version) || return 0
+    systemctl is-active --quiet "$SERVICE_NAME" || return 0
+    running=$(health_version) || { NO_ANSWER=1; return 0; }
     [[ -n "$running" && "$running" == "$(python_version "$py")" && "$(unauth_code)" == 401 ]] || return 0
     PREV_PROVEN=1
 }
@@ -701,7 +701,8 @@ undo_switch() {
             echo "        Rolling back to the previous install..."
             restore_previous
         fi
-        if ! await_proven; then
+        poll_running_install await
+        if [[ -z "$PREV_PROVEN" ]]; then
             stop_unproven "The previous install does not prove itself again (not running, another version or no authentication)"
         elif [[ -n "$MODIFIED" ]]; then
             echo "        Rolled back: the previous install runs again and proved itself; the old system copy was kept"
@@ -945,7 +946,7 @@ main() {
     elif [[ -e "$PENDING_FILE" ]]; then
         say "An earlier switch has run since (the unit started again): it is checked as it runs"
     fi
-    [[ "$POLICY" != restart ]] || check_running_install  # before the switch: what a failure may go back to
+    [[ "$POLICY" != restart ]] || poll_running_install read  # before the switch: what a failure may go back to
     arm
     mkdir -p "$CONFIG_DIR"
     invocation_id >"$PENDING_FILE"
@@ -968,7 +969,7 @@ main() {
     else
         # A switch stays pending; a no-op on a proven running install leaves it proven. Old builds
         # go (the link points at the new one); an old system copy stays (a legacy process).
-        [[ -n "$CHANGED" ]] || check_running_install
+        [[ -n "$CHANGED" ]] || poll_running_install read
         if [[ -n "$PREV_PROVEN" ]]; then
             rm -f "$PENDING_FILE"
             say "Nothing changed (enable-only): the proven running install was not touched"
