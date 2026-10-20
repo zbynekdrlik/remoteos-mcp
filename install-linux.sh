@@ -234,10 +234,9 @@ user_from_unit_text() {
     printf '%s' "${v%"${v##*[![:space:]]}"}"
 }
 
-# Sets OLD_UNIT, MODE (desktop | headless), SERVICE_USER, SERVICE_UID. An explicit
-# REMOTEOS_MCP_MODE / REMOTEOS_MCP_USER wins (camera-box's provisioning passes them), else the
-# existing unit, so a re-run never changes the box's shape or moves the agent to another
-# account; else the session check / SUDO_USER / root.
+# Sets OLD_UNIT, MODE (desktop | headless), SERVICE_USER, SERVICE_UID. REMOTEOS_MCP_MODE/USER
+# win (camera-box passes them), else the existing unit's (a re-run never changes the box's shape
+# or account), else the session check / SUDO_USER / root.
 detect_layout() {
     local u old_display
     OLD_UNIT=$(cat "$UNIT_PATH" 2>/dev/null || true)
@@ -312,9 +311,8 @@ check_inputs() {
 
 # --- the source and the venv -------------------------------------------------------------------
 
-# Download the GitHub tarball of REF into $WORK_DIR/src; sets SOURCE_ID (its top directory,
-# e.g. zbynekdrlik-remoteos-mcp-8b4ce58: it carries the commit). Code and constraints.txt come
-# from the same tarball, so they always match.
+# Download the GitHub tarball of REF into $WORK_DIR/src; sets SOURCE_ID (its top dir, e.g.
+# zbynekdrlik-remoteos-mcp-8b4ce58: the commit). Code and constraints.txt always match.
 fetch_source() {
     local url="https://api.github.com/repos/${REPO}/tarball/${REF}" tgz="$WORK_DIR/source.tar.gz" rc=0
     if [[ -n "$GH_TOKEN_VALUE" ]]; then
@@ -358,10 +356,9 @@ venv_import_check() {
     venv_python "$1" -c 'import remoteos.__main__, fastmcp; from fastmcp import FastMCP' 2>&1
 }
 
-# The source id the installed venv records, or nothing: ours (.remoteos-mcp-source) or, for a
-# venv camera-box's lib built, its .camera-box-source. Both in one venv = camera-box's lib
-# upgraded our build in place (it writes into whatever /opt/remoteos-mcp-venv points at), so
-# our marker no longer says what is installed: nothing.
+# The source id the installed venv records: ours (.remoteos-mcp-source) or camera-box's
+# (.camera-box-source). Both = camera-box's lib upgraded our build in place (it writes into
+# whatever /opt/remoteos-mcp-venv points at): our marker no longer says what is installed.
 installed_source() {
     local ours="$VENV_LINK/.remoteos-mcp-source" theirs="$VENV_LINK/.camera-box-source"
     if [[ -f "$ours" && -f "$theirs" ]]; then
@@ -392,10 +389,9 @@ build_failed() {
     exit 1
 }
 
-# Desktop mode: let the venv import the system python's GI bindings (python3-gi), which
-# AnnotatedSnapshot's AT-SPI tree needs, and nothing else of the system's packages: a
-# directory in the build holding one link to the system `gi` package, named by a .pth after
-# the venv's own site-packages. Returns 1 when the system python has no gi.
+# Desktop mode: the venv imports the system's GI bindings (python3-gi, for AnnotatedSnapshot's
+# AT-SPI tree) and nothing else of the system's: a build dir holding one link to the system `gi`
+# package, named by a .pth after the venv's own site-packages. Returns 1 when there is no gi.
 link_system_gi() {
     local build="$1" gi_pkg purelib
     gi_pkg=$("$PYTHON" -c 'import os, gi; print(os.path.dirname(os.path.abspath(gi.__file__)))' 2>/dev/null) \
@@ -904,7 +900,10 @@ main() {
     check_inputs
     # One run at a time: a second run's prune could delete the build this one just swapped in.
     command -v flock &>/dev/null || fail "flock (util-linux) is missing — nothing was changed on this box"
+    umask 077  # owner-only: flock(2) works on a read-only fd, so any reader could block us
     exec 9>"$LOCK_FILE"
+    umask 022
+    chmod 600 "$LOCK_FILE"  # an older run's lock was 0644
     flock -n 9 || fail "another install-linux.sh run holds ${LOCK_FILE} — nothing was changed on this box"
 
     echo "  [1/6] Checking Python and the box..."
@@ -967,11 +966,15 @@ main() {
         remove_legacy_system_copy
         prune_builds
     else
-        # Nothing started: the switch stays pending (the next restart run proves it). Old builds
-        # can go: a venv process imports through the link, which points at the new build. An
-        # old system-python copy stays: a running legacy process may still import from it.
+        # A switch stays pending; a no-op leaves the mark as it was (a pending one set CHANGED). Old
+        # builds go (the link points at the new one); an old system copy stays (a legacy process).
+        if [[ -n "$CHANGED" ]]; then
+            say "Not started (enable-only): the next restart run restarts and proves it; any old system-python copy stays until then"
+        else
+            rm -f "$PENDING_FILE"
+            say "Nothing changed (enable-only): the running service was not touched"
+        fi
         prune_builds
-        say "Not started (enable-only): the next restart run restarts and proves it; any old system-python copy stays until then"
     fi
 
     echo "  [6/6] Configuring firewall and getting network info..."
