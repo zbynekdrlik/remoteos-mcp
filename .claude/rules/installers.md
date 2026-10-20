@@ -48,8 +48,10 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 - **Never put the key into an argv on the way either.** Python reads a key file from stdin or
   by path and prints the key to a `$(…)`; files are written by `printf` / a here-string into a
   0600 temp file, then renamed; the health check sends `Authorization: Bearer` with
-  `curl -H @-`; `GH_TOKEN` goes the same way. `unset` the secret env vars after reading them, so
-  no child inherits them.
+  `curl -H @-`; `GH_TOKEN` goes the same way. Read the secret env vars and `unset` them (Windows:
+  `Remove-Item Env:`) BEFORE the installer's FIRST child — the Python check, `query user`, brew,
+  winget — not after it: every child inherits them (review round 9; pinned on Linux and macOS by
+  the child-environment tests, on Windows by a static order test).
 - Windows keys come from `RandomNumberGenerator` (rejection sampling, no modulo bias), never
   `Get-Random` (no CSPRNG; `-Count 32` drew 32 DISTINCT characters).
 - PowerShell: `-cmatch '^[A-Za-z0-9]+\z'`, never `$` (it matches before a trailing newline);
@@ -159,7 +161,9 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
      proven → `stop_unproven` (round 7: the restored FILES may not be what the process ran, e.g.
      an EnvironmentFile changed under it to an empty key = authentication off). Not PROVEN before
      the run (a fresh box, a pending switch, files never run, auth off) → `stop_unproven`, the
-     files + the pending marker kept for a re-run. An
+     files + the pending marker kept for a re-run; `stop_unproven` re-stamps a kept mark with the
+     stopped unit's InvocationID (the run's own restart made a new one), so the re-run takes it
+     as pending, not as "has run since" (round 9). An
      unproven state may be an agent with authentication off (a full shell on 0.0.0.0): it is
      never "rolled back" into running (review round 3). **enable-only never starts or stops
      anything**: its failure puts the previous files back with no restart (a fresh box: the unit is

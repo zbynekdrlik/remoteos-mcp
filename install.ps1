@@ -434,7 +434,8 @@ try {
 # --- Firewall + Network profile ---
 Write-Host "  [6/6] Configuring firewall..." -ForegroundColor White
 try {
-    # Ensure network is Private (firewall rule only allows Private/Domain)
+    # Set the network to Private (the rule below allows every profile, but a Public network may
+    # carry other blocking rules)
     Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object {
         $_.NetworkCategory -eq "Public"
     } | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue

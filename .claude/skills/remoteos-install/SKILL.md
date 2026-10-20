@@ -36,7 +36,7 @@ Verify after a (re)install: the key is unchanged (the client config still gets 2
 
 ### Windows network profile fix (if firewall rule doesn't work)
 
-Network must be **Private** (not Public) for the firewall rule to apply:
+The installer's firewall rule allows TCP 8092 on **all** profiles (`-Profile Any`), so the profile alone does not block it. If clients still cannot connect, check for another rule or a third-party firewall that blocks the port on a Public network, and set the profile to Private:
 
 ```powershell
 Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private
