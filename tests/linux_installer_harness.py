@@ -209,6 +209,27 @@ class LinuxBox:
             env={**self.env, **env},
         )
 
+    def run_and_drop_console(self, marker: str, release: Path) -> int:
+        """Run the installer with stdout+stderr on ONE pipe, close it after the line holding
+        `marker` (a dropped `ssh box 'curl … | sudo bash'` has no tty and sends no SIGHUP: the
+        installer just writes into a dead pipe), then create `release` so a fake waiting on it
+        goes on."""
+        proc = subprocess.Popen(
+            [os.environ.get("INSTALLER_TEST_BASH", "bash"), str(self.script)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=self.env, start_new_session=True,
+        )
+        assert proc.stdout is not None
+        seen = b""
+        for line in proc.stdout:
+            seen += line
+            if marker.encode() in line:
+                break
+        proc.stdout.close()
+        release.touch()
+        returncode = proc.wait(timeout=120)
+        assert marker.encode() in seen, f"the installer never printed {marker!r}:\n{seen.decode(errors='replace')}"
+        return returncode
+
     # --- reading the result ------------------------------------------------
     def state(self) -> dict:
         return fake_linux_tools._load(self.cfg()["state"])

@@ -329,6 +329,44 @@ class TestProveHealth:
         if loaded is not None:  # start_fails keeps the old unit down too; the others restart it
             assert loaded["python"].endswith("/shims/python3") and loaded["key"] == K_UNIT
 
+    @pytest.mark.parametrize("signal_name", ["TERM", "HUP", "INT"])
+    def test_an_interrupted_switch_is_rolled_back(self, tmp_path: Path, signal_name: str) -> None:
+        """An ssh drop (HUP), a timeout's TERM or Ctrl-C while the box switches to the new install
+        (venv swapped, files written, service restarting) must leave the previous install."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        unit_before, config_before = box.unit(), box.config_file.read_bytes()
+        box.configure(service={"signal_on_restart": signal_name})
+
+        result = box.run()
+        out = _output(result)
+
+        assert result.returncode != 0, out
+        assert "Interrupted" in out, out
+        assert box.unit() == unit_before
+        assert box.config_file.read_bytes() == config_before
+        assert not box.env_file.exists() and not box.venv_link.is_symlink() and _builds(box) == []
+        assert box.pip.versions("remoteos-mcp") == [LEGACY_VERSION]
+        service = box.state()["service"]
+        assert service["python"].endswith("/shims/python3") and service["key"] == K_UNIT
+
+    def test_a_console_lost_while_switching_is_rolled_back(self, tmp_path: Path) -> None:
+        """A dropped no-tty `ssh box 'curl … | sudo bash'` sends no signal: the installer's next
+        write fails. Unproven, the switch must not stay half done."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        unit_before = box.unit()
+        release = tmp_path / "console-closed"
+        box.configure(service={"restart_waits_for": str(release)})
+
+        returncode = box.run_and_drop_console("Restarting", release)
+
+        assert returncode != 0
+        assert box.unit() == unit_before
+        assert not box.env_file.exists() and not box.venv_link.is_symlink() and _builds(box) == []
+        assert box.pip.versions("remoteos-mcp") == [LEGACY_VERSION]
+        assert box.state()["service"]["python"].endswith("/shims/python3")
+
     def test_a_service_reporting_another_version_is_a_failure_naming_both(self, tmp_path: Path) -> None:
         box = linux_box(tmp_path)
         box.configure(service={"serve_version": "0.0.1"})
@@ -434,7 +472,16 @@ class TestSource:
         assert box.state()["service"]["version"] == "0.7.0.dev40"
         assert (box.venv_target() / ".remoteos-mcp-source").read_text().strip() == source_id
 
-    @pytest.mark.parametrize("bad", ["main;id", "../../x", "a b", ""])
+    def test_an_empty_ref_means_main(self, tmp_path: Path) -> None:
+        """`${REMOTEOS_MCP_REF:-main}`, as camera-box's lib reads its ref."""
+        box = linux_box(tmp_path)
+
+        result = box.run(REMOTEOS_MCP_REF="")
+
+        assert result.returncode == 0, _output(result)
+        assert [r["url"] for r in box.curl_requests() if "/tarball/" in r["url"]][0].endswith("/tarball/main")
+
+    @pytest.mark.parametrize("bad", ["main;id", "../../x", "a b", "-main", "x/../y"])
     def test_an_invalid_ref_is_refused_before_anything_changes(self, tmp_path: Path, bad: str) -> None:
         box = linux_box(tmp_path)
         box.install_legacy(K_UNIT)

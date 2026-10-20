@@ -28,7 +28,10 @@ Config keys (JSON):
   venv_pip      fake_pip.py options for installs into a venv (install_fail, install_broken, ...)
   venv_fail     `python3 -m venv` fails until apt-get installed python3-venv
   service       {"start_fails": bool, "serve_version": str, "initialize_code": int,
-                 "unauth_code": int}
+                 "unauth_code": int,
+                 "signal_on_restart": "TERM" | "HUP" | "INT"  (the first restart signals
+                     the installer, as an ssh drop / timeout / Ctrl-C would),
+                 "restart_waits_for": path  (the first restart waits for the file)}
   uids          {"account": uid}
 """
 
@@ -38,9 +41,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import sysconfig
+import time
 from pathlib import Path
 
 PORT = 8092
@@ -202,6 +207,15 @@ def _run_unit(cfg: dict, text: str) -> tuple[dict | None, str]:
     }, ""
 
 
+def _wait_for(path: str) -> None:
+    """Block until the test has done its part (e.g. closed the installer's console)."""
+    deadline = time.monotonic() + 30
+    while not os.path.exists(path):
+        if time.monotonic() > deadline:
+            raise SystemExit(f"fake systemctl: {path} never appeared")
+        time.sleep(0.02)
+
+
 def systemctl(cfg: dict, args: list[str]) -> int:
     state = _load(cfg["state"]) or {"enabled": False, "active": False, "starts": 0, "restarts": 0, "reloads": 0}
     flags = [a for a in args if a.startswith("-")]
@@ -213,6 +227,14 @@ def systemctl(cfg: dict, args: list[str]) -> int:
         unit = Path(cfg["unit_path"])
         state["loaded_unit"] = unit.read_text() if unit.exists() else None
     elif verb in ("start", "restart"):
+        overrides = cfg.get("service", {})
+        if verb == "restart" and not state.get("interrupted"):
+            if overrides.get("restart_waits_for"):
+                _wait_for(overrides["restart_waits_for"])
+            if overrides.get("signal_on_restart"):
+                state["interrupted"] = True
+                Path(cfg["state"]).write_text(json.dumps(state, indent=1))
+                os.kill(os.getppid(), getattr(signal, f"SIG{overrides['signal_on_restart']}"))
         if verb == "start" and state["active"]:
             pass  # systemd: starting an active unit does nothing; a changed unit is NOT loaded
         else:
