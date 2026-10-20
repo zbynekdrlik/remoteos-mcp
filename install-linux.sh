@@ -17,22 +17,9 @@
 #   read -rs REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY
 #   curl -fsSL …/install-linux.sh | sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash
 #
-# Layout (#12: the one camera-box's scripts/lib/remoteos-mcp.sh runs on strih-snv, strih-pp,
-# stream-pp and the cams, so both installers produce the same box):
-#   /opt/remoteos-mcp-venv                    what the unit runs: a symlink to the current build
-#                                             in /opt/remoteos-mcp-venvs/. A real venv directory
-#                                             there (camera-box's lib) is adopted as it is.
-#   /etc/remoteos-mcp/config.json             0600, the key store
-#   /etc/remoteos-mcp/remoteos-mcp.env        0600, REMOTEOS_AUTH_KEY=<key>: the EnvironmentFile
-#   /etc/systemd/system/remoteos-mcp.service  0644, never carries the key
-# The key is never in the unit, in an argv or in this installer's output.
-#
-# Order (.claude/rules/installers.md has the details): inputs + lock → key → ONE tarball of the
-# ref → build a fresh venv side by side → swap the link, write the files, restart → prove it
-# (/health = the build, authenticated initialize 200, unauthenticated 401) → only then remove
-# the old system-python copy and old builds. A failed download or build changes nothing; a
-# switch that fails or is interrupted before its proof goes back to the previous PROVEN install,
-# or is stopped when there is none (never an unproven agent left up).
+# camera-box's layout (/opt/remoteos-mcp-venv → a build in /opt/remoteos-mcp-venvs/); the key
+# only in 0600 files under /etc/remoteos-mcp, never in the unit, an argv or this output. The
+# layout, the order and the rollback rules: README "Install" and .claude/rules/installers.md.
 set -euo pipefail
 
 say() { echo "        $*"; }
@@ -76,16 +63,11 @@ key_ok() {
 
 # The value after `--auth-key` on a unit's ExecStart (what our pre-#12 installer wrote).
 key_from_unit_text() {
-    local line rest
-    while IFS= read -r line; do
-        case "$line" in
-            ExecStart=*--auth-key\ *)
-                rest="${line#*--auth-key }"
-                printf '%s' "${rest%% *}"
-                return 0
-                ;;
-        esac
-    done <<<"${1-}"
+    local rest
+    rest=$(first_value 'ExecStart=' "${1-}")
+    [[ "$rest" == *"--auth-key "* ]] || return 0
+    rest="${rest#*--auth-key }"
+    printf '%s' "${rest%% *}"
 }
 
 # first_value PREFIX TEXT: the rest of TEXT's first line that starts with PREFIX, or nothing.
@@ -121,11 +103,9 @@ generate_key() {
     "$PYTHON" -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32)), end='')"
 }
 
-# Sets AUTH_KEY, and KEY_SOURCE (where it came from, never the value; empty = new). The key
-# precedence is camera-box's: explicit, the running unit's (a legacy --auth-key, else its
-# EnvironmentFile), config.json, new. A re-run never changes the key: the first key the box
-# has decides, and one this installer cannot carry (not 1-128 letters/digits) is refused,
-# never silently replaced by a new one.
+# Sets AUTH_KEY and KEY_SOURCE (where from, never the value; empty = new). camera-box's order:
+# explicit, the running unit's (a legacy --auth-key, else its EnvironmentFile), config.json, new.
+# The first key the box has decides; one this installer cannot carry is refused, never replaced.
 resolve_key() {
     local unit_key env_key cfg_key
     cfg_key=$(key_from_config_text "$(cat "$CONFIG_FILE" 2>/dev/null || true)")
@@ -296,17 +276,13 @@ detect_layout() {
 check_inputs() {
     ref_ok "$REF" \
         || fail "REMOTEOS_MCP_REF must be a commit sha, a tag or a branch name — nothing was changed on this box"
-    case "$GIVEN_MODE" in
-        '' | desktop | headless) ;;
-        *) fail "REMOTEOS_MCP_MODE must be desktop or headless — nothing was changed on this box" ;;
-    esac
+    [[ "$GIVEN_MODE" =~ ^(desktop|headless)?$ ]] \
+        || fail "REMOTEOS_MCP_MODE must be desktop or headless — nothing was changed on this box"
     if [[ -n "$GIVEN_USER" ]] && ! name_ok "$GIVEN_USER"; then
         fail "REMOTEOS_MCP_USER must be an account name — nothing was changed on this box"
     fi
-    case "$POLICY" in
-        restart | enable-only) ;;
-        *) fail "REMOTEOS_MCP_POLICY must be restart or enable-only — nothing was changed on this box" ;;
-    esac
+    [[ "$POLICY" =~ ^(restart|enable-only)$ ]] \
+        || fail "REMOTEOS_MCP_POLICY must be restart or enable-only — nothing was changed on this box"
 }
 
 # --- the source and the venv -------------------------------------------------------------------
@@ -339,16 +315,27 @@ fetch_source() {
     say "Source: ${REF} = ${SOURCE_ID}"
 }
 
-# Run a venv's python under a minimal environment: it imports the package's code. A check
-# reads the venv, never writes it (no __pycache__ in an adopted venv).
+# Run a python under a minimal environment: it imports the package's code. A check reads,
+# never writes (no __pycache__ in an adopted venv).
+run_python() {
+    local py="$1"
+    shift
+    env -i PATH="$PATH" HOME="$PIP_HOME" LANG="${LANG:-C.UTF-8}" PYTHONDONTWRITEBYTECODE=1 "$py" "$@"
+}
+
 venv_python() {
     local venv="$1"
     shift
-    env -i PATH="$PATH" HOME="$PIP_HOME" LANG="${LANG:-C.UTF-8}" PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" "$@"
+    run_python "$venv/bin/python" "$@"
+}
+
+# The remoteos-mcp version a python (a venv's, or the unit's) has installed, or nothing.
+python_version() {
+    run_python "$1" -c 'import importlib.metadata as m; print(m.version("remoteos-mcp"))' 2>/dev/null || true
 }
 
 venv_version() {
-    venv_python "$1" -c 'import importlib.metadata as m; print(m.version("remoteos-mcp"))' 2>/dev/null || true
+    python_version "$1/bin/python"
 }
 
 # Import what the service runs (`python -m remoteos`), minus starting it.
@@ -356,9 +343,8 @@ venv_import_check() {
     venv_python "$1" -c 'import remoteos.__main__, fastmcp; from fastmcp import FastMCP' 2>&1
 }
 
-# The source id the installed venv records: ours (.remoteos-mcp-source) or camera-box's
-# (.camera-box-source). Both = camera-box's lib upgraded our build in place (it writes into
-# whatever /opt/remoteos-mcp-venv points at): our marker no longer says what is installed.
+# The installed venv's source id: ours (.remoteos-mcp-source) or camera-box's. Both = camera-box's
+# lib upgraded our build in place (it writes through the link): ours no longer says what is there.
 installed_source() {
     local ours="$VENV_LINK/.remoteos-mcp-source" theirs="$VENV_LINK/.camera-box-source"
     if [[ -f "$ours" && -f "$theirs" ]]; then
@@ -372,8 +358,7 @@ source_version() {
     sed -n '/^version *= *"/{s/^version *= *"\([^"]*\)".*/\1/p;q;}' "$SRC_DIR/pyproject.toml"
 }
 
-# Is the installed venv exactly the downloaded source, working? Its marker, its version and
-# the import check must all agree; anything else is rebuilt.
+# Is the installed venv exactly the downloaded source (marker, version, import), working?
 venv_is_current() {
     [[ -n "$SOURCE_ID" && "$(installed_source)" == "$SOURCE_ID" ]] || return 1
     [[ "$(venv_version "$VENV_LINK")" == "$(source_version)" ]] || return 1
@@ -389,9 +374,8 @@ build_failed() {
     exit 1
 }
 
-# Desktop mode: the venv imports the system's GI bindings (python3-gi, for AnnotatedSnapshot's
-# AT-SPI tree) and nothing else of the system's: a build dir holding one link to the system `gi`
-# package, named by a .pth after the venv's own site-packages. Returns 1 when there is no gi.
+# Desktop mode: the venv imports the system's `gi` (AT-SPI) and nothing else of the system's: a
+# build dir holding one link to it, named by a .pth in the venv's site-packages. 1 = no gi.
 link_system_gi() {
     local build="$1" gi_pkg purelib
     gi_pkg=$("$PYTHON" -c 'import os, gi; print(os.path.dirname(os.path.abspath(gi.__file__)))' 2>/dev/null) \
@@ -418,14 +402,14 @@ ensure_system_gi() {
     [[ "$MODE" == desktop && -L "$VENV_LINK" ]] || return 0
     venv_python "$VENV_LINK" -c 'import gi' >/dev/null 2>&1 && return 0
     build=$(readlink -f "$VENV_LINK")
+    GI_LINKED=$build MODIFIED=1  # set first: restore_previous takes the link out again
     if link_system_gi "$build"; then
         CHANGED=1
     fi
 }
 
-# Build a fresh venv for SOURCE_ID in the store, next to the running one. Sets NEW_BUILD and
-# PKG_VER. pip runs the source's (and every sdist's) build code, so it runs under an env
-# ALLOWLIST: no GH_TOKEN, no key, nothing the caller exported.
+# Build a fresh venv for SOURCE_ID next to the running one; sets NEW_BUILD and PKG_VER. pip runs
+# build code, so under an env ALLOWLIST: no GH_TOKEN, no key, nothing the caller exported.
 build_venv() {
     local log="$WORK_DIR/pip.log" pv out
     local -a pip_env
@@ -474,12 +458,9 @@ build_venv() {
     say "Built v${PKG_VER}"
 }
 
+# A desktop box gets the desktop tools' backends (headless boxes, the cams, stay stub-only):
+# ffmpeg = ScreenRecord (#8), pyatspi/gir/gi = the AT-SPI tree (#7), xrandr = frames (#28).
 install_desktop_tools() {
-    # A desktop box gets xdotool/scrot/xclip/wmctrl + tesseract so the desktop tools (Snapshot,
-    # Click, Type, clipboard, OCR, ...) work; headless boxes (the cams) stay stub-only.
-    #   ffmpeg                     -> ScreenRecord (x11grab, issue #8)
-    #   python3-pyatspi/gir/gi     -> AnnotatedSnapshot AT-SPI tree (issue #7)
-    #   x11-xserver-utils (xrandr) -> per-monitor Snapshot/input frames (issue #28)
     if command -v apt-get &>/dev/null; then
         apt-get update -qq || true
         apt-get install -y -qq xdotool scrot xclip wmctrl tesseract-ocr ffmpeg x11-xserver-utils \
@@ -493,9 +474,8 @@ install_desktop_tools() {
 
 # --- the switch: venv link, key files, unit, service ------------------------------------------
 
-# camera-box's unit shapes (remoteos_mcp_unit_text), line for line. The existing unit's
-# Description= is kept: camera-box's lib writes its own, and a cosmetic difference alone must
-# not restart a live box (nor flip-flop between the two).
+# camera-box's unit shapes (remoteos_mcp_unit_text), line for line. The existing Description= is
+# kept: a cosmetic difference alone must not restart a live box (nor flip-flop with camera-box).
 unit_text() {
     local after="network.target"
     [[ "$MODE" == desktop ]] && after="network.target graphical-session.target"
@@ -519,9 +499,8 @@ env_file_text() {
     printf 'REMOTEOS_AUTH_KEY=%s\n' "$1"
 }
 
-# write_if_changed PATH MODE LABEL (content on stdin, a here-string: never a pipe, so CHANGED
-# is set in this shell). Content, mode AND owner must match, or the file is rewritten: through
-# a temp file that is 0600 from the start, then renamed.
+# write_if_changed PATH MODE LABEL (content on stdin: a here-string, so CHANGED is set in this
+# shell). Content, mode AND owner must match, or it is rewritten through a 0600 temp file.
 write_if_changed() {
     local path="$1" mode="$2" label="$3" tmp
     tmp=$(mktemp "${path}.XXXXXX")
@@ -533,8 +512,8 @@ write_if_changed() {
         return 0
     fi
     chmod "$mode" "$tmp"
+    CHANGED=1 MODIFIED=1
     mv -f "$tmp" "$path"
-    CHANGED=1
     say "${label}: written (${path})"
 }
 
@@ -558,14 +537,11 @@ previous_path() {
     esac
 }
 
-# Point VENV_LINK at NEW_BUILD with one rename(2) of a new link over the old one. A real venv
-# directory there (camera-box's lib, or a hand-made one) is moved into the store first. SWAPPED
-# is set FIRST: a signal can land between any two steps, and restore_previous reads the state
-# each step leaves, so every point of the swap can be undone.
+# Point VENV_LINK at NEW_BUILD with one rename(2); a real venv directory there (camera-box's) is
+# moved into the store first. The flags are set FIRST, so a signal at any step can be undone.
 swap_venv() {
     TMP_LINK="$VENV_STORE/.link.$$"
-    SWAPPED=1
-    CHANGED=1
+    SWAPPED=1 MODIFIED=1 CHANGED=1
     if [[ -L "$VENV_LINK" ]]; then
         PREV_LINK_TARGET=$(readlink "$VENV_LINK")
     elif [[ -d "$VENV_LINK" ]]; then
@@ -615,6 +591,10 @@ restore_previous() {
     if [[ -n "$SWAPPED" ]]; then
         restore_venv
     fi
+    if [[ -n "$GI_LINKED" ]]; then
+        rm -rf "$GI_LINKED/system-gi"
+        find "$GI_LINKED" -name remoteos-system-gi.pth -delete
+    fi
     systemctl daemon-reload || true
     if [[ -z "$WAS_PENDING" ]]; then
         rm -f "$PENDING_FILE"  # the marker goes back to its state before this run
@@ -639,6 +619,33 @@ health_version() {
         2>/dev/null || true
 }
 
+# What an unauthenticated POST /mcp answers (401 = the key is enforced). Sends no key.
+unauth_code() {
+    curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:${PORT}/mcp" 2>/dev/null || true
+}
+
+# PREV_PROVEN = what runs is proven: a unit, no pending switch, /health = the unit's python's
+# version, an unauthenticated request refused. Read-only, no key sent. Only that is restored.
+check_running_install() {
+    local py running
+    PREV_PROVEN=""
+    [[ -n "$HAD_UNIT" && -z "$WAS_PENDING" ]] || return 0
+    py=$(first_value 'ExecStart=' "$OLD_UNIT" | awk '{ print $1; exit }')
+    [[ "${py##*/}" == python* ]] || return 0
+    systemctl is-active --quiet "$SERVICE_NAME" && running=$(health_version) || return 0
+    [[ -n "$running" && "$running" == "$(python_version "$py")" && "$(unauth_code)" == 401 ]] || return 0
+    PREV_PROVEN=1
+}
+
+# Is the unit's own process the only listener on :PORT? The key is never sent to another one:
+# a local account could hold the port while the service restarts, and fake the proof.
+port_is_ours() {
+    local main pids
+    main=$(systemctl show -p MainPID --value "$SERVICE_NAME" 2>/dev/null) || return 1
+    pids=$(ss -Hltnp "sport = :${PORT}" 2>/dev/null | grep -o 'pid=[0-9]*' | sort -u) || return 1
+    [[ "$main" =~ ^[1-9][0-9]*$ && "$pids" == "pid=${main}" ]]
+}
+
 # Is the new install what answers, and does it enforce the key? Sets HEALTH_FAILURE. It writes
 # nothing to the console: the proof's result alone decides what happens next.
 prove_health() {
@@ -659,6 +666,10 @@ prove_health() {
         fi
         sleep "$HEALTH_SLEEP"
     done
+    if ! port_is_ours; then
+        HEALTH_FAILURE="another process holds :${PORT}, not the unit's (ss -ltnp 'sport = :${PORT}'): the key was not sent"
+        return 1
+    fi
     code=$(printf 'Authorization: Bearer %s\n' "$AUTH_KEY" \
         | curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H @- -H 'Content-Type: application/json' \
             -H 'Accept: application/json, text/event-stream' -X POST --data "$init" \
@@ -667,23 +678,30 @@ prove_health() {
         HEALTH_FAILURE="an authenticated initialize answered ${code:-nothing} (want 200)"
         return 1
     fi
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:${PORT}/mcp" 2>/dev/null) || true
+    code=$(unauth_code)
     if [[ "$code" != 401 ]]; then
         HEALTH_FAILURE="authentication is not enforced: an unauthenticated /mcp request answered ${code:-nothing} (want 401)"
         return 1
     fi
 }
 
-# Undo a switch (set +e, SIGPIPE ignored). restart: back to the previous install if it was
-# proven (a unit, no pending switch), else stop + disable: an unproven state (maybe auth off, a
-# full shell on 0.0.0.0) is never restarted. enable-only never starts or stops anything.
+# Undo a switch (set +e, SIGPIPE ignored). enable-only never starts or stops anything: the
+# previous files go back (a fresh box: only disabled). restart: a PROVEN install (PREV_PROVEN)
+# is restored and restarted, or left as it ran when nothing was switched; anything else is
+# stopped + disabled, never restarted: it may be an agent with authentication off.
 undo_switch() {
-    if [[ -n "$HAD_UNIT" && ( -z "$WAS_PENDING" || "$POLICY" == enable-only ) ]]; then
-        echo "        Rolling back to the previous install..."
+    if [[ "$POLICY" == enable-only && -n "$HAD_UNIT" ]]; then
+        echo "        Rolling back to the previous files..."
         restore_previous
     elif [[ "$POLICY" == enable-only ]]; then
         systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
         echo "        Nothing to go back to: ${SERVICE_NAME} is disabled (enable-only: nothing was started)"
+    elif [[ -n "$PREV_PROVEN" && -n "$MODIFIED" ]]; then
+        echo "        Rolling back to the previous install..."
+        restore_previous
+    elif [[ -n "$PREV_PROVEN" ]]; then
+        rm -f "$PENDING_FILE"
+        echo "        Nothing was switched: the proven install that was running is left as it ran"
     else
         systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
         systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
@@ -700,9 +718,8 @@ remove_unswapped_build() {
     [[ -z "$STORE_CREATED" ]] || rmdir "$VENV_STORE" 2>/dev/null || true
 }
 
-# The new install did not prove itself (HEALTH_FAILURE). It stays immune to signals and to a
-# lost console (SIGPIPE ignored, set +e) until the undo is done: disarming first let the next
-# echo end the run before anything was restored.
+# The new install did not prove itself. Immune to signals and a lost console until the undo is
+# done (disarming first let the next echo end the run before anything was restored).
 health_failed() {
     trap '' PIPE HUP INT TERM
     ARMED=""
@@ -753,10 +770,9 @@ on_exit() {
     exit "$rc"
 }
 
-# Write the key files and the unit, enable the unit (camera-box's verify wants the literal
-# `enabled`), then (re)start the service unless the policy is enable-only.
+# Write the files, enable the unit (literally `enabled`, as camera-box verifies), (re)start it.
 switch_to_new_install() {
-    local enabled running
+    local enabled
     mkdir -p "$CONFIG_DIR"
     chmod 755 "$CONFIG_DIR"
     write_if_changed "$CONFIG_FILE" 600 "config.json" <<<"$(config_json_text "$AUTH_KEY")"
@@ -773,14 +789,11 @@ switch_to_new_install() {
         say "Enabled for the next boot (enable-only: not started)"
         return 0
     fi
-    # Unchanged files, but is the running process what they say? camera-box's enable-only run
-    # may have upgraded the venv in place without a restart; a hung process answers nothing.
-    if [[ -z "$CHANGED" ]] && systemctl is-active --quiet "$SERVICE_NAME"; then
-        running=$(health_version) || running=""
-        if [[ "$running" != "$PKG_VER" ]]; then
-            say "The running service reports v${running:-nothing}, the venv has v${PKG_VER}: restarting"
-            CHANGED=1
-        fi
+    # Unchanged files: only a proven running install is left as it runs. camera-box's enable-only
+    # in-place upgrade, a hung process, a stopped one or authentication off get a restart.
+    if [[ -z "$CHANGED" && -z "$PREV_PROVEN" ]]; then
+        say "The running service is not a proven v${PKG_VER} (another version, no answer or no authentication): restarting"
+        CHANGED=1
     fi
     if [[ -n "$CHANGED" ]]; then
         say "Restarting ${SERVICE_NAME}..."
@@ -794,8 +807,7 @@ switch_to_new_install() {
 
 # --- after the proof ---------------------------------------------------------------------------
 
-# Our pre-#12 installer put remoteos-mcp into the SYSTEM python. The service runs the venv now
-# (proven above), so that copy goes.
+# Our pre-#12 installer's SYSTEM-python copy goes: the service runs the proven venv now.
 remove_legacy_system_copy() {
     local ver
     ver=$("$PYTHON" -m pip show remoteos-mcp 2>/dev/null | sed -n 's/^Version: //p') || ver=""
@@ -816,13 +828,8 @@ prune_builds() {
     [[ -d "$VENV_STORE" ]] || return 0
     keep=$(readlink -f "$VENV_LINK" 2>/dev/null || true)
     for entry in "$VENV_STORE"/* "$VENV_STORE"/.[!.]*; do
-        if [[ ! -e "$entry" && ! -L "$entry" ]]; then
-            continue
-        fi
-        if [[ -n "$keep" && "$(readlink -f "$entry")" == "$keep" ]]; then
-            continue
-        fi
-        rm -rf "$entry"
+        [[ -e "$entry" || -L "$entry" ]] || continue  # an unmatched glob
+        [[ -n "$keep" && "$(readlink -f "$entry")" == "$keep" ]] || rm -rf "$entry"
     done
 }
 
@@ -839,9 +846,8 @@ configure_firewall() {
     fi
 }
 
-# Everything runs inside main(), called on the very last line: bash parses the whole function
-# before running any of it, so a truncated `curl | bash` download fails to parse (or never
-# reaches the call) instead of running half.
+# Everything runs inside main(), called on the last line: a truncated `curl | bash` download
+# fails to parse (or never reaches the call) instead of running half.
 main() {
     REPO="zbynekdrlik/remoteos-mcp"
     PORT=8092
@@ -857,13 +863,10 @@ main() {
     ENV_FILE="$CONFIG_DIR/remoteos-mcp.env"
     PENDING_FILE="$CONFIG_DIR/.switch-pending"
     umask 022
-    # [A-Za-z0-9] in the checks above means ASCII, whatever the locale (bash >= 4.3; the default
-    # since bash 5.0).
-    shopt -s globasciiranges
+    shopt -s globasciiranges  # [A-Za-z0-9] = ASCII in any locale (bash >= 4.3)
 
-    # bash keeps the export flag of a name the caller exported, for globals AND locals: unset
-    # every name that ever holds the key (or the unit text, which may carry a legacy key), so
-    # none of them reaches a child's environment.
+    # bash keeps a caller-exported name's export flag (globals AND locals): unset every name that
+    # holds the key or the unit text (a legacy key), so none reaches a child's environment.
     unset AUTH_KEY EXPLICIT_KEY GH_TOKEN_VALUE KEY_SOURCE OLD_UNIT OLD_DESCRIPTION \
         unit_key env_key cfg_key k key line rest v
     # The secrets are read once, then dropped from the environment every child inherits.
@@ -878,28 +881,23 @@ main() {
     # The run's state (each set below where it happens).
     WORK_DIR="" TMP_LINK="" WAS_PENDING="" SESSION_TYPE="" SESSION_DISPLAY="" UNIT_DISPLAY=""
     ARMED="" INTERRUPTED="" CHANGED="" SWAPPED="" NEW_BUILD="" STORE_CREATED=""
-    PREV_LINK_TARGET="" ADOPTED_DIR="" HAD_UNIT="" HEALTH_FAILURE=""
+    PREV_LINK_TARGET="" ADOPTED_DIR="" HAD_UNIT="" HEALTH_FAILURE="" MODIFIED="" PREV_PROVEN=""
+    GI_LINKED=""
 
     printf '\n  RemoteOS MCP Installer (Linux)\n  Remote desktop control for Claude Code\n\n'
 
-    # --- Check root ---
     if [[ "$EUID" -ne 0 ]]; then
-        echo "  [X] This installer must be run as root (via sudo)."
-        exit 1
+        fail "This installer must be run as root (via sudo)."
     fi
     if [[ "$EUID" -eq 0 ]]; then PIP_HOME=/root; else PIP_HOME="${HOME:-/tmp}"; fi
-
-    # --- Pre-flight: a read-only root filesystem ---
-    if command -v findmnt &>/dev/null; then
-        ROOT_OPTS=$(findmnt -no OPTIONS / 2>/dev/null || true)
-        if echo ",$ROOT_OPTS," | grep -q ',ro,'; then
-            echo "  [X] Root filesystem is read-only — run: mount -o remount,rw / (and fix /etc/fstab: '/ ext4 ro' → 'defaults') then rerun."
-            exit 1
-        fi
+    if command -v findmnt &>/dev/null && [[ ",$(findmnt -no OPTIONS / 2>/dev/null || true)," == *,ro,* ]]; then
+        fail "Root filesystem is read-only — run: mount -o remount,rw / (and fix /etc/fstab: '/ ext4 ro' → 'defaults') then rerun."
     fi
     check_inputs
     # One run at a time: a second run's prune could delete the build this one just swapped in.
     command -v flock &>/dev/null || fail "flock (util-linux) is missing — nothing was changed on this box"
+    [[ "$POLICY" != restart ]] || command -v ss &>/dev/null \
+        || fail "ss (iproute2, the proof's port check) is missing — nothing was changed on this box"
     umask 077  # owner-only: flock(2) works on a read-only fd, so any reader could block us
     exec 9>"$LOCK_FILE"
     umask 022
@@ -944,6 +942,9 @@ main() {
         CHANGED=1
         say "An earlier switch was never proven: restarting into what the files say"
     fi
+    if [[ "$POLICY" == restart ]]; then
+        check_running_install  # before the switch: what a failure may go back to
+    fi
     arm
     mkdir -p "$CONFIG_DIR"
     : >"$PENDING_FILE"
@@ -953,10 +954,8 @@ main() {
         ensure_system_gi
     fi
     switch_to_new_install
-    if [[ "$POLICY" == restart ]]; then
-        if ! prove_health; then
-            health_failed
-        fi
+    if [[ "$POLICY" == restart ]] && ! prove_health; then
+        health_failed
     fi
     disarm
     exec 3>&- 4>&-
@@ -966,13 +965,14 @@ main() {
         remove_legacy_system_copy
         prune_builds
     else
-        # A switch stays pending; a no-op leaves the mark as it was (a pending one set CHANGED). Old
-        # builds go (the link points at the new one); an old system copy stays (a legacy process).
-        if [[ -n "$CHANGED" ]]; then
-            say "Not started (enable-only): the next restart run restarts and proves it; any old system-python copy stays until then"
-        else
+        # A switch stays pending; a no-op on a proven running install leaves it proven. Old builds
+        # go (the link points at the new one); an old system copy stays (a legacy process).
+        [[ -n "$CHANGED" ]] || check_running_install
+        if [[ -n "$PREV_PROVEN" ]]; then
             rm -f "$PENDING_FILE"
-            say "Nothing changed (enable-only): the running service was not touched"
+            say "Nothing changed (enable-only): the proven running install was not touched"
+        else
+            say "Not started (enable-only): the next restart run restarts and proves it; any old system-python copy stays until then"
         fi
         prune_builds
     fi
