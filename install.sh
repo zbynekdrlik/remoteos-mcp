@@ -14,6 +14,10 @@ CONFIG_FILE="$CONFIG_DIR/config.json"
 PLIST_LABEL="com.remoteos-mcp"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
+# bash keeps the export flag of a name the caller exported (globals AND locals): unset every
+# name that ever holds the key, so none of them reaches a child's environment (#12).
+unset AUTH_KEY EXPLICIT_KEY CFG_KEY PLIST_KEY KEY_SOURCE k key
+
 echo ""
 echo "  RemoteOS MCP Installer (macOS)"
 echo "  Remote desktop control for Claude Code"
