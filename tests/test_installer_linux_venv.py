@@ -282,7 +282,7 @@ class TestProveHealth:
         box = linux_box(tmp_path)
         box.install_legacy(K_UNIT)
         unit_before, config_before = box.unit(), box.config_file.read_bytes()
-        box.configure(service=service)
+        box.configure(service={**service, "only_version": SOURCE_VERSION})  # the NEW install's server
 
         result = box.run()
         out = output(result)

@@ -60,8 +60,10 @@ _LOGGED = (
 
 # Each shim records its argv, and the environment it was started with (`export -p`, a builtin,
 # into <records>.env): the "never in a child's environment" checks read that.
+# One write per record: the shims of a pipeline (`ss … | grep … | sort`) run at the same time,
+# and two appends per record let their fields interleave.
 _LOG_ARGV = (
-    'printf "%s\\x1f" "${{0##*/}}" "$@" >> "{records}"; printf "\\x1e" >> "{records}"; '
+    'printf -v _argv_record "%s\\x1f" "${{0##*/}}" "$@"; printf "%s\\x1e" "$_argv_record" >> "{records}"; '
     'export -p >> "{records}.env"\n'
 )
 

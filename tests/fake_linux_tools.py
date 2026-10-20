@@ -38,7 +38,10 @@ Config keys (JSON):
                  "health_waits_for": path  (/health waits for the file),
                  "enable_fails": bool  (the unit is masked: `systemctl enable` fails and
                      `is-enabled` answers `masked`),
-                 "squatter_pid": int  (another process also listens on :8092)}
+                 "squatter_pid": int  (another process also listens on :8092),
+                 "only_version": str  (the answer overrides above, unauth_code to
+                     serve_version, describe only a server of that version: the new install's,
+                     not the one the installer finds running)}
   uids          {"account": uid}
 
 The systemctl state's `hung` (set by a test) makes the active service answer nothing until the
@@ -346,6 +349,8 @@ def curl(cfg: dict, args: list[str]) -> int:
         print(f"curl: (7) Failed to connect to 127.0.0.1 port {PORT}", file=sys.stderr)
         return 7
     service, overrides = state["service"], cfg.get("service", {})
+    if overrides.get("only_version") not in (None, service["version"]):
+        overrides = {}  # the overrides describe another version's server
     if state.get("hung"):  # active but answering nothing (until a (re)start runs it afresh)
         sys.stdout.write(write_out.replace("%{http_code}", "000"))
         print("curl: (28) Operation timed out after 3000 milliseconds", file=sys.stderr)

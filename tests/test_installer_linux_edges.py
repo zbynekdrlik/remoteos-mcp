@@ -56,7 +56,7 @@ class TestLostConsoleDuringTheProof:
         box.install_legacy(K_UNIT)
         unit_before = box.unit()
         release = tmp_path / "console-closed"
-        box.configure(service={"unauth_code": 200, "health_waits_for": str(release)})
+        box.configure(service={"unauth_code": 200, "health_waits_for": str(release), "only_version": SOURCE_VERSION})
 
         returncode = box.run_and_drop_console("Proving the install", release)
 
@@ -68,7 +68,7 @@ class TestLostConsoleDuringTheProof:
         box = linux_box(tmp_path)
         box.install_legacy(K_UNIT)
         release = tmp_path / "console-closed"
-        box.configure(service={"health_waits_for": str(release)})
+        box.configure(service={"health_waits_for": str(release), "only_version": SOURCE_VERSION})
 
         box.run_and_drop_console("Proving the install", release)
 
