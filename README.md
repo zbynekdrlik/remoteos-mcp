@@ -57,7 +57,8 @@ REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY`, then `… | sudo
   `remoteos-mcp.service` (`User=` the desktop user with `DISPLAY` on a desktop box, headless
   otherwise). A new source is built next to the running one and swapped in; the new install must
   answer `/health` with its version, accept the key and refuse a request without it, or the box
-  goes back to the previous install. An unchanged source changes nothing.
+  goes back to the previous proven install (or, with none, is stopped and disabled: an unproven
+  agent never stays up). An unchanged source changes nothing.
 - **Upgrading a Linux box from the old system-python install** moves it to the venv with the
   same key. The old copy in the system python is removed only after the venv has proved itself.
 

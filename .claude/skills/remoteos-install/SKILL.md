@@ -71,8 +71,8 @@ Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and
 - The key lives ONLY in 0600 `/etc/remoteos-mcp/config.json` and the 0600 EnvironmentFile `/etc/remoteos-mcp/remoteos-mcp.env` (`REMOTEOS_AUTH_KEY=`). Never in the unit, an argv or the installer output: read it on the box with `sudo cat /etc/remoteos-mcp/config.json`.
 - The key is kept on a re-run: explicit `REMOTEOS_MCP_AUTH_KEY`, else the running unit's (a legacy `--auth-key`, else its EnvironmentFile), else config.json, else new.
 - An unchanged source skips pip and restarts nothing. A new one is built side by side, then swapped in; a failed build changes nothing.
-- The install must prove itself (`/health` = the new version, an authenticated `initialize` 200, an unauthenticated request 401), or it rolls back to the previous unit, key files and venv.
-- On a fresh box, a failed proof stops and disables the service (its files stay for a re-run).
+- The install must prove itself (`/health` = the new version, an authenticated `initialize` 200, an unauthenticated request 401), or it rolls back to the previous PROVEN unit, key files and venv.
+- With nothing proven to go back to (a fresh box, or a switch an earlier run left pending), a failed proof stops and disables the service; its files and the pending marker stay for a re-run. An unproven agent never stays up.
 - After `REMOTEOS_MCP_POLICY=enable-only` the switch is pending (`/etc/remoteos-mcp/.switch-pending`): the next normal run restarts and proves it.
 - A desktop unit gets the X11 session's `DISPLAY` (or keeps the existing unit's); a Wayland session gets none.
 

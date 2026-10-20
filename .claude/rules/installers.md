@@ -68,7 +68,9 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     `User=`: `REMOTEOS_MCP_USER`, else the existing unit, else `SUDO_USER`, else root. A re-run
     never changes the box's shape or account.
   - `DISPLAY`: the existing unit's, else the X11 session's (`loginctl show-session -p Display`,
-    GDM's Xorg is often `:1`), else `:0` (camera-box's). A Wayland session gets NO `DISPLAY`: for
+    GDM's Xorg is often `:1`); a Wayland session, or a desktop unit of ours with no `DISPLAY` (the
+    saved Wayland choice, on a re-run with nobody logged in), gets NO `DISPLAY`; else `:0`
+    (camera-box's). No `DISPLAY` on Wayland because, for
     a non-root `User=` the server trusts its environment first, and a forced `:0` would make it
     treat Wayland as X11.
   - `REMOTEOS_MCP_POLICY=enable-only` (camera-box's cams: `remoteos_mcp_install root headless
@@ -102,17 +104,22 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
      `.pth` (not the whole dist-packages). An unchanged desktop build of ours without gi gets it
      linked (`ensure_system_gi`) and a restart; camera-box's adopted directory is never written.
      **A failed download or build changes NOTHING** (it removes its build and an empty store).
-  6. Save the previous unit / EnvironmentFile / config.json. ARM (only when a unit existed).
+  6. Save the previous unit / EnvironmentFile / config.json. ARM (every box, a fresh one too).
      Swap the link (`ln -sfn` + `mv -Tf`: one rename(2)); a real directory is moved into the
      store first. Write the files (`write_if_changed`: content + mode + owner). daemon-reload,
      enable, and `is-enabled` must be literally `enabled` (camera-box's verify) or roll back;
-     `restart` on a change, else `start`.
+     `restart` on a change, else `start` — but an unchanged box whose running process answers
+     `/health` with another version (camera-box's enable-only in-place upgrade) or nothing is
+     restarted too (`health_version`).
   7. `prove_health` (writes NOTHING): active + `/health` = the built version, an authenticated
      `initialize` 200, an unauthenticated `POST /mcp` 401. Failure → `health_failed`, which
-     keeps SIGPIPE/HUP/INT/TERM ignored and `set +e` until `restore_previous` (files, link or
-     directory, daemon-reload, restart) is done, then exits 1. A fresh box has nothing to roll
-     back to: its service is stopped and disabled (an unproven agent, maybe with authentication
-     off, must not stay up); its files stay for a re-run.
+     keeps SIGPIPE/HUP/INT/TERM ignored and `set +e` until `undo_switch` is done, then exits 1.
+     **`undo_switch` (also the armed EXIT trap) restarts only a PROVEN state**: with a previous
+     unit and no pending switch it runs `restore_previous` (files, link or directory,
+     daemon-reload, restart); otherwise (a fresh box, a switch an earlier run left pending) it
+     stops and disables the service and keeps the files + the pending marker for a re-run. An
+     unproven state may be an agent with authentication off (a full shell on 0.0.0.0): it is
+     never "rolled back" into running (review round 3).
   8. DISARM, then print the proof. Only then `remove_legacy_system_copy` (the pre-venv
      system-python `remoteos-mcp fastmcp fastmcp-slim`, `--break-system-packages`) and
      `prune_builds`.
