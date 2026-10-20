@@ -207,6 +207,7 @@ class LinuxBox:
             f" --port 8092 --auth-key {key}\nRestart=always\nRestartSec=5\nUser={user}\n\n"
             "[Install]\nWantedBy=multi-user.target\n"
         )
+        self.unit_path.chmod(0o644)  # written by root under umask 022
         self.boot()
 
     def install_camera_box(self, key: str, *, mode: str = "desktop", source_id: str = CB_SOURCE_ID,
@@ -220,6 +221,7 @@ class LinuxBox:
             path.write_text(text)
             path.chmod(0o600)
         self.unit_path.write_text(camera_box_unit(self.venv_link, self.env_file, mode=mode))
+        self.unit_path.chmod(0o644)  # _remoteos_mcp_write ... 644
         self.boot()
 
     def boot(self) -> None:
