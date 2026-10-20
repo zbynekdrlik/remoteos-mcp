@@ -72,6 +72,9 @@ Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and
 - The key is kept on a re-run: explicit `REMOTEOS_MCP_AUTH_KEY`, else the running unit's (a legacy `--auth-key`, else its EnvironmentFile), else config.json, else new.
 - An unchanged source skips pip and restarts nothing. A new one is built side by side, then swapped in; a failed build changes nothing.
 - The install must prove itself (`/health` = the new version, an authenticated `initialize` 200, an unauthenticated request 401), or it rolls back to the previous unit, key files and venv.
+- On a fresh box, a failed proof stops and disables the service (its files stay for a re-run).
+- After `REMOTEOS_MCP_POLICY=enable-only` the switch is pending (`/etc/remoteos-mcp/.switch-pending`): the next normal run restarts and proves it.
+- A desktop unit gets the X11 session's `DISPLAY` (or keeps the existing unit's); a Wayland session gets none.
 
 **Migration from the old system-python layout:** the first run builds the venv, switches the unit and proves it; only then does it remove the old copy from the system python (`pip uninstall --break-system-packages remoteos-mcp fastmcp fastmcp-slim`). If the proof fails, the old unit and the old copy stay and the box runs as before.
 

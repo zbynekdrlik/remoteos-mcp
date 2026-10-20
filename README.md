@@ -377,7 +377,10 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps
 
 - Auth key is required for all connections
 - The key is kept in owner-only files and reaches the server through `REMOTEOS_AUTH_KEY`, never
-  its command line (`ps`, Task Manager), a unit file or the installer output
+  its command line (`ps`, Task Manager), a unit file or the installer output. The server drops
+  it from its environment at start, so no tool child inherits it; its initial process
+  environment (`/proc/<pid>/environ`) still holds it, readable by root and by the account the
+  server runs as (on a desktop box: the desktop user's own programs)
 - The Windows firewall rule allows inbound TCP 8092 on all profiles (it survives network
   drift); the server binds 0.0.0.0, so keep the machines on a trusted network
 - On LAN this is fine over HTTP

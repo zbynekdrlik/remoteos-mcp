@@ -58,19 +58,34 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 - **Layout:** `/opt/remoteos-mcp-venv` is what the unit runs. It is a SYMLINK to the current
   build `/opt/remoteos-mcp-venvs/<source-id>.<random>`. A real venv DIRECTORY there (camera-box's
   `scripts/lib/remoteos-mcp.sh`) is adopted as it is.
-- **The unit is camera-box's shape**, byte for byte except `Description=` (its verify checks the
-  exact `ExecStart=` and `EnvironmentFile=` lines). desktop: `User=`, `DISPLAY=:0`,
+- **The unit is camera-box's shape** (its verify checks the exact `ExecStart=` and
+  `EnvironmentFile=` lines). desktop: `User=`, `DISPLAY=<display>`,
   `XDG_RUNTIME_DIR=/run/user/<uid>`, `After=… graphical-session.target`. headless: the cams.
-  - The mode: `REMOTEOS_MCP_MODE`, else the existing unit (`Environment=DISPLAY=` → desktop),
-    else the session check (loginctl x11/wayland). `User=`: `REMOTEOS_MCP_USER`, else the
-    existing unit, else `SUDO_USER`, else root. A re-run never changes the box's shape or account.
+  - The existing unit's `Description=` is KEPT (else ours): a cosmetic difference alone
+    restarted a live camera-box box on every run and flip-flopped with camera-box's lib.
+  - The mode: `REMOTEOS_MCP_MODE`, else the existing unit (`Environment=DISPLAY=` or
+    `After=…graphical-session.target` → desktop), else the session check (loginctl x11/wayland).
+    `User=`: `REMOTEOS_MCP_USER`, else the existing unit, else `SUDO_USER`, else root. A re-run
+    never changes the box's shape or account.
+  - `DISPLAY`: the existing unit's, else the X11 session's (`loginctl show-session -p Display`,
+    GDM's Xorg is often `:1`), else `:0` (camera-box's). A Wayland session gets NO `DISPLAY`: for
+    a non-root `User=` the server trusts its environment first, and a forced `:0` would make it
+    treat Wayland as X11.
   - `REMOTEOS_MCP_POLICY=enable-only` (camera-box's cams: `remoteos_mcp_install root headless
-    enable-only`): install, write, enable, never start or prove; the old builds and the old
-    system copy stay (a running process may still use them). Default `restart`.
+    enable-only`): install, write, enable, never start or prove. The old builds ARE pruned (a
+    venv run through the link has `sys.prefix` = the link path, so a running process already
+    imports from the new build; an old build protects nothing). The old system-python copy
+    stays (a running legacy process imports from it). Default `restart`.
+- **A pending switch** (`/etc/remoteos-mcp/.switch-pending`): created when a switch starts,
+  removed after a passed proof (or a rollback's restart). A run that finds it restarts instead
+  of taking the files as unchanged: after enable-only or a run killed with no trap (SIGKILL), the
+  running process is not what the files say, and `systemctl start` on an active unit loads
+  nothing new.
 - **Order (keep it):**
   1. Validate the inputs (`REMOTEOS_MCP_REF` default `main`, empty = `main` as camera-box reads
-     it; MODE / USER / POLICY), take `flock -n` on `/run/lock/remoteos-mcp-install.lock` (a
-     second run's prune could delete this run's build). Read the existing unit; resolve the key.
+     it; MODE / USER / POLICY), take `flock -n` on `/run/remoteos-mcp-install.lock` (a
+     second run's prune could delete this run's build; NOT the world-writable `/run/lock`, where
+     any local user could hold or pre-create the file and block every install). Read the existing unit; resolve the key.
   2. `fetch_source`: ONE GitHub API tarball of the ref (`api.github.com/repos/…/tarball/<ref>`).
      Its top directory (`zbynekdrlik-remoteos-mcp-<sha7>`) is the source id. Code and
      `constraints.txt` come from the same tarball.
@@ -96,7 +111,8 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
      `initialize` 200, an unauthenticated `POST /mcp` 401. Failure → `health_failed`, which
      keeps SIGPIPE/HUP/INT/TERM ignored and `set +e` until `restore_previous` (files, link or
      directory, daemon-reload, restart) is done, then exits 1. A fresh box has nothing to roll
-     back to.
+     back to: its service is stopped and disabled (an unproven agent, maybe with authentication
+     off, must not stay up); its files stay for a re-run.
   8. DISARM, then print the proof. Only then `remove_legacy_system_copy` (the pre-venv
      system-python `remoteos-mcp fastmcp fastmcp-slim`, `--break-system-packages`) and
      `prune_builds`.
@@ -106,14 +122,23 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   - **The proof decides, not the console.** Before it, a lost console rolls back; during it,
     its result decides (a failure rolls back with no console); after it, the proven switch stays
     even if the next write kills the run (the legacy copy then waits for a re-run).
-  - Never DISARM before a restore: `disarm` puts SIGPIPE back to default, so the next echo to a
-    dead console kills bash with no EXIT trap (review round 1).
+  - Never DISARM before a restore: `disarm` clears ARMED and puts SIGPIPE back to default, so
+    the next echo to a dead console ends the run with ARMED already cleared: the EXIT trap runs
+    but restores nothing (review round 1). Signals before ARM and after DISARM still go through
+    `on_signal` → the EXIT trap, which removes a build nothing points at yet.
   - **Every step of the swap must be undoable**: `swap_venv` sets `SWAPPED` before the first
     rename, and `restore_venv` reads the state each step leaves (the directory moved aside, the
     `.link` temp, the new link). Tests inject `kill -HUP $$` after each step
     (`LinuxBox.inject_after`).
   - Everything runs inside `main()`, called on the last line (a truncated download never
     half-runs).
+- **Unset every name that ever holds the key before using it** (`AUTH_KEY`, `cfg_key`,
+  `line`, `OLD_UNIT`, …): bash keeps the export flag of a name the caller exported, for globals
+  AND locals, and the key would reach every child's environment. The shims log `export -p`
+  (`box.child_environments()`).
+- **The script is not sourceable** (the design said "sourced and tested like camera-box's lib"):
+  `main "$@"` on the last line keeps a truncated `curl | bash` from half-running, and a source
+  guard would break the piped one-liner. The tests run the whole script on the fake box instead.
 - **Checks never write the venv:** `venv_python` sets `PYTHONDONTWRITEBYTECODE=1`, so an adopted
   venv stays byte-identical.
 - **Never rename a venv directory in place to "swap" it**: console-script shebangs and
