@@ -168,6 +168,18 @@ class TestMacosKeyPrecedence:
         envs = Path(str(mac.records) + ".env")
         assert K_PLIST_ENV not in envs.read_text(), "a child was started with the key in its environment"
 
+    def test_an_explicit_key_never_reaches_a_child(self, tmp_path: Path) -> None:
+        """Review round 9: the key is dropped from the environment before the first child
+        (`python3 --version`, a brew fallback), not after the Python check."""
+        mac = Mac(tmp_path)
+        mac.write_plist(env_key=K_PLIST_ENV)
+
+        result = mac.run(REMOTEOS_MCP_AUTH_KEY=K_EXPLICIT)
+
+        assert result.returncode == 0, _output(result)
+        envs = Path(str(mac.records) + ".env").read_text()
+        assert K_EXPLICIT not in envs, "a child was started with the explicit key in its environment"
+
     @pytest.mark.parametrize("where", ["config", "plist"])
     def test_an_existing_key_the_installer_cannot_carry_is_refused_never_replaced(
         self, tmp_path: Path, where: str

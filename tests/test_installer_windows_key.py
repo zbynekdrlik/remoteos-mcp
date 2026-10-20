@@ -34,6 +34,19 @@ def test_install_ps1_never_prints_the_key() -> None:
     assert offenders == [], f"install.ps1 prints the key: {offenders}"
 
 
+def test_the_explicit_key_leaves_the_environment_before_the_first_child() -> None:
+    """A child process inherits $env:, so the key is read and removed before `query user`,
+    `python --version`, winget, curl.exe or any other program starts (review round 9)."""
+    lines = _code_lines()
+    read = next(n for n, line in lines if line.startswith("$explicitKey = $env:REMOTEOS_MCP_AUTH_KEY"))
+    removed = next(n for n, line in lines if line.startswith("Remove-Item Env:REMOTEOS_MCP_AUTH_KEY"))
+    children = [n for n, line in lines
+                if any(child in line for child in ("query user", "--version", "winget", "curl.exe", "Start-Process",
+                                                   "icacls", "schtasks", "& $"))]
+    assert children, "no child process found: the check would be vacuous"
+    assert read < removed < min(children), (read, removed, min(children))
+
+
 def test_install_ps1_draws_the_key_from_a_csprng() -> None:
     code = "\n".join(line for _, line in _code_lines())
     assert "Get-Random" not in code, "Get-Random is not a CSPRNG (and -Count 32 draws 32 distinct characters)"

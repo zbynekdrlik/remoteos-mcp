@@ -191,3 +191,20 @@ class TestAServerThatTakesAMomentToBind:
 
         assert result.returncode == 0, output(result)
         assert box.state()["active"]
+
+
+class TestTheReRunAfterAStop:
+    def test_a_switch_stopped_by_a_failed_proof_is_still_pending_on_the_re_run(self, tmp_path: Path) -> None:
+        """Review round 9: the run's own restart made a new InvocationID, so the kept mark must
+        name the stopped unit's, or the re-run calls it "has run since" (a reboot's message)."""
+        box = linux_box(tmp_path)
+        box.configure(service={"initialize_code": 500})
+        assert box.run().returncode != 0 and _pending(box)
+        box.configure(service={})
+
+        result = box.run()
+
+        assert result.returncode == 0, output(result)
+        assert "has run since" not in output(result)
+        assert "An earlier switch was never proven: restarting into what the files say" in output(result)
+        assert box.state()["active"] and not _pending(box)

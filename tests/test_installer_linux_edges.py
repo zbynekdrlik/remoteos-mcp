@@ -20,6 +20,7 @@ from linux_installer_harness import (
     CB_SOURCE_ID,
     CB_VERSION,
     K_ENV,
+    K_EXPLICIT,
     K_UNIT,
     LEGACY_VERSION,
     MAIN_SOURCE_ID,
@@ -478,6 +479,19 @@ class TestNoSecretInAChildEnvironment:
 
         assert result.returncode == 0, output(result)
         assert K_UNIT not in box.child_environments(), "a child was started with the key in its environment"
+
+    def test_the_key_and_the_token_given_never_reach_a_child(self, tmp_path: Path) -> None:
+        """Review round 9: REMOTEOS_MCP_AUTH_KEY and GH_TOKEN themselves leave the environment
+        before the first child (a desktop box: apt-get runs maintainer scripts too)."""
+        box = linux_box(tmp_path, graphical=True)
+        box.install_legacy(K_UNIT)
+        token = "FakeGitHubToken0123456789abcdef"
+
+        result = box.run(REMOTEOS_MCP_AUTH_KEY=K_EXPLICIT, GH_TOKEN=token)
+
+        assert result.returncode == 0, output(result)
+        envs = box.child_environments()
+        assert K_EXPLICIT not in envs and token not in envs, "a child got the key or the token in its environment"
 
 
 class TestCameraBoxAdoptionChurn:
