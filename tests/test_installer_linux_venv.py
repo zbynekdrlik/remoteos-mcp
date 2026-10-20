@@ -14,10 +14,14 @@ installer starts.
 
 from __future__ import annotations
 
+import fcntl
 import re
+import shutil
 from pathlib import Path
 
 import pytest
+from fake_linux_tools import _venv_purelib
+from fake_pip import dist_files, write_dist
 from linux_installer_harness import (
     CB_SOURCE_ID,
     CB_VERSION,
@@ -580,3 +584,255 @@ class TestUninstall:
         assert box.pip.versions("remoteos-mcp") == [] and box.pip.versions("fastmcp-slim") == []
         assert all("--break-system-packages" in a for a in _legacy_removals(box)), _legacy_removals(box)
         assert not box.state()["active"]
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: the edges of the switch
+# ---------------------------------------------------------------------------
+
+
+def _assert_legacy_box_restored(box: LinuxBox, unit_before: str) -> None:
+    assert box.unit() == unit_before, "the previous unit was not restored"
+    assert not box.env_file.exists() and not box.venv_link.is_symlink() and _builds(box) == []
+    assert box.pip.versions("remoteos-mcp") == [LEGACY_VERSION], "the legacy copy was removed"
+    service = box.state()["service"]
+    assert service["python"].endswith("/shims/python3") and service["key"] == K_UNIT
+
+
+class TestLostConsoleDuringTheProof:
+    def test_a_console_lost_while_a_failing_proof_runs_is_rolled_back(self, tmp_path: Path) -> None:
+        """The proof's own failure path must roll back with no console (round 1: health_failed
+        disarmed first, and its next echo killed bash by SIGPIPE before anything was restored)."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        unit_before = box.unit()
+        release = tmp_path / "console-closed"
+        box.configure(service={"unauth_code": 200, "health_waits_for": str(release)})
+
+        returncode = box.run_and_drop_console("Proving the install", release)
+
+        assert returncode != 0
+        _assert_legacy_box_restored(box, unit_before)
+
+    def test_a_console_lost_while_a_passing_proof_runs_keeps_the_proven_install(self, tmp_path: Path) -> None:
+        """The proof decides, not the console: a write after it must not undo a proven switch."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        release = tmp_path / "console-closed"
+        box.configure(service={"health_waits_for": str(release)})
+
+        box.run_and_drop_console("Proving the install", release)
+
+        assert _exec_start(box) in box.unit().splitlines()
+        assert box.venv_link.is_symlink() and box.env_file_key() == K_UNIT
+        service = box.state()["service"]
+        assert service["python"] == str(box.venv_link / "bin" / "python")
+        assert (service["version"], service["key"]) == (SOURCE_VERSION, K_UNIT)
+
+
+class TestSignalMidSwap:
+    @pytest.mark.parametrize(
+        "after",
+        ['mv -T "$VENV_LINK" "$ADOPTED_DIR"', 'ln -sfn "$NEW_BUILD" "$tmp_link"', 'mv -Tf "$tmp_link" "$VENV_LINK"'],
+        ids=["dir-moved-aside", "between-the-renames", "link-swapped"],
+    )
+    def test_a_signal_inside_the_swap_puts_camera_box_s_venv_back(self, tmp_path: Path, after: str) -> None:
+        box = linux_box(tmp_path)
+        box.install_camera_box(K_ENV)
+        unit_before = box.unit()
+        venv_before = {k: v for k, v in box.snapshot().items() if k.startswith(str(box.venv_link))}
+        box.inject_after(after, "kill -HUP $$")
+
+        result = box.run()
+
+        assert result.returncode != 0, _output(result)
+        assert "Interrupted" in _output(result)
+        assert not box.venv_link.is_symlink() and box.venv_link.is_dir()
+        assert {k: v for k, v in box.snapshot().items() if k.startswith(str(box.venv_link))} == venv_before
+        assert box.unit() == unit_before
+        assert _builds(box) == []
+        service = box.state()["service"]
+        assert (service["version"], service["key"]) == (CB_VERSION, K_ENV)
+
+    def test_a_signal_inside_the_swap_puts_the_previous_build_back(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        old_build = box.venv_target()
+        box.add_source("main", "def5678", "0.7.0.dev33")
+        box.inject_after('ln -sfn "$NEW_BUILD" "$tmp_link"', "kill -TERM $$")
+
+        result = box.run()
+
+        assert result.returncode != 0, _output(result)
+        assert box.venv_target() == old_build and _builds(box) == [old_build]
+        assert box.state()["service"]["version"] == SOURCE_VERSION
+
+
+class TestForeignChangesToOurBuild:
+    def _camera_box_upgrades_in_place(self, box: LinuxBox, version: str, marker: bool) -> None:
+        """What camera-box's lib (before it delegates) does to the venv it finds at
+        /opt/remoteos-mcp-venv: `pip install --upgrade` of its pin in place, its marker, a
+        restart."""
+        target = box.venv_target()
+        site = Path(_venv_purelib(target))
+        for old in [site / "remoteos", *site.glob("remoteos_mcp-*.dist-info")]:
+            shutil.rmtree(old)
+        write_dist(site, "remoteos-mcp", version, dist_files("remoteos-mcp", version))
+        if marker:
+            (target / ".camera-box-source").write_text(CB_SOURCE_ID + "\n")
+        box.boot()
+
+    def test_a_build_camera_box_s_lib_upgraded_in_place_is_rebuilt(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        self._camera_box_upgrades_in_place(box, CB_VERSION, marker=True)
+        assert box.state()["service"]["version"] == CB_VERSION
+
+        result = box.run()
+
+        assert result.returncode == 0, _output(result)
+        assert len(box.venv_installs()) == 2, "a build another installer changed was taken as unchanged"
+        assert box.state()["service"]["version"] == SOURCE_VERSION
+
+    def test_a_build_whose_version_is_not_its_source_s_is_rebuilt(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        self._camera_box_upgrades_in_place(box, "0.7.0.dev1", marker=False)
+
+        result = box.run()
+
+        assert result.returncode == 0, _output(result)
+        assert len(box.venv_installs()) == 2
+        assert box.state()["service"]["version"] == SOURCE_VERSION
+
+
+class TestDesktopGi:
+    def test_a_fresh_desktop_box_links_the_gi_its_desktop_tools_just_installed(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path, graphical=True)
+        gi = box.system_extra / "gi"
+        box.shim("apt-get", f'case " $* " in *" python3-gi "*) mkdir -p "{gi}"; '
+                            f'echo "SYSTEM_GI = True" > "{gi}/__init__.py" ;; esac\nexit 0\n')
+
+        result = box.run()
+
+        assert result.returncode == 0, _output(result)
+        probe = box.venv_python("import gi; print(gi.SYSTEM_GI)")
+        assert probe.returncode == 0 and probe.stdout.strip() == "True", probe.stderr
+
+    def test_an_unchanged_desktop_build_gets_gi_once_the_system_has_it(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path, graphical=True)
+        assert box.run().returncode == 0
+        assert box.venv_python("import gi").returncode != 0
+        (box.system_extra / "gi").mkdir()
+        (box.system_extra / "gi" / "__init__.py").write_text("SYSTEM_GI = True\n")
+
+        result = box.run()
+
+        assert result.returncode == 0, _output(result)
+        assert len(box.venv_installs()) == 1, "linking gi rebuilt the venv"
+        assert box.venv_python("import gi").returncode == 0
+        assert _restarted(box), "the running service never saw the linked gi"
+
+    def test_only_gi_is_borrowed_from_the_system_python(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path, graphical=True)
+        for name in ("gi", "aptonly"):
+            (box.system_extra / name).mkdir()
+            (box.system_extra / name / "__init__.py").write_text("")
+
+        assert box.run().returncode == 0
+
+        assert box.venv_python("import gi").returncode == 0
+        assert box.venv_python("import aptonly").returncode != 0, "the venv sees every system package"
+
+
+class TestCameraBoxInputs:
+    def test_the_mode_and_the_account_can_be_given(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)  # no graphical session: the session check alone says headless
+
+        result = box.run(REMOTEOS_MCP_MODE="desktop", REMOTEOS_MCP_USER="newlevel")
+
+        assert result.returncode == 0, _output(result)
+        lines = box.unit().splitlines()
+        assert "User=newlevel" in lines and "Environment=DISPLAY=:0" in lines
+        assert "Environment=XDG_RUNTIME_DIR=/run/user/1000" in lines
+
+    @pytest.mark.parametrize(
+        "env",
+        [{"REMOTEOS_MCP_MODE": "kiosk"}, {"REMOTEOS_MCP_USER": "no-such-account"},
+         {"REMOTEOS_MCP_USER": "bad;name"}, {"REMOTEOS_MCP_POLICY": "sometimes"}],
+        ids=["mode", "missing-account", "bad-account", "policy"],
+    )
+    def test_an_invalid_input_is_refused_before_anything_changes(self, tmp_path: Path, env: dict) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        before = box.snapshot()
+
+        result = box.run(**env)
+
+        assert result.returncode != 0, _output(result)
+        assert next(iter(env)) in _output(result)
+        assert box.snapshot() == before and box.venv_installs() == []
+
+    def test_enable_only_installs_and_enables_but_never_starts(self, tmp_path: Path) -> None:
+        """camera-box's cam provisioning (`remoteos_mcp_install root headless enable-only`)."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        state_before = box.state()
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+        out = _output(result)
+
+        assert result.returncode == 0, out
+        assert _exec_start(box) in box.unit().splitlines() and box.env_file_key() == K_UNIT
+        assert box.state()["enabled"] and "next boot" in out
+        assert not any(a[:1] in (["start"], ["restart"]) for a in box.calls("systemctl")), box.calls("systemctl")
+        assert box.state()["service"] == state_before["service"], "the running service was touched"
+        assert box.curl_requests() == [r for r in box.curl_requests() if "/tarball/" in r["url"]]
+        assert box.pip.versions("remoteos-mcp") == [LEGACY_VERSION], "the legacy copy the old process runs went"
+
+
+class TestGuards:
+    @pytest.mark.parametrize(
+        "where", ["config", "unit"], ids=["config-json", "legacy-unit"],
+    )
+    def test_an_existing_key_the_installer_cannot_carry_is_refused_never_replaced(
+        self, tmp_path: Path, where: str
+    ) -> None:
+        """The pre-#12 installers reused ANY config.json key; minting a new one would silently
+        cut the client off (#51)."""
+        box = linux_box(tmp_path)
+        if where == "config":
+            _write_config(box, "has-dash_and.dot")
+        else:
+            box.install_legacy("has-dash_and.dot")
+        before = box.snapshot()
+
+        result = box.run()
+
+        assert result.returncode != 0, _output(result)
+        assert "REMOTEOS_MCP_AUTH_KEY" in _output(result)
+        assert box.snapshot() == before and box.venv_installs() == []
+
+    def test_a_second_run_while_one_runs_is_refused(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        before = box.snapshot()
+        with open(box.lock_file, "w") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            result = box.run()
+
+        assert result.returncode != 0, _output(result)
+        assert "another" in _output(result).lower()
+        assert box.snapshot() == before and box.curl_requests() == []
+
+    def test_a_unit_that_cannot_be_enabled_is_rolled_back(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        unit_before = box.unit()
+        box.configure(service={"enable_fails": True})
+
+        result = box.run()
+
+        assert result.returncode != 0, _output(result)
+        assert "enabled" in _output(result)
+        _assert_legacy_box_restored(box, unit_before)

@@ -31,7 +31,9 @@ Config keys (JSON):
                  "unauth_code": int,
                  "signal_on_restart": "TERM" | "HUP" | "INT"  (the first restart signals
                      the installer, as an ssh drop / timeout / Ctrl-C would),
-                 "restart_waits_for": path  (the first restart waits for the file)}
+                 "restart_waits_for": path  (the first restart waits for the file),
+                 "health_waits_for": path  (/health waits for the file),
+                 "enable_fails": bool  (`systemctl enable` fails, the unit stays disabled)}
   uids          {"account": uid}
 """
 
@@ -255,7 +257,11 @@ def systemctl(cfg: dict, args: list[str]) -> int:
     elif verb == "stop":
         state["active"] = False
     elif verb == "enable":
-        state["enabled"] = True
+        if cfg.get("service", {}).get("enable_fails"):
+            print("Failed to enable unit: Unit file remoteos-mcp.service is masked.", file=sys.stderr)
+            rc = 1
+        else:
+            state["enabled"] = True
     elif verb == "disable":
         state["enabled"] = False
     elif verb == "is-active":
@@ -325,6 +331,8 @@ def curl(cfg: dict, args: list[str]) -> int:
         print(f"curl: (7) Failed to connect to 127.0.0.1 port {PORT}", file=sys.stderr)
         return 7
     service, overrides = state["service"], cfg.get("service", {})
+    if url == HEALTH_URL and overrides.get("health_waits_for"):
+        _wait_for(overrides["health_waits_for"])
     if url == HEALTH_URL:
         version = overrides.get("serve_version") or service["version"]
         return answer(200, json.dumps({"status": "ok", "version": version}))

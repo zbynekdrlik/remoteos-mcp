@@ -125,6 +125,21 @@ class LinuxBox:
         """Replace the shim `name` (its argv is still logged)."""
         _shim(self.shims / name, body, Path(self.cfg()["records"]))
 
+    @property
+    def lock_file(self) -> Path:
+        return self.root / "install.lock"
+
+    def inject_after(self, line: str, code: str) -> None:
+        """Insert `code` after every line of the installer copy that is exactly `line` (indent
+        aside), e.g. a `kill -HUP $$` between two steps."""
+        lines = self.script.read_text().split("\n")
+        hits = [i for i, text in enumerate(lines) if text.strip() == line]
+        assert hits, f"the installer has no line {line!r}"
+        for i in reversed(hits):
+            indent = lines[i][: len(lines[i]) - len(lines[i].lstrip())]
+            lines.insert(i + 1, indent + code)
+        self.script.write_text("\n".join(lines))
+
     def add_source(self, ref: str, sha7: str, version: str) -> str:
         """A GitHub API tarball for `ref` (top dir zbynekdrlik-remoteos-mcp-<sha7>) holding a
         pyproject.toml of `version` and a constraints.txt. Returns its source id."""
@@ -309,6 +324,7 @@ def _redirected(script: Path, tmp_path: Path, config_dir: Path, unit_path: Path,
         'SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"': f'SERVICE_FILE="{unit_path}"',
         'VENV_LINK="/opt/remoteos-mcp-venv"': f'VENV_LINK="{venv_link}"',
         'VENV_STORE="/opt/remoteos-mcp-venvs"': f'VENV_STORE="{venv_store}"',
+        'LOCK_FILE="/run/lock/remoteos-mcp-install.lock"': f'LOCK_FILE="{tmp_path / "install.lock"}"',
         "HEALTH_TRIES=12": "HEALTH_TRIES=3",
         "HEALTH_SLEEP=5": "HEALTH_SLEEP=0",
     }.items():
