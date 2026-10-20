@@ -453,3 +453,49 @@ exit 0
     )
     box.add_source("main", MAIN_SHA7, SOURCE_VERSION)
     return box
+
+
+# ---------------------------------------------------------------------------
+# Shared by the Linux installer test modules
+# ---------------------------------------------------------------------------
+
+K_UNIT = "UnitKey0123456789abcdefghijklmno"
+K_ENV = "EnvFileKey0123456789abcdefghijkl"
+K_CONFIG = "ConfigKey0123456789abcdefghijklm"
+K_EXPLICIT = "ExplicitKey0123456789abcdefghijk"
+
+
+def output(result) -> str:
+    return f"{result.stdout}\n{result.stderr}"
+
+
+def assert_never_in_an_argv(box, secret: str) -> None:
+    for argv in box.argvs():
+        assert not any(secret in arg for arg in argv), f"the key is in an argv: {argv}"
+
+
+def exec_start(box: LinuxBox) -> str:
+    return (f"ExecStart={box.venv_link}/bin/python -m remoteos --transport streamable-http --enable-all"
+            " --host 0.0.0.0 --port 8092")
+
+
+def without_description(unit: str) -> list[str]:
+    return [line for line in unit.splitlines() if line and not line.startswith("Description=")]
+
+
+def write_config(box: LinuxBox, key: str) -> None:
+    box.config_dir.mkdir(parents=True, exist_ok=True)
+    box.config_file.write_text(f'{{"port": 8092, "auth_key": "{key}", "host": "0.0.0.0"}}')
+    box.config_file.chmod(0o600)
+
+
+def builds(box: LinuxBox) -> list[Path]:
+    return sorted(box.venv_store.iterdir()) if box.venv_store.exists() else []
+
+
+def restarted(box: LinuxBox) -> bool:
+    return any(argv[:1] == ["restart"] for argv in box.calls("systemctl"))
+
+
+def legacy_removals(box: LinuxBox) -> list[list[str]]:
+    return [a for a in box.calls("python3") if a[:3] == ["-m", "pip", "uninstall"]]
