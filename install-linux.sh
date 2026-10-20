@@ -369,7 +369,7 @@ venv_is_current() {
 build_failed() {
     echo "        [X] $1 — nothing was changed on this box (the installed version keeps running). Full output:"
     cat "$2"
-    remove_unswapped_build
+    remove_new_build
     NEW_BUILD=""
     exit 1
 }
@@ -401,6 +401,7 @@ ensure_system_gi() {
     local build
     [[ "$MODE" == desktop && -L "$VENV_LINK" ]] || return 0
     venv_python "$VENV_LINK" -c 'import gi' >/dev/null 2>&1 && return 0
+    "$PYTHON" -c 'import gi' >/dev/null 2>&1 || return 0  # no system gi: nothing to link
     build=$(readlink -f "$VENV_LINK")
     GI_LINKED=$build MODIFIED=1  # set first: restore_previous takes the link out again
     if link_system_gi "$build"; then
@@ -436,9 +437,7 @@ build_venv() {
     for pv in http_proxy https_proxy no_proxy all_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
         SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE \
         PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIP_CERT PIP_CONFIG_FILE; do
-        if [[ -n "${!pv:-}" ]]; then
-            pip_env+=("${pv}=${!pv}")
-        fi
+        [[ -z "${!pv:-}" ]] || pip_env+=("${pv}=${!pv}")
     done
     say "pip install (constraints.txt of the same source)..."
     if ! env -i "${pip_env[@]}" PIP_CONSTRAINT="$SRC_DIR/constraints.txt" PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -452,9 +451,7 @@ build_venv() {
         build_failed "v${PKG_VER} is installed but does not import" "$log"
     fi
     printf '%s\n' "$SOURCE_ID" >"$NEW_BUILD/.remoteos-mcp-source"
-    if [[ "$MODE" == desktop ]]; then
-        link_system_gi "$NEW_BUILD" || true
-    fi
+    [[ "$MODE" != desktop ]] || link_system_gi "$NEW_BUILD" || true
     say "Built v${PKG_VER}"
 }
 
@@ -503,17 +500,20 @@ env_file_text() {
 # shell). Content, mode AND owner must match, or it is rewritten through a 0600 temp file.
 write_if_changed() {
     local path="$1" mode="$2" label="$3" tmp
-    tmp=$(mktemp "${path}.XXXXXX")
+    WRITE_TMP=$(mktemp "${path}.XXXXXX")  # on_exit removes it (it may hold the key)
+    tmp=$WRITE_TMP
     cat >"$tmp"
     if [[ -f "$path" ]] && cmp -s "$tmp" "$path" \
         && [[ "$(stat -c '%a %U:%G' "$path" 2>/dev/null)" == "${mode} $(id -un):$(id -gn)" ]]; then
         rm -f "$tmp"
+        WRITE_TMP=""
         say "${label}: unchanged"
         return 0
     fi
     chmod "$mode" "$tmp"
     CHANGED=1 MODIFIED=1
     mv -f "$tmp" "$path"
+    WRITE_TMP=""
     say "${label}: written (${path})"
 }
 
@@ -523,9 +523,7 @@ save_previous() {
     mkdir -m 700 "$WORK_DIR/prev"
     for name in unit env config; do
         path=$(previous_path "$name")
-        if [[ -e "$path" ]]; then
-            cp -p "$path" "$WORK_DIR/prev/$name"
-        fi
+        [[ ! -e "$path" ]] || cp -p "$path" "$WORK_DIR/prev/$name"
     done
 }
 
@@ -557,10 +555,7 @@ swap_venv() {
 # Undo swap_venv from whatever step it reached.
 restore_venv() {
     if [[ -n "$ADOPTED_DIR" && -d "$ADOPTED_DIR" ]]; then
-        # the real directory was moved aside: VENV_LINK is our link, or nothing yet
-        if [[ -L "$VENV_LINK" ]]; then
-            rm -f "$VENV_LINK"
-        fi
+        [[ ! -L "$VENV_LINK" ]] || rm -f "$VENV_LINK"  # moved aside: the link is ours, or none yet
         mv -T "$ADOPTED_DIR" "$VENV_LINK"
     elif [[ -n "$PREV_LINK_TARGET" ]]; then
         ln -sfn "$PREV_LINK_TARGET" "$TMP_LINK"
@@ -569,14 +564,11 @@ restore_venv() {
         rm -f "$VENV_LINK"  # there was no venv before
     fi
     rm -f "$TMP_LINK"
-    rm -rf "$NEW_BUILD"
-    if [[ -n "$STORE_CREATED" ]]; then
-        rmdir "$VENV_STORE" 2>/dev/null || true
-    fi
+    remove_new_build
 }
 
-# Put the previous unit, key files and venv back, and restart what they run. Never exits; never
-# stops on a failed write (it runs with SIGPIPE ignored and set +e, the console may be gone).
+# Put the previous unit, key files and venv back (restart policy: and restart them). Never exits;
+# never stops on a failed write (SIGPIPE ignored and set +e: the console may be gone).
 restore_previous() {
     local name path
     for name in unit env config; do
@@ -588,27 +580,36 @@ restore_previous() {
             rm -f "$path"
         fi
     done
-    if [[ -n "$SWAPPED" ]]; then
-        restore_venv
-    fi
+    [[ -z "$SWAPPED" ]] || restore_venv
     if [[ -n "$GI_LINKED" ]]; then
         rm -rf "$GI_LINKED/system-gi"
         find "$GI_LINKED" -name remoteos-system-gi.pth -delete
     fi
     systemctl daemon-reload || true
-    if [[ -z "$WAS_PENDING" ]]; then
-        rm -f "$PENDING_FILE"  # the marker goes back to its state before this run
-    fi
+    [[ -n "$WAS_PENDING" ]] || rm -f "$PENDING_FILE"  # the marker goes back to its pre-run state
     if [[ "$POLICY" == enable-only ]]; then
         echo "        Rolled back to the previous unit, key files and venv (enable-only: the running service was not touched)"
-        return 0
-    fi
-    systemctl restart "$SERVICE_NAME" || true
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        echo "        Rolled back: the previous install runs again; the old system copy was kept"
     else
-        echo "        [X] Rolled back, but the previous install is not running either: journalctl -u ${SERVICE_NAME} -n 50"
+        systemctl restart "$SERVICE_NAME" || true
     fi
+}
+
+# Wait until what runs proves itself again (check_running_install: read-only, no key sent).
+await_proven() {
+    local i
+    for ((i = 0; i < HEALTH_TRIES; i++)); do
+        check_running_install
+        [[ -z "$PREV_PROVEN" ]] || return 0
+        sleep "$HEALTH_SLEEP"
+    done
+    return 1
+}
+
+# stop_unproven WHY: nothing proven runs, so nothing runs (it may be an agent with auth off).
+stop_unproven() {
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
+    systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
+    echo "        [X] $1: ${SERVICE_NAME} is stopped and disabled; fix the cause and rerun. Logs: journalctl -u ${SERVICE_NAME} -n 50"
 }
 
 # The version the running service reports on /health; fails when nothing answers.
@@ -686,9 +687,8 @@ prove_health() {
 }
 
 # Undo a switch (set +e, SIGPIPE ignored). enable-only never starts or stops anything: the
-# previous files go back (a fresh box: only disabled). restart: a PROVEN install (PREV_PROVEN)
-# is restored and restarted, or left as it ran when nothing was switched; anything else is
-# stopped + disabled, never restarted: it may be an agent with authentication off.
+# previous files go back (a fresh box: only disabled). restart: a PROVEN install gets its files
+# back (when switched) and must prove itself again to stay up; anything else is stopped.
 undo_switch() {
     if [[ "$POLICY" == enable-only && -n "$HAD_UNIT" ]]; then
         echo "        Rolling back to the previous files..."
@@ -696,24 +696,28 @@ undo_switch() {
     elif [[ "$POLICY" == enable-only ]]; then
         systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
         echo "        Nothing to go back to: ${SERVICE_NAME} is disabled (enable-only: nothing was started)"
-    elif [[ -n "$PREV_PROVEN" && -n "$MODIFIED" ]]; then
-        echo "        Rolling back to the previous install..."
-        restore_previous
-    elif [[ -n "$PREV_PROVEN" ]]; then
-        rm -f "$PENDING_FILE"
-        echo "        Nothing was switched: the proven install that was running is left as it ran"
+    elif [[ -z "$PREV_PROVEN" ]]; then
+        stop_unproven "Nothing proven to go back to"
     else
-        systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
-        systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
-        echo "        Nothing proven to go back to: ${SERVICE_NAME} is stopped and disabled; fix the cause and rerun. Logs: journalctl -u ${SERVICE_NAME} -n 50"
+        if [[ -n "$MODIFIED" ]]; then
+            echo "        Rolling back to the previous install..."
+            restore_previous
+        fi
+        if ! await_proven; then
+            stop_unproven "The previous install does not prove itself again (not running, another version or no authentication)"
+        elif [[ -n "$MODIFIED" ]]; then
+            echo "        Rolled back: the previous install runs again and proved itself; the old system copy was kept"
+        else
+            rm -f "$PENDING_FILE"
+            echo "        Nothing was switched: the proven install that was running is left as it ran"
+        fi
     fi
-    if [[ -n "$NEW_BUILD" && -z "$SWAPPED" ]]; then
-        remove_unswapped_build
-    fi
+    [[ -z "$NEW_BUILD" || -n "$SWAPPED" ]] || remove_new_build
 }
 
-# A build nothing points at yet (the run ended before the swap), and a store this run created.
-remove_unswapped_build() {
+# This run's build (nothing points at it: the run ended before the swap, or the swap was undone),
+# and a store this run created.
+remove_new_build() {
     rm -rf "$NEW_BUILD"
     [[ -z "$STORE_CREATED" ]] || rmdir "$VENV_STORE" 2>/dev/null || true
 }
@@ -764,8 +768,9 @@ on_exit() {
         undo_switch
         rc=1
     elif [[ -n "$NEW_BUILD" && -z "$SWAPPED" ]]; then
-        remove_unswapped_build  # a signal or a failure before the swap
+        remove_new_build  # a signal or a failure before the swap
     fi
+    [[ -z "$WRITE_TMP" ]] || rm -f "$WRITE_TMP"
     rm -rf "$WORK_DIR"
     exit "$rc"
 }
@@ -882,7 +887,7 @@ main() {
     WORK_DIR="" TMP_LINK="" WAS_PENDING="" SESSION_TYPE="" SESSION_DISPLAY="" UNIT_DISPLAY=""
     ARMED="" INTERRUPTED="" CHANGED="" SWAPPED="" NEW_BUILD="" STORE_CREATED=""
     PREV_LINK_TARGET="" ADOPTED_DIR="" HAD_UNIT="" HEALTH_FAILURE="" MODIFIED="" PREV_PROVEN=""
-    GI_LINKED=""
+    GI_LINKED="" WRITE_TMP=""
 
     printf '\n  RemoteOS MCP Installer (Linux)\n  Remote desktop control for Claude Code\n\n'
 
@@ -938,13 +943,10 @@ main() {
     # trap) left the files ahead of the running process: restart, never take it as unchanged.
     WAS_PENDING=""
     if [[ -e "$PENDING_FILE" ]]; then
-        WAS_PENDING=1
-        CHANGED=1
-        say "An earlier switch was never proven: restarting into what the files say"
+        WAS_PENDING=1 CHANGED=1
+        say "An earlier switch was never proven: $([[ "$POLICY" == restart ]] && echo "restarting into what the files say" || echo "it stays pending (enable-only)")"
     fi
-    if [[ "$POLICY" == restart ]]; then
-        check_running_install  # before the switch: what a failure may go back to
-    fi
+    [[ "$POLICY" != restart ]] || check_running_install  # before the switch: what a failure may go back to
     arm
     mkdir -p "$CONFIG_DIR"
     : >"$PENDING_FILE"
@@ -988,9 +990,7 @@ main() {
         "  Port:      $PORT" "  Version:   v${PKG_VER} (${SOURCE_ID})" \
         "  Auth key:  in ${ENV_FILE} and ${CONFIG_FILE} (root, 0600) — never printed." \
         "             Read it on this box: sudo cat ${CONFIG_FILE}"
-    if [[ -z "$KEY_SOURCE" ]]; then
-        echo "             It is a NEW key: update the client's .mcp.json entry for this box."
-    fi
+    [[ -n "$KEY_SOURCE" ]] || echo "             It is a NEW key: update the client's .mcp.json entry for this box."
     printf '%s\n' "" "  On your Linux machine, run:" "" "  claude mcp add --transport http linux-${HOSTNAME_SHORT} \\" \
         "    http://${LOCAL_IP}:${PORT}/mcp \\" "    --header \"Authorization: Bearer <the auth key>\"" "" \
         "  Then restart Claude Code." "" "  To uninstall later:" \
