@@ -82,12 +82,18 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   removed after a passed proof (or a rollback's restart). A run that finds it restarts instead
   of taking the files as unchanged: after enable-only or a run killed with no trap (SIGKILL), the
   running process is not what the files say, and `systemctl start` on an active unit loads
-  nothing new.
+  nothing new. An enable-only run that changed nothing (`CHANGED` empty) removes the mark it
+  wrote: a proven box stays proven, so a later failing restart run rolls it back instead of
+  stopping it (review round 5; camera-box's first delegated cam run is exactly this). A mark
+  an earlier run left sets `CHANGED`, so it stays.
 - **Order (keep it):**
   1. Validate the inputs (`REMOTEOS_MCP_REF` default `main`, empty = `main` as camera-box reads
      it; MODE / USER / POLICY), take `flock -n` on `/run/remoteos-mcp-install.lock` (a
      second run's prune could delete this run's build; NOT the world-writable `/run/lock`, where
-     any local user could hold or pre-create the file and block every install). Read the existing unit; resolve the key.
+     any local user could hold or pre-create the file and block every install). The lock is
+     0600 (`umask 077`, and `chmod 600` for an older run's 0644 one): `flock(2)` works on a
+     read-only fd, so a readable lock lets any account block every install (review round 5).
+     Read the existing unit; resolve the key.
   2. `fetch_source`: ONE GitHub API tarball of the ref (`api.github.com/repos/…/tarball/<ref>`).
      Its top directory (`zbynekdrlik-remoteos-mcp-<sha7>`) is the source id. Code and
      `constraints.txt` come from the same tarball.
@@ -112,7 +118,10 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
      `/health` with another version (camera-box's enable-only in-place upgrade) or nothing is
      restarted too (`health_version`).
   7. `prove_health` (writes NOTHING): active + `/health` = the built version, an authenticated
-     `initialize` 200, an unauthenticated `POST /mcp` 401. Failure → `health_failed`, which
+     `initialize` 200, an unauthenticated `POST /mcp` 401. (The proof sends the key to whatever
+     holds :8092, as every client does; a local account squatting the port while the service
+     restarts is a transport issue — systemd socket activation — not the installer's, round 5.)
+     Failure → `health_failed`, which
      keeps SIGPIPE/HUP/INT/TERM ignored and `set +e` until `undo_switch` is done, then exits 1.
      **`undo_switch` (also the armed EXIT trap) restarts only a PROVEN state**: with a previous
      unit and no pending switch it runs `restore_previous` (files, link or directory,

@@ -364,7 +364,10 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Implementation details decided on the way (all on #12, issuecomment-6293797059):** the swap
   is a symlink (`/opt/remoteos-mcp-venv` → a build in `/opt/remoteos-mcp-venvs/`; a venv cannot
   be renamed); a failed fetch/build exits 1 changing nothing; a failed proof or an interrupted
-  switch rolls back to the previous unit/key files/venv; desktop venvs get one `.pth` to the
+  switch goes back to the previous unit/key files/venv only when that state was PROVEN (a unit
+  existed, no `.switch-pending`), else the service is stopped and disabled (an unproven agent
+  may have authentication off); enable-only never starts or stops anything, and a no-op run
+  leaves the pending mark as it found it; desktop venvs get one `.pth` to the
   system gi (AT-SPI); the mode and User= follow the existing unit; the installers never print
   the key; Windows keys come from a CSPRNG; an empty `REMOTEOS_MCP_REF` means main; the import
   checks never write bytecode (an adopted venv stays byte-identical); `uninstall-linux.sh`
@@ -374,9 +377,16 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   `46ccae2`; the system-python block's tests moved to `install.sh` and the Linux ones the venv
   replaces retired in `12aaf35`; GREEN `5f5dcf3` (Linux), `afe8ed0` (macOS), `115ec17`
   (Windows), `87de551` (uninstall-linux.sh).
-- **Tests:** `tests/test_installer_linux_venv.py` (41, on `tests/linux_installer_harness.py` +
-  `tests/fake_linux_tools.py`: real venvs, a stateful fake systemd/curl, the argv of every
-  process), `tests/test_installer_macos_key.py` (7, also under GNU bash 3.2.57),
+- **Review rounds (each RED → GREEN, recorded on #12):** round 1 `7a105f4` → `74f1dd5`,
+  `282acd4`, `ea177ab`/`b51a9e8` (the server drops the key names from its environment, refuse
+  a key the installer cannot carry); round 2 `2a9812e` → `229480a`, `dc15f27`; round 3 `6b7d74e`
+  → `ebfecd5` (only a proven state is restarted); round 4 `c57d6a3` → `90d9323` (enable-only
+  never stops the running agent); round 5 `13c4e14` → `aa798fa` (a no-op enable-only run keeps
+  a proven box proven; the lock is 0600).
+- **Tests:** `tests/test_installer_linux_venv.py` (41) and `tests/test_installer_linux_edges.py`
+  (50, the review rounds' edges), both on `tests/linux_installer_harness.py` +
+  `tests/fake_linux_tools.py` (real venvs, a stateful fake systemd/curl, the argv of every
+  process); `tests/test_installer_macos_key.py` (10, also under GNU bash 3.2.57);
   `tests/test_installer_windows_key.py` (3 static) and `tests_windows/test_install_ps1_key.py`
-  (real PowerShell 5.1: install.ps1's own functions, one real cmd.exe run, the ACL). Result: 818
-  pass, ruff + shellcheck clean.
+  (real PowerShell 5.1: install.ps1's own functions, one real cmd.exe run, the ACL). Result: 872
+  pass, ruff + shellcheck clean; `install-linux.sh` 1000 lines.
