@@ -639,12 +639,15 @@ class TestNoOpEnableOnly:
 
     def test_camera_box_s_first_delegated_enable_only_run_leaves_the_cam_proven(self, tmp_path: Path) -> None:
         box = linux_box(tmp_path)
-        box.install_camera_box(K_ENV, mode="headless", source_id=MAIN_SOURCE_ID, version=SOURCE_VERSION)
+        box.install_camera_box(K_ENV, mode="headless", source_id=MAIN_SOURCE_ID, version=SOURCE_VERSION,
+                               user="root")
+        unit_before = box.unit()
 
         result = box.run(REMOTEOS_MCP_POLICY="enable-only", REMOTEOS_MCP_MODE="headless",
                          REMOTEOS_MCP_USER="root")
 
         assert result.returncode == 0, output(result)
+        assert box.unit() == unit_before, output(result)
         assert not _pending(box), "camera-box's working cam was marked pending"
 
     def test_a_second_enable_only_run_keeps_an_unproven_switch_pending(self, tmp_path: Path) -> None:

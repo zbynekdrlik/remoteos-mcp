@@ -211,16 +211,16 @@ class LinuxBox:
         self.boot()
 
     def install_camera_box(self, key: str, *, mode: str = "desktop", source_id: str = CB_SOURCE_ID,
-                           version: str = CB_VERSION) -> None:
+                           version: str = CB_VERSION, user: str = SERVICE_USER) -> None:
         """camera-box's layout (scripts/lib/remoteos-mcp.sh): a real venv DIRECTORY at
         /opt/remoteos-mcp-venv with its .camera-box-source marker, the key in 0600 config.json
-        and EnvironmentFile, and its unit."""
+        and EnvironmentFile, and its unit (a cam's runs as root)."""
         self.make_venv(self.venv_link, version, marker=(".camera-box-source", source_id))
         self.config_dir.mkdir(parents=True, exist_ok=True)
         for path, text in ((self.config_file, config_json_text(key)), (self.env_file, f"REMOTEOS_AUTH_KEY={key}\n")):
             path.write_text(text)
             path.chmod(0o600)
-        self.unit_path.write_text(camera_box_unit(self.venv_link, self.env_file, mode=mode))
+        self.unit_path.write_text(camera_box_unit(self.venv_link, self.env_file, user=user, mode=mode))
         self.unit_path.chmod(0o644)  # _remoteos_mcp_write ... 644
         self.boot()
 
