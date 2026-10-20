@@ -35,9 +35,9 @@ On **macOS**: `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos
 
 On **Linux** (systemd): `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash`.
 Pin a source with `| sudo REMOTEOS_MCP_REF=<commit sha | tag | branch> bash` (default `main`).
-To install a given key, never put it on sudo's command line (`ps` shows it): `read -rs
-REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY`, then `… | sudo
---preserve-env=REMOTEOS_MCP_AUTH_KEY bash`.
+To install a given key, never put it on sudo's command line (`ps` shows it): `read -rs k`,
+then `… | REMOTEOS_MCP_AUTH_KEY="$k" sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash` (the key
+reaches sudo's environment only; nothing is exported to curl or the rest of the shell).
 
 ### Where the installers put things (#12)
 

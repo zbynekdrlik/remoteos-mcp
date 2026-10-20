@@ -13,9 +13,9 @@
 #   REMOTEOS_MCP_POLICY    restart (default: restart and prove the new install) | enable-only
 #                          (install + enable for the next boot, never start: camera-box's cams)
 # A secret never goes on a command line, sudo's included: `sudo REMOTEOS_MCP_AUTH_KEY=… bash`
-# shows it in `ps`. Export it in your shell and keep it across sudo instead:
-#   read -rs REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY
-#   curl -fsSL …/install-linux.sh | sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash
+# shows it in `ps`. Hand it to sudo's environment only (no export: curl never gets it):
+#   read -rs k
+#   curl -fsSL …/install-linux.sh | REMOTEOS_MCP_AUTH_KEY="$k" sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash
 #
 # camera-box's layout (/opt/remoteos-mcp-venv → a build in /opt/remoteos-mcp-venvs/); the key
 # only in 0600 files under /etc/remoteos-mcp, never in the unit, an argv or this output. The

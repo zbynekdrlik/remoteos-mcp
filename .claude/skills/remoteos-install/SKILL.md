@@ -57,8 +57,8 @@ curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/insta
 # pin a ref (commit sha, tag or branch; default main):
 curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo REMOTEOS_MCP_REF=<sha> bash
 # install a given key: never `sudo REMOTEOS_MCP_AUTH_KEY=… bash` (the key would be in sudo's argv)
-read -rs REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY
-curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash
+read -rs k   # not exported: only sudo's environment gets it, never curl or a later command
+curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | REMOTEOS_MCP_AUTH_KEY="$k" sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash
 ```
 
 Other inputs: `REMOTEOS_MCP_MODE=desktop|headless` and `REMOTEOS_MCP_USER=<account>` (default: what the existing unit has, else the session check / `SUDO_USER`), `REMOTEOS_MCP_POLICY=enable-only` (install + enable, never start: camera-box's cams). camera-box's `remoteos_mcp_install USER MODE POLICY` maps onto them.
@@ -92,6 +92,10 @@ Verify after a run (from dev1 and on the box):
 - `[X] The new install did not prove itself … Rolled back: the previous install runs again and proved itself`: the previous install runs again. Read `journalctl -u remoteos-mcp -n 50` from the failed start.
 - `[X] The previous install does not prove itself again … stopped and disabled`: the previous unit, key files and venv are back, but that install does not come up proven either (not running, another version, or no authentication, e.g. an EnvironmentFile with an empty key). Nothing runs. Read the journal, fix the cause, rerun.
 - `Nothing was switched: the proven install that was running is left as it ran`: the run changed nothing and the box runs as before; the proof's failure line says what failed.
+- `[X] Nothing proven to go back to: remoteos-mcp is stopped and disabled`: a fresh box, a pending switch the unit never started, or a running install that did not prove itself before the run (another version, no answer, no authentication). The agent is DISABLED: it does not come back at boot. Fix the cause and rerun.
+- enable-only failures never touch the running service: `Rolled back to the previous unit, key files and venv (enable-only: …)`, or on a fresh box `Nothing to go back to: remoteos-mcp is disabled`.
+- `An earlier switch has run since (the unit started again)`: an enable-only switch that a reboot (or a restart) has started since; the run checks it as it runs.
+- The key-out-of-the-environment guarantee needs a source at or after the #12 merge: an older `REMOTEOS_MCP_REF` (e.g. camera-box's pin before its bump) runs a server that keeps `REMOTEOS_AUTH_KEY` in its environment, so Shell children inherit it.
 - `another process holds :8092, not the unit's`: something else listens on the port (`sudo ss -ltnp 'sport = :8092'`). The key was not sent. Stop that process, then rerun.
 
 **Gotcha — cam boxes can boot with a read-only rootfs** (fstab `ro`). The installer now refuses to run until remounted rw + fstab fixed (`mount -o remount,rw /` then edit `/etc/fstab`). Both Linux and macOS installers also verify after restart that the `/health` endpoint reports the version just installed — a stale pre-existing install is caught and reported as failure.

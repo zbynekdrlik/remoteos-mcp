@@ -38,7 +38,13 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   `os.environ` at the start of `cli()`**, after click read it: otherwise every Shell/App child
   inherits the key (`Shell("printenv REMOTEOS_AUTH_KEY")` printed it, review round 1).
 - **Never `sudo VAR=<secret> bash`:** the secret is then in sudo's argv. Linux docs say
-  `read -rs REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY` + `sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash`.
+  `read -rs k` + `… | REMOTEOS_MCP_AUTH_KEY="$k" sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash`:
+  the prefix assignment reaches only sudo's environment, never an argv, and nothing is exported
+  to curl or the rest of the shell (round 8; `export` leaked it to every later command).
+- **The server side of "the key never in a child's environment" starts at the #12 merge.** A
+  `REMOTEOS_MCP_REF` older than that (camera-box's pin before its bump) installs a server that
+  keeps `REMOTEOS_AUTH_KEY` in `os.environ`, so Shell children inherit it. camera-box's pin must
+  be at or after the merge commit when it delegates to this installer.
 - **Never put the key into an argv on the way either.** Python reads a key file from stdin or
   by path and prints the key to a `$(…)`; files are written by `printf` / a here-string into a
   0600 temp file, then renamed; the health check sends `Authorization: Bearer` with
@@ -78,11 +84,16 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     venv run through the link has `sys.prefix` = the link path, so a running process already
     imports from the new build; an old build protects nothing). The old system-python copy
     stays (a running legacy process imports from it). Default `restart`.
-- **A pending switch** (`/etc/remoteos-mcp/.switch-pending`): created when a switch starts,
-  removed after a passed proof (or a rollback's restart). A run that finds it restarts instead
-  of taking the files as unchanged: after enable-only or a run killed with no trap (SIGKILL), the
-  running process is not what the files say, and `systemctl start` on an active unit loads
-  nothing new. An enable-only run that changed nothing removes the mark it wrote ONLY when
+- **A pending switch** (`/etc/remoteos-mcp/.switch-pending`): written after `arm`, holding the
+  unit's `systemctl show -p InvocationID --value` (systemd makes a new one at every start and
+  keeps it while the unit is inactive). Removed after a passed proof, by "Nothing was switched",
+  by a no-op enable-only run on a proven box; `restore_previous` puts it back to its pre-run
+  state. A run that finds it with the SAME InvocationID restarts instead of taking the files as
+  unchanged: after enable-only or a run killed with no trap (SIGKILL), the running process is
+  not what the files say, and `systemctl start` on an active unit loads nothing new. Another
+  InvocationID = the unit started since (a cam rebooted into its enable-only switch): the mark
+  is stale and `check_running_install` judges what runs (round 8: a stale mark stopped and
+  disabled a working cam on the next failing restart run). An enable-only run that changed nothing removes the mark it wrote ONLY when
   `check_running_install` finds the running install proven (round 5, narrowed in round 6): a
   cam whose venv camera-box's lib upgraded in place without a restart runs another version
   than its files, so its no-op run keeps the mark. A mark an earlier run left sets `CHANGED`.
