@@ -198,18 +198,46 @@ find_python() {
     fail "Python 3.10+ required but not found. Install it (apt-get install python3 python3-venv, or dnf/yum) and rerun."
 }
 
-# The type of the first graphical user session (x11 / wayland), or nothing.
+# The first graphical user session: sets SESSION_TYPE (x11 / wayland, or nothing) and
+# SESSION_DISPLAY (an X11 session's display, e.g. :1; GDM's Xorg is often not :0).
 graphical_session() {
     local s stype sclass
+    SESSION_TYPE=""
+    SESSION_DISPLAY=""
     command -v loginctl &>/dev/null || return 0
     for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
         stype=$(loginctl show-session "$s" -p Type --value 2>/dev/null || true)
         sclass=$(loginctl show-session "$s" -p Class --value 2>/dev/null || true)
         if [[ "$sclass" == "user" && ( "$stype" == "x11" || "$stype" == "wayland" ) ]]; then
-            printf '%s' "$stype"
+            SESSION_TYPE=$stype
+            if [[ "$stype" == x11 ]]; then
+                SESSION_DISPLAY=$(loginctl show-session "$s" -p Display --value 2>/dev/null || true)
+            fi
             return 0
         fi
     done
+}
+
+# A local X display: :N or :N.S.
+display_ok() {
+    case "${1-}" in
+        : | *[!0-9:.]* | :*:* | :.*) return 1 ;;
+        :[0-9]*) return 0 ;;
+    esac
+    return 1
+}
+
+# The value of the unit's Environment=DISPLAY=, or nothing.
+display_from_unit_text() {
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            Environment=DISPLAY=*)
+                printf '%s' "${line#Environment=DISPLAY=}"
+                return 0
+                ;;
+        esac
+    done <<<"${1-}"
 }
 
 # The User= of a unit, trimmed.
@@ -233,25 +261,39 @@ user_from_unit_text() {
 # existing unit, so a re-run never changes the box's shape or moves the agent to another
 # account; else the session check / SUDO_USER / root.
 detect_layout() {
-    local session u
+    local u old_display
     OLD_UNIT=$(cat "$UNIT_PATH" 2>/dev/null || true)
+    OLD_DESCRIPTION=$(grep -m1 '^Description=' <<<"$OLD_UNIT" || true)
     if [[ -e "$VENV_LINK" && ! -L "$VENV_LINK" && ! -d "$VENV_LINK" ]]; then
         fail "$VENV_LINK is neither a venv directory nor a link — nothing was changed on this box"
     fi
+    graphical_session
+    old_display=$(display_from_unit_text "$OLD_UNIT")
     if [[ -n "$GIVEN_MODE" ]]; then
         MODE=$GIVEN_MODE
         say "Mode: ${MODE} (REMOTEOS_MCP_MODE)"
-    elif grep -q '^Environment=DISPLAY=' <<<"$OLD_UNIT"; then
+    elif [[ -n "$old_display" ]] || grep -q '^After=.*graphical-session\.target' <<<"$OLD_UNIT"; then
         MODE=desktop
         say "Mode: desktop (the existing unit's)"
+    elif [[ -n "$SESSION_TYPE" ]]; then
+        MODE=desktop
+        say "Mode: desktop (a ${SESSION_TYPE} session is active)"
     else
-        session=$(graphical_session)
-        if [[ -n "$session" ]]; then
-            MODE=desktop
-            say "Mode: desktop (a ${session} session is active)"
+        MODE=headless
+        say "Mode: headless (no graphical session)"
+    fi
+    # The unit's DISPLAY: the existing unit's, else the X11 session's, else :0 (camera-box's).
+    # A Wayland session gets none: the server's own detection then reports it honestly.
+    UNIT_DISPLAY=""
+    if [[ "$MODE" == desktop ]]; then
+        if display_ok "$old_display"; then
+            UNIT_DISPLAY=$old_display
+        elif [[ -z "$old_display" && "$SESSION_TYPE" == wayland ]]; then
+            UNIT_DISPLAY=""
+        elif display_ok "$SESSION_DISPLAY"; then
+            UNIT_DISPLAY=$SESSION_DISPLAY
         else
-            MODE=headless
-            say "Mode: headless (no graphical session)"
+            UNIT_DISPLAY=":0"
         fi
     fi
     SERVICE_USER=""
@@ -387,7 +429,11 @@ link_system_gi() {
     fi
     mkdir -p "$build/system-gi"
     ln -sfn "$gi_pkg" "$build/system-gi/gi"
-    purelib=$(venv_python "$build" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+    purelib=$(venv_python "$build" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])') || purelib=""
+    if [[ -z "$purelib" || ! -d "$purelib" ]]; then
+        say "[!] Could not find the venv's site-packages; the system GI bindings are not linked"
+        return 1
+    fi
     printf '%s\n' "$build/system-gi" >"$purelib/remoteos-system-gi.pth"
     say "System GI bindings linked: ${gi_pkg}"
 }
@@ -476,7 +522,9 @@ install_desktop_tools() {
 
 unit_text() {
     printf '[Unit]\n'
-    printf 'Description=RemoteOS MCP Server (install-linux.sh, venv)\n'
+    # The existing unit's Description= is kept: camera-box's lib writes its own, and a
+    # cosmetic difference alone must not restart a live box (nor flip-flop between them).
+    printf '%s\n' "${OLD_DESCRIPTION:-Description=RemoteOS MCP Server (install-linux.sh, venv)}"
     if [[ "$MODE" == desktop ]]; then
         printf 'After=network.target graphical-session.target\n'
     else
@@ -487,7 +535,9 @@ unit_text() {
     printf 'Type=simple\n'
     printf 'User=%s\n' "$SERVICE_USER"
     if [[ "$MODE" == desktop ]]; then
-        printf 'Environment=DISPLAY=:0\n'
+        if [[ -n "$UNIT_DISPLAY" ]]; then
+            printf 'Environment=DISPLAY=%s\n' "$UNIT_DISPLAY"
+        fi
         printf 'Environment=XDG_RUNTIME_DIR=/run/user/%s\n' "$SERVICE_UID"
     fi
     printf 'EnvironmentFile=%s\n' "$ENV_FILE"
@@ -609,7 +659,12 @@ restore_previous() {
     if [[ "$POLICY" == restart ]]; then
         systemctl restart "$SERVICE_NAME" || true
     fi
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
+    if [[ "$POLICY" == restart ]]; then
+        rm -f "$PENDING_FILE"  # what runs now is what the files say
+    fi
+    if systemctl is-active --quiet "$SERVICE_NAME" && [[ -n "$WAS_PENDING" ]]; then
+        echo "        Rolled back to the state before this run (a switch an earlier run left unproven); the old system copy was kept"
+    elif systemctl is-active --quiet "$SERVICE_NAME"; then
         echo "        Rolled back: the previous install runs again; the old system copy was kept"
     elif [[ "$POLICY" == restart ]]; then
         echo "        [X] Rolled back, but the previous install is not running either: journalctl -u ${SERVICE_NAME} -n 50"
@@ -668,7 +723,11 @@ health_failed() {
         echo "        Rolling back to the previous install..."
         restore_previous
     else
-        echo "        Nothing to roll back to on this fresh box. Logs: journalctl -u ${SERVICE_NAME} -n 50"
+        # Nothing to roll back to, but an unproven agent (maybe with authentication off: a
+        # full shell on 0.0.0.0) must not stay up. The files stay for a re-run.
+        systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
+        systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
+        echo "        Nothing to roll back to on this fresh box: ${SERVICE_NAME} is stopped and disabled. Logs: journalctl -u ${SERVICE_NAME} -n 50"
     fi
     exit 1
 }
@@ -681,7 +740,8 @@ arm() {
 
 disarm() {
     ARMED=""
-    trap - HUP INT TERM PIPE
+    trap on_signal HUP INT TERM
+    trap - PIPE
 }
 
 on_signal() {
@@ -706,6 +766,12 @@ on_exit() {
         fi
         restore_previous
         rc=1
+    elif [[ -n "$NEW_BUILD" && -z "$SWAPPED" ]]; then
+        # a build nothing points at yet (a signal or a failure before the swap)
+        rm -rf "$NEW_BUILD"
+        if [[ -n "$STORE_CREATED" ]]; then
+            rmdir "$VENV_STORE" 2>/dev/null || true
+        fi
     fi
     rm -rf "$WORK_DIR"
     exit "$rc"
@@ -799,16 +865,22 @@ main() {
     UNIT_PATH="/etc/systemd/system/remoteos-mcp.service"
     VENV_LINK="/opt/remoteos-mcp-venv"
     VENV_STORE="/opt/remoteos-mcp-venvs"
-    LOCK_FILE="/run/lock/remoteos-mcp-install.lock"
+    LOCK_FILE="/run/remoteos-mcp-install.lock"
     HEALTH_TRIES=12
     HEALTH_SLEEP=5
     CONFIG_FILE="$CONFIG_DIR/config.json"
     ENV_FILE="$CONFIG_DIR/remoteos-mcp.env"
+    PENDING_FILE="$CONFIG_DIR/.switch-pending"
     umask 022
     # [A-Za-z0-9] in the checks above means ASCII, whatever the locale (bash >= 4.3; the default
     # since bash 5.0).
     shopt -s globasciiranges
 
+    # bash keeps the export flag of a name the caller exported, for globals AND locals: unset
+    # every name that ever holds the key (or the unit text, which may carry a legacy key), so
+    # none of them reaches a child's environment.
+    unset AUTH_KEY EXPLICIT_KEY GH_TOKEN_VALUE KEY_SOURCE OLD_UNIT OLD_DESCRIPTION \
+        unit_key env_key cfg_key k key line rest v
     # The secrets are read once, then dropped from the environment every child inherits.
     EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
     GH_TOKEN_VALUE="${GH_TOKEN:-}"
@@ -820,6 +892,10 @@ main() {
 
     WORK_DIR=""
     TMP_LINK=""
+    WAS_PENDING=""
+    SESSION_TYPE=""
+    SESSION_DISPLAY=""
+    UNIT_DISPLAY=""
     ARMED=""
     INTERRUPTED=""
     CHANGED=""
@@ -853,7 +929,7 @@ main() {
     fi
     check_inputs
     # One run at a time: a second run's prune could delete the build this one just swapped in.
-    mkdir -p "$(dirname "$LOCK_FILE")"
+    command -v flock &>/dev/null || fail "flock (util-linux) is missing — nothing was changed on this box"
     exec 9>"$LOCK_FILE"
     flock -n 9 || fail "another install-linux.sh run holds ${LOCK_FILE} — nothing was changed on this box"
 
@@ -868,6 +944,7 @@ main() {
     WORK_DIR=$(mktemp -d)
     exec 3>&1 4>&2
     trap on_exit EXIT
+    trap on_signal HUP INT TERM
 
     echo "  [3/6] Downloading the source..."
     fetch_source
@@ -886,6 +963,16 @@ main() {
 
     echo "  [5/6] Switching to the new install..."
     save_previous
+    # A switch an earlier run started and never proved (enable-only, or a run killed with no
+    # trap) left the files ahead of the running process: restart, never take it as unchanged.
+    WAS_PENDING=""
+    if [[ -e "$PENDING_FILE" ]]; then
+        WAS_PENDING=1
+        CHANGED=1
+        say "An earlier switch was never proven: restarting into what the files say"
+    fi
+    mkdir -p "$CONFIG_DIR"
+    : >"$PENDING_FILE"
     if [[ -n "$HAD_UNIT" ]]; then
         arm
     fi
@@ -903,13 +990,17 @@ main() {
     disarm
     exec 3>&- 4>&-
     if [[ "$POLICY" == restart ]]; then
+        rm -f "$PENDING_FILE"
         say "Health check OK: v${PKG_VER}; an authenticated request answered 200, an unauthenticated one 401"
         remove_legacy_system_copy
         prune_builds
     else
-        # Nothing was started: the running process (if any) still uses the old build and the
-        # old system copy, so neither goes before the next proven start.
-        say "Not started (enable-only): the old builds and any old system-python copy stay until a restart run"
+        # Nothing was started, so the switch stays pending: the next restart run restarts and
+        # proves it. The old builds can go (a venv process imports through the link, which
+        # already points at the new build); an old system-python copy stays, a running legacy
+        # process may still import from it.
+        prune_builds
+        say "Not started (enable-only): the next restart run restarts and proves it; any old system-python copy stays until then"
     fi
 
     echo "  [6/6] Configuring firewall and getting network info..."
