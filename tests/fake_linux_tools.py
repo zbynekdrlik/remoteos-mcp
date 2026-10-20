@@ -39,6 +39,8 @@ Config keys (JSON):
                  "enable_fails": bool  (the unit is masked: `systemctl enable` fails and
                      `is-enabled` answers `masked`),
                  "squatter_pid": int  (another process also listens on :8092),
+                 "health_misses": int  (after each (re)start the first N /health polls are
+                     refused: a real server takes a moment to bind),
                  "only_version": str  (the answer overrides above, unauth_code to
                      serve_version, describe only a server of that version: the new install's,
                      not the one the installer finds running)}
@@ -59,6 +61,7 @@ import subprocess
 import sys
 import sysconfig
 import time
+import uuid
 from pathlib import Path
 
 PORT = 8092
@@ -265,9 +268,14 @@ def systemctl(cfg: dict, args: list[str]) -> int:
                 state.update(active=False, service=service, failure="the server exited")
             else:
                 state.update(active=True, service=service, failure="", hung=False,
-                             pid=4000 + state["starts"] + state["restarts"])
-    elif verb == "show":  # `show -p MainPID --value remoteos-mcp`
-        print(state.get("pid", 0) if state["active"] and words[1:2] == ["MainPID"] else 0)
+                             pid=4000 + state["starts"] + state["restarts"],
+                             health_misses=overrides.get("health_misses", 0))
+            state["invocation"] = uuid.uuid4().hex  # systemd: a new InvocationID per start
+    elif verb == "show":  # `show -p MainPID|InvocationID --value remoteos-mcp`
+        if words[1:2] == ["InvocationID"]:
+            print(state.get("invocation", ""))  # kept while inactive, as systemd does
+        else:
+            print(state.get("pid", 0) if state["active"] and words[1:2] == ["MainPID"] else 0)
     elif verb == "stop":
         state["active"] = False
     elif verb == "enable":
@@ -355,6 +363,12 @@ def curl(cfg: dict, args: list[str]) -> int:
         sys.stdout.write(write_out.replace("%{http_code}", "000"))
         print("curl: (28) Operation timed out after 3000 milliseconds", file=sys.stderr)
         return 28
+    if url == HEALTH_URL and state.get("health_misses", 0) > 0:  # not bound yet
+        state["health_misses"] -= 1
+        Path(cfg["state"]).write_text(json.dumps(state, indent=1))
+        sys.stdout.write(write_out.replace("%{http_code}", "000"))
+        print(f"curl: (7) Failed to connect to 127.0.0.1 port {PORT}", file=sys.stderr)
+        return 7
     if url == HEALTH_URL and overrides.get("health_waits_for"):
         _wait_for(overrides["health_waits_for"])
     if url == HEALTH_URL:

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from linux_installer_harness import K_EXPLICIT, K_UNIT, LinuxBox, linux_box, output
+from linux_installer_harness import K_EXPLICIT, K_UNIT, SOURCE_VERSION, LinuxBox, linux_box, output
 
 INSTALLER = Path(__file__).resolve().parent.parent / "install-linux.sh"
 
@@ -126,3 +126,68 @@ class TestPreflightAndMessages:
         assert result.returncode == 0, output(result)
         assert box.state()["restarts"] == restarts
         assert "restarting" not in output(result).lower(), output(result)
+
+
+def _reboot_into_an_enable_only_switch(box: LinuxBox) -> None:
+    """A proven cam, an enable-only switch to dev33 (pending), then the cam reboots: systemd
+    starts what the files say, and dev33 runs fine."""
+    assert box.run().returncode == 0
+    box.add_source("main", "bbb2222", "0.7.0.dev33")
+    assert box.run(REMOTEOS_MCP_POLICY="enable-only").returncode == 0
+    assert _pending(box)
+    box.boot()
+    assert box.state()["service"]["version"] == "0.7.0.dev33"
+
+
+class TestAPendingSwitchThatHasRunSince:
+    """Review round 8: the pending mark means "not started since the switch". Once the unit has
+    started (a reboot, a crash restart), the running process IS what the files say: provable."""
+
+    def test_a_failing_restart_run_rolls_back_to_it(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        _reboot_into_an_enable_only_switch(box)
+        box.add_source("main", "ccc3333", "0.7.0.dev34")
+        box.configure(service={"initialize_code": 500, "only_version": "0.7.0.dev34"})
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        assert "Rolled back" in output(result)
+        state = box.state()
+        assert state["active"] and state["enabled"], "a working, rebooted cam was stopped and disabled"
+        assert state["service"]["version"] == "0.7.0.dev33" and not _pending(box)
+
+    def test_a_no_op_enable_only_run_leaves_it_proven(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        _reboot_into_an_enable_only_switch(box)
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+
+        assert result.returncode == 0, output(result)
+        assert not _pending(box), "a stale mark: the switch has run since the reboot"
+
+
+class TestAServerThatTakesAMomentToBind:
+    """Review round 8: the proof and the re-proof poll; a real server binds a moment after
+    `systemctl restart` (Type=simple is active right after the fork)."""
+
+    def test_a_restored_install_that_comes_up_slowly_is_kept(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        box.configure(service={"initialize_code": 500, "only_version": SOURCE_VERSION, "health_misses": 2})
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        assert "Rolled back" in output(result) and "proved itself" in output(result)
+        state = box.state()
+        assert state["active"] and state["enabled"] and state["service"]["python"].endswith("/shims/python3")
+
+    def test_a_new_install_that_comes_up_slowly_proves_itself(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.configure(service={"health_misses": 2})
+
+        result = box.run()
+
+        assert result.returncode == 0, output(result)
+        assert box.state()["active"]
