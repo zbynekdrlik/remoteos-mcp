@@ -17,7 +17,9 @@ Roles (`fake_linux_tools.py <config.json> <role> <args...>`):
                  `start` on an active service changes nothing, as in systemd.
   curl ...       the GitHub API tarball download, plus the service's /health and /mcp on
                  127.0.0.1:8092, answered from the systemctl state. `-H @-` reads headers
-                 from stdin, as the installer sends the bearer key.
+                 from stdin, as the installer sends the bearer key. With a proxy in the
+                 environment, a loopback request without `--noproxy '*'` goes to that proxy,
+                 which cannot reach the box (curl 5), as real curl does.
   id ...         `id -u <name>` for the test accounts; everything else is the real `id`.
   ss ...         `ss -Hltnp 'sport = :8092'`: the active service's own process (its MainPID,
                  which `systemctl show -p MainPID --value` answers) listening on :8092, plus a
@@ -308,7 +310,8 @@ def systemctl(cfg: dict, args: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 _CURL_VALUE_OPTS = {"-o", "--output", "-w", "--write-out", "-H", "--header", "-X", "--request",
-                    "-d", "--data", "--data-raw", "-m", "--max-time", "--connect-timeout"}
+                    "-d", "--data", "--data-raw", "-m", "--max-time", "--connect-timeout", "--noproxy"}
+_PROXY_VARS = ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY")
 
 
 def curl(cfg: dict, args: list[str]) -> int:
@@ -353,6 +356,12 @@ def curl(cfg: dict, args: list[str]) -> int:
             return answer(404, "")
         shutil.copyfile(tarball, out)
         return 0
+    if any(os.environ.get(v) for v in _PROXY_VARS) and "*" not in opts.get("--noproxy", []):
+        # real curl sends a loopback URL to the proxy from the environment (curl 8.5 does), which
+        # cannot reach this box's 127.0.0.1 (and would see the key): --noproxy '*' goes direct
+        sys.stdout.write(write_out.replace("%{http_code}", "000"))
+        print("curl: (5) Could not resolve proxy: proxy.invalid", file=sys.stderr)
+        return 5
     state = _load(cfg["state"])
     if not state.get("active"):
         sys.stdout.write(write_out.replace("%{http_code}", "000"))

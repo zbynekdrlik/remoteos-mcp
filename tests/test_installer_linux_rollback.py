@@ -246,3 +246,18 @@ class TestTheRunningInstallIsReadWithPatience:
 
         assert result.returncode == 0, output(result)
         assert not _pending(box), "one missed poll left a sticky pending mark on a working cam"
+
+
+class TestAProxiedBox:
+    def test_the_loopback_checks_never_go_through_a_proxy(self, tmp_path: Path) -> None:
+        """Review round 11: curl sends http://127.0.0.1 to an http_proxy from the environment
+        (pip needs it, so the installer keeps it). A remote proxy cannot reach the box, so every
+        check failed and a working agent was stopped; a local one would have seen the key."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+
+        result = box.run(http_proxy="http://proxy.invalid:3128")
+
+        assert result.returncode == 0, output(result)
+        state = box.state()
+        assert state["active"] and state["enabled"] and state["service"]["version"] == SOURCE_VERSION

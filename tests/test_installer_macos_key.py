@@ -168,6 +168,23 @@ class TestMacosKeyPrecedence:
         envs = Path(str(mac.records) + ".env")
         assert K_PLIST_ENV not in envs.read_text(), "a child was started with the key in its environment"
 
+    def test_a_signal_while_a_key_file_is_written_leaves_no_temp_copy(self, tmp_path: Path) -> None:
+        """Review round 11: write_private's 0600 temp file (it holds the key) goes on any exit,
+        as Linux's WRITE_TMP does since round 7."""
+        mac = Mac(tmp_path)
+        lines = mac.script.read_text().split("\n")
+        hits = [i for i, line in enumerate(lines) if line.strip() == 'cat >"$tmp"']
+        assert len(hits) == 1, hits
+        lines.insert(hits[0] + 1, "    kill -TERM $$")
+        mac.script.write_text("\n".join(lines))
+
+        result = mac.run(REMOTEOS_MCP_AUTH_KEY=K_EXPLICIT)
+
+        assert result.returncode != 0, _output(result)
+        leftovers = [p.name for d in (mac.config.parent, mac.plist.parent) if d.exists() for p in d.iterdir()
+                     if p.name.startswith(("config.json.", "com.remoteos-mcp.plist."))]
+        assert leftovers == [], "a temp copy of a key file is left behind"
+
     def test_an_explicit_key_never_reaches_a_child(self, tmp_path: Path) -> None:
         """Review round 9: the key is dropped from the environment before the first child
         (`python3 --version`, a brew fallback), not after the Python check."""
