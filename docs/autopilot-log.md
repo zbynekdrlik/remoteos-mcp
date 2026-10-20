@@ -365,9 +365,10 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   is a symlink (`/opt/remoteos-mcp-venv` → a build in `/opt/remoteos-mcp-venvs/`; a venv cannot
   be renamed); a failed fetch/build exits 1 changing nothing; a failed proof or an interrupted
   switch goes back to the previous unit/key files/venv only when that state was PROVEN (a unit
-  existed, no `.switch-pending`), else the service is stopped and disabled (an unproven agent
-  may have authentication off); enable-only never starts or stops anything, and a no-op run
-  leaves the pending mark as it found it; desktop venvs get one `.pth` to the
+  existed, no `.switch-pending`, and the running process answers with its files' version and
+  refuses a request without the key), else the service is stopped and disabled (an unproven
+  agent may have authentication off); enable-only never starts or stops anything, and a no-op
+  run on a proven box keeps it proven; desktop venvs get one `.pth` to the
   system gi (AT-SPI); the mode and User= follow the existing unit; the installers never print
   the key; Windows keys come from a CSPRNG; an empty `REMOTEOS_MCP_REF` means main; the import
   checks never write bytecode (an adopted venv stays byte-identical); `uninstall-linux.sh`
@@ -382,11 +383,13 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   a key the installer cannot carry); round 2 `2a9812e` → `229480a`, `dc15f27`; round 3 `6b7d74e`
   → `ebfecd5` (only a proven state is restarted); round 4 `c57d6a3` → `90d9323` (enable-only
   never stops the running agent); round 5 `13c4e14` → `aa798fa` (a no-op enable-only run keeps
-  a proven box proven; the lock is 0600).
+  a proven box proven; the lock is 0600); round 6 `bc736d9` → `6dec457` (PROVEN = the running
+  install answers with its files' version and refuses a request without the key; nothing
+  switched → left as it ran; the gi link undone; the key only to the unit's own listener, `ss`).
 - **Tests:** `tests/test_installer_linux_venv.py` (41) and `tests/test_installer_linux_edges.py`
-  (50, the review rounds' edges), both on `tests/linux_installer_harness.py` +
+  (56, the review rounds' edges), both on `tests/linux_installer_harness.py` +
   `tests/fake_linux_tools.py` (real venvs, a stateful fake systemd/curl, the argv of every
   process); `tests/test_installer_macos_key.py` (10, also under GNU bash 3.2.57);
   `tests/test_installer_windows_key.py` (3 static) and `tests_windows/test_install_ps1_key.py`
-  (real PowerShell 5.1: install.ps1's own functions, one real cmd.exe run, the ACL). Result: 872
+  (real PowerShell 5.1: install.ps1's own functions, one real cmd.exe run, the ACL). Result: 878
   pass, ruff + shellcheck clean; `install-linux.sh` 1000 lines.

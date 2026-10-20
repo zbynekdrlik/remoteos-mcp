@@ -58,7 +58,8 @@ REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY`, then `… | sudo
   otherwise). A new source is built next to the running one and swapped in; the new install must
   answer `/health` with its version, accept the key and refuse a request without it, or the box
   goes back to the previous proven install (or, with none, is stopped and disabled: an unproven
-  agent never stays up). An unchanged source changes nothing.
+  agent never stays up). The key goes only to the unit's own process on :8092 (the check needs
+  `ss`, from iproute2). An unchanged source changes nothing.
 - **Upgrading a Linux box from the old system-python install** moves it to the venv with the
   same key. The old copy in the system python is removed only after the venv has proved itself.
 

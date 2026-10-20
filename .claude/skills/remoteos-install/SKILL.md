@@ -71,9 +71,10 @@ Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and
 - The key lives ONLY in 0600 `/etc/remoteos-mcp/config.json` and the 0600 EnvironmentFile `/etc/remoteos-mcp/remoteos-mcp.env` (`REMOTEOS_AUTH_KEY=`). Never in the unit, an argv or the installer output: read it on the box with `sudo cat /etc/remoteos-mcp/config.json`.
 - The key is kept on a re-run: explicit `REMOTEOS_MCP_AUTH_KEY`, else the running unit's (a legacy `--auth-key`, else its EnvironmentFile), else config.json, else new.
 - An unchanged source skips pip and restarts nothing. A new one is built side by side, then swapped in; a failed build changes nothing.
-- The install must prove itself (`/health` = the new version, an authenticated `initialize` 200, an unauthenticated request 401), or it rolls back to the previous PROVEN unit, key files and venv.
-- With nothing proven to go back to (a fresh box, or a switch an earlier run left pending), a failed proof stops and disables the service; its files and the pending marker stay for a re-run. An unproven agent never stays up.
-- After `REMOTEOS_MCP_POLICY=enable-only` the switch is pending (`/etc/remoteos-mcp/.switch-pending`): the next normal run restarts and proves it.
+- The install must prove itself (`/health` = the new version, an authenticated `initialize` 200, an unauthenticated request 401), or it rolls back to the previous PROVEN unit, key files and venv. The key is sent only when the unit's own process is the only listener on :8092 (`ss`, from iproute2, which a normal run requires).
+- PROVEN = what ran before the run: a unit, no pending switch, the service answering `/health` with the version its own ExecStart python has, and refusing a request without the key. A failed run on a proven box with nothing switched leaves it running as it was (`Nothing was switched`).
+- With nothing proven to go back to (a fresh box, a pending switch, files the running process never ran, an agent with authentication off), a failed proof stops and disables the service; its files and the pending marker stay for a re-run. An unproven agent never stays up.
+- After `REMOTEOS_MCP_POLICY=enable-only` the switch is pending (`/etc/remoteos-mcp/.switch-pending`): the next normal run restarts and proves it. An enable-only run that changed nothing on a proven box leaves it proven.
 - A desktop unit gets the X11 session's `DISPLAY` (or keeps the existing unit's); a Wayland session gets none.
 
 **Migration from the old system-python layout:** the first run builds the venv, switches the unit and proves it; only then does it remove the old copy from the system python (`pip uninstall --break-system-packages remoteos-mcp fastmcp fastmcp-slim`). If the proof fails, the old unit and the old copy stay and the box runs as before.
@@ -90,6 +91,8 @@ Verify after a run (from dev1 and on the box):
 - `[X] … nothing was changed on this box`: nothing changed. Fix the cause (network, the ref) and rerun.
 - `[X] The new install did not prove itself … Rolled back`: the previous install runs again. Read `journalctl -u remoteos-mcp -n 50` from the failed start.
 - `[X] Rolled back, but the previous install is not running either`: the previous unit, key files and venv are back, but that install does not start either. Read the journal, fix the cause, rerun.
+- `Nothing was switched: the proven install that was running is left as it ran`: the run changed nothing and the box runs as before; the proof's failure line says what failed.
+- `another process holds :8092, not the unit's`: something else listens on the port (`sudo ss -ltnp 'sport = :8092'`). The key was not sent. Stop that process, then rerun.
 
 **Gotcha — cam boxes can boot with a read-only rootfs** (fstab `ro`). The installer now refuses to run until remounted rw + fstab fixed (`mount -o remount,rw /` then edit `/etc/fstab`). Both Linux and macOS installers also verify after restart that the `/health` endpoint reports the version just installed — a stale pre-existing install is caught and reported as failure.
 

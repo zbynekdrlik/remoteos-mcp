@@ -82,10 +82,17 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   removed after a passed proof (or a rollback's restart). A run that finds it restarts instead
   of taking the files as unchanged: after enable-only or a run killed with no trap (SIGKILL), the
   running process is not what the files say, and `systemctl start` on an active unit loads
-  nothing new. An enable-only run that changed nothing (`CHANGED` empty) removes the mark it
-  wrote: a proven box stays proven, so a later failing restart run rolls it back instead of
-  stopping it (review round 5; camera-box's first delegated cam run is exactly this). A mark
-  an earlier run left sets `CHANGED`, so it stays.
+  nothing new. An enable-only run that changed nothing removes the mark it wrote ONLY when
+  `check_running_install` finds the running install proven (round 5, narrowed in round 6): a
+  cam whose venv camera-box's lib upgraded in place without a restart runs another version
+  than its files, so its no-op run keeps the mark. A mark an earlier run left sets `CHANGED`.
+- **PROVEN (`check_running_install`, review round 6)** = the unit existed, no pending switch,
+  the service is active, `/health` reports the version the unit's own ExecStart python has
+  (`python_version`, the interpreter is the ExecStart's first word, `python*` only), and an
+  unauthenticated `POST /mcp` answers 401. Read-only, the key is never sent. A restart run
+  reads it BEFORE the switch (what a failure may go back to); a no-op enable-only run reads it
+  at the end. "A unit and no pending mark" alone is NOT proven: it restored the state that had
+  just failed its proof, or files the running process never ran.
 - **Order (keep it):**
   1. Validate the inputs (`REMOTEOS_MCP_REF` default `main`, empty = `main` as camera-box reads
      it; MODE / USER / POLICY), take `flock -n` on `/run/remoteos-mcp-install.lock` (a
@@ -114,19 +121,27 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
      Swap the link (`ln -sfn` + `mv -Tf`: one rename(2)); a real directory is moved into the
      store first. Write the files (`write_if_changed`: content + mode + owner). daemon-reload,
      enable, and `is-enabled` must be literally `enabled` (camera-box's verify) or roll back;
-     `restart` on a change, else `start` — but an unchanged box whose running process answers
-     `/health` with another version (camera-box's enable-only in-place upgrade) or nothing is
-     restarted too (`health_version`).
+     `restart` on a change, else `start` — but an unchanged box whose running install is not
+     PROVEN (another version, e.g. camera-box's enable-only in-place upgrade; no answer; a
+     stopped service; authentication off) is restarted too. `MODIFIED` marks what the run changed
+     (a key file or the unit written, the venv swapped, the gi link added), each set BEFORE its
+     change so a signal in between still counts it.
   7. `prove_health` (writes NOTHING): active + `/health` = the built version, an authenticated
-     `initialize` 200, an unauthenticated `POST /mcp` 401. (The proof sends the key to whatever
-     holds :8092, as every client does; a local account squatting the port while the service
-     restarts is a transport issue — systemd socket activation — not the installer's, round 5.)
+     `initialize` 200, an unauthenticated `POST /mcp` 401. **The key goes only to the unit's own
+     process** (`port_is_ours`, review round 6): `systemctl show -p MainPID --value` must be the
+     ONE pid `ss -Hltnp 'sport = :8092'` lists, else the proof fails with the key unsent. A local
+     account holding the port in the restart window (a loopback-only squatter gets no client
+     traffic) could otherwise take the key and fake a passing proof. Checked live on dev1: the
+     real server under systemd is its own listener. A restart run needs `ss` (iproute2), checked
+     before anything changes. Clients still send the key to whoever holds the port; closing that
+     is the transport's job (systemd socket activation), a follow-up candidate.
      Failure → `health_failed`, which
      keeps SIGPIPE/HUP/INT/TERM ignored and `set +e` until `undo_switch` is done, then exits 1.
-     **`undo_switch` (also the armed EXIT trap) restarts only a PROVEN state**: with a previous
-     unit and no pending switch it runs `restore_previous` (files, link or directory,
-     daemon-reload, restart); otherwise (a fresh box, a switch an earlier run left pending) it
-     stops and disables the service and keeps the files + the pending marker for a re-run. An
+     **`undo_switch` (also the armed EXIT trap) restarts only a PROVEN state**: PROVEN and
+     `MODIFIED` → `restore_previous` (files, link or directory, the gi link taken out, daemon-
+     reload, restart); PROVEN with nothing switched → left as it ran ("Nothing was switched", the
+     pending mark removed); otherwise (a fresh box, a pending switch, files never run, auth off)
+     it stops and disables the service and keeps the files + the pending marker for a re-run. An
      unproven state may be an agent with authentication off (a full shell on 0.0.0.0): it is
      never "rolled back" into running (review round 3). **enable-only never starts or stops
      anything**: its failure puts the previous files back with no restart (a fresh box: the unit is
@@ -151,6 +166,11 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     rename, and `restore_venv` reads the state each step leaves (the directory moved aside, the
     `.link` temp, the new link). Tests inject `kill -HUP $$` after each step
     (`LinuxBox.inject_after`).
+  - **One file, ~1000 lines (decided in review round 6).** `curl … | sudo bash` delivers ONE
+    file, and camera-box installs pinned older refs, so the installer cannot source a second file
+    from the ref's tarball or from `main` (raw caches `main` for minutes: version skew). At the
+    budget, trim comments into this rule; if it must grow, split the SOURCE into parts that a
+    generator concatenates into the committed `install-linux.sh`, with a test that they match.
   - Everything runs inside `main()`, called on the last line (a truncated download never
     half-runs).
 - **Unset every name that ever holds the key before using it** (`AUTH_KEY`, `cfg_key`,
