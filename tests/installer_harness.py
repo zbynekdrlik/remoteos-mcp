@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -342,6 +343,7 @@ def _run_installer(
     tmp_path: Path,
     *,
     timeout: int = 60,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run an installer script with controlled PATH (see `_installer_env`), in
     its own session: a fake pip may signal the installer's whole process group
@@ -350,7 +352,7 @@ def _run_installer(
         _installer_argv(script),
         capture_output=True,
         text=True,
-        env=_installer_env(shim_dir, tmp_path),
+        env={**_installer_env(shim_dir, tmp_path), **(extra_env or {})},
         timeout=timeout,
         start_new_session=True,
     )
@@ -578,6 +580,29 @@ fi
 exit 0
 """,
     )
+
+
+_LOGGED_COMMANDS = (
+    "awk basename cat chmod chown cmp cp cut date dirname env find grep head install ln ls "
+    "mkdir mktemp mv plutil readlink realpath rm sed seq sleep sort stat tail tar tee touch tr uname wc xargs"
+).split()
+
+
+def log_every_command(shim_dir: Path, records: Path) -> None:
+    """Record the argv of every process the installer starts by name: each shim in `shim_dir`
+    is wrapped, and each command of `_LOGGED_COMMANDS` gets a shim in front of the real one.
+    Read the records with `fake_linux_tools.records(records)` (`[tool, arg, ...]` each)."""
+    real_dir = shim_dir / ".real"
+    real_dir.mkdir()
+    log = f'printf "%s\\x1f" "${{0##*/}}" "$@" >> "{records}"; printf "\\x1e" >> "{records}"\n'
+    for shim in sorted(p for p in shim_dir.iterdir() if p.is_file()):
+        target = real_dir / shim.name
+        shim.rename(target)
+        _make_shim(shim, f'{log}exec "{target}" "$@"\n')
+    for name in _LOGGED_COMMANDS:
+        real = shutil.which(name, path="/usr/bin:/bin:/usr/sbin:/sbin")
+        if real and not (shim_dir / name).exists():
+            _make_shim(shim_dir / name, f'{log}exec "{real}" "$@"\n')
 
 
 def rollback_helper(path: Path, installer: Path = INSTALLER_LINUX) -> Path:
