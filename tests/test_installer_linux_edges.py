@@ -1,4 +1,4 @@
-"""install-linux.sh: the edges of the switch, found by the #12 review rounds (rounds 1-5).
+"""install-linux.sh: the edges of the switch, found by the #12 review rounds (rounds 1-6).
 
 The core behaviour (layout, key precedence, migration, failed build, proof, idempotence,
 camera-box adoption) is in tests/test_installer_linux_venv.py; this module holds what the review
@@ -703,3 +703,109 @@ class TestLockMode:
 
         assert result.returncode == 0, output(result)
         assert box.lock_file.stat().st_mode & 0o777 == 0o600
+
+
+# ---------------------------------------------------------------------------
+# Review round 6
+# ---------------------------------------------------------------------------
+
+
+def _upgrade_camera_box_venv_in_place(box: LinuxBox) -> None:
+    """camera-box's enable-only run: the venv now holds our source, the process still runs the old."""
+    site = Path(_venv_purelib(box.venv_link))
+    for old in [site / "remoteos", *site.glob("remoteos_mcp-*.dist-info")]:
+        shutil.rmtree(old)
+    write_dist(site, "remoteos-mcp", SOURCE_VERSION, dist_files("remoteos-mcp", SOURCE_VERSION))
+    (box.venv_link / ".camera-box-source").write_text(MAIN_SOURCE_ID + "\n")
+
+
+class TestOnlyARunningProvenInstallIsRestored:
+    """Review round 6: "a unit and no pending mark" was taken as proven. A state that just failed
+    its proof, or files the running process never ran, was then "rolled back" into running."""
+
+    def test_an_unchanged_box_whose_agent_has_authentication_off_is_stopped(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        box.configure(service={"unauth_code": 200})
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        assert "not enforced" in output(result) and "Rolled back" not in output(result)
+        state = box.state()
+        assert not state["active"] and not state["enabled"], "an agent with authentication off stays up"
+
+    def test_files_a_cam_never_ran_are_never_rolled_back_into(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_camera_box(K_ENV, mode="headless", user="root")  # running CB_VERSION
+        _upgrade_camera_box_venv_in_place(box)
+        cam = {"REMOTEOS_MCP_MODE": "headless", "REMOTEOS_MCP_USER": "root"}
+
+        delegated = box.run(REMOTEOS_MCP_POLICY="enable-only", **cam)
+
+        assert delegated.returncode == 0, output(delegated)
+        assert _pending(box), "files the running process never ran were taken as proven"
+        box.configure(service={"initialize_code": 500})
+        result = box.run(**cam)
+        assert result.returncode != 0, output(result)
+        assert "Rolled back" not in output(result)
+        state = box.state()
+        assert not state["active"] and not state["enabled"], "the version that just failed was left up"
+
+    def test_a_proven_box_whose_proof_fails_with_nothing_switched_is_left_as_it_ran(
+        self, tmp_path: Path
+    ) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        box.configure(service={"initialize_code": 500})
+        restarts, snap = box.state()["restarts"], box.snapshot()
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        assert "Nothing was switched" in output(result) and "Rolled back" not in output(result)
+        state = box.state()
+        assert state["active"] and state["enabled"] and state["restarts"] == restarts
+        assert box.snapshot() == snap and not _pending(box)
+
+
+class TestGiLinkRollback:
+    def test_a_failed_proof_takes_the_gi_link_out_of_the_proven_build(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path, graphical=True)
+        assert box.run().returncode == 0
+        (box.system_extra / "gi").mkdir()
+        (box.system_extra / "gi" / "__init__.py").write_text("SYSTEM_GI = True\n")
+        box.configure(service={"initialize_code": 500})
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        assert "Rolled back" in output(result) and box.state()["active"]
+        build = box.venv_target()
+        assert not (build / "system-gi").exists() and not list(build.rglob("remoteos-system-gi.pth"))
+        assert box.venv_python("import gi").returncode != 0, "the restored build still imports the system gi"
+
+
+class TestTheKeyGoesOnlyToTheUnit:
+    def test_the_key_is_never_sent_while_another_process_holds_the_port(self, tmp_path: Path) -> None:
+        """A local account holding :8092 in the restart window would get the key (a root shell
+        with User=root) and could fake a passing proof."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        unit_before = box.unit()
+        box.configure(service={"squatter_pid": 4242})
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        assert "another process" in output(result)
+        sent = [r for r in box.curl_requests() if any("Authorization" in h for h in r["headers"])]
+        assert sent == [], "the key went to a port another process holds"
+        _assert_legacy_box_restored(box, unit_before)
+
+    def test_the_proof_asks_who_holds_the_port(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+
+        assert box.run().returncode == 0
+
+        assert ["-Hltnp", "sport = :8092"] in box.calls("ss")

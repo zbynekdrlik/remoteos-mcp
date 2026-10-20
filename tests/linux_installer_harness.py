@@ -8,7 +8,7 @@ installer under bash. Only the OS/tool boundary is faked (see tests/fake_linux_t
 - /etc/remoteos-mcp, the unit file, /opt/remoteos-mcp-venv and /opt/remoteos-mcp-venvs live
   under tmp_path;
 - PATH starts with shims: python3 (the SYSTEM python, whose pip is tests/fake_pip.py on a fake
-  /usr/local site: the old system-python layout), systemctl, curl, id, apt-get, loginctl,
+  /usr/local site: the old system-python layout), systemctl, curl, id, ss, apt-get, loginctl,
   findmnt, hostname, git, ufw, firewall-cmd;
 - every other command the installer may start (mv, cat, tar, env, ...) gets a logging shim
   in front of the real one, so `box.argvs()` holds the argv of every process it started by
@@ -411,7 +411,7 @@ case "$1" in
 esac
 exec "{real_py}" "$@"
 """, records)
-    for role in ("systemctl", "curl", "id"):
+    for role in ("systemctl", "curl", "id", "ss"):
         _shim(shims / role, f'{tools} {role} "$@"\n', records)
     ls_remote = f'printf "%s\\trefs/heads/main\\n" "{FAKE_SHA}"'
     _shim(shims / "git", f'if [[ "$1" == "ls-remote" ]]; then {ls_remote}; fi\nexit 0\n', records)

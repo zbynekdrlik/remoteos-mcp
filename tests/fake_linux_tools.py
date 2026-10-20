@@ -19,6 +19,9 @@ Roles (`fake_linux_tools.py <config.json> <role> <args...>`):
                  127.0.0.1:8092, answered from the systemctl state. `-H @-` reads headers
                  from stdin, as the installer sends the bearer key.
   id ...         `id -u <name>` for the test accounts; everything else is the real `id`.
+  ss ...         `ss -Hltnp 'sport = :8092'`: the active service's own process (its MainPID,
+                 which `systemctl show -p MainPID --value` answers) listening on :8092, plus a
+                 `squatter_pid` (another local process holding the port) when configured.
 
 Config keys (JSON):
 
@@ -34,7 +37,8 @@ Config keys (JSON):
                  "restart_waits_for": path  (the first restart waits for the file),
                  "health_waits_for": path  (/health waits for the file),
                  "enable_fails": bool  (the unit is masked: `systemctl enable` fails and
-                     `is-enabled` answers `masked`)}
+                     `is-enabled` answers `masked`),
+                 "squatter_pid": int  (another process also listens on :8092)}
   uids          {"account": uid}
 
 The systemctl state's `hung` (set by a test) makes the active service answer nothing until the
@@ -257,7 +261,10 @@ def systemctl(cfg: dict, args: list[str]) -> int:
             elif cfg.get("service", {}).get("start_fails"):
                 state.update(active=False, service=service, failure="the server exited")
             else:
-                state.update(active=True, service=service, failure="", hung=False)
+                state.update(active=True, service=service, failure="", hung=False,
+                             pid=4000 + state["starts"] + state["restarts"])
+    elif verb == "show":  # `show -p MainPID --value remoteos-mcp`
+        print(state.get("pid", 0) if state["active"] and words[1:2] == ["MainPID"] else 0)
     elif verb == "stop":
         state["active"] = False
     elif verb == "enable":
@@ -362,6 +369,23 @@ def curl(cfg: dict, args: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# ss
+# ---------------------------------------------------------------------------
+
+
+def ss(cfg: dict, args: list[str]) -> int:
+    """`ss -Hltnp 'sport = :8092'`: who listens on the service's port."""
+    assert args == ["-Hltnp", f"sport = :{PORT}"], args
+    state = _load(cfg["state"])
+    if state.get("active"):
+        print(f'LISTEN 0 2048 0.0.0.0:{PORT} 0.0.0.0:* users:(("python",pid={state["pid"]},fd=6))')
+    squatter = cfg.get("service", {}).get("squatter_pid")
+    if squatter:
+        print(f'LISTEN 0 5 127.0.0.1:{PORT} 0.0.0.0:* users:(("python3",pid={squatter},fd=3))')
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # id
 # ---------------------------------------------------------------------------
 
@@ -386,6 +410,7 @@ def main(argv: list[str]) -> int:
         "systemctl": lambda: systemctl(cfg, args),
         "curl": lambda: curl(cfg, args),
         "id": lambda: fake_id(cfg, args),
+        "ss": lambda: ss(cfg, args),
     }
     return handlers[role]()
 
