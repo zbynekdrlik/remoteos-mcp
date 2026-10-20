@@ -202,9 +202,14 @@ class LinuxBox:
         Path(self.cfg()["records"]).unlink(missing_ok=True)
 
     # --- running -----------------------------------------------------------
-    def run(self, *, timeout: int = 120, **env: str) -> subprocess.CompletedProcess:
+    def uninstaller(self) -> Path:
+        """uninstall-linux.sh, redirected to this box's paths."""
+        return _redirected(UNINSTALLER_LINUX, self.root, self.config_dir, self.unit_path, self.venv_link,
+                           self.venv_store)
+
+    def run(self, *, script: Path | None = None, timeout: int = 120, **env: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [os.environ.get("INSTALLER_TEST_BASH", "bash"), str(self.script)],
+            [os.environ.get("INSTALLER_TEST_BASH", "bash"), str(script or self.script)],
             capture_output=True, text=True, timeout=timeout, start_new_session=True,
             env={**self.env, **env},
         )
@@ -292,10 +297,27 @@ def mode_of(path: Path) -> int:
     return path.stat().st_mode & 0o777
 
 
-def _patch(content: str, replacements: dict[str, str]) -> str:
-    for old, new in replacements.items():
+def _redirected(script: Path, tmp_path: Path, config_dir: Path, unit_path: Path, venv_link: Path,
+                venv_store: Path) -> Path:
+    """A copy of `script` (the installer or the uninstaller) with the root check off and the
+    box's paths under tmp_path."""
+    content = script.read_text()
+    for old, new in {
+        'if [[ "$EUID" -ne 0 ]]; then': "if false; then",
+        'CONFIG_DIR="/etc/remoteos-mcp"': f'CONFIG_DIR="{config_dir}"',
+        'UNIT_PATH="/etc/systemd/system/remoteos-mcp.service"': f'UNIT_PATH="{unit_path}"',
+        'SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"': f'SERVICE_FILE="{unit_path}"',
+        'VENV_LINK="/opt/remoteos-mcp-venv"': f'VENV_LINK="{venv_link}"',
+        'VENV_STORE="/opt/remoteos-mcp-venvs"': f'VENV_STORE="{venv_store}"',
+        "HEALTH_TRIES=12": "HEALTH_TRIES=3",
+        "HEALTH_SLEEP=5": "HEALTH_SLEEP=0",
+    }.items():
         content = content.replace(old, new)
-    return content
+    assert str(config_dir) in content and str(unit_path) in content, f"{script.name}'s paths were not redirected"
+    copy = tmp_path / script.name
+    copy.write_text(content)
+    copy.chmod(0o755)
+    return copy
 
 
 def linux_box(tmp_path: Path, *, graphical: bool = False, installer: Path = INSTALLER_LINUX) -> LinuxBox:
@@ -371,20 +393,7 @@ exit 0
         if real and not (shims / name).exists():
             _shim(shims / name, f'exec "{real}" "$@"\n', records)
 
-    content = _patch(installer.read_text(), {
-        'if [[ "$EUID" -ne 0 ]]; then': "if false; then",
-        'CONFIG_DIR="/etc/remoteos-mcp"': f'CONFIG_DIR="{config_dir}"',
-        'UNIT_PATH="/etc/systemd/system/remoteos-mcp.service"': f'UNIT_PATH="{unit_path}"',
-        'SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"': f'SERVICE_FILE="{unit_path}"',
-        'VENV_LINK="/opt/remoteos-mcp-venv"': f'VENV_LINK="{venv_link}"',
-        'VENV_STORE="/opt/remoteos-mcp-venvs"': f'VENV_STORE="{venv_store}"',
-        "HEALTH_TRIES=12": "HEALTH_TRIES=3",
-        "HEALTH_SLEEP=5": "HEALTH_SLEEP=0",
-    })
-    assert str(config_dir) in content and str(unit_path) in content, "the installer's paths were not redirected"
-    script = tmp_path / installer.name
-    script.write_text(content)
-    script.chmod(0o755)
+    script = _redirected(installer, tmp_path, config_dir, unit_path, venv_link, venv_store)
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir(exist_ok=True)
     box = LinuxBox(

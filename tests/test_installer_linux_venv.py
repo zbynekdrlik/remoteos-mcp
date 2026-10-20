@@ -557,3 +557,26 @@ class TestDesktopMode:
         assert result.returncode == 0, _output(result)
         assert any("python3-venv" in a for a in box.calls("apt-get")), box.calls("apt-get")
         assert box.state()["service"]["version"] == SOURCE_VERSION
+
+
+# ---------------------------------------------------------------------------
+# uninstall-linux.sh knows the layout
+# ---------------------------------------------------------------------------
+
+
+class TestUninstall:
+    def test_uninstall_removes_the_venv_layout_and_an_old_system_copy(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        box.install_legacy(K_UNIT)  # a box that still has the old system-python copy too
+        uninstaller = box.uninstaller()
+
+        result = box.run(script=uninstaller)
+
+        assert result.returncode == 0, _output(result)
+        assert not box.unit_path.exists() and not box.config_dir.exists()
+        assert not box.venv_link.exists() and not box.venv_link.is_symlink()
+        assert not box.venv_store.exists()
+        assert box.pip.versions("remoteos-mcp") == [] and box.pip.versions("fastmcp-slim") == []
+        assert all("--break-system-packages" in a for a in _legacy_removals(box)), _legacy_removals(box)
+        assert not box.state()["active"]
