@@ -80,8 +80,15 @@ function Resolve-RemoteOSAuthKey([string]$Explicit, $Found) {
         }
         return [pscustomobject]@{ Key = $Explicit; Source = 'REMOTEOS_MCP_AUTH_KEY' }
     }
+    # The first key the PC has decides; one this installer cannot carry is refused, never
+    # replaced by a new key (that would silently cut the clients off).
     foreach ($source in $Found.Keys) {
-        if (Test-RemoteOSKey $Found[$source]) { return [pscustomobject]@{ Key = $Found[$source]; Source = $source } }
+        $key = $Found[$source]
+        if (-not $key) { continue }
+        if (-not (Test-RemoteOSKey $key)) {
+            throw "the key in $source is not 1-128 letters/digits, so it cannot be carried over; pass the key the clients use as REMOTEOS_MCP_AUTH_KEY"
+        }
+        return [pscustomobject]@{ Key = $key; Source = $source }
     }
     return [pscustomobject]@{ Key = (New-RemoteOSKey); Source = $null }
 }

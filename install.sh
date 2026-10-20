@@ -118,17 +118,23 @@ if [[ -n "$EXPLICIT_KEY" ]]; then
     AUTH_KEY="$EXPLICIT_KEY"
     KEY_SOURCE="REMOTEOS_MCP_AUTH_KEY"
 else
+    # The first key the mac has decides; one this installer cannot carry is refused, never
+    # replaced by a new key (that would silently cut the clients off).
     PLIST_KEY=$(key_from_plist "$PLIST_PATH")
-    if key_ok "$PLIST_KEY"; then
+    if [[ -n "$PLIST_KEY" ]]; then
         AUTH_KEY="$PLIST_KEY"
         KEY_SOURCE="the running LaunchAgent"
-    elif key_ok "$CFG_KEY"; then
+    elif [[ -n "$CFG_KEY" ]]; then
         AUTH_KEY="$CFG_KEY"
         KEY_SOURCE="$CONFIG_FILE"
     else
         # Not `tr … < /dev/urandom | head -c 32`: tr dies of SIGPIPE when head
         # exits, and pipefail turns that into an abort on a fresh mac (#12).
         AUTH_KEY=$("$PYTHON" -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(32)), end='')")
+    fi
+    if [[ -n "$KEY_SOURCE" ]] && ! key_ok "$AUTH_KEY"; then
+        echo "  [X] The key in ${KEY_SOURCE} is not 1-128 letters/digits, so it cannot be carried over; pass the key the clients use as REMOTEOS_MCP_AUTH_KEY — nothing was changed on this mac"
+        exit 1
     fi
 fi
 if ! key_ok "$AUTH_KEY"; then
