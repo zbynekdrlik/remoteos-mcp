@@ -53,6 +53,89 @@ if [[ -z "$PYTHON" ]]; then
     exit 1
 fi
 
+# --- The auth key (read before anything changes: an invalid explicit key is refused) ---
+# The key precedence is the Linux installer's (#12): an explicit REMOTEOS_MCP_AUTH_KEY, else
+# the key the running LaunchAgent uses (a legacy `--auth-key` in its ProgramArguments, else
+# its EnvironmentVariables), else config.json, else a new key.  A re-run never changes it.
+# The key reaches the server through the plist's EnvironmentVariables (REMOTEOS_AUTH_KEY),
+# never an argv, and is never printed.
+
+# 1-128 ASCII letters/digits.  LC_ALL=C in the subshell makes the bracket range ASCII
+# (bash 3.2 has no globasciiranges).
+key_ok() {
+    (
+        LC_ALL=C
+        k="${1-}"
+        [[ -n "$k" && ${#k} -le 128 ]] || exit 1
+        case "$k" in
+            *[!A-Za-z0-9]*) exit 1 ;;
+        esac
+    )
+}
+
+# The auth_key of a config.json (python reads the file; the key only comes back on stdout).
+key_from_config() {
+    [[ -f "$1" ]] || return 0
+    "$PYTHON" -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        v = json.load(f).get("auth_key", "")
+except Exception:
+    v = ""
+print(v if isinstance(v, str) else "", end="")' "$1" 2>/dev/null || true
+}
+
+# The key a LaunchAgent plist hands the server: a legacy `--auth-key <key>` in
+# ProgramArguments, else EnvironmentVariables' REMOTEOS_AUTH_KEY.
+key_from_plist() {
+    [[ -f "$1" ]] || return 0
+    "$PYTHON" -c '
+import plistlib, sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        p = plistlib.load(f)
+except Exception:
+    sys.exit(0)
+args = p.get("ProgramArguments") or []
+key = ""
+if "--auth-key" in args and args.index("--auth-key") + 1 < len(args):
+    key = args[args.index("--auth-key") + 1]
+elif isinstance(p.get("EnvironmentVariables"), dict):
+    key = p["EnvironmentVariables"].get("REMOTEOS_AUTH_KEY", "")
+print(key if isinstance(key, str) else "", end="")' "$1" 2>/dev/null || true
+}
+
+EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
+unset REMOTEOS_MCP_AUTH_KEY
+KEY_SOURCE=""
+CFG_KEY=$(key_from_config "$CONFIG_FILE")
+if [[ -n "$EXPLICIT_KEY" ]]; then
+    if ! key_ok "$EXPLICIT_KEY"; then
+        echo "  [X] REMOTEOS_MCP_AUTH_KEY must be 1-128 letters/digits [A-Za-z0-9] — nothing was changed on this mac"
+        exit 1
+    fi
+    AUTH_KEY="$EXPLICIT_KEY"
+    KEY_SOURCE="REMOTEOS_MCP_AUTH_KEY"
+else
+    PLIST_KEY=$(key_from_plist "$PLIST_PATH")
+    if key_ok "$PLIST_KEY"; then
+        AUTH_KEY="$PLIST_KEY"
+        KEY_SOURCE="the running LaunchAgent"
+    elif key_ok "$CFG_KEY"; then
+        AUTH_KEY="$CFG_KEY"
+        KEY_SOURCE="$CONFIG_FILE"
+    else
+        # Not `tr … < /dev/urandom | head -c 32`: tr dies of SIGPIPE when head
+        # exits, and pipefail turns that into an abort on a fresh mac (#12).
+        AUTH_KEY=$("$PYTHON" -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(32)), end='')")
+    fi
+fi
+if ! key_ok "$AUTH_KEY"; then
+    echo "  [X] Could not make an auth key"
+    exit 1
+fi
+
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
 # No --ignore-installed here: macOS has no apt-owned python packages (that is
@@ -60,9 +143,11 @@ echo "  [2/5] Installing remoteos-mcp..."
 PIP_FLAGS=(--no-cache-dir --break-system-packages)
 SERVICE_DESC="the ${PLIST_LABEL} LaunchAgent"
 
-# >>> shared install block — byte-identical in install-linux.sh and install.sh
-# (tests/test_installer_preflight_rollback.py guards it).  Needs: PYTHON,
-# PIP_FLAGS, SERVICE_DESC.  Leaves: PKG_VER (the installed, importable version).
+# >>> shared install block — the system-python install with preflight + rollback.
+# install-linux.sh carried the same block until 0.7.0.dev32, when Linux moved to
+# its own venv (#12); tests/test_installer_preflight_rollback.py runs it here.
+# Needs: PYTHON, PIP_FLAGS, SERVICE_DESC.  Leaves: PKG_VER (the installed,
+# importable version).
 #
 # Order: pin one commit of main → record the installed version → dry-run
 # preflight → plan + snapshot → ARM → pre-uninstall → install → verify (version
@@ -442,34 +527,31 @@ exec 3>&- 4>&-
 echo "        Installed v${PKG_VER}"
 # <<< shared install block
 
-# --- [3/5] Configure auth key ---
+# --- [3/5] Write the auth key ---
 echo "  [3/5] Configuring auth key..."
+if [[ -n "$KEY_SOURCE" ]]; then
+    echo "        Auth key: kept, from ${KEY_SOURCE}"
+else
+    echo "        Auth key: a NEW auth key was generated — the client's .mcp.json entry for this mac needs it"
+fi
+if key_ok "$CFG_KEY" && [[ "$CFG_KEY" != "$AUTH_KEY" ]]; then
+    echo "        [!] config.json held another key; it now holds the installed one"
+fi
+
+# write_private PATH (content on stdin): through a temp file that mktemp makes 0600, then
+# renamed, so the key is never in a file another account can read.
+write_private() {
+    local tmp
+    tmp=$(mktemp "$1.XXXXXX")
+    cat >"$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$1"
+}
+
 mkdir -p "$CONFIG_DIR"
-
-AUTH_KEY=""
-if [[ -f "$CONFIG_FILE" ]]; then
-    # Try to read existing key
-    EXISTING_KEY=$("$PYTHON" -c "import json; print(json.load(open('$CONFIG_FILE')).get('auth_key',''))" 2>/dev/null || true)
-    if [[ -n "$EXISTING_KEY" ]]; then
-        AUTH_KEY="$EXISTING_KEY"
-        echo "        Reusing existing auth key"
-    fi
-fi
-
-if [[ -z "$AUTH_KEY" ]]; then
-    # Not `tr … < /dev/urandom | head -c 32`: tr dies of SIGPIPE when head
-    # exits, and pipefail turns that into an abort on a fresh mac (#12).
-    AUTH_KEY=$("$PYTHON" -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(32)))")
-    echo "        Generated new auth key"
-fi
-
-# Write config
-"$PYTHON" -c "
-import json, pathlib
-cfg = {'port': $PORT, 'auth_key': '$AUTH_KEY', 'host': '0.0.0.0'}
-pathlib.Path('$CONFIG_FILE').write_text(json.dumps(cfg, indent=2))
-"
-echo "        Config: $CONFIG_FILE"
+chmod 700 "$CONFIG_DIR"
+write_private "$CONFIG_FILE" <<<"$(printf '{\n  "port": %s,\n  "auth_key": "%s",\n  "host": "0.0.0.0"\n}' "$PORT" "$AUTH_KEY")"
+echo "        Config: $CONFIG_FILE (0600)"
 
 # --- [4/5] Set up LaunchAgent auto-start ---
 echo "  [4/5] Setting up auto-start..."
@@ -478,7 +560,9 @@ PYTHON_PATH=$(command -v "$PYTHON")
 
 mkdir -p "$HOME/Library/LaunchAgents"
 
-cat > "$PLIST_PATH" <<PLIST
+# The key is in EnvironmentVariables (remoteos reads REMOTEOS_AUTH_KEY), never in
+# ProgramArguments: those are the server's argv, which `ps` shows to every account.
+write_private "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -497,9 +581,12 @@ cat > "$PLIST_PATH" <<PLIST
         <string>0.0.0.0</string>
         <string>--port</string>
         <string>${PORT}</string>
-        <string>--auth-key</string>
-        <string>${AUTH_KEY}</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>REMOTEOS_AUTH_KEY</key>
+        <string>${AUTH_KEY}</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -511,6 +598,7 @@ cat > "$PLIST_PATH" <<PLIST
 </dict>
 </plist>
 PLIST
+echo "        LaunchAgent: $PLIST_PATH (0600)"
 
 # Load the agent
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
@@ -554,13 +642,17 @@ echo "  ============================================"
 echo ""
 echo "  Computer:  $HOSTNAME_SHORT ($LOCAL_IP)"
 echo "  Port:      $PORT"
-echo "  Auth Key:  $AUTH_KEY"
+echo "  Auth key:  in ${CONFIG_FILE} and the LaunchAgent plist (0600) — never printed."
+echo "             Read it on this mac: cat ${CONFIG_FILE}"
+if [[ -z "$KEY_SOURCE" ]]; then
+    echo "             It is a NEW key: update the client's .mcp.json entry for this mac."
+fi
 echo ""
 echo "  On your Linux machine, run:"
 echo ""
 echo "  claude mcp add --transport http mac-${HOSTNAME_SHORT} \\"
 echo "    http://${LOCAL_IP}:${PORT}/mcp \\"
-echo "    --header \"Authorization: Bearer ${AUTH_KEY}\""
+echo "    --header \"Authorization: Bearer <the auth key>\""
 echo ""
 echo "  Then restart Claude Code."
 echo ""
