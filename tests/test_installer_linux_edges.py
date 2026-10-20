@@ -670,7 +670,7 @@ class TestPinnedOrder:
         box = linux_box(tmp_path)
         box.install_legacy(K_UNIT)
         unit_before = box.unit()
-        box.inject_after(': >"$PENDING_FILE"', "kill -TERM $$")
+        box.inject_after('invocation_id >"$PENDING_FILE"', "kill -TERM $$")  # the mark's line (round 8)
 
         result = box.run()
 
