@@ -89,8 +89,8 @@ Verify after a run (from dev1 and on the box):
 **Recovery:**
 
 - `[X] … nothing was changed on this box`: nothing changed. Fix the cause (network, the ref) and rerun.
-- `[X] The new install did not prove itself … Rolled back`: the previous install runs again. Read `journalctl -u remoteos-mcp -n 50` from the failed start.
-- `[X] Rolled back, but the previous install is not running either`: the previous unit, key files and venv are back, but that install does not start either. Read the journal, fix the cause, rerun.
+- `[X] The new install did not prove itself … Rolled back: the previous install runs again and proved itself`: the previous install runs again. Read `journalctl -u remoteos-mcp -n 50` from the failed start.
+- `[X] The previous install does not prove itself again … stopped and disabled`: the previous unit, key files and venv are back, but that install does not come up proven either (not running, another version, or no authentication, e.g. an EnvironmentFile with an empty key). Nothing runs. Read the journal, fix the cause, rerun.
 - `Nothing was switched: the proven install that was running is left as it ran`: the run changed nothing and the box runs as before; the proof's failure line says what failed.
 - `another process holds :8092, not the unit's`: something else listens on the port (`sudo ss -ltnp 'sport = :8092'`). The key was not sent. Stop that process, then rerun.
 

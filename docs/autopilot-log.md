@@ -385,11 +385,14 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   never stops the running agent); round 5 `13c4e14` → `aa798fa` (a no-op enable-only run keeps
   a proven box proven; the lock is 0600); round 6 `bc736d9` → `6dec457` (PROVEN = the running
   install answers with its files' version and refuses a request without the key; nothing
-  switched → left as it ran; the gi link undone; the key only to the unit's own listener, `ss`).
-- **Tests:** `tests/test_installer_linux_venv.py` (41) and `tests/test_installer_linux_edges.py`
-  (56, the review rounds' edges), both on `tests/linux_installer_harness.py` +
+  switched → left as it ran; the gi link undone; the key only to the unit's own listener, `ss`);
+  round 7 `443ce91` → `6c53a05` (the rollback re-proves what it restarts, else stop + disable;
+  no gi flag without a system gi; no key temp copy left on a signal).
+- **Tests:** `tests/test_installer_linux_venv.py` (41), `tests/test_installer_linux_edges.py`
+  (56, the review rounds' edges) and `tests/test_installer_linux_rollback.py` (7, what a failed
+  run leaves running), on `tests/linux_installer_harness.py` +
   `tests/fake_linux_tools.py` (real venvs, a stateful fake systemd/curl, the argv of every
   process); `tests/test_installer_macos_key.py` (10, also under GNU bash 3.2.57);
   `tests/test_installer_windows_key.py` (3 static) and `tests_windows/test_install_ps1_key.py`
-  (real PowerShell 5.1: install.ps1's own functions, one real cmd.exe run, the ACL). Result: 878
+  (real PowerShell 5.1: install.ps1's own functions, one real cmd.exe run, the ACL). Result: 885
   pass, ruff + shellcheck clean; `install-linux.sh` 1000 lines.

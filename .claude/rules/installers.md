@@ -115,11 +115,14 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
      version + `import remoteos.__main__, fastmcp; from fastmcp import FastMCP`. Desktop mode
      links ONLY the system `gi` package: `<build>/system-gi/gi` → the system gi, named by a
      `.pth` (not the whole dist-packages). An unchanged desktop build of ours without gi gets it
-     linked (`ensure_system_gi`) and a restart; camera-box's adopted directory is never written.
+     linked (`ensure_system_gi`, only when the system python has a gi: no gi = nothing switched)
+     and a restart; camera-box's adopted directory is never written.
      **A failed download or build changes NOTHING** (it removes its build and an empty store).
   6. Save the previous unit / EnvironmentFile / config.json. ARM (every box, a fresh one too).
      Swap the link (`ln -sfn` + `mv -Tf`: one rename(2)); a real directory is moved into the
-     store first. Write the files (`write_if_changed`: content + mode + owner). daemon-reload,
+     store first. Write the files (`write_if_changed`: content + mode + owner, through a 0600
+     temp file kept in `WRITE_TMP`, which `on_exit` removes: a signal never leaves a copy of a
+     key file, round 7). daemon-reload,
      enable, and `is-enabled` must be literally `enabled` (camera-box's verify) or roll back;
      `restart` on a change, else `start` — but an unchanged box whose running install is not
      PROVEN (another version, e.g. camera-box's enable-only in-place upgrade; no answer; a
@@ -137,11 +140,15 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
      is the transport's job (systemd socket activation), a follow-up candidate.
      Failure → `health_failed`, which
      keeps SIGPIPE/HUP/INT/TERM ignored and `set +e` until `undo_switch` is done, then exits 1.
-     **`undo_switch` (also the armed EXIT trap) restarts only a PROVEN state**: PROVEN and
-     `MODIFIED` → `restore_previous` (files, link or directory, the gi link taken out, daemon-
-     reload, restart); PROVEN with nothing switched → left as it ran ("Nothing was switched", the
-     pending mark removed); otherwise (a fresh box, a pending switch, files never run, auth off)
-     it stops and disables the service and keeps the files + the pending marker for a re-run. An
+     **`undo_switch` (also the armed EXIT trap) leaves up only what proves itself AFTER the
+     undo**: PROVEN and `MODIFIED` → `restore_previous` (files, link or directory, the gi link
+     taken out, daemon-reload, restart); PROVEN with nothing switched → nothing restored. Then
+     `await_proven` (`check_running_install` up to HEALTH_TRIES times, read-only, no key): proven
+     → "Rolled back … proved itself" / "Nothing was switched" (the pending mark removed); not
+     proven → `stop_unproven` (round 7: the restored FILES may not be what the process ran, e.g.
+     an EnvironmentFile changed under it to an empty key = authentication off). Not PROVEN before
+     the run (a fresh box, a pending switch, files never run, auth off) → `stop_unproven`, the
+     files + the pending marker kept for a re-run. An
      unproven state may be an agent with authentication off (a full shell on 0.0.0.0): it is
      never "rolled back" into running (review round 3). **enable-only never starts or stops
      anything**: its failure puts the previous files back with no restart (a fresh box: the unit is
