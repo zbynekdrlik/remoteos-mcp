@@ -153,6 +153,27 @@ class TestMacosKeyPrecedence:
         for argv in mac.argvs():
             assert not any(K_EXPLICIT in a for a in argv), argv
 
+    @pytest.mark.parametrize("where", ["config", "plist"])
+    def test_an_existing_key_the_installer_cannot_carry_is_refused_never_replaced(
+        self, tmp_path: Path, where: str
+    ) -> None:
+        """Review round 1: a key with other characters used to be skipped and a NEW key minted,
+        silently cutting the client off (#51). The first key the mac has decides."""
+        mac = Mac(tmp_path)
+        if where == "config":
+            mac.write_config("has-dash_and.dot")
+        else:
+            mac.write_plist(args_key="has-dash_and.dot")
+            mac.write_config(K_CONFIG)
+        before = (mac.plist.read_bytes() if mac.plist.exists() else b"", mac.config.read_bytes())
+
+        result = mac.run()
+
+        assert result.returncode != 0, _output(result)
+        assert "REMOTEOS_MCP_AUTH_KEY" in _output(result)
+        assert (mac.plist.read_bytes() if mac.plist.exists() else b"", mac.config.read_bytes()) == before
+        assert mac.pip.calls("install") == []
+
     def test_an_invalid_explicit_key_is_refused_before_anything_changes(self, tmp_path: Path) -> None:
         mac = Mac(tmp_path)
         mac.write_plist(args_key=K_PLIST)

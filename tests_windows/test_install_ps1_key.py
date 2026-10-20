@@ -152,6 +152,22 @@ class TestKeyPrecedence:
         # Get-Random -Count 32 drew 32 DISTINCT characters: no key could repeat one
         assert any(len(set(k)) < 32 for k in keys), "every key has 32 distinct characters: not uniform random"
 
+    def test_an_existing_key_the_installer_cannot_carry_is_refused_never_replaced(self, tmp_path: Path) -> None:
+        """Review round 1: a key with other characters was skipped and a NEW key minted, silently
+        cutting the client off (#51). The first key the PC has decides."""
+        _write(tmp_path / "cfg" / "config.json", '{"auth_key": "has-dash_and.dot"}')
+        _write(tmp_path / "remoteos.toml", '[server]\nauth_key = "TomlKey01"\n')
+
+        out = _ps(tmp_path, f"""
+$found = Get-RemoteOSExistingKeys -ConfigDir {_q(tmp_path / 'cfg')} -TomlPath {_q(tmp_path / 'remoteos.toml')} `
+    -OldConfigDir {_q(tmp_path / 'old')}
+try {{ Resolve-RemoteOSAuthKey -Explicit '' -Found $found | Out-Null; $refused = $false }}
+catch {{ $refused = "$_" -match 'REMOTEOS_MCP_AUTH_KEY' }}
+@{{ refused = $refused }} | ConvertTo-Json -Compress
+""")
+
+        assert out["refused"] is True
+
     def test_an_explicit_key_wins_and_an_invalid_one_is_refused(self, tmp_path: Path) -> None:
         _write(tmp_path / "cfg" / "config.json", '{"auth_key": "ConfigKey01"}')
 
