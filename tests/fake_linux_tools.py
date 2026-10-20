@@ -36,6 +36,9 @@ Config keys (JSON):
                  "enable_fails": bool  (the unit is masked: `systemctl enable` fails and
                      `is-enabled` answers `masked`)}
   uids          {"account": uid}
+
+The systemctl state's `hung` (set by a test) makes the active service answer nothing until the
+next start/restart.
 """
 
 from __future__ import annotations
@@ -254,7 +257,7 @@ def systemctl(cfg: dict, args: list[str]) -> int:
             elif cfg.get("service", {}).get("start_fails"):
                 state.update(active=False, service=service, failure="the server exited")
             else:
-                state.update(active=True, service=service, failure="")
+                state.update(active=True, service=service, failure="", hung=False)
     elif verb == "stop":
         state["active"] = False
     elif verb == "enable":
@@ -336,6 +339,10 @@ def curl(cfg: dict, args: list[str]) -> int:
         print(f"curl: (7) Failed to connect to 127.0.0.1 port {PORT}", file=sys.stderr)
         return 7
     service, overrides = state["service"], cfg.get("service", {})
+    if state.get("hung"):  # active but answering nothing (until a (re)start runs it afresh)
+        sys.stdout.write(write_out.replace("%{http_code}", "000"))
+        print("curl: (28) Operation timed out after 3000 milliseconds", file=sys.stderr)
+        return 28
     if url == HEALTH_URL and overrides.get("health_waits_for"):
         _wait_for(overrides["health_waits_for"])
     if url == HEALTH_URL:

@@ -45,6 +45,7 @@ def _assert_legacy_box_restored(box: LinuxBox, unit_before: str) -> None:
     assert box.pip.versions("remoteos-mcp") == [LEGACY_VERSION], "the legacy copy was removed"
     service = box.state()["service"]
     assert service["python"].endswith("/shims/python3") and service["key"] == K_UNIT
+    assert not (box.config_dir / ".switch-pending").exists(), "a restored, proven box is marked pending"
 
 
 class TestLostConsoleDuringTheProof:
@@ -525,3 +526,81 @@ class TestLockPlace:
         text = Path(__file__).resolve().parent.parent.joinpath("install-linux.sh").read_text()
         lines = [line.strip() for line in text.splitlines() if line.strip().startswith("LOCK_FILE=")]
         assert lines == ['LOCK_FILE="/run/remoteos-mcp-install.lock"'], lines
+
+
+# ---------------------------------------------------------------------------
+# Review round 4
+# ---------------------------------------------------------------------------
+
+
+class TestEnableOnlyNeverStops:
+    """Review round 4: enable-only promises never to start (or stop) anything. A failure in an
+    enable-only run puts the previous files back and leaves the running process alone; and a
+    proven box it rolls back is not left marked pending."""
+
+    def test_an_interrupted_enable_only_run_leaves_the_running_agent_alone(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        assert box.run(REMOTEOS_MCP_POLICY="enable-only").returncode == 0
+        unit_before, target_before = box.unit(), box.venv_target()
+        box.add_source("main", "def5678", "0.7.0.dev33")
+        box.inject_after('mv -Tf "$tmp_link" "$VENV_LINK"', "kill -HUP $$")
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+
+        assert result.returncode != 0, output(result)
+        state = box.state()
+        assert state["active"] and state["enabled"], "enable-only stopped the agent it never started"
+        assert state["service"]["python"].endswith("/shims/python3"), "the running legacy agent was touched"
+        assert box.unit() == unit_before and box.venv_target() == target_before
+        assert (box.config_dir / ".switch-pending").exists(), "the earlier enable-only switch is still unproven"
+
+    def test_an_enable_only_run_that_cannot_enable_leaves_the_running_agent_alone(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        assert box.run(REMOTEOS_MCP_POLICY="enable-only").returncode == 0
+        box.configure(service={"enable_fails": True})
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+
+        assert result.returncode != 0, output(result)
+        assert box.state()["active"], "enable-only stopped the agent it never started"
+        assert "running service was not touched" in output(result)
+
+    def test_a_failed_enable_only_run_on_a_proven_box_leaves_it_proven(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        box.configure(service={"enable_fails": True})
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+
+        assert result.returncode != 0, output(result)
+        assert not (box.config_dir / ".switch-pending").exists(), "a proven box was left marked pending"
+        assert box.state()["active"]
+
+
+class TestNoOrphanAfterArm:
+    def test_a_signal_right_after_arming_leaves_no_build_and_no_pending_mark(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        unit_before = box.unit()
+        box.inject_after("arm", "kill -TERM $$")
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        _assert_legacy_box_restored(box, unit_before)
+
+
+class TestHungProcess:
+    def test_an_unchanged_box_whose_process_answers_nothing_is_restarted(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        box.hang()
+        restarts = box.state()["restarts"]
+
+        result = box.run()
+
+        assert result.returncode == 0, output(result)
+        assert box.state()["restarts"] == restarts + 1
+        assert box.venv_installs()[1:] == [], "a hung process made pip run again"

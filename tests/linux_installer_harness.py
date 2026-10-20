@@ -233,6 +233,13 @@ class LinuxBox:
         assert self.state()["active"], self.state()
         Path(self.cfg()["records"]).unlink(missing_ok=True)
 
+    def hang(self) -> None:
+        """The running service stops answering (it stays active) until it is (re)started."""
+        state_path = Path(self.cfg()["state"])
+        state = json.loads(state_path.read_text())
+        state["hung"] = True
+        state_path.write_text(json.dumps(state, indent=1))
+
     # --- running -----------------------------------------------------------
     def uninstaller(self) -> Path:
         """uninstall-linux.sh, redirected to this box's paths."""
