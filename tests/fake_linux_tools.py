@@ -273,7 +273,7 @@ def systemctl(cfg: dict, args: list[str]) -> int:
             state["invocation"] = uuid.uuid4().hex  # systemd: a new InvocationID per start
     elif verb == "show":  # `show -p MainPID|InvocationID --value remoteos-mcp`
         if words[1:2] == ["InvocationID"]:
-            print(state.get("invocation", ""))  # kept while inactive, as systemd does
+            print(state.get("invocation", ""))  # kept while inactive but still enabled, as systemd does
         else:
             print(state.get("pid", 0) if state["active"] and words[1:2] == ["MainPID"] else 0)
     elif verb == "stop":
@@ -286,6 +286,8 @@ def systemctl(cfg: dict, args: list[str]) -> int:
             state["enabled"] = True
     elif verb == "disable":
         state["enabled"] = False
+        if not state["active"]:  # systemd unloads the unreferenced unit: its InvocationID is gone
+            state.pop("invocation", None)
     elif verb == "is-active":
         if "--quiet" not in flags and "-q" not in flags:
             print("active" if state["active"] else "inactive")

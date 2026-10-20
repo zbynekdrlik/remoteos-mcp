@@ -11,7 +11,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from linux_installer_harness import K_EXPLICIT, K_UNIT, SOURCE_VERSION, LinuxBox, linux_box, output
+from linux_installer_harness import (
+    K_ENV,
+    K_EXPLICIT,
+    K_UNIT,
+    MAIN_SOURCE_ID,
+    SOURCE_VERSION,
+    LinuxBox,
+    linux_box,
+    output,
+)
 
 INSTALLER = Path(__file__).resolve().parent.parent / "install-linux.sh"
 
@@ -208,3 +217,32 @@ class TestTheReRunAfterAStop:
         assert "has run since" not in output(result)
         assert "An earlier switch was never proven: restarting into what the files say" in output(result)
         assert box.state()["active"] and not _pending(box)
+
+
+class TestTheRunningInstallIsReadWithPatience:
+    """Review round 10: the read of what runs (before a restart run's switch, at a no-op
+    enable-only run's end) gives an active unit that does not answer yet the same polls as the
+    proof; one missed poll must not turn a working box into "nothing proven"."""
+
+    def test_a_proven_box_that_misses_one_poll_is_still_rolled_back_to(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.configure(service={"initialize_code": 500, "only_version": SOURCE_VERSION, "health_misses": 1})
+        box.install_legacy(K_UNIT)  # boots: the legacy agent misses its first /health poll
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        assert "Rolled back" in output(result)
+        state = box.state()
+        assert state["active"] and state["enabled"], "a working agent was stopped and disabled"
+
+    def test_a_no_op_enable_only_run_that_misses_one_poll_leaves_the_cam_proven(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.configure(service={"health_misses": 1})
+        box.install_camera_box(K_ENV, mode="headless", source_id=MAIN_SOURCE_ID, version=SOURCE_VERSION,
+                               user="root")
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only", REMOTEOS_MCP_MODE="headless", REMOTEOS_MCP_USER="root")
+
+        assert result.returncode == 0, output(result)
+        assert not _pending(box), "one missed poll left a sticky pending mark on a working cam"

@@ -47,6 +47,29 @@ def test_the_explicit_key_leaves_the_environment_before_the_first_child() -> Non
     assert read < removed < min(children), (read, removed, min(children))
 
 
+def _start_script_template() -> list[str]:
+    """The lines of New-RemoteOSStartScript's here-string (the generated start-remoteos.bat)."""
+    lines = [line.strip() for line in INSTALLER_WINDOWS.read_text().splitlines()]
+    start = lines.index("function New-RemoteOSStartScript([string]$PythonPath, [int]$Port, [string]$AuthKey) {")
+    begin = lines.index('return @"', start) + 1
+    return lines[begin:lines.index('"@', begin)]
+
+
+def test_the_start_script_gives_the_key_to_the_server_only() -> None:
+    """Every program cmd.exe starts inherits its environment: the key is set right before the
+    server line and cleared right after it, so netstat, findstr and timeout never get it (review
+    round 10)."""
+    bat = _start_script_template()
+    sets = [i for i, line in enumerate(bat) if line == 'set "REMOTEOS_AUTH_KEY=$AuthKey"']
+    server = [i for i, line in enumerate(bat) if "-m remoteos" in line]
+    assert len(sets) == 1 and len(server) == 1, (sets, server)
+    assert sets[0] == server[0] - 1, "something runs between setting the key and starting the server"
+    assert bat[server[0] + 1] == "set EXIT_CODE=%errorlevel%"
+    assert bat[server[0] + 2] == 'set "REMOTEOS_AUTH_KEY="', "the key stays set for the loop's other programs"
+    netstat = next(i for i, line in enumerate(bat) if line.startswith("netstat"))
+    assert bat.index(":loop") < netstat < sets[0], "the key is set before the loop's port check"
+
+
 def test_install_ps1_draws_the_key_from_a_csprng() -> None:
     code = "\n".join(line for _, line in _code_lines())
     assert "Get-Random" not in code, "Get-Random is not a CSPRNG (and -Count 32 draws 32 distinct characters)"

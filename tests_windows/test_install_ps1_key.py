@@ -105,6 +105,28 @@ New-RemoteOSStartScript -PythonPath {_q(server)} -Port 18092 -AuthKey {_q(key)} 
         assert "-m remoteos" in args and "--port 18092" in args, args
         assert key not in args and "--auth-key" not in args, args
 
+    def test_the_start_script_s_port_check_never_gets_the_key(self, tmp_path: Path) -> None:
+        """Review round 10: every program cmd.exe starts inherits its environment. A netstat.cmd
+        in the .bat's working directory (cmd looks there before PATH) records what the loop's
+        port check sees; the server still gets the key."""
+        key = "LoopKey0123456789abcdef"
+        server = tmp_path / "fake-server.cmd"
+        server.write_text('@echo off\r\n>"%~dp0seen-key.txt" echo %REMOTEOS_AUTH_KEY%\r\n', encoding="ascii")
+        (tmp_path / "netstat.cmd").write_text(
+            '@echo off\r\n>"%~dp0netstat-saw.txt" echo [%REMOTEOS_AUTH_KEY%]\r\n', encoding="ascii"
+        )
+        bat = tmp_path / "start-remoteos.bat"
+        _ps(tmp_path, f"""
+New-RemoteOSStartScript -PythonPath {_q(server)} -Port 18093 -AuthKey {_q(key)} | Set-Content -LiteralPath {_q(bat)}
+@{{ ok = $true }} | ConvertTo-Json -Compress
+""")
+
+        subprocess.run(["cmd", "/c", str(bat)], capture_output=True, timeout=120, stdin=subprocess.DEVNULL,
+                       cwd=tmp_path)
+
+        assert (tmp_path / "netstat-saw.txt").read_text().strip() == "[]", "the port check got the key"
+        assert (tmp_path / "seen-key.txt").read_text().strip() == key
+
 
 class TestKeyPrecedence:
     def test_a_key_only_in_remoteos_toml_is_reused(self, tmp_path: Path) -> None:
