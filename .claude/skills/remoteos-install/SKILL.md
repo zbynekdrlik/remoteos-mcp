@@ -56,7 +56,12 @@ Service runs as a LaunchAgent (`com.remoteos-mcp`). Since 0.7.0.dev32 (#12) the 
 curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash
 # pin a ref (commit sha, tag or branch; default main):
 curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo REMOTEOS_MCP_REF=<sha> bash
+# install a given key: never `sudo REMOTEOS_MCP_AUTH_KEY=… bash` (the key would be in sudo's argv)
+read -rs REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY
+curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash
 ```
+
+Other inputs: `REMOTEOS_MCP_MODE=desktop|headless` and `REMOTEOS_MCP_USER=<account>` (default: what the existing unit has, else the session check / `SUDO_USER`), `REMOTEOS_MCP_POLICY=enable-only` (install + enable, never start: camera-box's cams). camera-box's `remoteos_mcp_install USER MODE POLICY` maps onto them.
 
 Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and other systemd-based distributions.
 

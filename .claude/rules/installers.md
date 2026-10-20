@@ -31,7 +31,14 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   unit's legacy `--auth-key`, else its EnvironmentFile; macOS: the plist's legacy
   `--auth-key`, else `EnvironmentVariables`; Windows: the start script's `set` line or legacy
   `--auth-key`), else `config.json`, (Windows: else `remoteos.toml` `[server] auth_key`, else
-  the old winremote config), else a new key. A re-run never changes the key (#51).
+  the old winremote config), else a new key. A re-run never changes the key (#51): the FIRST
+  key the box has decides, and one that is not 1-128 letters/digits is refused, never skipped
+  for a new key (that silently cuts the clients off).
+- **The server drops `REMOTEOS_AUTH_KEY` (and `REMOTEOS_OAUTH_CLIENT_SECRET`) from
+  `os.environ` at the start of `cli()`**, after click read it: otherwise every Shell/App child
+  inherits the key (`Shell("printenv REMOTEOS_AUTH_KEY")` printed it, review round 1).
+- **Never `sudo VAR=<secret> bash`:** the secret is then in sudo's argv. Linux docs say
+  `read -rs REMOTEOS_MCP_AUTH_KEY; export REMOTEOS_MCP_AUTH_KEY` + `sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash`.
 - **Never put the key into an argv on the way either.** Python reads a key file from stdin or
   by path and prints the key to a `$(…)`; files are written by `printf` / a here-string into a
   0600 temp file, then renamed; the health check sends `Authorization: Bearer` with
@@ -54,35 +61,57 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 - **The unit is camera-box's shape**, byte for byte except `Description=` (its verify checks the
   exact `ExecStart=` and `EnvironmentFile=` lines). desktop: `User=`, `DISPLAY=:0`,
   `XDG_RUNTIME_DIR=/run/user/<uid>`, `After=… graphical-session.target`. headless: the cams.
-  - The mode follows the existing unit (`Environment=DISPLAY=` → desktop), else the session
-    check (loginctl x11/wayland). `User=` follows the existing unit, else `SUDO_USER`, else root.
-    A re-run never changes the box's shape or account.
+  - The mode: `REMOTEOS_MCP_MODE`, else the existing unit (`Environment=DISPLAY=` → desktop),
+    else the session check (loginctl x11/wayland). `User=`: `REMOTEOS_MCP_USER`, else the
+    existing unit, else `SUDO_USER`, else root. A re-run never changes the box's shape or account.
+  - `REMOTEOS_MCP_POLICY=enable-only` (camera-box's cams: `remoteos_mcp_install root headless
+    enable-only`): install, write, enable, never start or prove; the old builds and the old
+    system copy stay (a running process may still use them). Default `restart`.
 - **Order (keep it):**
-  1. Validate `REMOTEOS_MCP_REF` (default `main`; empty = `main`, as camera-box reads it) and
-     the explicit key. Read the existing unit; resolve the key.
+  1. Validate the inputs (`REMOTEOS_MCP_REF` default `main`, empty = `main` as camera-box reads
+     it; MODE / USER / POLICY), take `flock -n` on `/run/lock/remoteos-mcp-install.lock` (a
+     second run's prune could delete this run's build). Read the existing unit; resolve the key.
   2. `fetch_source`: ONE GitHub API tarball of the ref (`api.github.com/repos/…/tarball/<ref>`).
      Its top directory (`zbynekdrlik-remoteos-mcp-<sha7>`) is the source id. Code and
      `constraints.txt` come from the same tarball.
-  3. Unchanged source (the venv's `.remoteos-mcp-source`, else camera-box's `.camera-box-source`,
-     equals the id) AND the venv imports → no pip at all.
-  4. Else `build_venv` in the store, side by side: `python3 -m venv` (apt `python3-venv` when
+  3. Desktop mode: `install_desktop_tools` FIRST (it brings `python3-gi`, which the venv links).
+  4. `venv_is_current` (the marker = the id, the installed version = the source's pyproject
+     version, and the import check) → no pip at all. The marker is ours, else camera-box's; BOTH
+     in one venv means camera-box's lib upgraded our build in place (it writes into whatever the
+     link points at): rebuild.
+  5. Else `build_venv` in the store, side by side: `python3 -m venv` (apt `python3-venv` when
      ensurepip is missing), `pip install --no-cache-dir <src>` with `PIP_CONSTRAINT=<src>/constraints.txt`
      under `env -i` + an allowlist (PATH, HOME, LANG, TMPDIR, proxies, CA/index vars), then the
      version + `import remoteos.__main__, fastmcp; from fastmcp import FastMCP`. Desktop mode
-     adds one `.pth` naming the system python's `gi` directory (AT-SPI, #7).
+     links ONLY the system `gi` package: `<build>/system-gi/gi` → the system gi, named by a
+     `.pth` (not the whole dist-packages). An unchanged desktop build of ours without gi gets it
+     linked (`ensure_system_gi`) and a restart; camera-box's adopted directory is never written.
      **A failed download or build changes NOTHING** (it removes its build and an empty store).
-  5. Save the previous unit / EnvironmentFile / config.json. ARM (only when a unit existed).
+  6. Save the previous unit / EnvironmentFile / config.json. ARM (only when a unit existed).
      Swap the link (`ln -sfn` + `mv -Tf`: one rename(2)); a real directory is moved into the
      store first. Write the files (`write_if_changed`: content + mode + owner). daemon-reload,
-     enable, `restart` on a change, else `start`.
-  6. `prove_health`: active + `/health` = the built version, an authenticated `initialize`
-     200, an unauthenticated `POST /mcp` 401. Failure → `restore_previous` (files, link or
-     directory, daemon-reload, restart), exit 1. A fresh box has nothing to roll back to.
-  7. DISARM. Only then `remove_legacy_system_copy` (the pre-venv system-python `remoteos-mcp
-     fastmcp fastmcp-slim`, `--break-system-packages`) and `prune_builds`.
+     enable, and `is-enabled` must be literally `enabled` (camera-box's verify) or roll back;
+     `restart` on a change, else `start`.
+  7. `prove_health` (writes NOTHING): active + `/health` = the built version, an authenticated
+     `initialize` 200, an unauthenticated `POST /mcp` 401. Failure → `health_failed`, which
+     keeps SIGPIPE/HUP/INT/TERM ignored and `set +e` until `restore_previous` (files, link or
+     directory, daemon-reload, restart) is done, then exits 1. A fresh box has nothing to roll
+     back to.
+  8. DISARM, then print the proof. Only then `remove_legacy_system_copy` (the pre-venv
+     system-python `remoteos-mcp fastmcp fastmcp-slim`, `--break-system-packages`) and
+     `prune_builds`.
   - While ARMED, any exit (a failed step, HUP/INT/TERM, a lost console: SIGPIPE is ignored, so
     the write fails and set -e exits) goes through the EXIT trap → `restore_previous`. Never arm
     on a list of signals alone: a no-tty `ssh … | sudo bash` drop sends no signal.
+  - **The proof decides, not the console.** Before it, a lost console rolls back; during it,
+    its result decides (a failure rolls back with no console); after it, the proven switch stays
+    even if the next write kills the run (the legacy copy then waits for a re-run).
+  - Never DISARM before a restore: `disarm` puts SIGPIPE back to default, so the next echo to a
+    dead console kills bash with no EXIT trap (review round 1).
+  - **Every step of the swap must be undoable**: `swap_venv` sets `SWAPPED` before the first
+    rename, and `restore_venv` reads the state each step leaves (the directory moved aside, the
+    `.link` temp, the new link). Tests inject `kill -HUP $$` after each step
+    (`LinuxBox.inject_after`).
   - Everything runs inside `main()`, called on the last line (a truncated download never
     half-runs).
 - **Checks never write the venv:** `venv_python` sets `PYTHONDONTWRITEBYTECODE=1`, so an adopted
