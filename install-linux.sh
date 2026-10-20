@@ -609,17 +609,18 @@ stop_unproven() {
     echo "        [X] $1: ${SERVICE_NAME} is stopped and disabled; fix the cause and rerun. Logs: journalctl -u ${SERVICE_NAME} -n 50"
 }
 
-# The version the running service reports on /health; fails when nothing answers.
+# The version the service reports on /health (fails when nothing answers). Every loopback curl
+# is `-q --noproxy '*'`: never a proxy from the environment (pip keeps it) or a .curlrc's.
 health_version() {
     local body
-    body=$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/health" 2>/dev/null) || return 1
+    body=$(curl -q --noproxy '*' -fsS --max-time 3 "http://127.0.0.1:${PORT}/health" 2>/dev/null) || return 1
     printf '%s' "$body" | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin).get("version", ""), end="")' \
         2>/dev/null || true
 }
 
 # What an unauthenticated POST /mcp answers (401 = the key is enforced). Sends no key.
 unauth_code() {
-    curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:${PORT}/mcp" 2>/dev/null || true
+    curl -q --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:${PORT}/mcp" 2>/dev/null || true
 }
 
 # PREV_PROVEN = what runs is proven: a unit, no pending switch, /health = the unit's python's
@@ -670,7 +671,7 @@ prove_health() {
         return 1
     fi
     code=$(printf 'Authorization: Bearer %s\n' "$AUTH_KEY" \
-        | curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H @- -H 'Content-Type: application/json' \
+        | curl -q --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 10 -H @- -H 'Content-Type: application/json' \
             -H 'Accept: application/json, text/event-stream' -X POST --data "$init" \
             "http://127.0.0.1:${PORT}/mcp" 2>/dev/null) || true
     if [[ "$code" != 200 ]]; then
@@ -684,9 +685,8 @@ prove_health() {
     fi
 }
 
-# Undo a switch (set +e, SIGPIPE ignored). enable-only never starts or stops anything: the
-# previous files go back (a fresh box: only disabled). restart: a PROVEN install gets its files
-# back (when switched) and must prove itself again to stay up; anything else is stopped.
+# Undo a switch (set +e, SIGPIPE ignored). enable-only starts/stops nothing (files back, or only
+# disabled). restart: a PROVEN install gets its files back and must prove itself again; else stop.
 undo_switch() {
     if [[ "$POLICY" == enable-only && -n "$HAD_UNIT" ]]; then
         echo "        Rolling back to the previous files..."

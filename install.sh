@@ -279,6 +279,7 @@ on_exit() {
     if [[ -z "$KEEP_WORK_DIR" ]]; then
         rm -rf "$WORK_DIR"
     fi
+    [[ -z "$WRITE_TMP" ]] || rm -f "$WRITE_TMP"
     exit "$rc"
 }
 
@@ -291,6 +292,7 @@ WORK_DIR=$(mktemp -d)
 KEEP_WORK_DIR=""
 ROLLBACK_ARMED=""
 INTERRUPTED=""
+WRITE_TMP=""
 OLD_VER=""
 CHANGED_DEPS=()
 ADDED_DEPS=()
@@ -554,10 +556,12 @@ fi
 # renamed, so the key is never in a file another account can read.
 write_private() {
     local tmp
-    tmp=$(mktemp "$1.XXXXXX")
+    WRITE_TMP=$(mktemp "$1.XXXXXX")  # on_exit removes it: it may hold the key
+    tmp=$WRITE_TMP
     cat >"$tmp"
     chmod 600 "$tmp"
     mv -f "$tmp" "$1"
+    WRITE_TMP=""
 }
 
 mkdir -p "$CONFIG_DIR"
@@ -621,7 +625,7 @@ echo "        LaunchAgent loaded: $PLIST_LABEL"
 echo "  [+]   Verifying installed version matches running service..."
 HEALTH_OK=false
 for _attempt in $(seq 1 6); do
-    HEALTH_JSON=$(curl -sf "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)
+    HEALTH_JSON=$(curl -q --noproxy '*' -sf "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)
     if [[ -n "$HEALTH_JSON" ]]; then
         HEALTH_VER=$(echo "$HEALTH_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)
         if [[ "$HEALTH_VER" == "$PKG_VER" ]]; then
