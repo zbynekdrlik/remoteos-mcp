@@ -121,6 +121,10 @@ class LinuxBox:
         cfg.update(values)
         self.cfg_path.write_text(json.dumps(cfg, indent=1))
 
+    def shim(self, name: str, body: str) -> None:
+        """Replace the shim `name` (its argv is still logged)."""
+        _shim(self.shims / name, body, Path(self.cfg()["records"]))
+
     def add_source(self, ref: str, sha7: str, version: str) -> str:
         """A GitHub API tarball for `ref` (top dir zbynekdrlik-remoteos-mcp-<sha7>) holding a
         pyproject.toml of `version` and a constraints.txt. Returns its source id."""

@@ -11,9 +11,16 @@ to uninstall them. Three defects sat on that path:
    proved the new install could succeed. A failed install left the box with
    NO remoteos package, and the service survived only from memory.
 
-These tests run the real installers against tests/fake_pip.py, a stateful
-Debian-pip stand-in. Its fake box has two site dirs: pip's /usr/local
-copy, and the apt copy behind it. They check end to end:
+The fix (0.7.0.dev24) was one install block shared by install-linux.sh and
+install.sh. Since 0.7.0.dev32 (#12, design issuecomment-6293340521) Linux
+installs into its own venv, built side by side and swapped in
+(tests/test_installer_linux_venv.py), so the system-python block lives on in
+install.sh (macOS) only, and these tests run it there.
+
+These tests run the real installer against tests/fake_pip.py, a stateful
+pip stand-in. Its fake box has two site dirs: pip's copy, and an apt copy
+behind it (the Debian shape the block was built for; the block handles it on
+any box). They check end to end:
 
 - the preflight;
 - the rollback: the restored bytes, what it removes and what it verifies;
@@ -38,7 +45,6 @@ from pathlib import Path
 import pytest
 from installer_harness import (
     GIT_URL,
-    INSTALLER_LINUX,
     INSTALLER_MACOS,
     INSTALLER_WINDOWS,
     NEW_VERSION,
@@ -46,11 +52,9 @@ from installer_harness import (
     OLD_VERSION,
     PINNED_CONSTRAINTS,
     FakePipBox,
-    _create_linux_shims,
     _create_macos_shims,
     _find_first_code_line,
     _make_shim,
-    _prepare_linux_installer,
     _prepare_macos_installer,
     _run_installer,
     dist_files,
@@ -66,21 +70,8 @@ from installer_harness import (
 OVERLAPPING = {"remoteos-mcp", "fastmcp", "fastmcp-slim"}
 
 
-def _linux_box(tmp_path: Path, *, upgrade: bool = True, **config: object) -> tuple[Path, Path, FakePipBox, Path]:
-    script = _prepare_linux_installer(tmp_path)
-    shim_dir = tmp_path / "shims"
-    shim_dir.mkdir()
-    invocations = tmp_path / "invocations.log"
-    _make_shim(shim_dir / "findmnt", 'echo "rw,relatime"')
-    _create_linux_shims(shim_dir, invocations)
-    box = setup_fake_pip(tmp_path, shim_dir, **config)
-    health_shim(shim_dir, NEW_VERSION)
-    if upgrade:
-        install_old_remoteos(box)
-    return script, shim_dir, box, invocations
-
-
-def _macos_box(tmp_path: Path, **config: object) -> tuple[Path, Path, FakePipBox, Path]:
+def _box(tmp_path: Path, *, upgrade: bool = True, **config: object) -> tuple[Path, Path, FakePipBox, Path]:
+    """install.sh on a fake box: `upgrade` = remoteos-mcp OLD_VERSION is installed."""
     script = _prepare_macos_installer(tmp_path)
     shim_dir = tmp_path / "shims"
     shim_dir.mkdir()
@@ -88,7 +79,8 @@ def _macos_box(tmp_path: Path, **config: object) -> tuple[Path, Path, FakePipBox
     _create_macos_shims(shim_dir, invocations)
     box = setup_fake_pip(tmp_path, shim_dir, **config)
     health_shim(shim_dir, NEW_VERSION)
-    install_old_remoteos(box)
+    if upgrade:
+        install_old_remoteos(box)
     return script, shim_dir, box, invocations
 
 
@@ -104,50 +96,14 @@ def _uninstalled_names(box: FakePipBox) -> set[str]:
     return {a for call in box.calls("uninstall") for a in call["argv"][1:] if not a.startswith("-")}
 
 
-def _shared_block(path: Path) -> str:
-    text = path.read_text()
-    start = text.index("# >>> shared install block")
-    return text[start : text.index("# <<< shared install block", start)]
-
-
 # ---------------------------------------------------------------------------
-# Linux: apt-owned dependencies are shadowed, never uninstalled
+# One commit of main for preflight, install and constraints
 # ---------------------------------------------------------------------------
 
 
-class TestLinuxDebianOwnedDependencies:
-    def test_upgrade_over_debian_owned_dependencies_succeeds_with_ignore_installed(self, tmp_path: Path) -> None:
-        """Debian's pip refuses to uninstall apt-owned cryptography/PyJWT.  The
-        pinned install must overlay them (--ignore-installed) and succeed."""
-        script, shim_dir, box, _ = _linux_box(tmp_path, debian_owned=["cryptography", "PyJWT"])
-
-        result = _run_installer(script, shim_dir, tmp_path)
-        out = _output(result)
-
-        assert result.returncode == 0, out
-        assert box.versions("remoteos-mcp") == [NEW_VERSION], out
-        installs = box.calls("install")
-        assert len(installs) == 1, box.entries()
-        argv = installs[0]["argv"]
-        assert "--ignore-installed" in argv, argv
-        assert "--no-cache-dir" in argv and "--break-system-packages" in argv, argv
-        assert GIT_URL in argv, argv
-        assert installs[0]["PIP_CONSTRAINT"] == PINNED_CONSTRAINTS
-        # The explicit pre-uninstall stays, between the preflight and the install.
-        assert box.verbs() == ["dry-run", "uninstall", "install"], box.entries()
-        assert OVERLAPPING <= _uninstalled_names(box)
-        assert not {"cryptography", "PyJWT", "pyjwt"} & _uninstalled_names(box)
-        assert box.work_dirs() == [], "the installer left its work dir behind"
-
-
-# ---------------------------------------------------------------------------
-# Linux: one commit of main for preflight, install and constraints
-# ---------------------------------------------------------------------------
-
-
-class TestLinuxPinnedCommit:
+class TestBlockPinnedCommit:
     def test_preflight_install_and_constraints_use_the_same_commit(self, tmp_path: Path) -> None:
-        script, shim_dir, box, _ = _linux_box(tmp_path)
+        script, shim_dir, box, _ = _box(tmp_path)
 
         result = _run_installer(script, shim_dir, tmp_path)
 
@@ -157,7 +113,7 @@ class TestLinuxPinnedCommit:
             assert call["PIP_CONSTRAINT"] == PINNED_CONSTRAINTS, call
 
     def test_unresolvable_main_aborts_before_anything_changes(self, tmp_path: Path) -> None:
-        script, shim_dir, box, _ = _linux_box(tmp_path)
+        script, shim_dir, box, _ = _box(tmp_path)
         _make_shim(shim_dir / "git", 'echo "fatal: unable to access github.com" >&2\nexit 128')
         before = box.files()
 
@@ -171,13 +127,13 @@ class TestLinuxPinnedCommit:
 
 
 # ---------------------------------------------------------------------------
-# Linux: dry-run preflight before anything is touched
+# A dry-run preflight before anything is touched
 # ---------------------------------------------------------------------------
 
 
-class TestLinuxPreflight:
+class TestBlockPreflight:
     def test_failed_dry_run_aborts_before_any_uninstall_and_prints_the_full_error(self, tmp_path: Path) -> None:
-        script, shim_dir, box, invocations = _linux_box(tmp_path, dry_run_fail=True, error_lines=12)
+        script, shim_dir, box, invocations = _box(tmp_path, dry_run_fail=True, error_lines=12)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -187,19 +143,19 @@ class TestLinuxPreflight:
         dry_runs = box.calls("dry-run")
         assert len(dry_runs) == 1, box.entries()
         argv = dry_runs[0]["argv"]
-        assert "--ignore-installed" in argv and "--break-system-packages" in argv and GIT_URL in argv, argv
+        assert "--break-system-packages" in argv and GIT_URL in argv, argv
         assert dry_runs[0]["PIP_CONSTRAINT"] == PINNED_CONSTRAINTS
         assert box.calls("uninstall") == [], "pip uninstall ran although the preflight failed"
         assert box.calls("install") == [], "the real install ran although the preflight failed"
         assert box.files() == before, "the box changed although the preflight failed"
         for i in range(1, 13):
             assert f"dry-run-error-line-{i:02d}" in out, f"line {i} of the pip error is missing:\n{out}"
-        assert "systemctl" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
 
     def test_unreadable_installed_file_aborts_before_any_uninstall(self, tmp_path: Path) -> None:
         """No rollback copy = no upgrade: the pre-uninstall must not run."""
         assert os.geteuid() != 0, "this test needs an unprivileged user (root reads mode-000 files)"
-        script, shim_dir, box, _ = _linux_box(tmp_path)
+        script, shim_dir, box, _ = _box(tmp_path)
         locked = box.site / "remoteos" / "server.py"
         locked.chmod(0o000)
         try:
@@ -215,16 +171,16 @@ class TestLinuxPreflight:
 
 
 # ---------------------------------------------------------------------------
-# Linux: pip-owned dependencies whose pin changes
+# Pip-owned dependencies whose pin changes
 # ---------------------------------------------------------------------------
 
 
-class TestLinuxChangedDependencies:
+class TestBlockChangedDependencies:
     def test_changed_pip_owned_dependency_is_replaced_without_a_stale_dist_info(self, tmp_path: Path) -> None:
         """--ignore-installed writes over a pip-owned dep but keeps its old
         dist-info + RECORD.  A pip-owned dep whose pin changes must be
         pre-uninstalled; an apt-owned one never is."""
-        script, shim_dir, box, _ = _linux_box(
+        script, shim_dir, box, _ = _box(
             tmp_path, resolved=[["psutil", "7.2.2"], ["cryptography", "46.0.1"], ["click", "8.5.0"]]
         )
         install_dep(box, "psutil", "7.1.0")
@@ -242,7 +198,7 @@ class TestLinuxChangedDependencies:
         assert "41.0.7" in box.versions("cryptography"), "the apt-owned copy must stay"
 
     def test_failed_install_restores_a_pre_uninstalled_dependency(self, tmp_path: Path) -> None:
-        script, shim_dir, box, _ = _linux_box(tmp_path, resolved=[["psutil", "7.2.2"]], install_fail=True)
+        script, shim_dir, box, _ = _box(tmp_path, resolved=[["psutil", "7.2.2"]], install_fail=True)
         install_dep(box, "psutil", "7.1.0")
         before = box.files()
 
@@ -254,7 +210,7 @@ class TestLinuxChangedDependencies:
 
     def test_installed_version_without_record_aborts_before_anything_changes(self, tmp_path: Path) -> None:
         """pip can neither replace nor roll back a RECORD-less remoteos-mcp."""
-        script, shim_dir, box, _ = _linux_box(tmp_path, upgrade=False)
+        script, shim_dir, box, _ = _box(tmp_path, upgrade=False)
         install_dep(box, "remoteos-mcp", OLD_VERSION, installer="debian")
         before = box.files()
 
@@ -268,17 +224,17 @@ class TestLinuxChangedDependencies:
 
 
 # ---------------------------------------------------------------------------
-# Linux: a failed real install rolls back to the recorded version
+# A failed real install rolls back to the recorded version
 # ---------------------------------------------------------------------------
 
 
-class TestLinuxRollback:
+class TestBlockRollback:
     def test_failed_install_after_pre_uninstall_restores_the_recorded_version(self, tmp_path: Path) -> None:
         """The install dies after the pre-uninstall (and after half-installing
         fastmcp-slim).  The box must end with exactly the old package files —
         never without a remoteos package — and the installer must exit non-zero
         without restarting the service."""
-        script, shim_dir, box, invocations = _linux_box(tmp_path, install_fail=True)
+        script, shim_dir, box, invocations = _box(tmp_path, install_fail=True)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -290,11 +246,11 @@ class TestLinuxRollback:
         assert box.versions("fastmcp-slim") == [OLD_FASTMCP_SLIM], out
         assert box.files() == before, "the rollback did not restore the exact previous files and modes"
         assert f"Rolled back: v{OLD_VERSION}" in out, out
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
         assert box.work_dirs() == [], "a successful rollback must not leave the work dir behind"
 
     def test_failed_install_prints_the_full_pip_output(self, tmp_path: Path) -> None:
-        script, shim_dir, box, _ = _linux_box(tmp_path, install_fail=True, error_lines=20)
+        script, shim_dir, box, _ = _box(tmp_path, install_fail=True, error_lines=20)
 
         result = _run_installer(script, shim_dir, tmp_path)
         out = _output(result)
@@ -306,7 +262,7 @@ class TestLinuxRollback:
     def test_failed_install_on_a_fresh_box_exits_nonzero_with_the_full_error(self, tmp_path: Path) -> None:
         """Nothing was installed before: nothing to roll back, but the failure
         must still be loud and complete."""
-        script, shim_dir, box, invocations = _linux_box(tmp_path, upgrade=False, install_fail=True)
+        script, shim_dir, box, invocations = _box(tmp_path, upgrade=False, install_fail=True)
 
         result = _run_installer(script, shim_dir, tmp_path)
         out = _output(result)
@@ -317,12 +273,12 @@ class TestLinuxRollback:
         for i in range(1, 13):
             assert f"install-error-line-{i:02d}" in out, out
         assert "NOT installed" in out, out
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
 
     def test_install_that_does_not_import_is_rolled_back(self, tmp_path: Path) -> None:
         """pip exits 0, but `from fastmcp import FastMCP` fails (the #12
         dropped-__init__.py class).  The service must never restart into it."""
-        script, shim_dir, box, invocations = _linux_box(tmp_path, install_broken=True)
+        script, shim_dir, box, invocations = _box(tmp_path, install_broken=True)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -332,10 +288,10 @@ class TestLinuxRollback:
         assert "does not import" in out and "FastMCP" in out, out
         assert box.versions("remoteos-mcp") == [OLD_VERSION], out
         assert box.files() == before
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
 
     def test_install_reporting_success_without_a_package_is_rolled_back(self, tmp_path: Path) -> None:
-        script, shim_dir, box, invocations = _linux_box(tmp_path, install_noop=True)
+        script, shim_dir, box, invocations = _box(tmp_path, install_noop=True)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -345,7 +301,7 @@ class TestLinuxRollback:
         assert "no remoteos package is installed" in out, out
         assert box.versions("remoteos-mcp") == [OLD_VERSION]
         assert box.files() == before
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
 
     @pytest.mark.parametrize(
         "block",
@@ -358,7 +314,7 @@ class TestLinuxRollback:
     def test_failed_rollback_is_loud_keeps_the_snapshot_and_does_not_restart(
         self, tmp_path: Path, block: str
     ) -> None:
-        script, shim_dir, box, invocations = _linux_box(
+        script, shim_dir, box, invocations = _box(
             tmp_path, install_fail=True, block_restore=block, resolved=[["newdep", "1.0"]]
         )
 
@@ -367,7 +323,7 @@ class TestLinuxRollback:
 
         assert result.returncode != 0, out
         assert "Rollback FAILED" in out, out
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
         kept = box.work_dirs()
         assert len(kept) == 1 and (kept[0] / "snapshot" / "manifest").exists(), kept
         assert f"restore {kept[0]}/snapshot" in out, out
@@ -376,7 +332,7 @@ class TestLinuxRollback:
     def test_interrupted_install_is_rolled_back(self, tmp_path: Path, signal_name: str) -> None:
         """An ssh drop (HUP), a timeout's TERM or Ctrl-C mid-install must not
         leave the box without its package."""
-        script, shim_dir, box, invocations = _linux_box(tmp_path, signal_parent=signal_name)
+        script, shim_dir, box, invocations = _box(tmp_path, signal_parent=signal_name)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -386,18 +342,18 @@ class TestLinuxRollback:
         assert "Interrupted" in out, out
         assert box.versions("remoteos-mcp") == [OLD_VERSION], out
         assert box.files() == before, "the interrupted upgrade was not rolled back"
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
         assert box.work_dirs() == []
 
 
 # ---------------------------------------------------------------------------
-# macOS: the same uninstall-before-install path gets the same protection
+# macOS: the upgrade path as a whole
 # ---------------------------------------------------------------------------
 
 
-class TestMacosPreflightRollback:
+class TestMacosUpgradePath:
     def test_upgrade_runs_preflight_then_pre_uninstall_then_install(self, tmp_path: Path) -> None:
-        script, shim_dir, box, _ = _macos_box(tmp_path)
+        script, shim_dir, box, _ = _box(tmp_path)
 
         result = _run_installer(script, shim_dir, tmp_path)
         out = _output(result)
@@ -413,7 +369,7 @@ class TestMacosPreflightRollback:
         assert re.fullmatch(r"[A-Za-z0-9]{32}", key), key
 
     def test_failed_dry_run_aborts_before_any_uninstall_and_prints_the_full_error(self, tmp_path: Path) -> None:
-        script, shim_dir, box, invocations = _macos_box(tmp_path, dry_run_fail=True)
+        script, shim_dir, box, invocations = _box(tmp_path, dry_run_fail=True)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -427,7 +383,7 @@ class TestMacosPreflightRollback:
         assert "launchctl" not in _invocations(invocations)
 
     def test_failed_install_restores_the_recorded_version_and_prints_the_full_error(self, tmp_path: Path) -> None:
-        script, shim_dir, box, invocations = _macos_box(tmp_path, install_fail=True)
+        script, shim_dir, box, invocations = _box(tmp_path, install_fail=True)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -441,7 +397,7 @@ class TestMacosPreflightRollback:
         assert "launchctl" not in _invocations(invocations)
 
     def test_install_that_does_not_import_is_rolled_back(self, tmp_path: Path) -> None:
-        script, shim_dir, box, invocations = _macos_box(tmp_path, install_broken=True)
+        script, shim_dir, box, invocations = _box(tmp_path, install_broken=True)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -451,7 +407,7 @@ class TestMacosPreflightRollback:
         assert "launchctl" not in _invocations(invocations)
 
     def test_interrupted_install_is_rolled_back(self, tmp_path: Path) -> None:
-        script, shim_dir, box, invocations = _macos_box(tmp_path, signal_parent="HUP")
+        script, shim_dir, box, invocations = _box(tmp_path, signal_parent="HUP")
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -462,7 +418,7 @@ class TestMacosPreflightRollback:
 
 
 # ---------------------------------------------------------------------------
-# Linux: the rollback is armed by STATE, not by a list of signals
+# The rollback is armed by STATE, not by a list of signals
 # ---------------------------------------------------------------------------
 
 
@@ -481,9 +437,9 @@ def _run_and_drop_console(script: Path, shim_dir: Path, tmp_path: Path) -> int:
     return proc.wait(timeout=60)
 
 
-class TestLinuxLostConsole:
+class TestBlockLostConsole:
     def test_console_lost_during_a_failing_install_still_rolls_back(self, tmp_path: Path) -> None:
-        script, shim_dir, box, invocations = _linux_box(
+        script, shim_dir, box, invocations = _box(
             tmp_path, install_fail=True, wait_for_file=str(tmp_path / "console-closed")
         )
         before = box.files()
@@ -493,7 +449,7 @@ class TestLinuxLostConsole:
         assert returncode != 0
         assert box.versions("remoteos-mcp") == [OLD_VERSION], box.entries()
         assert box.files() == before, "the box was left half-upgraded after the console went away"
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
 
     def test_console_lost_during_a_successful_install_rolls_back_instead_of_stopping_half_way(
         self, tmp_path: Path
@@ -501,14 +457,14 @@ class TestLinuxLostConsole:
         """The install itself works, but the run cannot finish (verify, report):
         an unfinished upgrade is no upgrade — the old version stays, consistent
         with the still-running service."""
-        script, shim_dir, box, invocations = _linux_box(tmp_path, wait_for_file=str(tmp_path / "console-closed"))
+        script, shim_dir, box, invocations = _box(tmp_path, wait_for_file=str(tmp_path / "console-closed"))
         before = box.files()
 
         returncode = _run_and_drop_console(script, shim_dir, tmp_path)
 
         assert returncode != 0
         assert box.files() == before
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
 
     @pytest.mark.parametrize("signal_name", ["HUP", "INT", "TERM"])
     def test_group_signal_while_pip_writes_a_wheel_rolls_back_cleanly(self, tmp_path: Path, signal_name: str) -> None:
@@ -516,7 +472,7 @@ class TestLinuxLostConsole:
         hit pip itself, not only the installer.  A pip killed mid-wheel leaves
         RECORD-less files nothing can remove; shielded, it finishes the wheel and
         the installer rolls back over complete RECORDs."""
-        script, shim_dir, box, invocations = _linux_box(tmp_path, partial_signal=signal_name)
+        script, shim_dir, box, invocations = _box(tmp_path, partial_signal=signal_name)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -525,11 +481,11 @@ class TestLinuxLostConsole:
         assert result.returncode != 0, out
         assert "Interrupted" in out, out
         assert box.files() == before, "a half-written wheel survived the rollback"
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
 
 
 # ---------------------------------------------------------------------------
-# Linux: a truncated `curl | bash` download never half-runs
+# A truncated `curl | bash` download never half-runs
 # ---------------------------------------------------------------------------
 
 
@@ -539,9 +495,9 @@ def _truncate_after(script: Path, predicate) -> None:
     script.write_text("\n".join(lines[:cut]) + "\n")
 
 
-class TestLinuxTruncatedDownload:
+class TestBlockTruncatedDownload:
     def test_cut_off_right_after_the_pre_uninstall_changes_nothing(self, tmp_path: Path) -> None:
-        script, shim_dir, box, _ = _linux_box(tmp_path)
+        script, shim_dir, box, _ = _box(tmp_path)
         # The top-level call (unindented), not the definition or the rollback's call.
         _truncate_after(script, lambda line: line.startswith("uninstall_overlapping") and "()" not in line)
         before = box.files()
@@ -554,26 +510,26 @@ class TestLinuxTruncatedDownload:
     def test_cut_off_after_the_install_does_not_report_success(self, tmp_path: Path) -> None:
         """Ending after a verified install but before config/restart/health: an
         unattended deploy must not read exit 0 as a finished install."""
-        script, shim_dir, box, invocations = _linux_box(tmp_path)
+        script, shim_dir, box, invocations = _box(tmp_path)
         _truncate_after(script, lambda line: line.startswith("# <<< shared install block"))
 
         result = _run_installer(script, shim_dir, tmp_path)
 
         assert result.returncode != 0, _output(result)
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
 
 
 # ---------------------------------------------------------------------------
-# Linux: what the rollback removes and what it verifies
+# What the rollback removes and what it verifies
 # ---------------------------------------------------------------------------
 
 
-class TestLinuxRollbackSet:
+class TestBlockRollbackSet:
     def test_rollback_is_not_stopped_by_a_package_pip_refuses_to_uninstall(self, tmp_path: Path) -> None:
         """aaa-dep's pip copy shadows an apt copy: once the pre-uninstall removed
         it, pip sees the apt copy — which it refuses to uninstall.  That must not
         stop the rollback from removing zzz-dep's half-installed new copy."""
-        script, shim_dir, box, _ = _linux_box(
+        script, shim_dir, box, _ = _box(
             tmp_path, resolved=[["zzz-dep", "2.0"], ["aaa-dep", "11.0"]], install_fail=True, fail_after=2
         )
         install_dep(box, "aaa-dep", "5.0", installer="debian")
@@ -591,7 +547,7 @@ class TestLinuxRollbackSet:
     def test_rollback_removes_what_the_failed_install_added(self, tmp_path: Path) -> None:
         """A new dep, and a pip copy overlaying an apt one, written by the failed
         install: the rollback takes them out again."""
-        script, shim_dir, box, _ = _linux_box(
+        script, shim_dir, box, _ = _box(
             tmp_path, resolved=[["newdep", "1.0"], ["cryptography", "46.0.1"]], install_fail=True
         )
         install_dep(box, "cryptography", "41.0.7", installer="debian")
@@ -610,7 +566,7 @@ class TestLinuxRollbackSet:
         """A uv/conda-installed dep with a RECORD whose pin changes: the overlay
         would overwrite it, and neither the pre-uninstall nor the snapshot may
         touch another installer's package — so refuse, untouched."""
-        script, shim_dir, box, _ = _linux_box(tmp_path, resolved=[["uvdep", "2.0"]])
+        script, shim_dir, box, _ = _box(tmp_path, resolved=[["uvdep", "2.0"]])
         install_dep(box, "uvdep", "1.0", installer="uv")
         before = box.files()
 
@@ -623,7 +579,7 @@ class TestLinuxRollbackSet:
         assert box.files() == before
 
     def test_failed_pre_uninstall_rolls_back_instead_of_installing_over_stale_files(self, tmp_path: Path) -> None:
-        script, shim_dir, box, _ = _linux_box(tmp_path, uninstall_fail_multi=True)
+        script, shim_dir, box, _ = _box(tmp_path, uninstall_fail_multi=True)
         before = box.files()
 
         result = _run_installer(script, shim_dir, tmp_path)
@@ -640,7 +596,7 @@ class TestLinuxRollbackSet:
     ) -> None:
         """The restore 'succeeds' from a damaged rollback copy: the rollback's own
         version + import check must catch it, keep the work dir, exit non-zero."""
-        script, shim_dir, box, invocations = _linux_box(tmp_path, install_fail=True, corrupt_snapshot=damage)
+        script, shim_dir, box, invocations = _box(tmp_path, install_fail=True, corrupt_snapshot=damage)
 
         result = _run_installer(script, shim_dir, tmp_path)
         out = _output(result)
@@ -648,19 +604,19 @@ class TestLinuxRollbackSet:
         assert result.returncode != 0, out
         assert "not back in a working state" in out, out
         assert len(box.work_dirs()) == 1, "the work dir must be kept for manual recovery"
-        assert "systemctl restart" not in _invocations(invocations)
+        assert "launchctl" not in _invocations(invocations)
 
 
 # ---------------------------------------------------------------------------
-# Linux: no upgrade without a complete rollback copy
+# No upgrade without a complete rollback copy
 # ---------------------------------------------------------------------------
 
 
-class TestLinuxSnapshotCompleteness:
+class TestBlockSnapshotCompleteness:
     def test_truncated_record_of_the_installed_version_aborts_before_anything_changes(self, tmp_path: Path) -> None:
         """Its RECORD does not list its own dist-info: the rollback copy could
         not bring the version back, so nothing may be uninstalled."""
-        script, shim_dir, box, _ = _linux_box(tmp_path, upgrade=False)
+        script, shim_dir, box, _ = _box(tmp_path, upgrade=False)
         write_dist(box.site, "remoteos-mcp", OLD_VERSION, dist_files("remoteos-mcp", OLD_VERSION),
                    record_lists_dist_info=False)
         before = box.files()
@@ -675,7 +631,7 @@ class TestLinuxSnapshotCompleteness:
     def test_overlapping_package_without_record_aborts_before_anything_changes(self, tmp_path: Path) -> None:
         """pip would refuse to uninstall a RECORD-less fastmcp-slim and abort the
         rest of the pre-uninstall."""
-        script, shim_dir, box, _ = _linux_box(tmp_path, upgrade=False)
+        script, shim_dir, box, _ = _box(tmp_path, upgrade=False)
         write_dist(box.site, "remoteos-mcp", OLD_VERSION, dist_files("remoteos-mcp", OLD_VERSION))
         write_dist(box.site, "fastmcp-slim", OLD_FASTMCP_SLIM, dist_files("fastmcp-slim", OLD_FASTMCP_SLIM),
                    record=False)
@@ -700,7 +656,7 @@ class TestRollbackHelperOnRealMetadata:
     INSTALLER), not by parsing pip's human output — check it on real dists."""
 
     def _helper(self, tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
-        helper = rollback_helper(tmp_path / "rollback.py")
+        helper = rollback_helper(tmp_path / "rollback.py", INSTALLER_MACOS)
         return subprocess.run([sys.executable, "-B", str(helper), *args], capture_output=True, text=True, timeout=60)
 
     def test_snapshot_copies_exactly_the_record_listed_files_of_a_real_dist(self, tmp_path: Path) -> None:
@@ -735,18 +691,6 @@ class TestRollbackHelperOnRealMetadata:
         assert result.returncode == 0, result.stderr
         assert (tmp_path / "plan" / "changed.txt").read_text().split() == ["pytest"]
         assert (tmp_path / "plan" / "added.txt").read_text().split() == ["not-installed-anywhere"]
-
-
-# ---------------------------------------------------------------------------
-# Linux + macOS: the install logic is one shared block, not two drifting copies
-# ---------------------------------------------------------------------------
-
-
-class TestSharedInstallBlock:
-    def test_linux_and_macos_installers_carry_the_identical_install_block(self) -> None:
-        linux, macos = _shared_block(INSTALLER_LINUX), _shared_block(INSTALLER_MACOS)
-        assert "rollback_install" in linux and "pip_install_remoteos" in linux
-        assert linux == macos, "the shared install block differs between install-linux.sh and install.sh"
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,8 @@
 
 install-linux.sh:
 (a) Aborts BEFORE any install when the root filesystem is mounted read-only.
-(b) Detects a version mismatch between the pip-installed package and /health.
+    (Its /health version check is in tests/test_installer_linux_venv.py, since
+    the #12 venv layout.)
 
 install.sh (macOS):
 (c) Detects a version mismatch between the pip-installed package and /health.
@@ -12,9 +13,10 @@ install.ps1 (Windows):
 (f) Stops the running service before pip install; fail-hard import check.
 
 All installers:
-(g) Deterministic pre-uninstall of remoteos-mcp, fastmcp, fastmcp-slim, and
-    no --force-reinstall on the main install.
-(h) The Linux/macOS pre-uninstall passes --break-system-packages.
+(g) Deterministic pre-uninstall of remoteos-mcp, fastmcp, fastmcp-slim (macOS,
+    Windows: the system/user python), and no --force-reinstall on the main install.
+(h) Every pip uninstall from a system python passes --break-system-packages
+    (macOS: the pre-uninstall; Linux: the removal of the old system-python copy).
 
 The behavioural tests run the real installer under bash with a FAKE PATH of
 shim scripts — no root, no network, no system changes.  Hermetic via tmp_path.
@@ -29,14 +31,13 @@ from installer_harness import (
     INSTALLER_LINUX,
     INSTALLER_MACOS,
     INSTALLER_WINDOWS,
-    _create_linux_shims,
     _create_macos_shims,
     _find_first_code_line,
     _make_shim,
-    _prepare_linux_installer,
     _prepare_macos_installer,
     _run_installer,
 )
+from linux_installer_harness import linux_box
 
 # ---------------------------------------------------------------------------
 # (a) Read-only rootfs must abort BEFORE any install command
@@ -50,17 +51,10 @@ class TestRoRootfsAbort:
         """findmnt reports 'ro' as a mount option -> installer exits non-zero
         with '[X] Root filesystem is read-only' BEFORE calling apt-get / pip /
         systemctl."""
-        script = _prepare_linux_installer(tmp_path)
-        shim_dir = tmp_path / "shims"
-        shim_dir.mkdir()
-        invocations = tmp_path / "invocations.log"
+        box = linux_box(tmp_path)
+        box.shim("findmnt", 'echo "ro,relatime,errors=remount-ro"\n')
 
-        # findmnt reports read-only root
-        _make_shim(shim_dir / "findmnt", 'echo "ro,relatime,errors=remount-ro"')
-
-        _create_linux_shims(shim_dir, invocations)
-
-        result = _run_installer(script, shim_dir, tmp_path)
+        result = box.run()
 
         # -- Must exit non-zero --
         assert result.returncode != 0, (
@@ -75,72 +69,9 @@ class TestRoRootfsAbort:
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
 
-        # -- Must NOT have called any install commands --
-        if invocations.exists():
-            calls = invocations.read_text()
-            assert "apt-get" not in calls, (
-                f"apt-get was called despite ro rootfs:\n{calls}"
-            )
-            assert "pip install" not in calls.lower(), (
-                f"pip install was called despite ro rootfs:\n{calls}"
-            )
-            assert "systemctl" not in calls, (
-                f"systemctl was called despite ro rootfs:\n{calls}"
-            )
-
-
-# ---------------------------------------------------------------------------
-# (b) Linux: version mismatch from /health must cause failure
-# ---------------------------------------------------------------------------
-
-
-class TestLinuxVersionSelfCheck:
-    """install-linux.sh must detect version mismatch after service restart."""
-
-    def test_version_mismatch_exits_nonzero(self, tmp_path: Path) -> None:
-        """pip installed 0.7.0.dev13 but health reports 0.7.0.dev8 -> installer
-        must exit non-zero with '[X] Installed ... but service reports ...'."""
-        script = _prepare_linux_installer(tmp_path)
-        shim_dir = tmp_path / "shims"
-        shim_dir.mkdir()
-        invocations = tmp_path / "invocations.log"
-
-        installed_ver = "0.7.0.dev13"
-        health_ver = "0.7.0.dev8"
-
-        # findmnt reports rw (happy path for ro check)
-        _make_shim(shim_dir / "findmnt", 'echo "rw,relatime,errors=remount-ro"')
-
-        _create_linux_shims(shim_dir, invocations, installed_version=installed_ver)
-
-        # curl — returns stale version on health check
-        _make_shim(
-            shim_dir / "curl",
-            f"""\
-echo "curl $*" >> "{invocations}"
-if [[ "$*" == *"health"* ]]; then
-    echo '{{"status":"ok","version":"{health_ver}"}}'
-    exit 0
-fi
-exit 0
-""",
-        )
-
-        result = _run_installer(script, shim_dir, tmp_path)
-
-        # -- Must exit non-zero due to version mismatch --
-        assert result.returncode != 0, (
-            f"Installer should fail on version mismatch "
-            f"(installed {installed_ver}, health {health_ver}) "
-            f"but exited 0.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
-
-        # -- Must print both versions in the mismatch message --
-        output = result.stdout + result.stderr
-        assert installed_ver in output and health_ver in output, (
-            f"Expected both '{installed_ver}' and '{health_ver}' in "
-            f"mismatch output.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
+        # -- Must NOT have started any install / download / service command --
+        started = {argv[0] for argv in box.argvs()}
+        assert not started & {"apt-get", "curl", "systemctl", "git", "python3", "tar"}, box.argvs()
 
 
 # ---------------------------------------------------------------------------
@@ -390,26 +321,8 @@ class TestDeterministicPreUninstall:
                 )
 
     # --- Linux (install-linux.sh) ---
-
-    def test_linux_pre_uninstall_present(self) -> None:
-        """install-linux.sh must pip uninstall remoteos-mcp, fastmcp, AND
-        fastmcp-slim before the main pip install."""
-        content = INSTALLER_LINUX.read_text()
-        uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
-        install_pos = _find_first_code_line(content, "pip", "install", "remoteos-mcp", exclude="uninstall")
-        assert uninstall_pos is not None, (
-            "install-linux.sh must pip uninstall before install"
-        )
-        assert install_pos is not None
-        assert uninstall_pos < install_pos, (
-            f"install-linux.sh: pre-uninstall (line {uninstall_pos + 1}) must "
-            f"precede pip install (line {install_pos + 1})"
-        )
-        lines = content.split("\n")
-        uninstall_line = lines[uninstall_pos]
-        assert "fastmcp" in uninstall_line, (
-            f"install-linux.sh pre-uninstall must include fastmcp: {uninstall_line!r}"
-        )
+    # Since #12 (0.7.0.dev32) Linux installs into a FRESH venv built side by side, so there is
+    # no pre-uninstall: no stale RECORD can exist in it (tests/test_installer_linux_venv.py).
 
     def test_linux_no_force_reinstall(self) -> None:
         """install-linux.sh must NOT use --force-reinstall on the main install.
@@ -480,7 +393,8 @@ class TestPreUninstallBreakSystemPackages:
     from a prior half-failed install were still present."""
 
     def test_linux_pre_uninstall_has_break_system_packages(self) -> None:
-        """install-linux.sh pip uninstall must include --break-system-packages
+        """install-linux.sh's pip uninstall from the SYSTEM python (the removal of
+        the old system-python copy, since #12) must include --break-system-packages
         so it succeeds on PEP 668 systems (Ubuntu 24.04+)."""
         content = INSTALLER_LINUX.read_text()
         uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
