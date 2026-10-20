@@ -356,6 +356,72 @@ class TestFreshBoxProofFailure:
         assert box.unit_path.exists() and box.env_file.exists(), "the files are kept for a re-run"
 
 
+def _stopped_disabled_pending(box: LinuxBox) -> None:
+    state = box.state()
+    assert not state["active"] and not state["enabled"], state
+    assert (box.config_dir / ".switch-pending").exists(), "the unproven switch is no longer marked pending"
+
+
+class TestNeverRestartAnUnprovenState:
+    """Review round 3: a rollback may only restart a PROVEN state. An unproven one (a fresh box's
+    first attempt, an enable-only switch, a killed switch) is stopped, never "rolled back" into
+    running: it may be an agent with authentication off."""
+
+    def test_a_fresh_box_whose_proof_fails_twice_stays_stopped(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.configure(service={"unauth_code": 200})
+        assert box.run().returncode != 0
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        _stopped_disabled_pending(box)
+        assert "Rolled back" not in output(result)
+
+    def test_an_enable_only_switch_whose_proof_fails_is_stopped(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        assert box.run(REMOTEOS_MCP_POLICY="enable-only").returncode == 0
+        box.configure(service={"unauth_code": 200})
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        _stopped_disabled_pending(box)
+
+    def test_a_fresh_box_interrupted_while_switching_is_stopped(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.configure(service={"signal_on_restart": "HUP"})
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        assert "Interrupted" in output(result)
+        _stopped_disabled_pending(box)
+
+
+class TestRunningVersion:
+    def test_an_unchanged_box_running_another_version_is_restarted(self, tmp_path: Path) -> None:
+        """camera-box's lib (enable-only, the cams) upgraded the venv in place to our source and
+        set its marker, but never restarted: the files are current, the process is not."""
+        box = linux_box(tmp_path)
+        box.install_camera_box(K_ENV)  # running CB_VERSION
+        site = Path(_venv_purelib(box.venv_link))
+        for old in [site / "remoteos", *site.glob("remoteos_mcp-*.dist-info")]:
+            shutil.rmtree(old)
+        write_dist(site, "remoteos-mcp", SOURCE_VERSION, dist_files("remoteos-mcp", SOURCE_VERSION))
+        (box.venv_link / ".camera-box-source").write_text(MAIN_SOURCE_ID + "\n")
+        restarts = box.state()["restarts"]
+        assert box.state()["service"]["version"] == CB_VERSION
+
+        result = box.run()
+
+        assert result.returncode == 0, output(result)
+        assert box.venv_installs() == []
+        assert box.state()["restarts"] == restarts + 1
+        assert box.state()["service"]["version"] == SOURCE_VERSION
+
+
 class TestDesktopDisplay:
     def test_an_x11_session_on_another_display_gets_that_display(self, tmp_path: Path) -> None:
         box = linux_box(tmp_path, graphical="x11", display=":1")
@@ -384,6 +450,17 @@ class TestDesktopDisplay:
 
         assert "Environment=DISPLAY=:1" in box.unit().splitlines()
 
+    def test_a_wayland_re_run_while_logged_out_keeps_no_display(self, tmp_path: Path) -> None:
+        """Review round 3: a desktop unit without DISPLAY is the saved Wayland choice; :0 would
+        stick for good (the existing unit's display wins on every later run)."""
+        box = linux_box(tmp_path, graphical="wayland")
+        assert box.run().returncode == 0
+        box.shim("loginctl", 'if [[ "$1" == "list-sessions" ]]; then echo ""; fi\nexit 0\n')  # logged out
+
+        assert box.run().returncode == 0
+
+        assert not any(line.startswith("Environment=DISPLAY") for line in box.unit().splitlines())
+
 
 class TestNoSecretInAChildEnvironment:
     def test_names_the_caller_exported_never_carry_the_key_to_a_child(self, tmp_path: Path) -> None:
@@ -393,7 +470,7 @@ class TestNoSecretInAChildEnvironment:
         box.install_legacy(K_UNIT)
         exported = {name: "from-the-caller" for name in (
             "AUTH_KEY", "EXPLICIT_KEY", "GH_TOKEN_VALUE", "KEY_SOURCE", "unit_key", "env_key", "cfg_key",
-            "k", "key", "line", "rest",
+            "k", "key", "line", "rest", "OLD_UNIT", "OLD_DESCRIPTION",  # OLD_UNIT holds a legacy --auth-key
         )}
 
         result = box.run(**exported)
