@@ -1,226 +1,586 @@
 #!/usr/bin/env bash
 # RemoteOS MCP - One-line installer for Linux (systemd)
 # Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash
+#
+# Optional settings, read from the environment (`... | sudo REMOTEOS_MCP_REF=<sha> bash`):
+#   REMOTEOS_MCP_REF       the source to install: a commit sha, a tag or a branch (default: main)
+#   REMOTEOS_MCP_AUTH_KEY  the auth key to install (1-128 letters/digits). Default: keep the key
+#                          the box has (the running unit's, else config.json's), else a new one.
+#   GH_TOKEN               sent as the download's Authorization header on curl's stdin (a fork)
+#
+# Layout (#12: the one camera-box's scripts/lib/remoteos-mcp.sh runs on strih-snv, strih-pp,
+# stream-pp and the cams, so both installers produce the same box):
+#   /opt/remoteos-mcp-venv                    what the unit runs: a symlink to the current build
+#                                             in /opt/remoteos-mcp-venvs/. A real venv directory
+#                                             there (camera-box's lib) is adopted as it is.
+#   /etc/remoteos-mcp/config.json             0600, the key store
+#   /etc/remoteos-mcp/remoteos-mcp.env        0600, REMOTEOS_AUTH_KEY=<key>: the EnvironmentFile
+#   /etc/systemd/system/remoteos-mcp.service  0644, never carries the key
+# The key is never in the unit, in an argv or in this installer's output.
+#
+# Order: validate the inputs → read the key → download ONE tarball of the ref → build a fresh
+# venv side by side (pip under an env allowlist) → swap the venv link, write the key files and
+# the unit, restart → prove the new install (/health = the built version, an authenticated
+# initialize answers 200, an unauthenticated request 401) → only then remove the old
+# system-python copy and the old builds. A failed download or build changes nothing. A switch
+# that does not prove itself, or is interrupted (a signal, a lost console), is rolled back to
+# the previous unit, key files and venv.
 set -euo pipefail
 
-# Everything runs inside main(), called on the very last line: bash parses the
-# whole function before running any of it, so a truncated `curl | bash`
-# download fails to parse (or never reaches the call) instead of running half.
-main() {
+say() { echo "        $*"; }
 
-PORT=8092
-CONFIG_DIR="/etc/remoteos-mcp"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-SERVICE_NAME="remoteos-mcp"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-
-echo ""
-echo "  RemoteOS MCP Installer (Linux)"
-echo "  Remote desktop control for Claude Code"
-echo ""
-
-# --- Check root ---
-if [[ "$EUID" -ne 0 ]]; then
-    echo "  [X] This installer must be run as root (via sudo)."
+# fail MESSAGE: before anything was switched (the EXIT trap rolls back a switch in progress).
+fail() {
+    echo "        [X] $*"
     exit 1
-fi
+}
 
-# Determine the actual user who invoked sudo
-ACTUAL_USER="${SUDO_USER:-root}"
+# Account names, source ids: letters, digits, dot, underscore, dash. The bracket ranges are
+# ASCII in any locale: main() sets globasciiranges.
+name_ok() {
+    [[ -n "${1-}" ]] || return 1
+    case "$1" in
+        *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+}
 
-# --- Pre-flight: check for read-only root filesystem ---
-if command -v findmnt &>/dev/null; then
-    ROOT_OPTS=$(findmnt -no OPTIONS / 2>/dev/null || true)
-    if echo ",$ROOT_OPTS," | grep -q ',ro,'; then
-        echo "  [X] Root filesystem is read-only — run: mount -o remount,rw / (and fix /etc/fstab: '/ ext4 ro' → 'defaults') then rerun."
-        exit 1
-    fi
-fi
+# A git ref the GitHub tarball API accepts: a sha, a tag or a branch name, no `..`, no option.
+ref_ok() {
+    local r="${1-}"
+    [[ -n "$r" && ${#r} -le 200 ]] || return 1
+    case "$r" in
+        -* | .* | */ | *..* | *//* | */.*) return 1 ;;
+        *[!A-Za-z0-9._/-]*) return 1 ;;
+    esac
+}
 
-# --- [1/5] Check Python ---
-echo "  [1/5] Checking Python..."
-PYTHON=""
-for cmd in python3 python /usr/bin/python3 /usr/local/bin/python3; do
-    if command -v "$cmd" &>/dev/null || [[ -x "$cmd" ]]; then
-        ver=$("$cmd" --version 2>&1 || true)
-        if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 10 )); then
-            PYTHON="$cmd"
-            echo "        Found $ver ($cmd)"
-            break
+# --- the key -----------------------------------------------------------------------------------
+
+# key_ok KEY: 1-128 ASCII letters/digits (the key charset of all three installers). Anything
+# else would break config.json or the EnvironmentFile line.
+key_ok() {
+    local k="${1-}"
+    [[ -n "$k" && ${#k} -le 128 ]] || return 1
+    case "$k" in
+        *[!A-Za-z0-9]*) return 1 ;;
+    esac
+}
+
+# The value after `--auth-key` on a unit's ExecStart (what our pre-#12 installer wrote).
+key_from_unit_text() {
+    local line rest
+    while IFS= read -r line; do
+        case "$line" in
+            ExecStart=*--auth-key\ *)
+                rest="${line#*--auth-key }"
+                printf '%s' "${rest%% *}"
+                return 0
+                ;;
+        esac
+    done <<<"${1-}"
+}
+
+# REMOTEOS_AUTH_KEY of an EnvironmentFile.
+key_from_env_text() {
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            REMOTEOS_AUTH_KEY=*)
+                printf '%s' "${line#REMOTEOS_AUTH_KEY=}"
+                return 0
+                ;;
+        esac
+    done <<<"${1-}"
+}
+
+# The auth_key of a config.json, read by python from stdin (never an argv).
+key_from_config_text() {
+    printf '%s' "${1-}" | "$PYTHON" -c '
+import json, sys
+try:
+    v = json.load(sys.stdin).get("auth_key", "")
+except Exception:
+    v = ""
+print(v if isinstance(v, str) else "", end="")' 2>/dev/null || true
+}
+
+generate_key() {
+    "$PYTHON" -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32)), end='')"
+}
+
+# Sets AUTH_KEY, and KEY_SOURCE (where it came from, never the value; empty = new). The key
+# precedence is camera-box's: explicit, the running unit's (a legacy --auth-key, else its
+# EnvironmentFile), config.json, new. A re-run never changes the key.
+resolve_key() {
+    local unit_key env_key cfg_key
+    cfg_key=$(key_from_config_text "$(cat "$CONFIG_FILE" 2>/dev/null || true)")
+    if [[ -n "$EXPLICIT_KEY" ]]; then
+        key_ok "$EXPLICIT_KEY" \
+            || fail "REMOTEOS_MCP_AUTH_KEY must be 1-128 letters/digits [A-Za-z0-9] — nothing was changed on this box"
+        AUTH_KEY=$EXPLICIT_KEY
+        KEY_SOURCE="REMOTEOS_MCP_AUTH_KEY"
+    else
+        unit_key=$(key_from_unit_text "$OLD_UNIT")
+        env_key=$(key_from_env_text "$(cat "$ENV_FILE" 2>/dev/null || true)")
+        if key_ok "$unit_key"; then
+            AUTH_KEY=$unit_key
+            KEY_SOURCE="the running unit (moved out of its ExecStart)"
+        elif key_ok "$env_key"; then
+            AUTH_KEY=$env_key
+            KEY_SOURCE="$ENV_FILE"
+        elif key_ok "$cfg_key"; then
+            AUTH_KEY=$cfg_key
+            KEY_SOURCE="$CONFIG_FILE"
+        else
+            AUTH_KEY=$(generate_key)
+            KEY_SOURCE=""
         fi
     fi
-done
-
-if [[ -z "$PYTHON" ]]; then
-    echo "        Python 3.10+ not found. Trying package manager..."
-    if command -v apt-get &>/dev/null; then
-        apt-get install -y python3 python3-pip
-    elif command -v dnf &>/dev/null; then
-        dnf install -y python3 python3-pip
-    elif command -v yum &>/dev/null; then
-        yum install -y python3 python3-pip
+    key_ok "$AUTH_KEY" || fail "could not make an auth key"
+    if [[ -n "$KEY_SOURCE" ]]; then
+        say "Auth key: kept, from ${KEY_SOURCE}"
+    else
+        say "Auth key: a NEW auth key was generated — the client's .mcp.json entry for this box needs it"
     fi
-    # Re-check after install
+    if key_ok "$cfg_key" && [[ "$cfg_key" != "$AUTH_KEY" ]]; then
+        say "[!] config.json held another key; it now holds the installed one"
+    fi
+}
+
+# --- the box: python, the unit's mode and user ------------------------------------------------
+
+find_python() {
+    local cmd ver
+    PYTHON=""
+    for cmd in python3 python /usr/bin/python3 /usr/local/bin/python3; do
+        if command -v "$cmd" &>/dev/null || [[ -x "$cmd" ]]; then
+            ver=$("$cmd" --version 2>&1 || true)
+            if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 10 )); then
+                PYTHON="$cmd"
+                say "Found $ver ($cmd)"
+                return 0
+            fi
+        fi
+    done
+    say "Python 3.10+ not found. Trying the package manager..."
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y python3 python3-venv
+    elif command -v dnf &>/dev/null; then
+        dnf install -y python3
+    elif command -v yum &>/dev/null; then
+        yum install -y python3
+    fi
     for cmd in python3 python; do
         if command -v "$cmd" &>/dev/null; then
             ver=$("$cmd" --version 2>&1 || true)
             if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 10 )); then
                 PYTHON="$cmd"
-                echo "        Python installed: $ver"
-                break
+                say "Python installed: $ver"
+                return 0
             fi
         fi
     done
-fi
+    fail "Python 3.10+ required but not found. Install it (apt-get install python3 python3-venv, or dnf/yum) and rerun."
+}
 
-if [[ -z "$PYTHON" ]]; then
-    echo "        [X] Python 3.10+ required but not found."
-    echo "        Install manually: apt-get install python3  (or dnf/yum)"
-    exit 1
-fi
+# The type of the first graphical user session (x11 / wayland), or nothing.
+graphical_session() {
+    local s stype sclass
+    command -v loginctl &>/dev/null || return 0
+    for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+        stype=$(loginctl show-session "$s" -p Type --value 2>/dev/null || true)
+        sclass=$(loginctl show-session "$s" -p Class --value 2>/dev/null || true)
+        if [[ "$sclass" == "user" && ( "$stype" == "x11" || "$stype" == "wayland" ) ]]; then
+            printf '%s' "$stype"
+            return 0
+        fi
+    done
+}
 
-PYTHON_PATH=$(command -v "$PYTHON")
+# The User= of a unit, trimmed.
+user_from_unit_text() {
+    local line v
+    while IFS= read -r line; do
+        case "$line" in
+            User=*)
+                v="${line#User=}"
+                v="${v#"${v%%[![:space:]]*}"}"
+                v="${v%"${v##*[![:space:]]}"}"
+                printf '%s' "$v"
+                return 0
+                ;;
+        esac
+    done <<<"${1-}"
+}
 
-# Ensure git is available (needed for pip install from GitHub)
-if ! command -v git &>/dev/null; then
-    echo "        git not found, installing..."
-    if command -v apt-get &>/dev/null; then
-        apt-get update -qq && apt-get install -y -qq git
-    elif command -v dnf &>/dev/null; then
-        dnf install -y git
-    elif command -v yum &>/dev/null; then
-        yum install -y git
+# Sets OLD_UNIT, MODE (desktop | headless), SERVICE_USER, SERVICE_UID. The existing unit wins,
+# so a re-run never changes the box's shape or moves the agent to another account.
+detect_layout() {
+    local session u
+    OLD_UNIT=$(cat "$UNIT_PATH" 2>/dev/null || true)
+    if [[ -e "$VENV_LINK" && ! -L "$VENV_LINK" && ! -d "$VENV_LINK" ]]; then
+        fail "$VENV_LINK is neither a venv directory nor a link — nothing was changed on this box"
     fi
-fi
-
-# Ensure pip is available
-if ! "$PYTHON" -m pip --version &>/dev/null; then
-    echo "        pip not found, installing..."
-    if command -v apt-get &>/dev/null; then
-        apt-get update -qq && apt-get install -y -qq python3-pip python3-venv
-    elif command -v dnf &>/dev/null; then
-        dnf install -y python3-pip
-    elif command -v yum &>/dev/null; then
-        yum install -y python3-pip
+    if grep -q '^Environment=DISPLAY=' <<<"$OLD_UNIT"; then
+        MODE=desktop
+        say "Mode: desktop (the existing unit's)"
     else
-        "$PYTHON" -m ensurepip --upgrade 2>/dev/null || true
+        session=$(graphical_session)
+        if [[ -n "$session" ]]; then
+            MODE=desktop
+            say "Mode: desktop (a ${session} session is active)"
+        else
+            MODE=headless
+            say "Mode: headless (no graphical session)"
+        fi
     fi
-    if ! "$PYTHON" -m pip --version &>/dev/null; then
-        echo "        [X] pip could not be installed"
+    SERVICE_USER=""
+    for u in "$(user_from_unit_text "$OLD_UNIT")" "${SUDO_USER:-}"; do
+        if name_ok "$u"; then
+            SERVICE_USER=$u
+            break
+        fi
+    done
+    SERVICE_USER=${SERVICE_USER:-root}
+    SERVICE_UID=$(id -u "$SERVICE_USER") || fail "the service account '${SERVICE_USER}' does not exist"
+    say "Service account: ${SERVICE_USER}"
+}
+
+# --- the source and the venv -------------------------------------------------------------------
+
+# Download the GitHub tarball of REF into $WORK_DIR/src; sets SOURCE_ID (its top directory,
+# e.g. zbynekdrlik-remoteos-mcp-8b4ce58: it carries the commit). Code and constraints.txt come
+# from the same tarball, so they always match.
+fetch_source() {
+    local url="https://api.github.com/repos/${REPO}/tarball/${REF}" tgz="$WORK_DIR/source.tar.gz" rc=0
+    if [[ -n "$GH_TOKEN_VALUE" ]]; then
+        printf 'Authorization: token %s\n' "$GH_TOKEN_VALUE" \
+            | curl -fsSL --max-time 120 -H @- -H 'Accept: application/vnd.github+json' -o "$tgz" "$url" \
+                >"$WORK_DIR/fetch.log" 2>&1 || rc=$?
+    else
+        curl -fsSL --max-time 120 -H 'Accept: application/vnd.github+json' -o "$tgz" "$url" \
+            >"$WORK_DIR/fetch.log" 2>&1 || rc=$?
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+        echo "        [X] Could not download ${url} (curl exit ${rc}) — nothing was changed on this box:"
+        cat "$WORK_DIR/fetch.log"
         exit 1
     fi
-    echo "        pip installed"
-fi
-
-# --- [2/5] Install remoteos-mcp ---
-echo "  [2/5] Installing remoteos-mcp..."
-# --ignore-installed: on Ubuntu 26.04+ / Debian 13 several pinned deps
-# (cryptography, cffi, PyJWT, psutil, ...) are apt python3-* packages that
-# Debian's pip refuses to uninstall ("installed by debian", #12 strih-pp).
-# Installing over them into /usr/local shadows the apt copies instead.  Safe
-# because the shared block pre-uninstalls everything pip itself owns and is
-# about to replace (remoteos-mcp, fastmcp, fastmcp-slim, changed pip-owned deps).
-PIP_FLAGS=(--no-cache-dir --break-system-packages --ignore-installed)
-SERVICE_DESC="the ${SERVICE_NAME} service"
-
-# >>> shared install block — byte-identical in install-linux.sh and install.sh
-# (tests/test_installer_preflight_rollback.py guards it).  Needs: PYTHON,
-# PIP_FLAGS, SERVICE_DESC.  Leaves: PKG_VER (the installed, importable version).
-#
-# Order: pin one commit of main → record the installed version → dry-run
-# preflight → plan + snapshot → ARM → pre-uninstall → install → verify (version
-# + import) → DISARM.  Before ARM nothing on the box has changed.  Whatever ends
-# the run while ARMED — a failed step, a signal (ssh drop, timeout, Ctrl-C), a
-# lost console (SIGPIPE is ignored, so the write fails and set -e exits) — goes
-# through the EXIT trap, which rolls the snapshot back and exits non-zero
-# without touching the service.  Armed pip steps are shielded from HUP/INT/TERM
-# so pip never dies half-way through a wheel.  pip always writes to a log; the
-# full log is printed on failure.
-
-installed_version() {
-    "$PYTHON" -m pip show remoteos-mcp 2>/dev/null | sed -n 's/^Version: //p' || true
+    SOURCE_ID=$(tar -tzf "$tgz" 2>/dev/null | awk -F/ 'NR == 1 { print $1 }') || true
+    name_ok "$SOURCE_ID" || fail "${url} is not a source tarball — nothing was changed on this box"
+    mkdir "$WORK_DIR/src"
+    tar -xzf "$tgz" -C "$WORK_DIR/src" --strip-components=1 \
+        || fail "could not unpack the ${REF} source — nothing was changed on this box"
+    [[ -f "$WORK_DIR/src/pyproject.toml" && -f "$WORK_DIR/src/constraints.txt" ]] \
+        || fail "the ${REF} source has no pyproject.toml + constraints.txt — nothing was changed on this box"
+    SRC_DIR="$WORK_DIR/src"
+    say "Source: ${REF} = ${SOURCE_ID}"
 }
 
-# Import what was installed the way `python -m remoteos` (the service) does,
-# minus starting it.  Runs as the installer's user.
-import_check() {
-    "$PYTHON" -c 'import remoteos.__main__, fastmcp; from fastmcp import FastMCP' 2>&1
+# Run a venv's python under a minimal environment: it imports the package's code. A check
+# reads the venv, never writes it (no __pycache__ in an adopted venv).
+venv_python() {
+    local venv="$1"
+    shift
+    env -i PATH="$PATH" HOME="$PIP_HOME" LANG="${LANG:-C.UTF-8}" PYTHONDONTWRITEBYTECODE=1 "$venv/bin/python" "$@"
 }
 
-# Run an armed pip step immune to HUP/INT/TERM (Ctrl-C, a tty hang-up and a
-# killpg timeout hit the whole process group): pip writes a wheel's RECORD
-# last, so a pip killed mid-wheel leaves files no rollback can find.  The
-# installer's own trap still sees the signal and rolls back once pip is done.
-shield() {
-    ( trap '' HUP INT TERM; exec "$@" )
+venv_version() {
+    venv_python "$1" -c 'import importlib.metadata as m; print(m.version("remoteos-mcp"))' 2>/dev/null || true
 }
 
-# Pre-uninstall the three packages so no stale RECORD can delete files the new
-# install writes.  Root cause (#12 wheel evidence): monolithic fastmcp 2.x
-# RECORD claims fastmcp/__init__.py — same file fastmcp-slim 4.x writes.  Plus
-# every pip-owned dep whose pinned version changes: --ignore-installed would
-# otherwise leave its old dist-info + RECORD behind next to the new files.  The
-# plan guarantees each of these has a RECORD, so pip cannot refuse one of them.
-uninstall_overlapping() {
-    shield "$PYTHON" -m pip uninstall -y --break-system-packages remoteos-mcp fastmcp fastmcp-slim ${CHANGED_DEPS[@]+"${CHANGED_DEPS[@]}"} >>"$WORK_DIR/uninstall.log" 2>&1
+# Import what the service runs (`python -m remoteos`), minus starting it.
+venv_import_check() {
+    venv_python "$1" -c 'import remoteos.__main__, fastmcp; from fastmcp import FastMCP' 2>&1
 }
 
-# The pinned install; extra pip args (--dry-run ...) go first.  The preflight
-# and the real install both run through here, so their flags are identical.
-pip_install_remoteos() {
-    local pip_cmd=("$PYTHON" -m pip install "${PIP_FLAGS[@]}" "$@" "git+https://github.com/zbynekdrlik/remoteos-mcp.git@${MAIN_SHA}")
-    if [[ -n "$ROLLBACK_ARMED" ]]; then
-        TMPDIR="$WORK_DIR/pip-tmp" shield "${pip_cmd[@]}"
-    else
-        TMPDIR="$WORK_DIR/pip-tmp" "${pip_cmd[@]}"
+# The source id the installed venv records (ours, or camera-box's marker), or nothing.
+installed_source() {
+    cat "$VENV_LINK/.remoteos-mcp-source" 2>/dev/null || cat "$VENV_LINK/.camera-box-source" 2>/dev/null || true
+}
+
+# A build that failed: print why, remove it, change nothing else.
+build_failed() {
+    echo "        [X] $1 — nothing was changed on this box (the installed version keeps running). Full output:"
+    cat "$2"
+    rm -rf "$NEW_BUILD"
+    NEW_BUILD=""
+    if [[ -n "$STORE_CREATED" ]]; then
+        rmdir "$VENV_STORE" 2>/dev/null || true
     fi
+    exit 1
 }
 
-rollback_failed() {
-    KEEP_WORK_DIR=1
-    echo "        [X] Rollback FAILED — $1; do NOT restart ${SERVICE_DESC}"
-    echo "        Snapshot kept for manual recovery: $PYTHON $ROLLBACK_PY restore $WORK_DIR/snapshot"
-    echo "        Rollback log: $WORK_DIR/rollback.log"
-}
-
-# Undo a failed or unfinished upgrade: take out every pip-owned copy of what
-# the install may have written (the three, the changed deps, the deps it added)
-# — one name per pip call, so one refusal cannot skip the rest — restore the
-# snapshot, check nothing new is left behind, and check the recorded version
-# works again.  Never exits.
-rollback_install() {
-    local name leftovers
-    trap '' HUP INT TERM
-    echo "        Rolling back (restoring the previous package files)..."
-    if ! "$PYTHON" "$ROLLBACK_PY" pipowned remoteos-mcp fastmcp fastmcp-slim ${CHANGED_DEPS[@]+"${CHANGED_DEPS[@]}"} \
-        ${ADDED_DEPS[@]+"${ADDED_DEPS[@]}"} >"$WORK_DIR/remove.txt" 2>>"$WORK_DIR/rollback.log"; then
-        rollback_failed "could not tell which packages the failed install wrote"
-        return
+# Desktop mode: let the venv import the system python's GI bindings (python3-gi), which
+# AnnotatedSnapshot's AT-SPI tree needs. One .pth naming the directory that holds `gi`,
+# after the venv's own site-packages, so every pinned package still comes from the venv.
+link_system_gi() {
+    local build="$1" gi_dir purelib
+    gi_dir=$("$PYTHON" -c 'import os, gi; print(os.path.dirname(os.path.dirname(os.path.abspath(gi.__file__))))' \
+        2>/dev/null) || gi_dir=""
+    if [[ -z "$gi_dir" ]]; then
+        say "[!] The system python has no gi (python3-gi): AnnotatedSnapshot's element tree will be empty"
+        return 0
     fi
-    while IFS= read -r name; do
-        if [[ -n "$name" ]]; then
-            "$PYTHON" -m pip uninstall -y --break-system-packages "$name" >>"$WORK_DIR/rollback.log" 2>&1 || true
+    purelib=$(venv_python "$build" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+    printf '%s\n' "$gi_dir" >"$purelib/remoteos-system-gi.pth"
+    say "System GI bindings linked from ${gi_dir}"
+}
+
+# Build a fresh venv for SOURCE_ID in the store, next to the running one. Sets NEW_BUILD and
+# PKG_VER. pip runs the source's (and every sdist's) build code, so it runs under an env
+# ALLOWLIST: no GH_TOKEN, no key, nothing the caller exported.
+build_venv() {
+    local log="$WORK_DIR/pip.log" pv out
+    local -a pip_env
+    if [[ ! -d "$VENV_STORE" ]]; then
+        mkdir -p "$VENV_STORE"
+        STORE_CREATED=1
+    fi
+    chmod 755 "$VENV_STORE"
+    NEW_BUILD=$(mktemp -d "$VENV_STORE/${SOURCE_ID}.XXXXXX")
+    chmod 755 "$NEW_BUILD"
+    say "Building a fresh venv: ${NEW_BUILD}"
+    if ! "$PYTHON" -m venv "$NEW_BUILD" >"$WORK_DIR/venv.log" 2>&1; then
+        command -v apt-get &>/dev/null || build_failed "python3 -m venv failed" "$WORK_DIR/venv.log"
+        say "python3 -m venv failed; installing python3-venv..."
+        apt-get update -qq >>"$WORK_DIR/venv.log" 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv >>"$WORK_DIR/venv.log" 2>&1 || true
+        rm -rf "$NEW_BUILD"
+        mkdir -m 755 "$NEW_BUILD"
+        "$PYTHON" -m venv "$NEW_BUILD" >>"$WORK_DIR/venv.log" 2>&1 \
+            || build_failed "python3 -m venv failed" "$WORK_DIR/venv.log"
+    fi
+    mkdir -p "$WORK_DIR/pip-tmp"
+    pip_env=(PATH="$PATH" HOME="$PIP_HOME" LANG="${LANG:-C.UTF-8}" TMPDIR="$WORK_DIR/pip-tmp")
+    for pv in http_proxy https_proxy no_proxy all_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
+        SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE \
+        PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIP_CERT PIP_CONFIG_FILE; do
+        if [[ -n "${!pv:-}" ]]; then
+            pip_env+=("${pv}=${!pv}")
         fi
-    done <"$WORK_DIR/remove.txt"
-    if ! "$PYTHON" "$ROLLBACK_PY" restore "$WORK_DIR/snapshot" >>"$WORK_DIR/rollback.log" 2>&1; then
-        rollback_failed "the previous files could not be restored"
-        return
+    done
+    say "pip install (constraints.txt of the same source)..."
+    if ! env -i "${pip_env[@]}" PIP_CONSTRAINT="$SRC_DIR/constraints.txt" PIP_DISABLE_PIP_VERSION_CHECK=1 \
+        "$NEW_BUILD/bin/python" -m pip install --no-cache-dir "$SRC_DIR" >"$log" 2>&1; then
+        build_failed "pip install failed" "$log"
     fi
-    if ! leftovers=$("$PYTHON" "$ROLLBACK_PY" leftovers "$WORK_DIR" 2>>"$WORK_DIR/rollback.log"); then
-        rollback_failed "could not check what the failed install left behind"
-        return
+    PKG_VER=$(venv_version "$NEW_BUILD")
+    [[ -n "$PKG_VER" ]] || build_failed "pip reported success but no remoteos-mcp is installed" "$log"
+    if ! out=$(venv_import_check "$NEW_BUILD"); then
+        printf '%s\n' "$out" >>"$log"
+        build_failed "v${PKG_VER} is installed but does not import" "$log"
     fi
-    if [[ -n "$leftovers" ]]; then
-        rollback_failed "the failed install left packages pip cannot remove: $leftovers"
-        return
+    printf '%s\n' "$SOURCE_ID" >"$NEW_BUILD/.remoteos-mcp-source"
+    if [[ "$MODE" == desktop ]]; then
+        link_system_gi "$NEW_BUILD"
     fi
-    if [[ -z "$OLD_VER" ]]; then
-        echo "        [X] No previous version to roll back to — remoteos is NOT installed on this box"
-    elif [[ "$(installed_version)" == "$OLD_VER" ]] && import_check >/dev/null; then
-        echo "        Rolled back: v${OLD_VER} is installed again and imports; ${SERVICE_DESC} was not restarted"
+    say "Built v${PKG_VER}"
+}
+
+install_desktop_tools() {
+    # A desktop box gets xdotool/scrot/xclip/wmctrl + tesseract so the desktop tools (Snapshot,
+    # Click, Type, clipboard, OCR, ...) work; headless boxes (the cams) stay stub-only.
+    #   ffmpeg                     -> ScreenRecord (x11grab, issue #8)
+    #   python3-pyatspi/gir/gi     -> AnnotatedSnapshot AT-SPI tree (issue #7)
+    #   x11-xserver-utils (xrandr) -> per-monitor Snapshot/input frames (issue #28)
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq || true
+        apt-get install -y -qq xdotool scrot xclip wmctrl tesseract-ocr ffmpeg x11-xserver-utils \
+            python3-pyatspi gir1.2-atspi-2.0 python3-gi \
+            || say "[!] Some desktop tools failed to install; desktop control may be limited"
+        say "Desktop tools ready (xdotool scrot xclip wmctrl xrandr tesseract-ocr ffmpeg AT-SPI)"
     else
-        rollback_failed "v${OLD_VER} is not back in a working state"
+        say "[!] Non-apt system — install 'xdotool scrot xclip wmctrl xrandr tesseract ffmpeg python3-pyatspi gir1.2-atspi-2.0' manually"
     fi
+}
+
+# --- the switch: venv link, key files, unit, service ------------------------------------------
+
+unit_text() {
+    printf '[Unit]\n'
+    printf 'Description=RemoteOS MCP Server (install-linux.sh, venv)\n'
+    if [[ "$MODE" == desktop ]]; then
+        printf 'After=network.target graphical-session.target\n'
+    else
+        printf 'After=network.target\n'
+    fi
+    printf 'Wants=network.target\n'
+    printf '[Service]\n'
+    printf 'Type=simple\n'
+    printf 'User=%s\n' "$SERVICE_USER"
+    if [[ "$MODE" == desktop ]]; then
+        printf 'Environment=DISPLAY=:0\n'
+        printf 'Environment=XDG_RUNTIME_DIR=/run/user/%s\n' "$SERVICE_UID"
+    fi
+    printf 'EnvironmentFile=%s\n' "$ENV_FILE"
+    printf 'ExecStart=%s/bin/python -m remoteos --transport streamable-http --enable-all --host 0.0.0.0 --port %s\n' \
+        "$VENV_LINK" "$PORT"
+    printf 'Restart=always\n'
+    printf 'RestartSec=5\n'
+    printf 'StandardOutput=journal\n'
+    printf 'StandardError=journal\n'
+    printf '[Install]\n'
+    printf 'WantedBy=multi-user.target\n'
+}
+
+config_json_text() {
+    printf '{\n  "port": %s,\n  "auth_key": "%s",\n  "host": "0.0.0.0"\n}\n' "$PORT" "$1"
+}
+
+env_file_text() {
+    printf 'REMOTEOS_AUTH_KEY=%s\n' "$1"
+}
+
+# write_if_changed PATH MODE LABEL (content on stdin, a here-string: never a pipe, so CHANGED
+# is set in this shell). Content, mode AND owner must match, or the file is rewritten: through
+# a temp file that is 0600 from the start, then renamed.
+write_if_changed() {
+    local path="$1" mode="$2" label="$3" tmp
+    tmp=$(mktemp "${path}.XXXXXX")
+    cat >"$tmp"
+    if [[ -f "$path" ]] && cmp -s "$tmp" "$path" \
+        && [[ "$(stat -c '%a %U:%G' "$path" 2>/dev/null)" == "${mode} $(id -un):$(id -gn)" ]]; then
+        rm -f "$tmp"
+        say "${label}: unchanged"
+        return 0
+    fi
+    chmod "$mode" "$tmp"
+    mv -f "$tmp" "$path"
+    CHANGED=1
+    say "${label}: written (${path})"
+}
+
+# Keep the unit, the EnvironmentFile and config.json as they are now, for the rollback.
+save_previous() {
+    local name path
+    mkdir -m 700 "$WORK_DIR/prev"
+    for name in unit env config; do
+        path=$(previous_path "$name")
+        if [[ -e "$path" ]]; then
+            cp -p "$path" "$WORK_DIR/prev/$name"
+        fi
+    done
+}
+
+previous_path() {
+    case "$1" in
+        unit) printf '%s' "$UNIT_PATH" ;;
+        env) printf '%s' "$ENV_FILE" ;;
+        config) printf '%s' "$CONFIG_FILE" ;;
+    esac
+}
+
+# Point VENV_LINK at NEW_BUILD with one rename(2) of a new link over the old one. A real venv
+# directory there (camera-box's lib, or a hand-made one) is moved into the store first.
+swap_venv() {
+    local tmp_link="$VENV_STORE/.link.$$"
+    if [[ -L "$VENV_LINK" ]]; then
+        PREV_LINK_TARGET=$(readlink "$VENV_LINK")
+    elif [[ -d "$VENV_LINK" ]]; then
+        ADOPTED_DIR=$(mktemp -u "$VENV_STORE/adopted.XXXXXX")
+        mv -T "$VENV_LINK" "$ADOPTED_DIR"
+    fi
+    ln -sfn "$NEW_BUILD" "$tmp_link"
+    mv -Tf "$tmp_link" "$VENV_LINK"
+    SWAPPED=1
+    CHANGED=1
+    say "Switched ${VENV_LINK} -> ${NEW_BUILD}"
+}
+
+# Put the previous unit, key files and venv back, and restart what they run. Never exits.
+restore_previous() {
+    local name path
+    for name in unit env config; do
+        path=$(previous_path "$name")
+        if [[ -e "$WORK_DIR/prev/$name" ]]; then
+            cp -p "$WORK_DIR/prev/$name" "${path}.rollback"
+            mv -f "${path}.rollback" "$path"
+        else
+            rm -f "$path"
+        fi
+    done
+    if [[ -n "$SWAPPED" ]]; then
+        rm -f "$VENV_LINK"
+        if [[ -n "$PREV_LINK_TARGET" ]]; then
+            ln -sfn "$PREV_LINK_TARGET" "$VENV_LINK"
+        elif [[ -n "$ADOPTED_DIR" ]]; then
+            mv -T "$ADOPTED_DIR" "$VENV_LINK"
+        fi
+        rm -rf "$NEW_BUILD"
+        if [[ -n "$STORE_CREATED" ]]; then
+            rmdir "$VENV_STORE" 2>/dev/null || true
+        fi
+    fi
+    systemctl daemon-reload || true
+    systemctl restart "$SERVICE_NAME" || true
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+        echo "        Rolled back: the previous install runs again; the old system copy was kept"
+    else
+        echo "        [X] Rolled back, but the previous install is not running either: journalctl -u ${SERVICE_NAME} -n 50"
+    fi
+}
+
+# Is the new install what answers, and does it enforce the key? Sets HEALTH_FAILURE.
+prove_health() {
+    local i=0 body ver code
+    local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"install-linux.sh","version":"1"}}}'
+    while :; do
+        if systemctl is-active --quiet "$SERVICE_NAME" \
+            && body=$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/health" 2>/dev/null); then
+            ver=$(printf '%s' "$body" | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin).get("version", ""), end="")' \
+                2>/dev/null) || ver=""
+            if [[ "$ver" != "$PKG_VER" ]]; then
+                HEALTH_FAILURE="Installed v${PKG_VER} but the service reports v${ver:-?}"
+                return 1
+            fi
+            break
+        fi
+        i=$((i + 1))
+        if [[ "$i" -ge "$HEALTH_TRIES" ]]; then
+            HEALTH_FAILURE="the service is not active + answering /health on :${PORT} (journalctl -u ${SERVICE_NAME} -n 50)"
+            return 1
+        fi
+        sleep "$HEALTH_SLEEP"
+    done
+    code=$(printf 'Authorization: Bearer %s\n' "$AUTH_KEY" \
+        | curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H @- -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' -X POST --data "$init" \
+            "http://127.0.0.1:${PORT}/mcp" 2>/dev/null) || true
+    if [[ "$code" != 200 ]]; then
+        HEALTH_FAILURE="an authenticated initialize answered ${code:-nothing} (want 200)"
+        return 1
+    fi
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:${PORT}/mcp" 2>/dev/null) || true
+    if [[ "$code" != 401 ]]; then
+        HEALTH_FAILURE="authentication is not enforced: an unauthenticated /mcp request answered ${code:-nothing} (want 401)"
+        return 1
+    fi
+    say "Health check OK: v${PKG_VER}; an authenticated request answered 200, an unauthenticated one 401"
+}
+
+# The new install did not prove itself: back to the previous one (a box that had one).
+health_failed() {
+    disarm
+    echo "        [X] The new install did not prove itself: ${HEALTH_FAILURE}"
+    if [[ -n "$HAD_UNIT" ]]; then
+        echo "        Rolling back to the previous install..."
+        restore_previous
+    else
+        echo "        Nothing to roll back to on this fresh box. Logs: journalctl -u ${SERVICE_NAME} -n 50"
+    fi
+    exit 1
+}
+
+arm() {
+    ARMED=1
+    trap on_signal HUP INT TERM
+    trap '' PIPE
+}
+
+disarm() {
+    ARMED=""
+    trap - HUP INT TERM PIPE
 }
 
 on_signal() {
@@ -229,435 +589,225 @@ on_signal() {
     exit 1
 }
 
+# Whatever ends the run while ARMED (a failed step, a signal, a lost console: SIGPIPE is
+# ignored, so a write fails and set -e exits) rolls the switch back. fd 3/4 = the console.
 on_exit() {
     local rc=$?
     trap '' PIPE HUP INT TERM
-    if [[ -n "$ROLLBACK_ARMED" ]]; then
-        ROLLBACK_ARMED=""
+    if [[ -n "$ARMED" ]]; then
+        ARMED=""
         set +e
         exec 1>&3 2>&4
         if [[ -n "$INTERRUPTED" ]]; then
-            echo "        [X] Interrupted during the upgrade"
+            echo "        [X] Interrupted while switching to the new install"
+        else
+            echo "        [X] The switch to the new install did not finish"
         fi
-        rollback_install
+        restore_previous
         rc=1
     fi
-    if [[ -z "$KEEP_WORK_DIR" ]]; then
-        rm -rf "$WORK_DIR"
-    fi
+    rm -rf "$WORK_DIR"
     exit "$rc"
 }
 
-# Fresh work dir: pip's TMPDIR (so pip cannot reuse stale build artifacts from a
-# prior failed install — the cam1 incident), the pip logs and report, the
-# rollback helper and the snapshot.  Removed on exit unless a failed rollback
-# needs it kept.  fd 3/4 = the console, for the EXIT trap (it can fire inside a
-# command whose output is redirected to a log).
-WORK_DIR=$(mktemp -d)
-KEEP_WORK_DIR=""
-ROLLBACK_ARMED=""
-INTERRUPTED=""
-OLD_VER=""
-CHANGED_DEPS=()
-ADDED_DEPS=()
-exec 3>&1 4>&2
-trap on_exit EXIT
-mkdir -p "$WORK_DIR/pip-tmp"
-
-# Rollback helper (python: it ships with what we install).  It reads installed
-# dists through importlib.metadata — RECORD + INSTALLER, exactly what pip itself
-# uses — so the snapshot holds exactly what `pip uninstall` removes; pip's own
-# uninstall rollback works the same way.  Exit 3 = no safe upgrade possible.
-#   plan      <report.json> <installed version> <dir>  → dir/changed.txt: pip-owned
-#             deps whose pinned version changes; dir/added.txt: deps not pip-owned
-#             yet; dir/dists-before.txt: every dist-info of the affected names
-#   snapshot  <dir> <names...>  copy those dists' RECORD files (bytes + modes)
-#   pipowned  <names...>        the names whose visible dist pip owns
-#   restore   <dir>             put the snapshot back
-#   leftovers <dir>             dist-infos of the affected names that were not
-#                               there before (one line, space-separated)
-ROLLBACK_PY="$WORK_DIR/rollback.py"
-cat >"$ROLLBACK_PY" <<'PY'
-import importlib.metadata as md
-import json, os, re, shutil, sys
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.curdir) != HERE]  # only what pip sees
-OVERLAPPING = ("remoteos-mcp", "fastmcp", "fastmcp-slim")
-
-
-def norm(name):
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def fail(message):
-    sys.stderr.write(message + "\n")
-    sys.exit(3)
-
-
-def visible(name):
-    """The dist pip sees for `name` (the first one on sys.path), or None."""
-    try:
-        return md.distribution(name)
-    except md.PackageNotFoundError:
-        return None
-
-
-def installer(dist):
-    return (dist.read_text("INSTALLER") or "").strip()
-
-
-def pip_owned(dist):
-    return dist is not None and dist.files is not None and installer(dist) == "pip"
-
-
-def record_files(dist):
-    paths = (os.path.normpath(str(dist.locate_file(f))) for f in dist.files or [])
-    return [p for p in paths if os.path.isfile(p) or os.path.islink(p)]
-
-
-def resolved(report_file):
-    with open(report_file, encoding="utf-8") as f:
-        return {norm(i["metadata"]["name"]): i["metadata"]["version"] for i in json.load(f).get("install", [])}
-
-
-def dist_dirs(names):
-    """Every .dist-info / .egg-info dir of `names` on sys.path, complete or not."""
-    wanted, found = {norm(n) for n in names}, set()
-    for entry in sys.path:
-        base = os.path.abspath(entry or os.curdir)
-        try:
-            children = os.listdir(base)
-        except OSError:
-            continue
-        for child in children:
-            for suffix in (".dist-info", ".egg-info"):
-                if child.endswith(suffix) and norm(child[: -len(suffix)].split("-", 1)[0]) in wanted:
-                    found.add(os.path.join(base, child))
-    return sorted(found)
-
-
-def write_lines(path, lines):
-    with open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
-        f.write("".join(line + "\n" for line in lines))
-
-
-def read_lines(path):
-    with open(path, encoding="utf-8", errors="surrogateescape") as f:
-        return [line for line in f.read().split("\n") if line]
-
-
-mode, args = sys.argv[1], sys.argv[2:]
-if mode == "plan":
-    want, old_ver, out = resolved(args[0]), args[1], args[2]
-    for name in OVERLAPPING:
-        dist = visible(name)
-        if dist is not None and dist.files is None:
-            fail(name + " " + dist.version + " has no RECORD, so pip can neither replace nor roll it back")
-    if old_ver and visible("remoteos-mcp") is None:
-        fail("pip reports remoteos-mcp " + old_ver + " but its metadata cannot be read")
-    changed, added = [], []
-    for name, version in sorted(want.items()):
-        if name in OVERLAPPING:
-            continue
-        dist = visible(name)
-        if pip_owned(dist):
-            if dist.version != version:
-                changed.append(name)
-            continue
-        if dist is not None and dist.files is not None and dist.version != version:
-            fail(name + " " + dist.version + " was installed by " + (installer(dist) or "an unknown tool")
-                 + ", not pip; the pinned " + version + " would overwrite it. Upgrade or remove it with that"
-                 + " tool, then rerun.")
-        added.append(name)
-    os.makedirs(out, exist_ok=True)
-    write_lines(os.path.join(out, "changed.txt"), changed)
-    write_lines(os.path.join(out, "added.txt"), added)
-    write_lines(os.path.join(out, "affected.txt"), sorted(set(OVERLAPPING) | set(want)))
-    write_lines(os.path.join(out, "dists-before.txt"), dist_dirs(set(OVERLAPPING) | set(want)))
-elif mode == "snapshot":
-    snap, paths = args[0], []
-    for name in args[1:]:
-        dist = visible(name)
-        if dist is None or dist.files is None:
-            continue  # nothing installed, or an apt copy: never removed, nothing to restore
-        files = record_files(dist)
-        if not any(os.path.basename(p) in ("METADATA", "PKG-INFO") for p in files):
-            fail("the RECORD of " + name + " " + dist.version + " does not list its own metadata")
-        paths += files
-    os.makedirs(snap)
-    for path in paths:
-        dst = snap + "/files" + path
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(path, dst, follow_symlinks=False)
-    write_lines(snap + "/manifest", paths)
-    print(len(paths))
-elif mode == "pipowned":
-    for name in args:
-        if pip_owned(visible(name)):
-            print(name)
-elif mode == "restore":
-    snap = args[0]
-    paths = read_lines(snap + "/manifest")
-    for path in paths:
-        if os.path.isdir(path) and not os.path.islink(path):
-            fail("a directory is in the way of " + path)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        if os.path.islink(path) or os.path.isfile(path):
-            os.remove(path)
-        shutil.copy2(snap + "/files" + path, path, follow_symlinks=False)
-    print(len(paths))
-elif mode == "leftovers":
-    work = args[0]
-    before = set(read_lines(os.path.join(work, "dists-before.txt")))
-    print(" ".join(d for d in dist_dirs(read_lines(os.path.join(work, "affected.txt"))) if d not in before))
-else:
-    sys.exit("unknown mode " + mode)
-PY
-
-# Pin the whole run to ONE commit of main: preflight, install and constraints
-# all see the same tree (a merge between two fetches of @main would mix trees,
-# and raw.githubusercontent.com caches .../main/ for minutes).
-MAIN_SHA=$(git ls-remote https://github.com/zbynekdrlik/remoteos-mcp.git refs/heads/main 2>"$WORK_DIR/ls-remote.log" \
-    | awk '{print $1}' || true)
-if [[ ! "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "        [X] Could not resolve main on GitHub — nothing was changed on this box:"
-    cat "$WORK_DIR/ls-remote.log"
-    exit 1
-fi
-export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/${MAIN_SHA}/constraints.txt"
-echo "        Source: main @ ${MAIN_SHA:0:12}"
-
-OLD_VER=$(installed_version)
-if [[ -n "$OLD_VER" ]]; then
-    echo "        Currently installed: v${OLD_VER}"
-else
-    echo "        No previous installation"
-fi
-
-# Preflight: resolve the whole pinned set with the real install's flags and
-# constraints BEFORE anything is uninstalled.  A failure here changes nothing.
-echo "        Preflight: pip install --dry-run..."
-if ! pip_install_remoteos --dry-run --report "$WORK_DIR/report.json" >"$WORK_DIR/dry-run.log" 2>&1; then
-    echo "        [X] Preflight failed — nothing was changed on this box. Full pip output:"
-    cat "$WORK_DIR/dry-run.log"
-    exit 1
-fi
-grep '^Would install' "$WORK_DIR/dry-run.log" | sed 's/^/        /' || true
-
-# Plan + snapshot what the upgrade will replace.
-if ! "$PYTHON" "$ROLLBACK_PY" plan "$WORK_DIR/report.json" "$OLD_VER" "$WORK_DIR" 2>"$WORK_DIR/plan.err"; then
-    echo "        [X] No safe upgrade possible — nothing was changed on this box:"
-    sed 's/^/            /' "$WORK_DIR/plan.err"
-    exit 1
-fi
-while IFS= read -r name; do
-    if [[ -n "$name" ]]; then CHANGED_DEPS+=("$name"); fi
-done <"$WORK_DIR/changed.txt"
-while IFS= read -r name; do
-    if [[ -n "$name" ]]; then ADDED_DEPS+=("$name"); fi
-done <"$WORK_DIR/added.txt"
-if [[ ${#CHANGED_DEPS[@]} -gt 0 ]]; then
-    echo "        Pinned version changes for pip-installed deps: ${CHANGED_DEPS[*]}"
-fi
-if ! SNAP_COUNT=$("$PYTHON" "$ROLLBACK_PY" snapshot "$WORK_DIR/snapshot" remoteos-mcp fastmcp fastmcp-slim \
-    ${CHANGED_DEPS[@]+"${CHANGED_DEPS[@]}"} ${ADDED_DEPS[@]+"${ADDED_DEPS[@]}"} 2>"$WORK_DIR/snapshot.err"); then
-    echo "        [X] Could not keep a rollback copy of the installed packages — nothing was changed on this box:"
-    sed 's/^/            /' "$WORK_DIR/snapshot.err"
-    exit 1
-fi
-echo "        Kept ${SNAP_COUNT} files for rollback"
-
-# ARM: from here until the install is verified, any exit rolls back.
-ROLLBACK_ARMED=1
-trap on_signal HUP INT TERM
-trap '' PIPE
-UNINSTALL_RC=0
-uninstall_overlapping || UNINSTALL_RC=$?
-if [[ "$UNINSTALL_RC" -ne 0 ]]; then
-    echo "        [X] The pre-uninstall failed. Full pip output:"
-    cat "$WORK_DIR/uninstall.log"
-    exit 1
-fi
-sed 's/^/        /' "$WORK_DIR/uninstall.log"
-if ! pip_install_remoteos >"$WORK_DIR/install.log" 2>&1; then
-    echo "        [X] pip install failed. Full pip output:"
-    cat "$WORK_DIR/install.log"
-    exit 1
-fi
-tail -3 "$WORK_DIR/install.log"
-
-PKG_VER=$(installed_version)
-if [[ -z "$PKG_VER" ]]; then
-    echo "        [X] pip reported success but no remoteos package is installed. Full pip output:"
-    cat "$WORK_DIR/install.log"
-    exit 1
-fi
-if ! IMPORT_OUT=$(import_check); then
-    echo "        [X] v${PKG_VER} is installed but does not import:"
-    echo "$IMPORT_OUT"
-    exit 1
-fi
-# DISARM: the new version is installed and imports.
-ROLLBACK_ARMED=""
-trap - HUP INT TERM PIPE
-exec 3>&- 4>&-
-echo "        Installed v${PKG_VER}"
-# <<< shared install block
-
-# --- [2b] Install desktop-control tools (only when a graphical session exists) ---
-# Headless boxes (cam1..4) stay stub-only and skip these; a machine with an
-# active X11/Wayland session gets xdotool/scrot/xclip/wmctrl + tesseract so the
-# desktop tools (Snapshot, Click, Type, clipboard, OCR, ...) actually work.
-echo "  [+]   Checking for a graphical session..."
-GRAPHICAL=""
-if command -v loginctl &>/dev/null; then
-    for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
-        stype=$(loginctl show-session "$s" -p Type --value 2>/dev/null || true)
-        sclass=$(loginctl show-session "$s" -p Class --value 2>/dev/null || true)
-        if [[ "$sclass" == "user" && ( "$stype" == "x11" || "$stype" == "wayland" ) ]]; then
-            GRAPHICAL="$stype"
-            break
-        fi
-    done
-fi
-
-if [[ -n "$GRAPHICAL" ]]; then
-    echo "        Graphical session detected ($GRAPHICAL) — installing desktop tools"
-    if command -v apt-get &>/dev/null; then
-        apt-get update -qq || true
-        # idempotent: apt-get install is a no-op for already-present packages
-        #   ffmpeg                     → ScreenRecord (x11grab, issue #8)
-        #   python3-pyatspi/gir/gi     → AnnotatedSnapshot AT-SPI tree (issue #7)
-        #   x11-xserver-utils (xrandr) → per-monitor Snapshot/input frames (issue #28)
-        apt-get install -y -qq xdotool scrot xclip wmctrl tesseract-ocr ffmpeg x11-xserver-utils \
-            python3-pyatspi gir1.2-atspi-2.0 python3-gi \
-            || echo "        [!] Some desktop tools failed to install; desktop control may be limited"
-        echo "        Desktop tools ready (xdotool scrot xclip wmctrl xrandr tesseract-ocr ffmpeg AT-SPI)"
+# Write the key files and the unit, then (re)start the service.
+switch_to_new_install() {
+    mkdir -p "$CONFIG_DIR"
+    chmod 755 "$CONFIG_DIR"
+    write_if_changed "$CONFIG_FILE" 600 "config.json" <<<"$(config_json_text "$AUTH_KEY")"
+    write_if_changed "$ENV_FILE" 600 "EnvironmentFile" <<<"$(env_file_text "$AUTH_KEY")"
+    write_if_changed "$UNIT_PATH" 644 "unit" <<<"$(unit_text)"
+    systemctl daemon-reload
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+    if [[ -n "$CHANGED" ]]; then
+        say "Restarting ${SERVICE_NAME}..."
+        systemctl restart "$SERVICE_NAME" || true
     else
-        echo "        [!] Non-apt system — install 'xdotool scrot xclip wmctrl xrandr tesseract ffmpeg python3-pyatspi gir1.2-atspi-2.0' manually"
+        say "Nothing changed; making sure ${SERVICE_NAME} runs"
+        systemctl start "$SERVICE_NAME" || true
     fi
-else
-    echo "        Headless (no graphical session) — skipping desktop tools"
-fi
+    say "Proving the install (health, authentication)..."
+}
 
-# --- [3/5] Configure auth key ---
-echo "  [3/5] Configuring auth key..."
-mkdir -p "$CONFIG_DIR"
+# --- after the proof ---------------------------------------------------------------------------
 
-AUTH_KEY=""
-if [[ -f "$CONFIG_FILE" ]]; then
-    # Try to read existing key
-    EXISTING_KEY=$("$PYTHON" -c "import json; print(json.load(open('$CONFIG_FILE')).get('auth_key',''))" 2>/dev/null || true)
-    if [[ -n "$EXISTING_KEY" ]]; then
-        AUTH_KEY="$EXISTING_KEY"
-        echo "        Reusing existing auth key"
+# Our pre-#12 installer put remoteos-mcp into the SYSTEM python. The service runs the venv now
+# (proven above), so that copy goes.
+remove_legacy_system_copy() {
+    local ver
+    ver=$("$PYTHON" -m pip show remoteos-mcp 2>/dev/null | sed -n 's/^Version: //p') || ver=""
+    [[ -n "$ver" ]] || return 0
+    say "Removing the old system-python copy (v${ver}): the venv proved itself"
+    if "$PYTHON" -m pip uninstall -y --break-system-packages remoteos-mcp fastmcp fastmcp-slim \
+        >"$WORK_DIR/legacy.log" 2>&1; then
+        say "Removed the old system-python copy"
+    else
+        say "[!] Could not remove the old system-python copy (the service does not use it). Full pip output:"
+        cat "$WORK_DIR/legacy.log"
     fi
-fi
+}
 
-if [[ -z "$AUTH_KEY" ]]; then
-    # head -c closes pipe, tr gets SIGPIPE → pipefail aborts. Use python instead.
-    AUTH_KEY=$("$PYTHON" -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters+string.digits) for _ in range(32)))")
-    echo "        Generated new auth key"
-fi
+# Remove every build in the store but the one the link points at.
+prune_builds() {
+    local keep entry
+    [[ -d "$VENV_STORE" ]] || return 0
+    keep=$(readlink -f "$VENV_LINK" 2>/dev/null || true)
+    for entry in "$VENV_STORE"/* "$VENV_STORE"/.[!.]*; do
+        if [[ ! -e "$entry" && ! -L "$entry" ]]; then
+            continue
+        fi
+        if [[ -n "$keep" && "$(readlink -f "$entry")" == "$keep" ]]; then
+            continue
+        fi
+        rm -rf "$entry"
+    done
+}
 
-# Write config
-"$PYTHON" -c "
-import json, pathlib
-cfg = {'port': $PORT, 'auth_key': '$AUTH_KEY', 'host': '0.0.0.0'}
-pathlib.Path('$CONFIG_FILE').write_text(json.dumps(cfg, indent=2))
-"
-chmod 600 "$CONFIG_FILE"
-echo "        Config: $CONFIG_FILE"
+configure_firewall() {
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow "$PORT"/tcp comment "remoteos-mcp" 2>/dev/null || true
+        say "ufw: allowed port $PORT"
+    elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+        firewall-cmd --permanent --add-port="$PORT"/tcp 2>/dev/null || true
+        firewall-cmd --reload 2>/dev/null || true
+        say "firewalld: allowed port $PORT"
+    else
+        say "No active firewall detected; skipping firewall rule"
+    fi
+}
 
-# --- [4/5] Set up systemd service ---
-echo "  [4/5] Setting up systemd service..."
+# Everything runs inside main(), called on the very last line: bash parses the whole function
+# before running any of it, so a truncated `curl | bash` download fails to parse (or never
+# reaches the call) instead of running half.
+main() {
+    REPO="zbynekdrlik/remoteos-mcp"
+    PORT=8092
+    SERVICE_NAME="remoteos-mcp"
+    CONFIG_DIR="/etc/remoteos-mcp"
+    UNIT_PATH="/etc/systemd/system/remoteos-mcp.service"
+    VENV_LINK="/opt/remoteos-mcp-venv"
+    VENV_STORE="/opt/remoteos-mcp-venvs"
+    HEALTH_TRIES=12
+    HEALTH_SLEEP=5
+    CONFIG_FILE="$CONFIG_DIR/config.json"
+    ENV_FILE="$CONFIG_DIR/remoteos-mcp.env"
+    umask 022
+    # [A-Za-z0-9] in the checks above means ASCII, whatever the locale (bash >= 4.3; the default
+    # since bash 5.0).
+    shopt -s globasciiranges
 
-cat > "$SERVICE_FILE" <<SERVICE
-[Unit]
-Description=RemoteOS MCP Server
-After=network.target
+    # The secrets are read once, then dropped from the environment every child inherits.
+    EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
+    GH_TOKEN_VALUE="${GH_TOKEN:-}"
+    unset REMOTEOS_MCP_AUTH_KEY GH_TOKEN
+    REF="${REMOTEOS_MCP_REF:-main}"
 
-[Service]
-Type=simple
-ExecStart=${PYTHON_PATH} -m remoteos --transport streamable-http --enable-all --host 0.0.0.0 --port ${PORT} --auth-key ${AUTH_KEY}
-Restart=always
-RestartSec=5
-User=${ACTUAL_USER}
+    WORK_DIR=""
+    ARMED=""
+    INTERRUPTED=""
+    CHANGED=""
+    SWAPPED=""
+    NEW_BUILD=""
+    STORE_CREATED=""
+    PREV_LINK_TARGET=""
+    ADOPTED_DIR=""
+    HAD_UNIT=""
+    HEALTH_FAILURE=""
 
-[Install]
-WantedBy=multi-user.target
-SERVICE
+    echo ""
+    echo "  RemoteOS MCP Installer (Linux)"
+    echo "  Remote desktop control for Claude Code"
+    echo ""
 
-systemctl daemon-reload
-systemctl enable "$SERVICE_NAME"
-systemctl restart "$SERVICE_NAME"
-echo "        systemd service enabled and started: $SERVICE_NAME"
+    # --- Check root ---
+    if [[ "$EUID" -ne 0 ]]; then
+        echo "  [X] This installer must be run as root (via sudo)."
+        exit 1
+    fi
+    if [[ "$EUID" -eq 0 ]]; then PIP_HOME=/root; else PIP_HOME="${HOME:-/tmp}"; fi
 
-# --- Post-install: verify service reports the correct version ---
-echo "  [+]   Verifying installed version matches running service..."
-HEALTH_OK=false
-for _attempt in $(seq 1 6); do
-    HEALTH_JSON=$(curl -sf "http://127.0.0.1:${PORT}/health" 2>/dev/null || true)
-    if [[ -n "$HEALTH_JSON" ]]; then
-        HEALTH_VER=$(echo "$HEALTH_JSON" | "$PYTHON" -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true)
-        if [[ "$HEALTH_VER" == "$PKG_VER" ]]; then
-            HEALTH_OK=true
-            echo "        Health check OK: v${HEALTH_VER}"
-            break
-        elif [[ -n "$HEALTH_VER" ]]; then
-            echo "  [X] Installed ${PKG_VER} but service reports ${HEALTH_VER}"
+    # --- Pre-flight: a read-only root filesystem ---
+    if command -v findmnt &>/dev/null; then
+        ROOT_OPTS=$(findmnt -no OPTIONS / 2>/dev/null || true)
+        if echo ",$ROOT_OPTS," | grep -q ',ro,'; then
+            echo "  [X] Root filesystem is read-only — run: mount -o remount,rw / (and fix /etc/fstab: '/ ext4 ro' → 'defaults') then rerun."
             exit 1
         fi
     fi
-    sleep 5
-done
-if [[ "$HEALTH_OK" != "true" ]]; then
-    echo "  [X] Health endpoint (http://127.0.0.1:${PORT}/health) did not respond within 30s"
-    exit 1
-fi
+    ref_ok "$REF" || fail "REMOTEOS_MCP_REF must be a commit sha, a tag or a branch name — nothing was changed on this box"
 
-# --- [5/5] Configure firewall and get network info ---
-echo "  [5/5] Configuring firewall and getting network info..."
+    echo "  [1/6] Checking Python and the box..."
+    find_python
+    detect_layout
+    [[ -n "$OLD_UNIT" ]] && HAD_UNIT=1
 
-# ufw (Ubuntu/Debian)
-if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-    ufw allow "$PORT"/tcp comment "remoteos-mcp" 2>/dev/null || true
-    echo "        ufw: allowed port $PORT"
-# firewalld (RHEL/Fedora/CentOS)
-elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port="$PORT"/tcp 2>/dev/null || true
-    firewall-cmd --reload 2>/dev/null || true
-    echo "        firewalld: allowed port $PORT"
-else
-    echo "        No active firewall detected; skipping firewall rule"
-fi
+    echo "  [2/6] Auth key..."
+    resolve_key
 
-LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "LINUX_IP")
-HOSTNAME_SHORT=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "linux")
-echo "        $HOSTNAME_SHORT ($LOCAL_IP)"
+    WORK_DIR=$(mktemp -d)
+    exec 3>&1 4>&2
+    trap on_exit EXIT
 
-# --- Summary ---
-echo ""
-echo "  ============================================"
-echo "  SETUP COMPLETE"
-echo "  ============================================"
-echo ""
-echo "  Computer:  $HOSTNAME_SHORT ($LOCAL_IP)"
-echo "  Port:      $PORT"
-echo "  Auth Key:  $AUTH_KEY"
-echo ""
-echo "  On your Linux machine, run:"
-echo ""
-echo "  claude mcp add --transport http linux-${HOSTNAME_SHORT} \\"
-echo "    http://${LOCAL_IP}:${PORT}/mcp \\"
-echo "    --header \"Authorization: Bearer ${AUTH_KEY}\""
-echo ""
-echo "  Then restart Claude Code."
-echo ""
-echo "  To uninstall later:"
-echo "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall-linux.sh | sudo bash"
-echo ""
+    echo "  [3/6] Downloading the source..."
+    fetch_source
+
+    echo "  [4/6] The venv..."
+    if [[ "$(installed_source)" == "$SOURCE_ID" ]] && venv_import_check "$VENV_LINK" >/dev/null; then
+        PKG_VER=$(venv_version "$VENV_LINK")
+        say "${SOURCE_ID} (v${PKG_VER}) is already installed in ${VENV_LINK}"
+    else
+        build_venv
+    fi
+    if [[ "$MODE" == desktop ]]; then
+        install_desktop_tools
+    fi
+
+    echo "  [5/6] Switching to the new install..."
+    save_previous
+    if [[ -n "$HAD_UNIT" ]]; then
+        arm
+    fi
+    if [[ -n "$NEW_BUILD" ]]; then
+        swap_venv
+    fi
+    switch_to_new_install
+    prove_health || health_failed
+    disarm
+    exec 3>&- 4>&-
+    remove_legacy_system_copy
+    prune_builds
+
+    echo "  [6/6] Configuring firewall and getting network info..."
+    configure_firewall
+    LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "LINUX_IP")
+    HOSTNAME_SHORT=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "linux")
+    say "$HOSTNAME_SHORT ($LOCAL_IP)"
+
+    echo ""
+    echo "  ============================================"
+    echo "  SETUP COMPLETE"
+    echo "  ============================================"
+    echo ""
+    echo "  Computer:  $HOSTNAME_SHORT ($LOCAL_IP)"
+    echo "  Port:      $PORT"
+    echo "  Version:   v${PKG_VER} (${SOURCE_ID})"
+    echo "  Auth key:  in ${ENV_FILE} and ${CONFIG_FILE} (root, 0600) — never printed."
+    echo "             Read it on this box: sudo cat ${CONFIG_FILE}"
+    if [[ -z "$KEY_SOURCE" ]]; then
+        echo "             It is a NEW key: update the client's .mcp.json entry for this box."
+    fi
+    echo ""
+    echo "  On your Linux machine, run:"
+    echo ""
+    echo "  claude mcp add --transport http linux-${HOSTNAME_SHORT} \\"
+    echo "    http://${LOCAL_IP}:${PORT}/mcp \\"
+    echo "    --header \"Authorization: Bearer <the auth key>\""
+    echo ""
+    echo "  Then restart Claude Code."
+    echo ""
+    echo "  To uninstall later:"
+    echo "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall-linux.sh | sudo bash"
+    echo ""
 }
 
 main "$@"
