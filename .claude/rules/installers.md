@@ -24,7 +24,10 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   - Linux: 0600 `/etc/remoteos-mcp/config.json` + the 0600 EnvironmentFile
     `/etc/remoteos-mcp/remoteos-mcp.env` (`REMOTEOS_AUTH_KEY=<key>`).
   - macOS: the plist's `EnvironmentVariables`; the plist and `config.json` are 0600.
-  - Windows: `start-remoteos.bat` does `set "REMOTEOS_AUTH_KEY=<key>"` before the server line.
+  - Windows: `start-remoteos.bat` does `set "REMOTEOS_AUTH_KEY=<key>"` right before the server
+    line and `set "REMOTEOS_AUTH_KEY="` right after `set EXIT_CODE=%errorlevel%`: every program
+    cmd.exe starts inherits its environment, so the loop's netstat, findstr and timeout never get
+    the key (review round 10). `Get-RemoteOSKeyFromStartScript` matches a non-empty value only.
     The `.bat` and `config.json` get a protected ACL: the desktop user, SYSTEM, Administrators.
 - **One key precedence:** explicit `REMOTEOS_MCP_AUTH_KEY` (validated: 1-128 `[A-Za-z0-9]`,
   else refused BEFORE anything changes), else the key the RUNNING service gets (Linux: the
@@ -99,6 +102,11 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   `check_running_install` finds the running install proven (round 5, narrowed in round 6): a
   cam whose venv camera-box's lib upgraded in place without a restart runs another version
   than its files, so its no-op run keeps the mark. A mark an earlier run left sets `CHANGED`.
+- **Reading what runs polls like the proof (review round 10).** `check_running_install` sets
+  `NO_ANSWER` for an active unit whose `/health` does not reply (it may be binding);
+  `poll_running_install read` (before a restart run's switch, at a no-op enable-only run's end)
+  polls only while that holds, so one missed poll never turns a working box into "nothing
+  proven". A definite answer (inactive, another version, authentication off) returns at once.
 - **PROVEN (`check_running_install`, review round 6)** = the unit existed, no pending switch,
   the service is active, `/health` reports the version the unit's own ExecStart python has
   (`python_version`, the interpreter is the ExecStart's first word, `python*` only), and an
@@ -156,14 +164,16 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
      **`undo_switch` (also the armed EXIT trap) leaves up only what proves itself AFTER the
      undo**: PROVEN and `MODIFIED` → `restore_previous` (files, link or directory, the gi link
      taken out, daemon-reload, restart); PROVEN with nothing switched → nothing restored. Then
-     `await_proven` (`check_running_install` up to HEALTH_TRIES times, read-only, no key): proven
+     `poll_running_install await` (`check_running_install` up to HEALTH_TRIES times, read-only,
+     no key): proven
      → "Rolled back … proved itself" / "Nothing was switched" (the pending mark removed); not
      proven → `stop_unproven` (round 7: the restored FILES may not be what the process ran, e.g.
      an EnvironmentFile changed under it to an empty key = authentication off). Not PROVEN before
      the run (a fresh box, a pending switch, files never run, auth off) → `stop_unproven`, the
-     files + the pending marker kept for a re-run; `stop_unproven` re-stamps a kept mark with the
-     stopped unit's InvocationID (the run's own restart made a new one), so the re-run takes it
-     as pending, not as "has run since" (round 9). An
+     files + the pending marker kept for a re-run; `stop_unproven` re-stamps a kept mark AFTER the
+     disable (systemd unloads an inactive, disabled unit: its InvocationID reads empty until it
+     starts again; the fake models that), so the re-run takes it as pending, not as "has run
+     since" (rounds 9-10). An
      unproven state may be an agent with authentication off (a full shell on 0.0.0.0): it is
      never "rolled back" into running (review round 3). **enable-only never starts or stops
      anything**: its failure puts the previous files back with no restart (a fresh box: the unit is

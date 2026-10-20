@@ -391,13 +391,15 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   `2f365c7` (the pending mark holds the unit's InvocationID: a switch the unit has started since
   is checked as it runs; the proof's and the re-proof's polling pinned); round 9 `91b0cb6` →
   `57e1093` (macOS and Windows drop the explicit key before their first child; a stopped
-  switch's kept mark names the stopped unit).
+  switch's kept mark names the stopped unit); round 10 `7c4ca82` → `a380342` (the start
+  script sets the key only around the server line; the read of what runs gives a
+  not-yet-answering unit the proof's polls).
 - **Tests:** `tests/test_installer_linux_venv.py` (41), `tests/test_installer_linux_edges.py`
-  (57, the review rounds' edges) and `tests/test_installer_linux_rollback.py` (12, what a failed
+  (57, the review rounds' edges) and `tests/test_installer_linux_rollback.py` (14, what a failed
   run leaves running), on `tests/linux_installer_harness.py` +
   `tests/fake_linux_tools.py` (real venvs, a stateful fake systemd/curl/ss, the argv and the
   environment of every process); `tests/test_installer_macos_key.py` (11, also under GNU bash
-  3.2.57); `tests/test_installer_windows_key.py` (4 static) and
-  `tests_windows/test_install_ps1_key.py` (real PowerShell 5.1: install.ps1's own functions, one
-  real cmd.exe run, the ACL). Result: 893 pass, ruff + shellcheck clean; `install-linux.sh` 999
-  lines.
+  3.2.57); `tests/test_installer_windows_key.py` (5 static) and
+  `tests_windows/test_install_ps1_key.py` (real PowerShell 5.1: install.ps1's own functions, real
+  cmd.exe runs of the .bat, the ACL). Result: 896 pass, ruff + shellcheck clean;
+  `install-linux.sh` 1000 lines.
