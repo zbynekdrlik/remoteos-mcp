@@ -517,22 +517,20 @@ write_if_changed() {
     say "${label}: written (${path})"
 }
 
-# Keep the unit, the EnvironmentFile and config.json as they are now, for the rollback.
+# Keep the unit, the EnvironmentFile and config.json as they are now (by their distinct base
+# names), for the rollback.
 save_previous() {
-    local name path
+    local path
     mkdir -m 700 "$WORK_DIR/prev"
-    for name in unit env config; do
-        path=$(previous_path "$name")
-        [[ ! -e "$path" ]] || cp -p "$path" "$WORK_DIR/prev/$name"
+    for path in "$UNIT_PATH" "$ENV_FILE" "$CONFIG_FILE"; do
+        [[ ! -e "$path" ]] || cp -p "$path" "$WORK_DIR/prev/${path##*/}"
     done
 }
 
-previous_path() {
-    case "$1" in
-        unit) printf '%s' "$UNIT_PATH" ;;
-        env) printf '%s' "$ENV_FILE" ;;
-        config) printf '%s' "$CONFIG_FILE" ;;
-    esac
+# What the unit's InvocationID is now: systemd makes a new one at every start and keeps it while
+# the unit is inactive. The pending mark holds it: another one = the unit started since.
+invocation_id() {
+    systemctl show -p InvocationID --value "$SERVICE_NAME" 2>/dev/null || true
 }
 
 # Point VENV_LINK at NEW_BUILD with one rename(2); a real venv directory there (camera-box's) is
@@ -570,11 +568,10 @@ restore_venv() {
 # Put the previous unit, key files and venv back (restart policy: and restart them). Never exits;
 # never stops on a failed write (SIGPIPE ignored and set +e: the console may be gone).
 restore_previous() {
-    local name path
-    for name in unit env config; do
-        path=$(previous_path "$name")
-        if [[ -e "$WORK_DIR/prev/$name" ]]; then
-            cp -p "$WORK_DIR/prev/$name" "${path}.rollback"
+    local path
+    for path in "$UNIT_PATH" "$ENV_FILE" "$CONFIG_FILE"; do
+        if [[ -e "$WORK_DIR/prev/${path##*/}" ]]; then
+            cp -p "$WORK_DIR/prev/${path##*/}" "${path}.rollback"
             mv -f "${path}.rollback" "$path"
         else
             rm -f "$path"
@@ -939,17 +936,19 @@ main() {
 
     echo "  [5/6] Switching to the new install..."
     save_previous
-    # A switch an earlier run started and never proved (enable-only, or a run killed with no
-    # trap) left the files ahead of the running process: restart, never take it as unchanged.
+    # A switch an earlier run made that the unit has not started since (enable-only, a run killed
+    # with no trap) left the files ahead of the process: restart, never take it as unchanged.
     WAS_PENDING=""
-    if [[ -e "$PENDING_FILE" ]]; then
+    if [[ -e "$PENDING_FILE" && "$(cat "$PENDING_FILE")" == "$(invocation_id)" ]]; then
         WAS_PENDING=1 CHANGED=1
         say "An earlier switch was never proven: $([[ "$POLICY" == restart ]] && echo "restarting into what the files say" || echo "it stays pending (enable-only)")"
+    elif [[ -e "$PENDING_FILE" ]]; then
+        say "An earlier switch has run since (the unit started again): it is checked as it runs"
     fi
     [[ "$POLICY" != restart ]] || check_running_install  # before the switch: what a failure may go back to
     arm
     mkdir -p "$CONFIG_DIR"
-    : >"$PENDING_FILE"
+    invocation_id >"$PENDING_FILE"
     if [[ -n "$NEW_BUILD" ]]; then
         swap_venv
     else
