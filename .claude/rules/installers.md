@@ -50,8 +50,12 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   be at or after the merge commit when it delegates to this installer.
 - **Never put the key into an argv on the way either.** Python reads a key file from stdin or
   by path and prints the key to a `$(…)`; files are written by `printf` / a here-string into a
-  0600 temp file, then renamed; the health check sends `Authorization: Bearer` with
-  `curl -H @-`; `GH_TOKEN` goes the same way. Read the secret env vars and `unset` them (Windows:
+  0600 temp file, then renamed (macOS `write_private` and Linux `write_if_changed` keep the
+  temp path in `WRITE_TMP`, which `on_exit` removes); the health check sends `Authorization:
+  Bearer` with `curl -H @-`; `GH_TOKEN` goes the same way. **Every loopback curl is `curl -q
+  --noproxy '*'`** (review round 11): an `http_proxy`/`all_proxy` in the environment (kept for
+  pip) or a `.curlrc` would send `http://127.0.0.1` to a proxy, which a remote one cannot reach
+  (every check fails, a working agent is stopped) and a local one would read the key from. Read the secret env vars and `unset` them (Windows:
   `Remove-Item Env:`) BEFORE the installer's FIRST child — the Python check, `query user`, brew,
   winget — not after it: every child inherits them (review round 9; pinned on Linux and macOS by
   the child-environment tests, on Windows by a static order test).
