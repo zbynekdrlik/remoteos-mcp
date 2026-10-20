@@ -1,4 +1,4 @@
-"""install-linux.sh: the edges of the switch, found by the #12 review rounds (rounds 1-3).
+"""install-linux.sh: the edges of the switch, found by the #12 review rounds (rounds 1-5).
 
 The core behaviour (layout, key precedence, migration, failed build, proof, idempotence,
 camera-box adoption) is in tests/test_installer_linux_venv.py; this module holds what the review
@@ -604,3 +604,99 @@ class TestHungProcess:
         assert result.returncode == 0, output(result)
         assert box.state()["restarts"] == restarts + 1
         assert box.venv_installs()[1:] == [], "a hung process made pip run again"
+
+
+# ---------------------------------------------------------------------------
+# Review round 5
+# ---------------------------------------------------------------------------
+
+
+def _pending(box: LinuxBox) -> bool:
+    return (box.config_dir / ".switch-pending").exists()
+
+
+class TestNoOpEnableOnly:
+    """Review round 5: an enable-only run that changed nothing leaves the pending mark as it found
+    it. Marking a proven box pending made a later failing restart run stop and disable a working
+    agent instead of rolling it back (camera-box's first delegated cam run is exactly this)."""
+
+    def test_a_no_op_enable_only_run_leaves_a_proven_box_proven(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+
+        assert result.returncode == 0, output(result)
+        assert not _pending(box), "a run that changed nothing marked a proven box pending"
+        assert "Nothing changed" in output(result) and "next restart run" not in output(result)
+        box.add_source("main", "def5678", "0.7.0.dev33")
+        box.configure(service={"initialize_code": 500})
+        failed = box.run()
+        assert failed.returncode != 0, output(failed)
+        assert "Rolled back" in output(failed)
+        state = box.state()
+        assert state["active"] and state["enabled"], "a working, proven agent was stopped"
+
+    def test_camera_box_s_first_delegated_enable_only_run_leaves_the_cam_proven(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_camera_box(K_ENV, mode="headless", source_id=MAIN_SOURCE_ID, version=SOURCE_VERSION)
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only", REMOTEOS_MCP_MODE="headless",
+                         REMOTEOS_MCP_USER="root")
+
+        assert result.returncode == 0, output(result)
+        assert not _pending(box), "camera-box's working cam was marked pending"
+
+    def test_a_second_enable_only_run_keeps_an_unproven_switch_pending(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        assert box.run(REMOTEOS_MCP_POLICY="enable-only").returncode == 0
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+
+        assert result.returncode == 0, output(result)
+        assert _pending(box), "the never-proven switch lost its pending mark"
+        assert "next restart run" in output(result)
+
+
+class TestPinnedOrder:
+    """Review round 5: two round-4 rules no test could tell from their mutants."""
+
+    def test_a_signal_right_after_the_pending_mark_leaves_no_mark(self, tmp_path: Path) -> None:
+        """arm comes BEFORE the mark: a signal after the mark is undone and the mark goes too."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        unit_before = box.unit()
+        box.inject_after(': >"$PENDING_FILE"', "kill -TERM $$")
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        _assert_legacy_box_restored(box, unit_before)
+
+    def test_a_failed_enable_only_run_on_a_fresh_box_stops_nothing(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.configure(service={"enable_fails": True})
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+
+        assert result.returncode != 0, output(result)
+        systemctl = box.calls("systemctl")
+        assert not any(a[:1] in (["stop"], ["start"], ["restart"]) for a in systemctl), systemctl
+        assert not box.state()["enabled"]
+
+
+class TestLockMode:
+    @pytest.mark.parametrize("existing", [False, True], ids=["fresh", "an-older-run-s-0644-lock"])
+    def test_the_lock_is_owner_only(self, tmp_path: Path, existing: bool) -> None:
+        """flock(2) works on a read-only fd: a lock any account can open lets it block every
+        install."""
+        box = linux_box(tmp_path)
+        if existing:
+            box.lock_file.write_text("")
+            box.lock_file.chmod(0o644)
+
+        result = box.run()
+
+        assert result.returncode == 0, output(result)
+        assert box.lock_file.stat().st_mode & 0o777 == 0o600
