@@ -24,12 +24,39 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 
 That's it. The script will:
 
 1. Check/install Python 3.10+
-2. Install winremote-mcp via pip
-3. Generate a random auth key
+2. Install remoteos-mcp via pip
+3. Keep the PC's auth key, or generate a random one
 4. Create a start script and auto-start scheduled task
 5. Open the firewall port
 6. Start the server immediately
-7. Print the exact `claude mcp add` command to run on your Linux machine
+7. Print the `claude mcp add` command to run on your Linux machine
+
+On **macOS**: `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.sh | bash`.
+
+On **Linux** (systemd): `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash`.
+Pin a source with `| sudo REMOTEOS_MCP_REF=<commit sha | tag | branch> bash` (default `main`).
+
+### Where the installers put things (#12)
+
+- **The auth key is never on a command line, in a service file or in the installer's output.**
+  The server reads it from `REMOTEOS_AUTH_KEY`:
+  - Linux: 0600 `/etc/remoteos-mcp/config.json` and the unit's 0600 `EnvironmentFile`
+    `/etc/remoteos-mcp/remoteos-mcp.env`;
+  - macOS: the LaunchAgent plist's `EnvironmentVariables` (plist and
+    `~/.remoteos-mcp/config.json` mode 600);
+  - Windows: `start-remoteos.bat` sets it before starting the server; the `.bat` and
+    `config.json` in `C:\Users\<user>\.remoteos-mcp\` are readable by that user, SYSTEM and
+    Administrators only.
+- **A re-run keeps the key**: an explicit `REMOTEOS_MCP_AUTH_KEY`, else the key the running
+  service uses, else `config.json` (Windows: then `remoteos.toml`), else a new one.
+- **Linux runs a dedicated venv**, the layout camera-box's provisioning uses too:
+  `/opt/remoteos-mcp-venv` (a link to the current build in `/opt/remoteos-mcp-venvs/`) and
+  `remoteos-mcp.service` (`User=` the desktop user with `DISPLAY` on a desktop box, headless
+  otherwise). A new source is built next to the running one and swapped in; the new install must
+  answer `/health` with its version, accept the key and refuse a request without it, or the box
+  goes back to the previous install. An unchanged source changes nothing.
+- **Upgrading a Linux box from the old system-python install** moves it to the venv with the
+  same key. The old copy in the system python is removed only after the venv has proved itself.
 
 ## Connect from Claude Code
 
@@ -38,10 +65,12 @@ After install, the script prints a command like:
 ```bash
 claude mcp add --transport http win-mypc \
   http://192.168.1.100:8092/mcp \
-  --header "Authorization: Bearer abc123..."
+  --header "Authorization: Bearer <the auth key>"
 ```
 
-Run it on your Linux machine, restart Claude Code, and you're connected.
+The key itself is not printed. Read it on the machine: `Get-Content $HOME\.remoteos-mcp\config.json`
+(Windows), `cat ~/.remoteos-mcp/config.json` (macOS), `sudo cat /etc/remoteos-mcp/config.json`
+(Linux). Run the command with it on your Linux machine, restart Claude Code, and you're connected.
 
 ## Restrict access per project
 
@@ -344,7 +373,10 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps
 ## Security
 
 - Auth key is required for all connections
-- Firewall rule is scoped to private/domain networks only (not public)
+- The key is kept in owner-only files and reaches the server through `REMOTEOS_AUTH_KEY`, never
+  its command line (`ps`, Task Manager), a unit file or the installer output
+- The Windows firewall rule allows inbound TCP 8092 on all profiles (it survives network
+  drift); the server binds 0.0.0.0, so keep the machines on a trusted network
 - On LAN this is fine over HTTP
 - For internet exposure, use TLS reverse proxy or SSH tunnel
 

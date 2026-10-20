@@ -349,3 +349,34 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   concurrent Shell snapshot can copy (needs a lock shared with `desktop.py`); the provider's
   `/proc` scan can pick a detached Shell-started program's stale `DISPLAY`/`XAUTHORITY` after a
   re-login on another display (match `/proc/<pid>/sessionid`).
+
+## #12 — one installer per OS: camera-box's venv layout, pinned ref, the key never in a unit or an argv (0.7.0.dev32)
+
+- **Why:** two installers managed `remoteos-mcp.service`. Ours installed into the system python
+  from `main` and wrote `--auth-key <key>` into the unit's ExecStart (world-readable, in `ps`);
+  camera-box's `scripts/lib/remoteos-mcp.sh` used a venv, a pinned ref and 0600 key files, and on
+  16.10 its run reverted strih-pp/stream-pp from dev31 to its pin (dev20). macOS had the key in
+  the plist's ProgramArguments, Windows on the `.bat`'s server command line.
+- **Design (main session, Approach 1, issuecomment-6293340521):** adopt camera-box's lib as the
+  base of `install-linux.sh` (resolve_key, fetch_source, build_venv side by side + swap,
+  camera-box's desktop/headless unit, 0600 EnvironmentFile, prove_health, then
+  remove_legacy_system_copy), and the same key rule on macOS and Windows.
+- **Implementation details decided on the way (all on #12, issuecomment-6293797059):** the swap
+  is a symlink (`/opt/remoteos-mcp-venv` → a build in `/opt/remoteos-mcp-venvs/`; a venv cannot
+  be renamed); a failed fetch/build exits 1 changing nothing; a failed proof or an interrupted
+  switch rolls back to the previous unit/key files/venv; desktop venvs get one `.pth` to the
+  system gi (AT-SPI); the mode and User= follow the existing unit; the installers never print
+  the key; Windows keys come from a CSPRNG; an empty `REMOTEOS_MCP_REF` means main; the import
+  checks never write bytecode (an adopted venv stays byte-identical); `uninstall-linux.sh`
+  knows the layout; the install skill moved to `.claude/skills/remoteos-install/` (a hook
+  blocks a skill that shadows `/install`).
+- **Commits:** `3edbc91` bump; RED `e1942ac`, `327bc4a`, `8a8c922`, `ca49f09`, `e57935c`,
+  `46ccae2`; the system-python block's tests moved to `install.sh` and the Linux ones the venv
+  replaces retired in `12aaf35`; GREEN `5f5dcf3` (Linux), `afe8ed0` (macOS), `115ec17`
+  (Windows), `87de551` (uninstall-linux.sh).
+- **Tests:** `tests/test_installer_linux_venv.py` (41, on `tests/linux_installer_harness.py` +
+  `tests/fake_linux_tools.py`: real venvs, a stateful fake systemd/curl, the argv of every
+  process), `tests/test_installer_macos_key.py` (7, also under GNU bash 3.2.57),
+  `tests/test_installer_windows_key.py` (3 static) and `tests_windows/test_install_ps1_key.py`
+  (real PowerShell 5.1: install.ps1's own functions, one real cmd.exe run, the ACL). Result: 818
+  pass, ruff + shellcheck clean.

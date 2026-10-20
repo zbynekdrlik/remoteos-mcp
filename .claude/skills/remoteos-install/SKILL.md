@@ -30,6 +30,10 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 
 
 Handles: pip install from repo, preserves existing auth key on reinstall, VBS hidden launcher (no CMD window), scheduled task with auto-restart, firewall rule.
 
+**The key (since 0.7.0.dev32, #12):** `start-remoteos.bat` sets `REMOTEOS_AUTH_KEY` in its own environment; the server's command line has no `--auth-key`. The `.bat` and `config.json` (in `C:\Users\<desktop user>\.remoteos-mcp\`) get an owner-only ACL (the user, SYSTEM, Administrators). A reinstall keeps the key: the running `.bat`'s, else `config.json`'s, else `remoteos.toml`'s `[server] auth_key` (`%USERPROFILE%\.config\remoteos\remoteos.toml`), else the old winremote one. It never mints a new key while any of them exists. Pass `$env:REMOTEOS_MCP_AUTH_KEY` to install a given key. The installer never prints the key: read it from `config.json` on the box.
+
+Verify after a (re)install: the key is unchanged (the client config still gets 200), and the server's command line has no key: `Get-CimInstance Win32_Process | ? CommandLine -match '-m remoteos' | % CommandLine`.
+
 ### Windows network profile fix (if firewall rule doesn't work)
 
 Network must be **Private** (not Public) for the firewall rule to apply:
@@ -44,17 +48,44 @@ Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private
 curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.sh | bash
 ```
 
-Service runs as a LaunchAgent (`com.remoteos-mcp`).
+Service runs as a LaunchAgent (`com.remoteos-mcp`). Since 0.7.0.dev32 (#12) the plist hands the server the key in `EnvironmentVariables` (`REMOTEOS_AUTH_KEY`), never in `ProgramArguments`; the plist and `~/.remoteos-mcp/config.json` are mode 600. The key precedence is the Linux one (explicit `REMOTEOS_MCP_AUTH_KEY`, else the running plist's, else `config.json`, else new). The installer never prints the key.
 
 ## Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash
+# pin a ref (commit sha, tag or branch; default main):
+curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo REMOTEOS_MCP_REF=<sha> bash
 ```
 
 Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and other systemd-based distributions.
 
+**Layout (since 0.7.0.dev32, #12): ONE installer, on camera-box's venv layout.** camera-box's `scripts/lib/remoteos-mcp.sh` and this installer produce the same box, so they no longer fight over the unit.
+
+- `/opt/remoteos-mcp-venv` is what the unit runs: a symlink to the current build in `/opt/remoteos-mcp-venvs/`. A real venv directory there (camera-box's) is adopted.
+- The key lives ONLY in 0600 `/etc/remoteos-mcp/config.json` and the 0600 EnvironmentFile `/etc/remoteos-mcp/remoteos-mcp.env` (`REMOTEOS_AUTH_KEY=`). Never in the unit, an argv or the installer output: read it on the box with `sudo cat /etc/remoteos-mcp/config.json`.
+- The key is kept on a re-run: explicit `REMOTEOS_MCP_AUTH_KEY`, else the running unit's (a legacy `--auth-key`, else its EnvironmentFile), else config.json, else new.
+- An unchanged source skips pip and restarts nothing. A new one is built side by side, then swapped in; a failed build changes nothing.
+- The install must prove itself (`/health` = the new version, an authenticated `initialize` 200, an unauthenticated request 401), or it rolls back to the previous unit, key files and venv.
+
+**Migration from the old system-python layout:** the first run builds the venv, switches the unit and proves it; only then does it remove the old copy from the system python (`pip uninstall --break-system-packages remoteos-mcp fastmcp fastmcp-slim`). If the proof fails, the old unit and the old copy stay and the box runs as before.
+
+Verify after a run (from dev1 and on the box):
+
+- `/health` reports the new version; the client config still gets 200 (the key did not change);
+- `systemctl cat remoteos-mcp` shows no key and no `--auth-key`;
+- `pgrep -af remoteos` shows no `--auth-key`;
+- `readlink /opt/remoteos-mcp-venv` points into `/opt/remoteos-mcp-venvs/`.
+
+**Recovery:**
+
+- `[X] … nothing was changed on this box`: nothing changed. Fix the cause (network, the ref) and rerun.
+- `[X] The new install did not prove itself … Rolled back`: the previous install runs again. Read `journalctl -u remoteos-mcp -n 50` from the failed start.
+- `[X] Rolled back, but the previous install is not running either`: the previous unit, key files and venv are back, but that install does not start either. Read the journal, fix the cause, rerun.
+
 **Gotcha — cam boxes can boot with a read-only rootfs** (fstab `ro`). The installer now refuses to run until remounted rw + fstab fixed (`mount -o remount,rw /` then edit `/etc/fstab`). Both Linux and macOS installers also verify after restart that the `/health` endpoint reports the version just installed — a stale pre-existing install is caught and reported as failure.
+
+The pip gotchas below are history of the system-python layout. They still apply to macOS (and Windows) and explain the old Linux boxes; a Linux install now runs pip only in a fresh venv.
 
 **Gotcha — pip's `--ignore-installed` does not force a re-clone from a git URL** (discovered 2026-09-09 deploying dev13 to imag.lan/cam2.lan). When an older version of remoteos-mcp is already installed, pip with `--ignore-installed` may reuse the existing package instead of fetching the latest from the git URL. All three installers now use explicit pre-uninstall + clean install (no `--force-reinstall`). On some boxes (cam2), even `--force-reinstall git+https://...` can fail due to deeper pip git caching — the workaround is a fresh `git clone` + install from the local path. The `@main` branch is now pinned in the git URL for Linux/macOS installers.
 
