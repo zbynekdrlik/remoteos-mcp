@@ -164,9 +164,9 @@ resolve_key() {
 
 # --- the box: python, the unit's mode and user ------------------------------------------------
 
-find_python() {
+# Sets PYTHON to the first system python 3.10+.
+pick_python() {
     local cmd ver
-    PYTHON=""
     for cmd in python3 python /usr/bin/python3 /usr/local/bin/python3; do
         if command -v "$cmd" &>/dev/null || [[ -x "$cmd" ]]; then
             ver=$("$cmd" --version 2>&1 || true)
@@ -177,25 +177,21 @@ find_python() {
             fi
         fi
     done
+    return 1
+}
+
+find_python() {
+    pick_python && return 0
     say "Python 3.10+ not found. Trying the package manager..."
     if command -v apt-get &>/dev/null; then
-        apt-get install -y python3 python3-venv
+        apt-get install -y python3 python3-venv || true
     elif command -v dnf &>/dev/null; then
-        dnf install -y python3
+        dnf install -y python3 || true
     elif command -v yum &>/dev/null; then
-        yum install -y python3
+        yum install -y python3 || true
     fi
-    for cmd in python3 python; do
-        if command -v "$cmd" &>/dev/null; then
-            ver=$("$cmd" --version 2>&1 || true)
-            if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 10 )); then
-                PYTHON="$cmd"
-                say "Python installed: $ver"
-                return 0
-            fi
-        fi
-    done
-    fail "Python 3.10+ required but not found. Install it (apt-get install python3 python3-venv, or dnf/yum) and rerun."
+    pick_python \
+        || fail "Python 3.10+ required but not found. Install it (apt-get install python3 python3-venv, or dnf/yum) and rerun."
 }
 
 # The first graphical user session: sets SESSION_TYPE (x11 / wayland, or nothing) and
@@ -520,35 +516,22 @@ install_desktop_tools() {
 
 # --- the switch: venv link, key files, unit, service ------------------------------------------
 
+# camera-box's unit shapes (remoteos_mcp_unit_text), line for line. The existing unit's
+# Description= is kept: camera-box's lib writes its own, and a cosmetic difference alone must
+# not restart a live box (nor flip-flop between the two).
 unit_text() {
-    printf '[Unit]\n'
-    # The existing unit's Description= is kept: camera-box's lib writes its own, and a
-    # cosmetic difference alone must not restart a live box (nor flip-flop between them).
-    printf '%s\n' "${OLD_DESCRIPTION:-Description=RemoteOS MCP Server (install-linux.sh, venv)}"
+    local after="network.target"
+    [[ "$MODE" == desktop ]] && after="network.target graphical-session.target"
+    printf '%s\n' '[Unit]' "${OLD_DESCRIPTION:-Description=RemoteOS MCP Server (install-linux.sh, venv)}" \
+        "After=${after}" 'Wants=network.target' '[Service]' 'Type=simple' "User=${SERVICE_USER}"
     if [[ "$MODE" == desktop ]]; then
-        printf 'After=network.target graphical-session.target\n'
-    else
-        printf 'After=network.target\n'
-    fi
-    printf 'Wants=network.target\n'
-    printf '[Service]\n'
-    printf 'Type=simple\n'
-    printf 'User=%s\n' "$SERVICE_USER"
-    if [[ "$MODE" == desktop ]]; then
-        if [[ -n "$UNIT_DISPLAY" ]]; then
-            printf 'Environment=DISPLAY=%s\n' "$UNIT_DISPLAY"
-        fi
+        [[ -n "$UNIT_DISPLAY" ]] && printf 'Environment=DISPLAY=%s\n' "$UNIT_DISPLAY"
         printf 'Environment=XDG_RUNTIME_DIR=/run/user/%s\n' "$SERVICE_UID"
     fi
-    printf 'EnvironmentFile=%s\n' "$ENV_FILE"
-    printf 'ExecStart=%s/bin/python -m remoteos --transport streamable-http --enable-all --host 0.0.0.0 --port %s\n' \
-        "$VENV_LINK" "$PORT"
-    printf 'Restart=always\n'
-    printf 'RestartSec=5\n'
-    printf 'StandardOutput=journal\n'
-    printf 'StandardError=journal\n'
-    printf '[Install]\n'
-    printf 'WantedBy=multi-user.target\n'
+    printf '%s\n' "EnvironmentFile=${ENV_FILE}" \
+        "ExecStart=${VENV_LINK}/bin/python -m remoteos --transport streamable-http --enable-all --host 0.0.0.0 --port ${PORT}" \
+        'Restart=always' 'RestartSec=5' 'StandardOutput=journal' 'StandardError=journal' '[Install]' \
+        'WantedBy=multi-user.target'
 }
 
 config_json_text() {
@@ -890,27 +873,12 @@ main() {
     GIVEN_USER="${REMOTEOS_MCP_USER:-}"
     POLICY="${REMOTEOS_MCP_POLICY:-restart}"
 
-    WORK_DIR=""
-    TMP_LINK=""
-    WAS_PENDING=""
-    SESSION_TYPE=""
-    SESSION_DISPLAY=""
-    UNIT_DISPLAY=""
-    ARMED=""
-    INTERRUPTED=""
-    CHANGED=""
-    SWAPPED=""
-    NEW_BUILD=""
-    STORE_CREATED=""
-    PREV_LINK_TARGET=""
-    ADOPTED_DIR=""
-    HAD_UNIT=""
-    HEALTH_FAILURE=""
+    # The run's state (each set below where it happens).
+    WORK_DIR="" TMP_LINK="" WAS_PENDING="" SESSION_TYPE="" SESSION_DISPLAY="" UNIT_DISPLAY=""
+    ARMED="" INTERRUPTED="" CHANGED="" SWAPPED="" NEW_BUILD="" STORE_CREATED=""
+    PREV_LINK_TARGET="" ADOPTED_DIR="" HAD_UNIT="" HEALTH_FAILURE=""
 
-    echo ""
-    echo "  RemoteOS MCP Installer (Linux)"
-    echo "  Remote desktop control for Claude Code"
-    echo ""
+    printf '\n  RemoteOS MCP Installer (Linux)\n  Remote desktop control for Claude Code\n\n'
 
     # --- Check root ---
     if [[ "$EUID" -ne 0 ]]; then
@@ -995,10 +963,9 @@ main() {
         remove_legacy_system_copy
         prune_builds
     else
-        # Nothing was started, so the switch stays pending: the next restart run restarts and
-        # proves it. The old builds can go (a venv process imports through the link, which
-        # already points at the new build); an old system-python copy stays, a running legacy
-        # process may still import from it.
+        # Nothing started: the switch stays pending (the next restart run proves it). Old builds
+        # can go: a venv process imports through the link, which points at the new build. An
+        # old system-python copy stays: a running legacy process may still import from it.
         prune_builds
         say "Not started (enable-only): the next restart run restarts and proves it; any old system-python copy stays until then"
     fi
@@ -1009,31 +976,18 @@ main() {
     HOSTNAME_SHORT=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "linux")
     say "$HOSTNAME_SHORT ($LOCAL_IP)"
 
-    echo ""
-    echo "  ============================================"
-    echo "  SETUP COMPLETE"
-    echo "  ============================================"
-    echo ""
-    echo "  Computer:  $HOSTNAME_SHORT ($LOCAL_IP)"
-    echo "  Port:      $PORT"
-    echo "  Version:   v${PKG_VER} (${SOURCE_ID})"
-    echo "  Auth key:  in ${ENV_FILE} and ${CONFIG_FILE} (root, 0600) — never printed."
-    echo "             Read it on this box: sudo cat ${CONFIG_FILE}"
+    printf '%s\n' "" "  ============================================" "  SETUP COMPLETE" \
+        "  ============================================" "" "  Computer:  $HOSTNAME_SHORT ($LOCAL_IP)" \
+        "  Port:      $PORT" "  Version:   v${PKG_VER} (${SOURCE_ID})" \
+        "  Auth key:  in ${ENV_FILE} and ${CONFIG_FILE} (root, 0600) — never printed." \
+        "             Read it on this box: sudo cat ${CONFIG_FILE}"
     if [[ -z "$KEY_SOURCE" ]]; then
         echo "             It is a NEW key: update the client's .mcp.json entry for this box."
     fi
-    echo ""
-    echo "  On your Linux machine, run:"
-    echo ""
-    echo "  claude mcp add --transport http linux-${HOSTNAME_SHORT} \\"
-    echo "    http://${LOCAL_IP}:${PORT}/mcp \\"
-    echo "    --header \"Authorization: Bearer <the auth key>\""
-    echo ""
-    echo "  Then restart Claude Code."
-    echo ""
-    echo "  To uninstall later:"
-    echo "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall-linux.sh | sudo bash"
-    echo ""
+    printf '%s\n' "" "  On your Linux machine, run:" "" "  claude mcp add --transport http linux-${HOSTNAME_SHORT} \\" \
+        "    http://${LOCAL_IP}:${PORT}/mcp \\" "    --header \"Authorization: Bearer <the auth key>\"" "" \
+        "  Then restart Claude Code." "" "  To uninstall later:" \
+        "  curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall-linux.sh | sudo bash" ""
 }
 
 main "$@"
