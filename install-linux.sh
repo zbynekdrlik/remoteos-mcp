@@ -27,14 +27,12 @@
 #   /etc/systemd/system/remoteos-mcp.service  0644, never carries the key
 # The key is never in the unit, in an argv or in this installer's output.
 #
-# Order: validate the inputs, take the lock → read the key → download ONE tarball of the ref →
-# (desktop) install the desktop tools → build a fresh venv side by side (pip under an env
-# allowlist) unless the installed one is exactly that source → swap the venv link, write the
-# key files and the unit, enable, restart → prove the new install (/health = the built version,
-# an authenticated initialize answers 200, an unauthenticated request 401) → only then remove
-# the old system-python copy and the old builds. A failed download or build changes nothing. A
-# switch that does not prove itself, or is interrupted before the proof (a signal, a lost
-# console), is rolled back to the previous unit, key files and venv; once proven it stays.
+# Order (.claude/rules/installers.md has the details): inputs + lock → key → ONE tarball of the
+# ref → build a fresh venv side by side → swap the link, write the files, restart → prove it
+# (/health = the build, authenticated initialize 200, unauthenticated 401) → only then remove
+# the old system-python copy and old builds. A failed download or build changes nothing; a
+# switch that fails or is interrupted before its proof goes back to the previous PROVEN install,
+# or is stopped when there is none (never an unproven agent left up).
 set -euo pipefail
 
 say() { echo "        $*"; }
@@ -90,17 +88,22 @@ key_from_unit_text() {
     done <<<"${1-}"
 }
 
-# REMOTEOS_AUTH_KEY of an EnvironmentFile.
-key_from_env_text() {
+# first_value PREFIX TEXT: the rest of TEXT's first line that starts with PREFIX, or nothing.
+first_value() {
     local line
     while IFS= read -r line; do
         case "$line" in
-            REMOTEOS_AUTH_KEY=*)
-                printf '%s' "${line#REMOTEOS_AUTH_KEY=}"
+            "$1"*)
+                printf '%s' "${line#"$1"}"
                 return 0
                 ;;
         esac
-    done <<<"${1-}"
+    done <<<"${2-}"
+}
+
+# REMOTEOS_AUTH_KEY of an EnvironmentFile.
+key_from_env_text() {
+    first_value 'REMOTEOS_AUTH_KEY=' "${1-}"
 }
 
 # The auth_key of a config.json, read by python from stdin (never an argv).
@@ -223,33 +226,12 @@ display_ok() {
     return 1
 }
 
-# The value of the unit's Environment=DISPLAY=, or nothing.
-display_from_unit_text() {
-    local line
-    while IFS= read -r line; do
-        case "$line" in
-            Environment=DISPLAY=*)
-                printf '%s' "${line#Environment=DISPLAY=}"
-                return 0
-                ;;
-        esac
-    done <<<"${1-}"
-}
-
 # The User= of a unit, trimmed.
 user_from_unit_text() {
-    local line v
-    while IFS= read -r line; do
-        case "$line" in
-            User=*)
-                v="${line#User=}"
-                v="${v#"${v%%[![:space:]]*}"}"
-                v="${v%"${v##*[![:space:]]}"}"
-                printf '%s' "$v"
-                return 0
-                ;;
-        esac
-    done <<<"${1-}"
+    local v
+    v=$(first_value 'User=' "${1-}")
+    v="${v#"${v%%[![:space:]]*}"}"
+    printf '%s' "${v%"${v##*[![:space:]]}"}"
 }
 
 # Sets OLD_UNIT, MODE (desktop | headless), SERVICE_USER, SERVICE_UID. An explicit
@@ -264,7 +246,7 @@ detect_layout() {
         fail "$VENV_LINK is neither a venv directory nor a link — nothing was changed on this box"
     fi
     graphical_session
-    old_display=$(display_from_unit_text "$OLD_UNIT")
+    old_display=$(first_value "Environment=DISPLAY=" "$OLD_UNIT")
     if [[ -n "$GIVEN_MODE" ]]; then
         MODE=$GIVEN_MODE
         say "Mode: ${MODE} (REMOTEOS_MCP_MODE)"
@@ -284,10 +266,12 @@ detect_layout() {
     if [[ "$MODE" == desktop ]]; then
         if display_ok "$old_display"; then
             UNIT_DISPLAY=$old_display
-        elif [[ -z "$old_display" && "$SESSION_TYPE" == wayland ]]; then
-            UNIT_DISPLAY=""
-        elif display_ok "$SESSION_DISPLAY"; then
+        elif [[ "$SESSION_TYPE" == x11 ]] && display_ok "$SESSION_DISPLAY"; then
             UNIT_DISPLAY=$SESSION_DISPLAY
+        elif [[ "$SESSION_TYPE" == wayland ]]; then
+            UNIT_DISPLAY=""
+        elif [[ -z "$old_display" ]] && grep -q '^After=.*graphical-session\.target' <<<"$OLD_UNIT"; then
+            UNIT_DISPLAY=""  # our desktop unit without DISPLAY: the saved Wayland choice
         else
             UNIT_DISPLAY=":0"
         fi
@@ -645,9 +629,7 @@ restore_previous() {
     if [[ "$POLICY" == restart ]]; then
         rm -f "$PENDING_FILE"  # what runs now is what the files say
     fi
-    if systemctl is-active --quiet "$SERVICE_NAME" && [[ -n "$WAS_PENDING" ]]; then
-        echo "        Rolled back to the state before this run (a switch an earlier run left unproven); the old system copy was kept"
-    elif systemctl is-active --quiet "$SERVICE_NAME"; then
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
         echo "        Rolled back: the previous install runs again; the old system copy was kept"
     elif [[ "$POLICY" == restart ]]; then
         echo "        [X] Rolled back, but the previous install is not running either: journalctl -u ${SERVICE_NAME} -n 50"
@@ -656,16 +638,21 @@ restore_previous() {
     fi
 }
 
+# The version the running service reports on /health; fails when nothing answers.
+health_version() {
+    local body
+    body=$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/health" 2>/dev/null) || return 1
+    printf '%s' "$body" | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin).get("version", ""), end="")' \
+        2>/dev/null || true
+}
+
 # Is the new install what answers, and does it enforce the key? Sets HEALTH_FAILURE. It writes
 # nothing to the console: the proof's result alone decides what happens next.
 prove_health() {
-    local i=0 body ver code
+    local i=0 ver code
     local init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"install-linux.sh","version":"1"}}}'
     while :; do
-        if systemctl is-active --quiet "$SERVICE_NAME" \
-            && body=$(curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/health" 2>/dev/null); then
-            ver=$(printf '%s' "$body" | "$PYTHON" -c 'import json, sys; print(json.load(sys.stdin).get("version", ""), end="")' \
-                2>/dev/null) || ver=""
+        if systemctl is-active --quiet "$SERVICE_NAME" && ver=$(health_version); then
             if [[ "$ver" != "$PKG_VER" ]]; then
                 HEALTH_FAILURE="Installed v${PKG_VER} but the service reports v${ver:-?}"
                 return 1
@@ -694,24 +681,30 @@ prove_health() {
     fi
 }
 
-# The new install did not prove itself (HEALTH_FAILURE): back to the previous one, on a box that
-# had one. It stays immune to signals and to a lost console (SIGPIPE ignored, set +e) until the
-# previous install is back: disarming first let the next echo kill bash before the restore.
+# Undo a switch: back to the previous install when it was a proven one (a unit existed and no
+# earlier switch was left pending), else stop and disable the service. An unproven state is
+# never restarted: it may be an agent with authentication off (a full shell on 0.0.0.0). The
+# files and the pending marker stay for a re-run. Runs with set +e and SIGPIPE ignored.
+undo_switch() {
+    if [[ -n "$HAD_UNIT" && -z "$WAS_PENDING" ]]; then
+        echo "        Rolling back to the previous install..."
+        restore_previous
+    else
+        systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
+        systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
+        echo "        Nothing proven to go back to: ${SERVICE_NAME} is stopped and disabled; fix the cause and rerun. Logs: journalctl -u ${SERVICE_NAME} -n 50"
+    fi
+}
+
+# The new install did not prove itself (HEALTH_FAILURE). It stays immune to signals and to a
+# lost console (SIGPIPE ignored, set +e) until the undo is done: disarming first let the next
+# echo end the run before anything was restored.
 health_failed() {
     trap '' PIPE HUP INT TERM
     ARMED=""
     set +e
     echo "        [X] The new install did not prove itself: ${HEALTH_FAILURE}"
-    if [[ -n "$HAD_UNIT" ]]; then
-        echo "        Rolling back to the previous install..."
-        restore_previous
-    else
-        # Nothing to roll back to, but an unproven agent (maybe with authentication off: a
-        # full shell on 0.0.0.0) must not stay up. The files stay for a re-run.
-        systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
-        systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
-        echo "        Nothing to roll back to on this fresh box: ${SERVICE_NAME} is stopped and disabled. Logs: journalctl -u ${SERVICE_NAME} -n 50"
-    fi
+    undo_switch
     exit 1
 }
 
@@ -747,7 +740,7 @@ on_exit() {
         else
             echo "        [X] The switch to the new install did not finish"
         fi
-        restore_previous
+        undo_switch
         rc=1
     elif [[ -n "$NEW_BUILD" && -z "$SWAPPED" ]]; then
         # a build nothing points at yet (a signal or a failure before the swap)
@@ -763,7 +756,7 @@ on_exit() {
 # Write the key files and the unit, enable the unit (camera-box's verify wants the literal
 # `enabled`), then (re)start the service unless the policy is enable-only.
 switch_to_new_install() {
-    local enabled
+    local enabled running
     mkdir -p "$CONFIG_DIR"
     chmod 755 "$CONFIG_DIR"
     write_if_changed "$CONFIG_FILE" 600 "config.json" <<<"$(config_json_text "$AUTH_KEY")"
@@ -779,6 +772,15 @@ switch_to_new_install() {
     if [[ "$POLICY" == enable-only ]]; then
         say "Enabled for the next boot (enable-only: not started)"
         return 0
+    fi
+    # Unchanged files, but is the running process what they say? camera-box's enable-only run
+    # may have upgraded the venv in place without a restart; a hung process answers nothing.
+    if [[ -z "$CHANGED" ]] && systemctl is-active --quiet "$SERVICE_NAME"; then
+        running=$(health_version) || running=""
+        if [[ "$running" != "$PKG_VER" ]]; then
+            say "The running service reports v${running:-nothing}, the venv has v${PKG_VER}: restarting"
+            CHANGED=1
+        fi
     fi
     if [[ -n "$CHANGED" ]]; then
         say "Restarting ${SERVICE_NAME}..."
@@ -941,9 +943,7 @@ main() {
     fi
     mkdir -p "$CONFIG_DIR"
     : >"$PENDING_FILE"
-    if [[ -n "$HAD_UNIT" ]]; then
-        arm
-    fi
+    arm
     if [[ -n "$NEW_BUILD" ]]; then
         swap_venv
     else
