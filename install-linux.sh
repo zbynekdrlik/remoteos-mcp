@@ -387,11 +387,8 @@ venv_is_current() {
 build_failed() {
     echo "        [X] $1 — nothing was changed on this box (the installed version keeps running). Full output:"
     cat "$2"
-    rm -rf "$NEW_BUILD"
+    remove_unswapped_build
     NEW_BUILD=""
-    if [[ -n "$STORE_CREATED" ]]; then
-        rmdir "$VENV_STORE" 2>/dev/null || true
-    fi
     exit 1
 }
 
@@ -623,18 +620,18 @@ restore_previous() {
         restore_venv
     fi
     systemctl daemon-reload || true
-    if [[ "$POLICY" == restart ]]; then
-        systemctl restart "$SERVICE_NAME" || true
+    if [[ -z "$WAS_PENDING" ]]; then
+        rm -f "$PENDING_FILE"  # the marker goes back to its state before this run
     fi
-    if [[ "$POLICY" == restart ]]; then
-        rm -f "$PENDING_FILE"  # what runs now is what the files say
+    if [[ "$POLICY" == enable-only ]]; then
+        echo "        Rolled back to the previous unit, key files and venv (enable-only: the running service was not touched)"
+        return 0
     fi
+    systemctl restart "$SERVICE_NAME" || true
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         echo "        Rolled back: the previous install runs again; the old system copy was kept"
-    elif [[ "$POLICY" == restart ]]; then
-        echo "        [X] Rolled back, but the previous install is not running either: journalctl -u ${SERVICE_NAME} -n 50"
     else
-        echo "        Rolled back to the previous unit, key files and venv (enable-only: nothing started)"
+        echo "        [X] Rolled back, but the previous install is not running either: journalctl -u ${SERVICE_NAME} -n 50"
     fi
 }
 
@@ -681,19 +678,30 @@ prove_health() {
     fi
 }
 
-# Undo a switch: back to the previous install when it was a proven one (a unit existed and no
-# earlier switch was left pending), else stop and disable the service. An unproven state is
-# never restarted: it may be an agent with authentication off (a full shell on 0.0.0.0). The
-# files and the pending marker stay for a re-run. Runs with set +e and SIGPIPE ignored.
+# Undo a switch (set +e, SIGPIPE ignored). restart: back to the previous install if it was
+# proven (a unit, no pending switch), else stop + disable: an unproven state (maybe auth off, a
+# full shell on 0.0.0.0) is never restarted. enable-only never starts or stops anything.
 undo_switch() {
-    if [[ -n "$HAD_UNIT" && -z "$WAS_PENDING" ]]; then
+    if [[ -n "$HAD_UNIT" && ( -z "$WAS_PENDING" || "$POLICY" == enable-only ) ]]; then
         echo "        Rolling back to the previous install..."
         restore_previous
+    elif [[ "$POLICY" == enable-only ]]; then
+        systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
+        echo "        Nothing to go back to: ${SERVICE_NAME} is disabled (enable-only: nothing was started)"
     else
         systemctl stop "$SERVICE_NAME" >/dev/null 2>&1
         systemctl disable "$SERVICE_NAME" >/dev/null 2>&1
         echo "        Nothing proven to go back to: ${SERVICE_NAME} is stopped and disabled; fix the cause and rerun. Logs: journalctl -u ${SERVICE_NAME} -n 50"
     fi
+    if [[ -n "$NEW_BUILD" && -z "$SWAPPED" ]]; then
+        remove_unswapped_build
+    fi
+}
+
+# A build nothing points at yet (the run ended before the swap), and a store this run created.
+remove_unswapped_build() {
+    rm -rf "$NEW_BUILD"
+    [[ -z "$STORE_CREATED" ]] || rmdir "$VENV_STORE" 2>/dev/null || true
 }
 
 # The new install did not prove itself (HEALTH_FAILURE). It stays immune to signals and to a
@@ -743,11 +751,7 @@ on_exit() {
         undo_switch
         rc=1
     elif [[ -n "$NEW_BUILD" && -z "$SWAPPED" ]]; then
-        # a build nothing points at yet (a signal or a failure before the swap)
-        rm -rf "$NEW_BUILD"
-        if [[ -n "$STORE_CREATED" ]]; then
-            rmdir "$VENV_STORE" 2>/dev/null || true
-        fi
+        remove_unswapped_build  # a signal or a failure before the swap
     fi
     rm -rf "$WORK_DIR"
     exit "$rc"
@@ -941,9 +945,9 @@ main() {
         CHANGED=1
         say "An earlier switch was never proven: restarting into what the files say"
     fi
+    arm
     mkdir -p "$CONFIG_DIR"
     : >"$PENDING_FILE"
-    arm
     if [[ -n "$NEW_BUILD" ]]; then
         swap_venv
     else
