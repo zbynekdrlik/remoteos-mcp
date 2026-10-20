@@ -153,6 +153,21 @@ class TestMacosKeyPrecedence:
         for argv in mac.argvs():
             assert not any(K_EXPLICIT in a for a in argv), argv
 
+    def test_names_the_caller_exported_never_carry_the_key_to_a_child(self, tmp_path: Path) -> None:
+        """Review round 2: bash keeps the export flag of a name the caller exported, so the
+        installer's own AUTH_KEY / CFG_KEY / … handed the key to every child."""
+        mac = Mac(tmp_path)
+        mac.write_plist(env_key=K_PLIST_ENV)
+        exported = {name: "from-the-caller" for name in (
+            "AUTH_KEY", "EXPLICIT_KEY", "CFG_KEY", "PLIST_KEY", "KEY_SOURCE", "k",
+        )}
+
+        result = mac.run(**exported)
+
+        assert result.returncode == 0, _output(result)
+        envs = Path(str(mac.records) + ".env")
+        assert K_PLIST_ENV not in envs.read_text(), "a child was started with the key in its environment"
+
     @pytest.mark.parametrize("where", ["config", "plist"])
     def test_an_existing_key_the_installer_cannot_carry_is_refused_never_replaced(
         self, tmp_path: Path, where: str

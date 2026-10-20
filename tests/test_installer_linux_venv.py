@@ -836,3 +836,155 @@ class TestGuards:
         assert result.returncode != 0, _output(result)
         assert "enabled" in _output(result)
         _assert_legacy_box_restored(box, unit_before)
+
+
+# ---------------------------------------------------------------------------
+# Review round 2
+# ---------------------------------------------------------------------------
+
+
+def _runs_the_new_install(box: LinuxBox) -> None:
+    service = box.state()["service"]
+    assert service["python"] == str(box.venv_link / "bin" / "python"), service
+    assert service["version"] == SOURCE_VERSION
+
+
+class TestPendingSwitch:
+    def test_a_restart_run_after_enable_only_restarts_into_the_new_install(self, tmp_path: Path) -> None:
+        """enable-only switched the files but started nothing: the next restart run must not take
+        the box as unchanged and prove the OLD process."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        assert box.run(REMOTEOS_MCP_POLICY="enable-only").returncode == 0
+        restarts = box.state()["restarts"]
+
+        result = box.run()
+
+        assert result.returncode == 0, _output(result)
+        assert box.state()["restarts"] == restarts + 1, "the switched files never got a restart"
+        _runs_the_new_install(box)
+        assert box.pip.versions("remoteos-mcp") == [], "the proven switch kept the legacy copy"
+
+    def test_a_restart_run_after_a_killed_switch_restarts_into_the_new_install(self, tmp_path: Path) -> None:
+        """SIGKILL (no trap runs) after the files were switched, before the restart."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        box.inject_after("systemctl daemon-reload", "kill -KILL $$")
+        assert box.run().returncode != 0
+        box.uninject()
+
+        result = box.run()
+
+        assert result.returncode == 0, _output(result)
+        _runs_the_new_install(box)
+        assert box.state()["service"]["key"] == K_UNIT
+
+
+class TestFreshBoxProofFailure:
+    def test_a_fresh_box_whose_proof_fails_is_stopped_and_disabled(self, tmp_path: Path) -> None:
+        """Nothing to roll back to, but a full-shell agent on 0.0.0.0 with authentication off must
+        not stay up (the proof exists to catch exactly that)."""
+        box = linux_box(tmp_path)
+        box.configure(service={"unauth_code": 200})
+
+        result = box.run()
+
+        assert result.returncode != 0, _output(result)
+        assert "not enforced" in _output(result)
+        state = box.state()
+        assert not state["active"] and not state["enabled"], state
+        assert box.unit_path.exists() and box.env_file.exists(), "the files are kept for a re-run"
+
+
+class TestDesktopDisplay:
+    def test_an_x11_session_on_another_display_gets_that_display(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path, graphical="x11", display=":1")
+
+        assert box.run().returncode == 0
+
+        lines = box.unit().splitlines()
+        assert "Environment=DISPLAY=:1" in lines and "Environment=DISPLAY=:0" not in lines
+
+    def test_a_wayland_session_gets_the_desktop_unit_without_a_display(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path, graphical="wayland")
+
+        assert box.run().returncode == 0
+
+        lines = box.unit().splitlines()
+        assert not any(line.startswith("Environment=DISPLAY") for line in lines), lines
+        assert f"Environment=XDG_RUNTIME_DIR=/run/user/{SERVICE_UID}" in lines
+        assert "After=network.target graphical-session.target" in lines
+
+    def test_a_re_run_keeps_the_unit_s_display(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path, graphical="x11", display=":1")
+        assert box.run().returncode == 0
+        box.shim("loginctl", 'if [[ "$1" == "list-sessions" ]]; then echo ""; fi\nexit 0\n')  # logged out
+
+        assert box.run().returncode == 0
+
+        assert "Environment=DISPLAY=:1" in box.unit().splitlines()
+
+
+class TestNoSecretInAChildEnvironment:
+    def test_names_the_caller_exported_never_carry_the_key_to_a_child(self, tmp_path: Path) -> None:
+        """bash keeps the export flag of a name the caller exported, for globals AND locals: the
+        installer's own AUTH_KEY / cfg_key / … would hand the key to every child."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        exported = {name: "from-the-caller" for name in (
+            "AUTH_KEY", "EXPLICIT_KEY", "GH_TOKEN_VALUE", "KEY_SOURCE", "unit_key", "env_key", "cfg_key",
+            "k", "key", "line", "rest",
+        )}
+
+        result = box.run(**exported)
+
+        assert result.returncode == 0, _output(result)
+        assert K_UNIT not in box.child_environments(), "a child was started with the key in its environment"
+
+
+class TestCameraBoxAdoptionChurn:
+    def test_a_camera_box_box_at_the_same_source_is_not_restarted(self, tmp_path: Path) -> None:
+        """Only Description= differed from camera-box's unit, and that alone restarted a live box
+        on every run (and flip-flopped with camera-box's lib)."""
+        box = linux_box(tmp_path)
+        box.install_camera_box(K_ENV, source_id=MAIN_SOURCE_ID, version=SOURCE_VERSION)
+        unit_before, restarts = box.unit(), box.state()["restarts"]
+
+        result = box.run()
+
+        assert result.returncode == 0, _output(result)
+        assert box.unit() == unit_before
+        assert box.state()["restarts"] == restarts
+
+    def test_a_same_version_in_place_upgrade_by_camera_box_s_lib_is_rebuilt(self, tmp_path: Path) -> None:
+        """Only the marker rule can see this one: same version, camera-box's marker in our build."""
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        (box.venv_target() / ".camera-box-source").write_text(CB_SOURCE_ID + "\n")
+
+        result = box.run()
+
+        assert result.returncode == 0, _output(result)
+        assert len(box.venv_installs()) == 2
+
+
+class TestInterruptedBuild:
+    def test_a_signal_after_the_build_leaves_no_partial_build(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        before = box.snapshot()
+        box.inject_after('printf \'%s\\n\' "$SOURCE_ID" >"$NEW_BUILD/.remoteos-mcp-source"', "kill -TERM $$")
+
+        result = box.run()
+
+        assert result.returncode != 0, _output(result)
+        assert _builds(box) == [] and box.snapshot() == before
+
+
+class TestLockPlace:
+    def test_the_lock_is_not_in_a_world_writable_directory(self) -> None:
+        """/run/lock is 1777: any local user could hold or pre-create the lock and block every
+        install (and fs.protected_regular makes root's open of a foreign file there fail)."""
+        text = Path(__file__).resolve().parent.parent.joinpath("install-linux.sh").read_text()
+        lines = [line.strip() for line in text.splitlines() if line.strip().startswith("LOCK_FILE=")]
+        assert lines == ['LOCK_FILE="/run/remoteos-mcp-install.lock"'], lines

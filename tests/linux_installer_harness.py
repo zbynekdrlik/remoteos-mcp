@@ -58,7 +58,12 @@ _LOGGED = (
     "mkdir mktemp mv readlink realpath rm sed seq sleep sort stat tail tar tee touch tr uname wc xargs"
 ).split()
 
-_LOG_ARGV = 'printf "%s\\x1f" "${{0##*/}}" "$@" >> "{records}"; printf "\\x1e" >> "{records}"\n'
+# Each shim records its argv, and the environment it was started with (`export -p`, a builtin,
+# into <records>.env): the "never in a child's environment" checks read that.
+_LOG_ARGV = (
+    'printf "%s\\x1f" "${{0##*/}}" "$@" >> "{records}"; printf "\\x1e" >> "{records}"; '
+    'export -p >> "{records}.env"\n'
+)
 
 
 def _shim(path: Path, body: str, records: Path) -> None:
@@ -102,6 +107,7 @@ class LinuxBox:
     pip: FakePipBox
     system_extra: Path
     env: dict[str, str] = field(default_factory=dict)
+    pristine: str = ""
 
     # --- paths -------------------------------------------------------------
     @property
@@ -128,6 +134,15 @@ class LinuxBox:
     @property
     def lock_file(self) -> Path:
         return self.root / "install.lock"
+
+    def child_environments(self) -> str:
+        """Every environment a shimmed child was started with (`export -p` text)."""
+        log = Path(str(self.cfg()["records"]) + ".env")
+        return log.read_text() if log.exists() else ""
+
+    def uninject(self) -> None:
+        """Undo every inject_after: the installer copy as linux_box made it."""
+        self.script.write_text(self.pristine)
 
     def inject_after(self, line: str, code: str) -> None:
         """Insert `code` after every line of the installer copy that is exactly `line` (indent
@@ -325,6 +340,7 @@ def _redirected(script: Path, tmp_path: Path, config_dir: Path, unit_path: Path,
         'VENV_LINK="/opt/remoteos-mcp-venv"': f'VENV_LINK="{venv_link}"',
         'VENV_STORE="/opt/remoteos-mcp-venvs"': f'VENV_STORE="{venv_store}"',
         'LOCK_FILE="/run/lock/remoteos-mcp-install.lock"': f'LOCK_FILE="{tmp_path / "install.lock"}"',
+        'LOCK_FILE="/run/remoteos-mcp-install.lock"': f'LOCK_FILE="{tmp_path / "install.lock"}"',
         "HEALTH_TRIES=12": "HEALTH_TRIES=3",
         "HEALTH_SLEEP=5": "HEALTH_SLEEP=0",
     }.items():
@@ -336,8 +352,10 @@ def _redirected(script: Path, tmp_path: Path, config_dir: Path, unit_path: Path,
     return copy
 
 
-def linux_box(tmp_path: Path, *, graphical: bool = False, installer: Path = INSTALLER_LINUX) -> LinuxBox:
-    """A fresh fake Linux box (nothing of remoteos on it) with the installer ready to run."""
+def linux_box(tmp_path: Path, *, graphical: bool | str = False, display: str = ":0",
+              installer: Path = INSTALLER_LINUX) -> LinuxBox:
+    """A fresh fake Linux box (nothing of remoteos on it) with the installer ready to run.
+    `graphical`: False (no session), True / "x11" (an X11 session on `display`), "wayland"."""
     shims = tmp_path / "shims"
     shims.mkdir()
     records = tmp_path / "argv.records"
@@ -394,10 +412,16 @@ exec "{real_py}" "$@"
     for name in ("ufw", "firewall-cmd"):
         _shim(shims / name, "exit 1\n", records)
     if graphical:
-        loginctl = """\
+        session_type = "x11" if graphical is True else graphical
+        session_display = display if session_type == "x11" else ""
+        loginctl = f"""\
 case "$1" in
     list-sessions) echo "2 1000 testuser seat0 tty2" ;;
-    show-session) case "$*" in *Type*) echo x11 ;; *Class*) echo user ;; *Name*) echo testuser ;; esac ;;
+    show-session)
+        case "$*" in
+            *Type*) echo {session_type} ;; *Class*) echo user ;; *Name*) echo testuser ;;
+            *Display*) echo "{session_display}" ;;
+        esac ;;
 esac
 exit 0
 """
@@ -423,6 +447,7 @@ exit 0
             "TMPDIR": str(tmpdir),
             "SUDO_USER": SERVICE_USER,
         },
+        pristine=script.read_text(),
     )
     box.add_source("main", MAIN_SHA7, SOURCE_VERSION)
     return box

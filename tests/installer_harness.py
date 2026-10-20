@@ -446,10 +446,12 @@ _LOGGED_COMMANDS = (
 def log_every_command(shim_dir: Path, records: Path) -> None:
     """Record the argv of every process the installer starts by name: each shim in `shim_dir`
     is wrapped, and each command of `_LOGGED_COMMANDS` gets a shim in front of the real one.
-    Read the records with `fake_linux_tools.records(records)` (`[tool, arg, ...]` each)."""
+    Read the records with `fake_linux_tools.records(records)` (`[tool, arg, ...]` each); the
+    environment each one was started with is in `<records>.env` (`export -p` text)."""
     real_dir = shim_dir / ".real"
     real_dir.mkdir()
-    log = f'printf "%s\\x1f" "${{0##*/}}" "$@" >> "{records}"; printf "\\x1e" >> "{records}"\n'
+    log = (f'printf "%s\\x1f" "${{0##*/}}" "$@" >> "{records}"; printf "\\x1e" >> "{records}"; '
+           f'export -p >> "{records}.env"\n')
     for shim in sorted(p for p in shim_dir.iterdir() if p.is_file()):
         target = real_dir / shim.name
         shim.rename(target)
