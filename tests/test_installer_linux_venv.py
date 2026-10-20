@@ -865,6 +865,18 @@ class TestPendingSwitch:
         _runs_the_new_install(box)
         assert box.pip.versions("remoteos-mcp") == [], "the proven switch kept the legacy copy"
 
+    def test_enable_only_prunes_the_old_builds(self, tmp_path: Path) -> None:
+        """A venv process imports through the link, which already points at the new build, so
+        an old build protects nothing: the cams (enable-only) must not pile them up."""
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        old_build = box.venv_target()
+        box.add_source("main", "def5678", "0.7.0.dev33")
+
+        assert box.run(REMOTEOS_MCP_POLICY="enable-only").returncode == 0
+
+        assert not old_build.exists() and _builds(box) == [box.venv_target()]
+
     def test_a_restart_run_after_a_killed_switch_restarts_into_the_new_install(self, tmp_path: Path) -> None:
         """SIGKILL (no trap runs) after the files were switched, before the restart."""
         box = linux_box(tmp_path)
