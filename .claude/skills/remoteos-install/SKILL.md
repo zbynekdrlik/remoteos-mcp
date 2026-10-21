@@ -20,7 +20,7 @@ triggers:
 ## The golden rule — always use the one-liner installer
 
 NEVER run ad-hoc `pip install` or other manual commands. The installer is the single source of truth.
-After pushing source changes, deploy by running the appropriate one-liner on each target via SSH or MCP Shell.
+After pushing source changes, deploy by running the appropriate one-liner on each target via SSH. On Linux never through the agent's own MCP Shell: that run is inside `remoteos-mcp.service`, whose restart would kill it half-way, so the installer (and the uninstaller) refuses with "nothing was changed".
 
 ## Windows
 
@@ -77,7 +77,7 @@ Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and
 - After `REMOTEOS_MCP_POLICY=enable-only` the switch is pending (`/etc/remoteos-mcp/.switch-pending`): the next normal run restarts and proves it. An enable-only run that changed nothing on a proven box leaves it proven.
 - A desktop unit gets the X11 session's `DISPLAY` (or keeps the existing unit's); a Wayland session gets none.
 
-**Migration from the old system-python layout:** the first run builds the venv, switches the unit and proves it; only then does it remove the old copy from the system python (`pip uninstall --break-system-packages remoteos-mcp fastmcp fastmcp-slim`). If the proof fails, the old unit and the old copy stay and the box runs as before.
+**Migration from the old system-python layout:** the first run builds the venv, switches the unit and proves it; only then does it remove the old copy from the system python (`pip uninstall --break-system-packages remoteos-mcp fastmcp fastmcp-slim`). If the proof fails, the old unit and the old copy stay and the box runs as before. The box keeps its key (#51), which the old unit showed to every local account (`systemctl cat`, `ps`): on a box with other local accounts, rotate it with `REMOTEOS_MCP_AUTH_KEY` and update the clients.
 
 Verify after a run (from dev1 and on the box):
 
@@ -97,6 +97,8 @@ Verify after a run (from dev1 and on the box):
 - `An earlier switch has run since (the unit started again)`: an enable-only switch that a reboot (or a restart) has started since; the run checks it as it runs.
 - The key-out-of-the-environment guarantee needs a source at or after the #12 merge: an older `REMOTEOS_MCP_REF` (e.g. camera-box's pin before its bump) runs a server that keeps `REMOTEOS_AUTH_KEY` in its environment, so Shell children inherit it.
 - `another process holds :8092, not the unit's`: something else listens on the port (`sudo ss -ltnp 'sport = :8092'`). The key was not sent. Stop that process, then rerun.
+- `this run is inside remoteos-mcp.service (the agent's own Shell)`: nothing was changed; run the one-liner over SSH.
+- Every restart run on an unchanged box ends `an authenticated initialize answered 401` + `Nothing was switched`: the running process holds another key than the key files (they were changed under it). `sudo systemctl restart remoteos-mcp` once, then rerun to prove it.
 
 **Gotcha — camera-box cams run a read-only rootfs by design** (camera-box's `scripts/lib/ro-root.sh`; its provisioning opens an rw window and runs this installer inside it). The installer refuses a read-only root and changes nothing: update a cam through camera-box's provisioning, never by editing its `/etc/fstab`. On any other box, `mount -o remount,rw /` for the run. Both Linux and macOS installers also verify after restart that the `/health` endpoint reports the version just installed — a stale pre-existing install is caught and reported as failure.
 

@@ -122,6 +122,10 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   at the end. "A unit and no pending mark" alone is NOT proven: it restored the state that had
   just failed its proof, or files the running process never ran.
 - **Order (keep it):**
+  0. Refuse a run inside `remoteos-mcp.service` (`/proc/self/cgroup`, `CGROUP_FILE`, redirected
+     by the harness): from the agent's own Shell the switch's restart (or the uninstaller's stop)
+     kills the run half-way and its rollback waits on that same stop until TimeoutStopSec
+     (review round 13). The uninstaller has the same guard.
   1. Validate the inputs (`REMOTEOS_MCP_REF` default `main`, empty = `main` as camera-box reads
      it; MODE / USER / POLICY), take `flock -n` on `/run/remoteos-mcp-install.lock` (a
      second run's prune could delete this run's build; NOT the world-writable `/run/lock`, where
