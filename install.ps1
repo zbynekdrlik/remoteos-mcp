@@ -304,7 +304,7 @@ if (Test-Path $oldConfigDir) {
 }
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
-# Stop running server BEFORE pip install — pip --force-reinstall on Windows
+# Stop running server BEFORE pip install - pip --force-reinstall on Windows
 # cannot delete files held open by the running python process, which corrupts
 # packages (e.g. fastmcp's __init__.py gets deleted, leaving a namespace package).
 Write-Host "        Stopping running server..." -ForegroundColor Gray
@@ -316,7 +316,7 @@ Get-Process -ErrorAction SilentlyContinue | Where-Object {
 # Kill ALL processes related to the running server: the python server process,
 # the CMD batch restart loop (start-remoteos.bat), and the wscript VBS launcher.
 # The CMD batch has a restart loop that will re-launch python within 10s if
-# only python is killed.  Exclude the current process AND its parent — the
+# only python is killed.  Exclude the current process AND its parent - the
 # installer's own source code (and the SSH cmd.exe wrapper carrying it) contain
 # these patterns as string literals and would match themselves.
 $myPid = $PID
@@ -328,7 +328,7 @@ Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
 } | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
 }
-# Kill server by port (fallback — catches anything on our port)
+# Kill server by port (fallback - catches anything on our port)
 $portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
     ($_.ToString().Trim() -split "\s+")[-1]
 }) | Select-Object -First 1
@@ -339,11 +339,11 @@ Start-Sleep -Seconds 3
 $env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
 # Pre-uninstall all three packages so no stale RECORD can delete files the new
 # install writes.  Root cause (#12 wheel evidence): monolithic fastmcp 2.x
-# RECORD claims fastmcp/__init__.py — same file fastmcp-slim 4.x writes.
+# RECORD claims fastmcp/__init__.py - same file fastmcp-slim 4.x writes.
 # pip --force-reinstall can install slim (writes it) then uninstall old 2.x
 # (deletes it).  Explicit pre-uninstall + clean install avoids this entirely.
 & $python -m pip uninstall -y remoteos-mcp fastmcp fastmcp-slim 2>&1 | Out-Null
-# Keep the full pip output: on failure it is printed whole (#12 — a discarded
+# Keep the full pip output: on failure it is printed whole (#12 - a discarded
 # or truncated pip error hides the real cause).
 $pipInstallOut = & $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" 2>&1 | Out-String
 $pipInstallExit = $LASTEXITCODE
@@ -362,7 +362,7 @@ if ($pipInstallExit -eq 0 -and $pipShow -match "Version: (.+)") {
 # Sanity check: verify remoteos and fastmcp can be imported (fail hard, never repair)
 $importCheck = & $python -c "import remoteos, fastmcp; from fastmcp import FastMCP" 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "        [X] Import check failed — remoteos or fastmcp broken after install" -ForegroundColor Red
+    Write-Host "        [X] Import check failed - remoteos or fastmcp broken after install" -ForegroundColor Red
     Write-Host "        $importCheck" -ForegroundColor Red
     exit 1
 }
