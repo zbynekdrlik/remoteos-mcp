@@ -11,10 +11,11 @@ For each ``[projects.<name>]`` of ``projects.toml``:
   carry the key store's url + key, so the project can debug a machine when the gateway is down.
 
 Only fleet entries change. An entry is the sync's own when its url is one sync writes (a
-gateway url, or — in direct mode — the key store's url) or it carries this project's registered
-token (only sync writes that; e.g. an entry at the gateway's OLD url): such an entry whose
-machine left the manifest is removed. Every other entry keeps its ORIGINAL member text (key as written, the
-colon's spacing, value) byte for byte, and so does everything outside ``mcpServers``; only the
+gateway url, or — in direct mode — the key store's url) or it has sync's shape
+(``.../<name>/mcp``) at another url with this project's registered token (an entry left at the
+gateway's OLD url): such an entry whose machine left the manifest is removed. Every other entry
+keeps its ORIGINAL member text (key as written, the colon's spacing, value) byte for byte, and
+so does everything outside ``mcpServers``; only the
 whitespace BETWEEN entries is rendered on a rewrite (a file with no ``mcpServers`` at all is
 re-serialised as JSON). A config whose entries do not change is not written at all.
 Writes are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``).
@@ -136,6 +137,10 @@ def parse_config(text: str | None) -> ParsedConfig:
         data = json.loads(text)
     except (ValueError, RecursionError) as exc:
         raise ConfigFormatError(f"not valid JSON ({exc.__class__.__name__}) — left untouched") from exc
+    try:  # a lone surrogate escape (\ud800) anywhere breaks hashing, output and the write-back
+        json.dumps(data, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ConfigFormatError("holds a lone surrogate escape such as \\ud800 — left untouched") from exc
     if not isinstance(data, dict):
         raise ConfigFormatError("not a JSON object — left untouched")
     if "mcpServers" not in data:
@@ -250,14 +255,17 @@ def plan_project(
     own_hashes = set(consumer.sha256) if consumer is not None and consumer.managed_by == SYNC_MANAGER else set()
 
     def owned(name: str, value: object) -> bool:
-        """Did sync write this entry? A gateway url; a key-store url in direct mode; or ANY entry
-        carrying this project's registered token — only sync puts it into a file (e.g. at the
-        gateway's OLD url, after a url change)."""
+        """Did sync write this entry? A gateway url; a key-store url in direct mode; or sync's
+        gateway SHAPE (``.../<name>/mcp``) at another gateway url carrying this project's
+        registered token — an entry left at the gateway's OLD url after a url change. A
+        hand-made alias (another name) keeps its place even with the token copied into it."""
         url = _url(value)
         if url == manifest.machine_url(name):
             return True
         if project.mode == MODE_DIRECT and name in keystore and url == keystore[name].url:
             return True
+        if not (isinstance(url, str) and url.endswith(f"/{name}/mcp")):
+            return False
         token = bearer_value(authorization_header(value) or "")
         return token is not None and token_sha256(token) in own_hashes
 
