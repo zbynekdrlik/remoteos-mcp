@@ -11,6 +11,9 @@
 
 Every edit is written atomically to the registry; a running gateway picks it up on its next
 request (file change) or on SIGHUP — no restart needed.
+
+The fleet commands (#51) — ``machine set-key|list|import|repair-recipe``, ``sync-configs``
+and ``check`` — live in ``cli_fleet.py`` and are registered on this group.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from pathlib import Path
 import click
 
 from remoteos import __version__
+from remoteos.gateway import cli_fleet
 from remoteos.gateway.accesslog import DEFAULT_ACCESS_LOG_PATH, read_access_log
 from remoteos.gateway.registry import (
     DEFAULT_MACHINES_PATH,
@@ -89,7 +93,7 @@ def check_bind_host(host: str) -> str:
     envvar="REMOTEOS_GATEWAY_MACHINES",
     default=DEFAULT_MACHINES_PATH,
     show_default=True,
-    help="Master MCP config the machine URL + key are read from (never copied).",
+    help="The key store (machine url + key). A legacy MCP config (mcpServers) is still read.",
 )
 @click.option(
     "--access-log",
@@ -356,6 +360,8 @@ def _printable(value: object) -> str:
         return text
     return "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in text)
 
+
+main.add_command(cli_fleet.machine)
 
 if __name__ == "__main__":  # pragma: no cover
     main()

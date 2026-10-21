@@ -138,7 +138,9 @@ def test_import_keeps_a_machine_repair_recipe_and_counts_the_store_copy(tmp_path
     old, new = fresh_secret("storedkey"), fresh_secret("configkey")
     recipe = {"ssh": "root@cam2.lan", "key_file": "/etc/remoteos-mcp/config.json", "sudo": False}
     with FakeFleetMachine(accept_keys=(new,)) as box:
-        write_private_json(tmp_path / "cfg" / "machines.json", {"linux-cam2": {"url": box.url, "key": old, "repair": recipe}})
+        write_private_json(
+            tmp_path / "cfg" / "machines.json", {"linux-cam2": {"url": box.url, "key": old, "repair": recipe}}
+        )
         config = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam2": _entry(box.url, new)})
 
         result = _import(tmp_path, "--from", str(config))
