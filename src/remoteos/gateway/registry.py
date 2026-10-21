@@ -536,11 +536,15 @@ def load_machines(path: Path) -> dict[str, Upstream]:
 
 
 def _is_http_url(url: str) -> bool:
+    """An http(s) url with a host and, if any, a valid port. urlsplit RAISES on some strings
+    ("http://[bad/mcp") and ``.port`` raises on a bad port (":99999", ":80a"): such a url is
+    simply not usable — refused here, never a crash in a probe later."""
     try:
         parts = urlsplit(url)
-    except ValueError:  # e.g. "http://[bad/mcp": an invalid IPv6 literal is simply not a usable url
+        parts.port  # noqa: B018 - evaluated for its ValueError on an invalid port
+    except ValueError:
         return False
-    return parts.scheme in ("http", "https") and bool(parts.netloc)
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
 def _url_scheme(url: str) -> str:

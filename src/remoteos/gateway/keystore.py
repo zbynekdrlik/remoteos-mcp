@@ -110,7 +110,7 @@ def edit_keystore(path: Path) -> Iterator[dict[str, MachineEntry]]:
     changed: every write makes the running gateway reload, and a no-op must not."""
     with fileops.exclusive_lock(str(path.with_name(path.name + ".lock"))):
         entries = load_keystore(path, missing_ok=True)
-        before = _payload(entries) if path.exists() else None
+        before = _payload(entries)  # a missing store loads as {}: a no-op never creates an EMPTY one
         yield entries
         if _payload(entries) != before:
             save_keystore(path, entries)

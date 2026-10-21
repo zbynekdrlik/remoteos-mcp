@@ -43,6 +43,7 @@ from remoteos.gateway.probe import (
     STATE_OK,
     STATE_UNAUTHORIZED,
     ProbeResult,
+    gather_probes,
     new_client,
     probe_healthz,
     probe_initialize,
@@ -74,9 +75,11 @@ class Observation:
 async def _probe_all(entries: dict[str, MachineEntry], gateway_url: str) -> tuple[dict[str, ProbeResult], ProbeResult]:
     async with new_client() as client:
         names = sorted(entries)
-        results = await asyncio.gather(
-            *(probe_initialize(client, entries[n].url, entries[n].authorization) for n in names),
-            probe_healthz(client, gateway_url),
+        results = await gather_probes(
+            [
+                *(probe_initialize(client, entries[n].url, entries[n].authorization) for n in names),
+                probe_healthz(client, gateway_url),
+            ]
         )
     return dict(zip(names, results[:-1])), results[-1]
 
@@ -88,7 +91,9 @@ def read_key_by_recipe(entry: MachineEntry, *, ssh_bin: str) -> tuple[str | None
     remote = shlex.join([*(["sudo", "-n"] if recipe.sudo else []), "cat", recipe.key_file])
     argv = [ssh_bin, *SSH_OPTIONS, recipe.ssh, remote]
     try:
-        proc = subprocess.run(argv, capture_output=True, timeout=REPAIR_TIMEOUT_S, check=False)
+        proc = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=REPAIR_TIMEOUT_S, check=False
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"repair failed: ssh {recipe.ssh} did not run ({type(exc).__name__})"
     if proc.returncode != 0:
@@ -153,11 +158,13 @@ def _advance(previous: object, observation: Observation, now: str) -> dict:
     """The new status record for one item, carrying ``since``/``notified`` while the state holds."""
     prev = previous if isinstance(previous, dict) else None
     if prev is not None and prev.get("state") == observation.state and not observation.repaired:
+        notified = bool(prev.get("notified"))
         return {
             "state": observation.state,
             "since": prev.get("since") or now,
-            "detail": observation.detail,
-            "notified": bool(prev.get("notified")),
+            # an announcement still owed reports the CHANGE (e.g. "repaired: ..."), not this run
+            "detail": observation.detail if notified else prev.get("detail") or observation.detail,
+            "notified": notified,
             "previous": prev.get("previous"),
         }
     first_seen_ok = prev is None and observation.state == STATE_OK and not observation.repaired
@@ -170,23 +177,52 @@ def _advance(previous: object, observation: Observation, now: str) -> dict:
     }
 
 
-def compose_message(pending: dict[str, dict], host: str, *, recovered: bool = False) -> str:
-    """The notification text (Slovak, phone-readable): names, states, details — never a key."""
-    lines = [f"MCP brána ({host}): " + ("kontrola strojov opäť beží" if recovered else "zmena stavu strojov")]
-    for name, record in pending.items():
-        old = record.get("previous")
-        before = _LABELS.get(old, old) if old else "nový"
-        after = _LABELS.get(record["state"], record["state"])
-        label = "brána (gateway /healthz)" if name == GATEWAY_KEY else name
-        lines.append(f"• {label}: {before} → {after} [{old or 'new'} → {record['state']}] — {record['detail']}")
-    if any(r["state"] == STATE_UNAUTHORIZED for r in pending.values()):
-        lines.append("Kľúč: `remoteos-gateway machine set-key <stroj>` (kľúč na stdin).")
-    if any(r["state"] == STATE_UNAUTHORIZED or r["detail"].startswith("repaired") for r in pending.values()):
-        lines.append(
+# airuleset cuts mention + body at 1900 characters and STILL prints "sent", so one message stays
+# well under that: a fleet-wide change goes out in several, each fully delivered or retried.
+CHUNK_LIMIT = 1700
+_DETAIL_LIMIT = 200
+
+
+def _change_line(name: str, record: dict) -> str:
+    old = record.get("previous")
+    before = _LABELS.get(old, old) if old else "nový"
+    after = _LABELS.get(record["state"], record["state"])
+    label = "brána (gateway /healthz)" if name == GATEWAY_KEY else name
+    detail = str(record["detail"])[:_DETAIL_LIMIT]
+    return f"• {label}: {before} → {after} [{old or 'new'} → {record['state']}] — {detail}"
+
+
+def _hints(records: list[dict]) -> list[str]:
+    hints = []
+    if any(r["state"] == STATE_UNAUTHORIZED for r in records):
+        hints.append("Kľúč: `remoteos-gateway machine set-key <stroj>` (kľúč na stdin).")
+    if any(r["state"] == STATE_UNAUTHORIZED or str(r["detail"]).startswith("repaired") for r in records):
+        hints.append(
             "Projekty cez bránu sa nemenia; priamu kópiu kľúčov (projekt remoteos-mcp) obnoví"
             " `remoteos-gateway sync-configs`."
         )
-    return "\n".join(lines)
+    return hints
+
+
+def compose_messages(pending: dict[str, dict], host: str, *, recovered: bool = False) -> list[tuple[str, list[str]]]:
+    """The notification texts (Slovak, phone-readable; names, states, details — never a key), as
+    ``(text, the names it announces)``, each text at most ``CHUNK_LIMIT`` characters."""
+    title = f"MCP brána ({host}): " + ("kontrola strojov opäť beží" if recovered else "zmena stavu strojov")
+    reserve = len(" (99/99)")
+    groups: list[list[str]] = [[]]
+    for name in pending:
+        candidate = groups[-1] + [name]
+        lines = [_change_line(n, pending[n]) for n in candidate] + _hints([pending[n] for n in candidate])
+        if groups[-1] and len("\n".join([title, *lines])) + reserve > CHUNK_LIMIT:
+            groups.append([name])
+        else:
+            groups[-1] = candidate
+    texts = []
+    for index, names in enumerate(groups, start=1):
+        head = title + (f" ({index}/{len(groups)})" if len(groups) > 1 else "")
+        lines = [_change_line(n, pending[n]) for n in names] + _hints([pending[n] for n in names])
+        texts.append(("\n".join([head, *lines]), names))
+    return texts
 
 
 # What `airuleset.py notify --body` prints (send()'s status). It EXITS 0 EVEN WHEN THE POST FAILED,
@@ -208,7 +244,9 @@ def airuleset_notifier(script: Path, owner: str | None) -> Callable[[str], bool]
         if owner:
             argv += ["--owner-name", owner]
         try:
-            proc = subprocess.run(argv, capture_output=True, timeout=NOTIFY_TIMEOUT_S, check=False)
+            proc = subprocess.run(
+                argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=NOTIFY_TIMEOUT_S, check=False
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.error("check: notify did not run (%s) — retried on the next run", type(exc).__name__)
             return False
@@ -270,13 +308,15 @@ def run_check(
         logger.warning("check: %s is %s (was %s) — %s", name, record["state"], record["previous"], record["detail"])
     sent: bool | None = None
     if pending or recovered:
-        message = compose_message(pending, host, recovered=recovered)
-        sent = notifier(message) if notifier is not None else True
-        if sent:
-            for record in pending.values():
-                record["notified"] = True
-        elif recovered:
-            status["recovery_pending"] = True
+        sent = True
+        for index, (text, names) in enumerate(compose_messages(pending, host, recovered=recovered)):
+            delivered = notifier(text) if notifier is not None else True
+            sent = sent and delivered
+            if delivered:  # only the machines of a DELIVERED message are done; the rest retry
+                for name in names:
+                    pending[name]["notified"] = True
+            elif index == 0 and recovered:  # the first message carries the "running again" title
+                status["recovery_pending"] = True
     try:
         _write_status(status_path, status)
     except OSError as exc:

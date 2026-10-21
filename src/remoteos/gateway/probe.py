@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass
 
 import httpx2
@@ -78,7 +78,10 @@ async def probe_initialize(client: httpx2.AsyncClient, url: str, authorization: 
     headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
     if authorization is not None:
         headers["authorization"] = authorization
-    request = httpx2.Request("POST", url, headers=headers, content=_initialize_body())
+    try:
+        request = httpx2.Request("POST", url, headers=headers, content=_initialize_body())
+    except (httpx2.InvalidURL, ValueError) as exc:
+        return ProbeResult(STATE_ERROR, None, f"invalid url ({type(exc).__name__})")
     try:
         response = await client.send(request, stream=True)
     except httpx2.RequestError as exc:
@@ -104,11 +107,28 @@ async def probe_healthz(client: httpx2.AsyncClient, base_url: str) -> ProbeResul
     return ProbeResult(STATE_OK, 200, f"version {version}")
 
 
+async def gather_probes(probes: Iterable[Awaitable[ProbeResult]]) -> list[ProbeResult]:
+    """Run probes concurrently. One that RAISES anyway (a transport may still throw, e.g. an
+    OverflowError from a socket call) becomes an ``error`` result for that machine alone — it
+    never takes the other probes, the import or the watchdog run down with it."""
+    results = await asyncio.gather(*probes, return_exceptions=True)
+    out: list[ProbeResult] = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error("probe failed unexpectedly: %s", type(result).__name__)
+            out.append(ProbeResult(STATE_ERROR, None, f"probe failed: {type(result).__name__}"))
+        elif isinstance(result, BaseException):  # cancellation / interrupt: never swallowed
+            raise result
+        else:
+            out.append(result)
+    return out
+
+
 async def probe_many(targets: Iterable[tuple[object, str, str | None]]) -> dict[object, ProbeResult]:
     """Probe every ``(id, url, authorization)`` concurrently; returns ``{id: ProbeResult}``."""
     targets = list(targets)
     async with new_client() as client:
-        results = await asyncio.gather(*(probe_initialize(client, url, auth) for _, url, auth in targets))
+        results = await gather_probes(probe_initialize(client, url, auth) for _, url, auth in targets)
     return {target[0]: result for target, result in zip(targets, results)}
 
 

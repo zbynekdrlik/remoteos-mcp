@@ -142,9 +142,16 @@ paths:
     failure, and its recovery is announced too. An UNWRITABLE status file is announced on every
     run: there is nowhere to remember that it was. Validation messages never repeat a value (a
     key pasted into `url` would reach Discord): length and scheme only.
-  - `urlsplit` RAISES `ValueError` on some strings (`http://[bad/mcp`, an invalid IPv6 literal):
-    `registry._is_http_url` / `_url_scheme` catch it, so a malformed url is just "not http(s)"
-    everywhere (review round 3: it crashed check, the gateway reload and import).
+  - `urlsplit` RAISES `ValueError` on some strings (`http://[bad/mcp`, an invalid IPv6 literal),
+    and its `.port` raises on a bad port (`:99999`, `:80a`). `registry._is_http_url` evaluates
+    both inside one `try` and requires a hostname, so such a url is just "not http(s)" in the
+    key store, the gateway reload and import (review rounds 3-4: each crashed check silently).
+    Second line of defence: `probe.gather_probes` turns any probe that still raises into an
+    `error` result for that machine alone.
+  - airuleset CUTS a body at 1900 characters (mention included) and still prints `sent`: a
+    fleet-wide change goes out as several messages of at most `CHUNK_LIMIT` (1700), and only the
+    machines of a DELIVERED message count as notified. While an announcement is still owed, the
+    record keeps the detail of the change (`repaired: ...`), so a retry still says what happened.
 - **Dry run = one choke point:** `sync._Saver(dry_run=True).commit()` never writes. Registry
   edits of a dry run (narrowing, withdrawing, `--prune`) happen in memory only. Never add a
   second save path around it.

@@ -397,7 +397,7 @@ owner reconnected it. Now:
 
 | Task | Do this |
 |---|---|
-| A machine's key changed | `remoteos-gateway machine set-key <machine>` with the key on stdin. Every project gets it on its next call: no config change, no reconnect. |
+| A machine's key changed | `remoteos-gateway machine set-key <machine>` with the key on stdin. Every project routed through the gateway gets it on its next call: no config change, no reconnect. The direct remoteos-mcp copy is refreshed by `remoteos-gateway sync-configs`. |
 | Add a machine to a project | Add it to the project's `machines` in `projects.toml`, then `remoteos-gateway sync-configs`. |
 | Add a NEW machine | `remoteos-gateway machine set-key <machine> --url http://<box>:8092/mcp` (key on stdin), then the step above. |
 | Add a project | One `[projects.<name>]` table in `projects.toml`, then `remoteos-gateway sync-configs`. |
