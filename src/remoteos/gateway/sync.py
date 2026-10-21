@@ -175,7 +175,8 @@ def render_config(parsed: ParsedConfig, entries: list[tuple[str, str]]) -> str:
     if not entries:
         return parsed.text[: parsed.start] + parsed.text[parsed.end :]
     indent = entry_indent(parsed)
-    lead = parsed.lead if "\n" in parsed.lead else "\n" + indent
+    # an EMPTY block's inner whitespace is the closing brace's indent, not an entry's: never reuse it
+    lead = parsed.lead if (parsed.entries and "\n" in parsed.lead) else "\n" + indent
     trail = parsed.trail if (parsed.entries and "\n" in parsed.trail) else "\n" + parsed.line_indent
     body = ("," + lead).join(f"{json.dumps(name, ensure_ascii=False)}: {raw}" for name, raw in entries)
     return parsed.text[: parsed.start] + lead + body + trail + parsed.text[parsed.end :]
@@ -318,9 +319,12 @@ def _describe(name: str, value: dict, plan: ProjectPlan) -> str:
 
 @dataclass
 class _Saver:
-    """Saves the locked registry only when it really changed (a no-op run writes nothing)."""
+    """The ONE way the run saves the locked registry: only when it really changed (a no-op run
+    writes nothing), and NEVER in a dry run — the single choke point, so no in-memory edit of a
+    dry run (narrowing, withdrawing, --prune) can reach the file."""
 
     transaction: RegistryTransaction
+    dry_run: bool = False
     saved: str = ""
 
     def __post_init__(self) -> None:
@@ -330,6 +334,8 @@ class _Saver:
         return json.dumps(self.transaction.registry.to_json(), sort_keys=True)
 
     def commit(self) -> bool:
+        if self.dry_run:
+            return False
         now = self._snapshot()
         if now == self.saved:
             return False
@@ -384,7 +390,7 @@ def sync_configs(
     failures = 0
     changed_projects: list[str] = []
     with registry_transaction(registry_path) as transaction:
-        saver = _Saver(transaction)
+        saver = _Saver(transaction, dry_run=dry_run)
         registry = transaction.registry
         for project in manifest.projects.values():
             target = target_for(project.host, project.account, local_host=local_host)
@@ -402,9 +408,8 @@ def sync_configs(
             except (TargetError, SyncError) as exc:
                 failures += 1
                 echo(f"{head}\n  FAILED: {exc}")
-                if not dry_run:
-                    _narrow_allow_list(registry, project)
-                    saver.commit()
+                _narrow_allow_list(registry, project)
+                saver.commit()
                 logger.warning("sync-configs: project %s FAILED: %s", project.name, exc)
                 continue
             consumer_line = _consumer_change(registry, plan)
@@ -442,17 +447,14 @@ def sync_configs(
             if prune:
                 echo(f"consumer {name}: its project left the manifest (or is direct now) — "
                      + ("would be removed (dry run)" if dry_run else "removed (--prune)"))
-                if not dry_run:
-                    del registry.consumers[name]
+                del registry.consumers[name]
                 continue
             withdrawn = "access withdrawn" if consumer.machines else "access stays withdrawn"
             echo(f"consumer {name}: its project left the manifest (or is direct now) — {withdrawn} (no machines;"
                  f" its token stays registered, so putting the project back needs no restart)."
                  " `sync-configs --prune` removes the consumer.")
-            if not dry_run:
-                consumer.machines = []
-        if not dry_run:
-            saver.commit()
+            consumer.machines = []
+        saver.commit()  # a no-op in a dry run
     if dry_run:
         echo("dry run — nothing was written")
     elif changed_projects:

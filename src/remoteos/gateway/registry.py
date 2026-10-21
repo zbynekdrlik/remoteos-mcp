@@ -424,7 +424,7 @@ def validate_http_url(url: str, *, what: str = "url") -> str:
     pasted into a url field by a hand edit would otherwise reach a log line or a notification."""
     if not isinstance(url, str) or not _is_http_url(url) or not url.isprintable():
         if isinstance(url, str):
-            scheme = urlsplit(url).scheme if url.isprintable() else ""
+            scheme = _url_scheme(url) if url.isprintable() else ""
             got = f"{len(url)} characters, " + (f"scheme {scheme!r}" if scheme.isalnum() else "no http(s) scheme")
         else:
             got = type(url).__name__
@@ -536,8 +536,18 @@ def load_machines(path: Path) -> dict[str, Upstream]:
 
 
 def _is_http_url(url: str) -> bool:
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # e.g. "http://[bad/mcp": an invalid IPv6 literal is simply not a usable url
+        return False
     return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
+def _url_scheme(url: str) -> str:
+    try:
+        return urlsplit(url).scheme
+    except ValueError:
+        return ""
 
 
 # -- live view with reload ------------------------------------------------------------

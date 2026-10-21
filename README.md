@@ -453,7 +453,8 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
     projects.
 - **Exposure.** It never re-exposes a machine (`unexpose` stays a kill switch); it warns
   instead. `machine import` and `machine set-key --url` expose only machines NEW to the key
-  store.
+  store, and never one a consumer already allows while it is unexposed (a kill switch engaged
+  before #51); the import's dry run lists what it would expose.
 - **Fail closed.** A manifest machine missing from the key store, an invalid or empty manifest
   or key store, or `mode = "direct"` for any account but the gateway's own on dev1 refuses
   the whole run before anything changes. An unparseable config is never overwritten.
@@ -494,7 +495,9 @@ journalctl --user -u remoteos-gateway-check          # each run's table
 3. Build the key store: `remoteos-gateway machine import --from-manifest --dry-run`, then
    without `--dry-run`. For each machine, the copy the machine accepts wins; every conflict
    and every machine it could not verify is listed. A machine the key store already has
-   keeps its entry unless a copy verifies.
+   keeps its entry unless a copy AT ITS URL verifies (a copy at another url needs
+   `--accept-url-change`). An unreadable `--from` file, or no machine at all, writes nothing
+   and exits 1.
 4. `systemctl --user restart remoteos-gateway` (it now reads the key store), then check
    `/healthz`.
 5. `remoteos-gateway sync-configs --dry-run`, review, then `remoteos-gateway sync-configs`.

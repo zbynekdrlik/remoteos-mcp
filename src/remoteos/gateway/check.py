@@ -112,7 +112,9 @@ async def _repair(name: str, entry: MachineEntry, *, keystore_path: Path, ssh_bi
     try:
         with edit_keystore(keystore_path) as entries:
             current = entries.get(name)
-            if current is None or current.key != entry.key:  # a set-key won the race: leave it alone
+            # a set-key (a new key, or a new --url: the re-read key was verified at the OLD url)
+            # won the race: leave it alone
+            if current is None or (current.url, current.key) != (entry.url, entry.key):
                 return Observation(STATE_UNAUTHORIZED, "repair skipped: the key store changed meanwhile")
             entries[name] = MachineEntry(url=current.url, key=key, repair=current.repair)
     except MachineSourceError as exc:  # it turned invalid since the load: the next run announces that

@@ -50,6 +50,7 @@ from remoteos.gateway.registry import (
     RegistryError,
     RepairRecipe,
     edit_registry,
+    load_registry,
     parse_repair,
 )
 from remoteos.gateway.sync import SyncError, sync_configs
@@ -82,13 +83,36 @@ def _fail(exc: Exception) -> click.ClickException:
     return click.ClickException(str(exc))
 
 
-def _expose(paths, machines: list[str]) -> list[str]:
-    """Expose *machines* in the registry; returns the ones that were not exposed before."""
+def _exposure_plan(registry, machines: list[str]) -> tuple[list[str], list[str]]:
+    """``(to_expose, held)`` for machines NEW to the key store. One already in a consumer's
+    allow-list but not exposed has its kill switch engaged (e.g. since before #51): it is
+    held, never opened by an import or a set-key."""
+    allowed = {m for consumer in registry.consumers.values() for m in consumer.machines}
+    pending = [m for m in machines if m not in registry.exposed]
+    return [m for m in pending if m not in allowed], [m for m in pending if m in allowed]
+
+
+def _expose_new(paths, machines: list[str], *, dry_run: bool = False) -> None:
+    """Expose the machines NEW to the key store (never one behind a kill switch), and say so."""
+    if not machines:
+        return
     try:
-        with edit_registry(paths.registry) as registry:
-            return [m for m in machines if registry.expose(m)]
+        if dry_run:
+            to_expose, held = _exposure_plan(load_registry(paths.registry), machines)
+        else:
+            with edit_registry(paths.registry) as registry:
+                to_expose, held = _exposure_plan(registry, machines)
+                for machine in to_expose:
+                    registry.expose(machine)
     except RegistryError as exc:
         raise _fail(exc) from exc
+    if to_expose:
+        click.echo(("would expose: " if dry_run else "exposed in the registry: ") + ", ".join(to_expose))
+    for machine in held:
+        click.echo(
+            f"  {machine}: a consumer is allowed it but it is NOT exposed (the kill switch) — left unexposed;"
+            f" `remoteos-gateway expose {machine}` opens it"
+        )
 
 
 def _read_key_from_stdin() -> str:
@@ -125,9 +149,8 @@ def machine_set_key(paths, name: str, url: str | None, force: bool) -> None:
             " `remoteos-gateway check` will tell."
         )
     if outcome.created:
-        newly = _expose(paths, [name])
-        if newly:
-            click.echo(f"  {name} exposed in the registry (add it to a project in projects.toml, then sync-configs).")
+        _expose_new(paths, [name])
+        click.echo(f"  next: add {name} to a project's machines in projects.toml, then run sync-configs.")
     click.echo(_RELOAD_NOTE)
     click.echo(
         "Projects routed through the gateway use the new key on their next call — no config change, no reconnect."
@@ -189,11 +212,16 @@ def machine_import(
     gateway_url = _gateway_url(paths, gateway_url, strict=True)
     files = list(sources) or ([] if from_manifest else sorted(LEGACY_MACHINES_PATH.parent.glob("*.mcp.json")))
     texts: list[tuple[str, str]] = []
+    unreadable: list[str] = []
     for path in files:
         try:
             texts.append((str(path), Path(path).expanduser().read_text(encoding="utf-8")))
         except (OSError, UnicodeDecodeError) as exc:
-            click.echo(f"  {path}: cannot read ({type(exc).__name__}) — skipped")
+            unreadable.append(f"{path} ({type(exc).__name__})")
+    if unreadable and sources:  # a file the owner NAMED: a typo must not import half a fleet
+        raise click.ClickException("cannot read " + ", ".join(unreadable) + " — nothing written")
+    for item in unreadable:
+        click.echo(f"  {item}: cannot read — skipped")
     if from_manifest:
         try:
             manifest = load_manifest(paths.manifest)
@@ -228,20 +256,24 @@ def _import_and_report(
         click.echo(f"  note: {note}")
     for decision in decisions:
         click.echo(describe_decision(decision))
+    if not decisions:
+        # Never a key store with no machines: the gateway would start serving nothing, where with
+        # no key store at all it refuses to start.
+        raise click.ClickException(f"no fleet machine found in {len(texts)} config(s) — nothing written")
     flagged = [d.name for d in decisions if d.flagged]
     if flagged:
         click.echo(f"{len(flagged)} machine(s) NOT verified: {', '.join(flagged)} — fix them before routing projects")
+    # Only machines NEW to the key store may be exposed: a known machine may be unexposed on
+    # purpose (the kill switch), and a re-import must not undo that.
+    new_machines = [d.name for d in decisions if d.name not in existing]
     if dry_run:
+        _expose_new(paths, new_machines, dry_run=True)
         click.echo("dry run — nothing written")
         return
     for name in apply_import(paths.machines, decisions, snapshot=existing):
         click.echo(f"  {name}: its key-store entry changed while the import probed — left as it is now")
     click.echo(f"key store {paths.machines} up to date ({len(decisions)} machine(s) considered)")
-    # Only machines NEW to the key store are exposed: a known machine may be unexposed on
-    # purpose (the kill switch), and a re-import must not undo that.
-    newly = _expose(paths, [d.name for d in decisions if d.name not in existing])
-    if newly:
-        click.echo(f"exposed in the registry: {', '.join(newly)}")
+    _expose_new(paths, new_machines)
     click.echo(_RELOAD_NOTE)
 
 

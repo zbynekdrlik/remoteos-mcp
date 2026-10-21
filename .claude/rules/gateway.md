@@ -138,9 +138,20 @@ paths:
     it PRINTS `send()`'s status (`sent` / `dedup` / `dry-run` / `no-config` / `error`). Only a
     printed `sent` / `dedup` is delivered. Every attempt passes its own `--dedup-key`, so a
     retry is never deduped away. The test fake prints a status and exits 0, like the real tool.
-  - A check that cannot run (an invalid key store, an unwritable status file) is announced
-    once per distinct failure, and its recovery is announced too. Validation messages never
-    repeat a value (a key pasted into `url` would reach Discord): length and scheme only.
+  - A check that cannot run because of an invalid key store is announced once per distinct
+    failure, and its recovery is announced too. An UNWRITABLE status file is announced on every
+    run: there is nowhere to remember that it was. Validation messages never repeat a value (a
+    key pasted into `url` would reach Discord): length and scheme only.
+  - `urlsplit` RAISES `ValueError` on some strings (`http://[bad/mcp`, an invalid IPv6 literal):
+    `registry._is_http_url` / `_url_scheme` catch it, so a malformed url is just "not http(s)"
+    everywhere (review round 3: it crashed check, the gateway reload and import).
+- **Dry run = one choke point:** `sync._Saver(dry_run=True).commit()` never writes. Registry
+  edits of a dry run (narrowing, withdrawing, `--prune`) happen in memory only. Never add a
+  second save path around it.
+- **Import writes no empty key store** (the gateway would then serve nothing, where with no
+  key store it refuses to start): zero machines, or an unreadable `--from`, exits 1. A NEW
+  machine a consumer already allows but that is not exposed (a kill switch from before #51)
+  stays unexposed, with a warning; the dry run lists what it would expose.
   - A machine first seen `ok` is not announced.
   - A repair stores the re-read key only if the machine accepts it AND the stored key did not
     change meanwhile (a concurrent `set-key` wins).

@@ -53,8 +53,9 @@ byte-equal. Edit those by hand as before.
 | Which machines work? | `~/.local/state/remoteos-gateway/machines-status.json`, written every 10 min by `remoteos-gateway check`. Each change is announced once. |
 
 Claude Code reads `.mcp.json` only at session start. A session started BEFORE `sync-configs`
-changed its project needs one restart (`claude -c`) to see an ADDED machine. Key changes never
-need one.
+changed its project's config (the first migration, an added or removed machine, a new token)
+needs one restart (`claude -c`). A machine key change never needs one: it changes nothing in
+any project config.
 
 Never paste a key into a project config, a chat, or an argv: `set-key` reads it from stdin,
 and `machine list` shows keys masked. Full reference: README "MCP gateway (dev1)" →
