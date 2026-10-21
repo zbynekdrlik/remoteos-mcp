@@ -9,13 +9,16 @@ dev2. File contents travel on stdin/stdout only, never in an argv (``ps`` shows 
 Command line (``python3 -c <source> <op> ...``):
 
 - ``read <path>``        — the file's bytes on stdout; exit 3 when it does not exist.
-- ``write <path> <tag>`` — stdin becomes the file (atomic, 0600). An existing file is first
+- ``write <path> <tag> [<length>]`` — stdin becomes the file (atomic, 0600). With *length*
+  (the byte count the caller sent; not a secret), a stdin that ended early or ran long — an
+  ssh that died mid-transfer — is refused and nothing is touched. An existing file is first
   copied to ``<dir>/.backup-<tag>/<name>`` (0600, dir 0700; ``<name>.1``, ``.2``... when that
   backup exists already). Prints ``{"path": ..., "backup": ...}`` as JSON.
 
 ``~`` means the home of the account the code runs as (from the password database, not
 ``$HOME``, which ``sudo`` may keep from the caller). A symlinked path is written through to
-its target, so the symlink a project's ``.mcp.json`` is stays a symlink.
+its target, so the symlink a project's ``.mcp.json`` is stays a symlink. A target inside a
+git work tree is refused: a token written there could be committed.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import tempfile
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_DIR_MODE = 0o700
 EXIT_MISSING = 3
+EXIT_REFUSED = 5
 
 _TAG_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
@@ -113,8 +117,33 @@ def backup(path: str, tag: str):
     return target
 
 
+def git_work_tree(path: str):
+    """The git work tree *path* would be inside (its top directory), else None. Looks for a
+    ``.git`` entry (a directory, or the file of a linked worktree / submodule) upward from the
+    nearest existing directory."""
+    directory = os.path.dirname(os.path.abspath(path))
+    while not os.path.isdir(directory) and directory != os.path.dirname(directory):
+        directory = os.path.dirname(directory)
+    while True:
+        if os.path.exists(os.path.join(directory, ".git")):
+            return directory
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
+def refuse_inside_git_work_tree(path: str) -> None:
+    """A config holds tokens and keys: never one inside a git work tree, where it (or its
+    ``.backup-*`` copies, which ``.mcp.json`` ignore rules do not cover) could be committed."""
+    repo = git_work_tree(path)
+    if repo is not None:
+        raise ValueError(f"refusing {path}: it is inside a git work tree ({repo}), where a token could be committed")
+
+
 def write_with_backup(path: str, data: bytes, tag: str) -> dict:
     """Back *path* up, then replace it atomically. Returns ``{"path", "backup"}``."""
+    refuse_inside_git_work_tree(path)
     saved = backup(path, tag)
     atomic_write(path, data)
     return {"path": path, "backup": saved}
@@ -138,17 +167,28 @@ def exclusive_lock(lock_path: str):
 
 
 def main(argv) -> int:
-    if len(argv) == 3 and argv[1] == "read":
-        data = read_bytes(expand(argv[2]))
-        if data is None:
-            return EXIT_MISSING
-        sys.stdout.buffer.write(data)
-        return 0
-    if len(argv) == 4 and argv[1] == "write":
-        result = write_with_backup(expand(argv[2]), sys.stdin.buffer.read(), argv[3])
-        sys.stdout.write(json.dumps(result) + "\n")
-        return 0
-    sys.stderr.write("usage: read <path> | write <path> <YYYY-MM-DD>\n")
+    try:
+        if len(argv) == 3 and argv[1] == "read":
+            path = expand(argv[2])
+            refuse_inside_git_work_tree(path)  # refused before the caller registers any token
+            data = read_bytes(path)
+            if data is None:
+                return EXIT_MISSING
+            sys.stdout.buffer.write(data)
+            return 0
+        if len(argv) in (4, 5) and argv[1] == "write":
+            data = sys.stdin.buffer.read()
+            if len(argv) == 5 and len(data) != int(argv[4]):
+                # stdin ended early (an ssh that died mid-transfer) or ran long: never install that
+                sys.stderr.write(f"refusing to write: got {len(data)} bytes, expected {argv[4]} bytes\n")
+                return EXIT_REFUSED
+            result = write_with_backup(expand(argv[2]), data, argv[3])
+            sys.stdout.write(json.dumps(result) + "\n")
+            return 0
+    except ValueError as exc:  # a refused path / tag / length: one plain line, no traceback
+        sys.stderr.write(f"{exc}\n")
+        return EXIT_REFUSED
+    sys.stderr.write("usage: read <path> | write <path> <YYYY-MM-DD> [<length>]\n")
     return 2
 
 

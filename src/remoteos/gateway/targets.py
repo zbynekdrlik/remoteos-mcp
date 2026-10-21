@@ -73,9 +73,13 @@ class Target:
         """The config's text, or None when the file does not exist."""
         if self.kind == "local":
             try:
-                data = fileops.read_bytes(fileops.expand(path))
+                real = fileops.expand(path)
+                fileops.refuse_inside_git_work_tree(real)  # before any token is minted for it
+                data = fileops.read_bytes(real)
             except OSError as exc:
                 raise TargetError(f"cannot read {path}: {exc.strerror or exc}") from exc
+            except ValueError as exc:
+                raise TargetError(str(exc)) from exc
         else:
             proc = self._run(["read", path], b"")
             if proc.returncode == fileops.EXIT_MISSING:
@@ -97,7 +101,10 @@ class Target:
                 return fileops.write_with_backup(fileops.expand(path), data, tag)
             except OSError as exc:
                 raise TargetError(f"cannot write {path}: {exc.strerror or exc}") from exc
-        proc = self._run(["write", path, tag], data)
+            except ValueError as exc:
+                raise TargetError(str(exc)) from exc
+        # the byte count (never a secret) lets the far side refuse a stdin cut short by a dropped link
+        proc = self._run(["write", path, tag, str(len(data))], data)
         self._check(proc, "write")
         try:
             return json.loads(proc.stdout.decode("utf-8"))

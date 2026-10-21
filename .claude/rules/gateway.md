@@ -93,6 +93,13 @@ paths:
 - **`fileops.py` is stdlib-only, py3.8+, with no package imports:** `targets.py` runs its
   SOURCE as `python3 -c` under sudo or over ssh, so the three writers share one tested
   implementation.
+  - `write` takes the byte count (never a secret) and refuses a stdin that ended early or ran
+    long: an ssh that died mid-transfer must not install a truncated config (review round 6).
+  - A config inside a git work tree (a `.git` entry upward) is refused at READ and at write:
+    a token there, or its `.backup-*/<name>.1` copies, could be committed. Refusing at read
+    means no token is minted for a file that can never be written.
+  - A new token keeps only ONE previous hash next to it (`sync._apply`), so a write that keeps
+    failing never piles up registered hashes.
   - File contents go on stdin/stdout only. An argv holds the source, an op and a path.
   - `~` is the account's passwd home, never `$HOME` (sudo may keep the caller's).
   - A symlink is written through (`realpath`): a project's `.mcp.json` symlink stays one.
@@ -162,6 +169,9 @@ paths:
   - A machine first seen `ok` is not announced.
   - A repair stores the re-read key only if the machine accepts it AND the stored url + key did
     not change meanwhile (a concurrent `set-key` wins).
+  - Nothing can make the watchdog silent (review round 6): any unexpected exception after the
+    key store loads goes through `_report_failure` (announced, exit 1), and a status record
+    that is not what check writes (a hand edit) is treated as unknown.
   - No single machine can blind the run (review rounds 4-5): a probe that raises
     (`gather_probes`), a key store the repair cannot write (`OSError`), a key file nested too
     deep (`RecursionError`), or any other repair exception (the guard in `observe`) becomes a

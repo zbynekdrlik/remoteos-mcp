@@ -22,8 +22,9 @@ allow-list (``--prune`` removes it), so undoing a mistaken manifest edit needs n
 
 Fail closed: an invalid or empty manifest, an invalid key store, a manifest machine missing
 from the key store, or direct mode off the gateway's own account refuses the whole run before
-anything changes; an unreadable / unparseable config or a missing ssh / sudo access fails that
-project only (its allow-list is only ever narrowed). A file never carries a token the gateway
+anything changes; an unreadable / unparseable config, a config inside a git work tree (refused
+at read, before any token is minted) or a missing ssh / sudo access fails that project only (its
+allow-list is only ever narrowed). A file never carries a token the gateway
 does not know — except the config of a project removed with ``--prune``, whose consumer is gone
 on purpose. No key or token is ever printed or logged.
 """
@@ -504,7 +505,9 @@ def _apply(plan: ProjectPlan, registry: Registry, saver: _Saver, today: str) -> 
         consumer.managed_by = SYNC_MANAGER
         consumer.machines = list(project.machines)
         if digest not in consumer.sha256:
-            consumer.sha256.append(digest)
+            # keep ONE previous hash next to the new one (the last write may have landed); a
+            # write that keeps failing must not pile up one more registered hash per run
+            consumer.sha256 = consumer.sha256[-1:] + [digest]
         saver.commit()
     written = plan.target.write(project.config, plan.new_text, today) if plan.file_changes else None
     if consumer is not None:

@@ -43,13 +43,16 @@ The exception is the remoteos-mcp project itself (`mode = "direct"`). It keeps D
 down. Every other entry (n8n, playwright, codex-bridge, ...) is never touched: it stays
 byte-equal. Edit those by hand as before.
 
-A session's 401 / `AUTH_HEADER_REJECTED` has TWO causes since #51. Tell them apart first, on dev1:
-`remoteos-gateway log --consumer <project>@<host> --tail 5`, or `machines-status.json`.
+A session's 401 / `AUTH_HEADER_REJECTED` has TWO causes since #51. Tell them apart first, on dev1,
+with `remoteos-gateway log --tail 20` (NO `--consumer`: a refused token has no consumer, so its
+line shows consumer `-` and a `--consumer` filter would hide it), and find the machine's line:
 
-- outcome `upstream_denied` (status says `401` for the machine): the MACHINE key is stale → `machine set-key`.
-- outcome `denied_unknown_token`: the PROJECT token is not registered (revoked, `--prune`d, a
-  restored old config) → `remoteos-gateway sync-configs` (it mints and registers a new one;
-  the session then needs one restart).
+- outcome `upstream_denied` (and `machines-status.json` says `401` for that machine): the
+  MACHINE key is stale → `machine set-key`.
+- outcome `denied_unknown_token` (consumer `-`; `machines-status.json` says the machine is
+  `ok`): the PROJECT token is not registered (revoked, `--prune`d, a restored old config) →
+  `remoteos-gateway sync-configs` (it mints and registers a new one; the session then needs one
+  restart).
 
 | Situation | Do this (on dev1) |
 |---|---|

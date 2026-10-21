@@ -162,8 +162,12 @@ def load_status(path: Path) -> dict:
 
 
 def _advance(previous: object, observation: Observation, now: str) -> dict:
-    """The new status record for one item, carrying ``since``/``notified`` while the state holds."""
-    prev = previous if isinstance(previous, dict) else None
+    """The new status record for one item, carrying ``since``/``notified`` while the state holds.
+    A record that is not what this code writes (a hand edit: a state that is not a string) is
+    treated as unknown, never trusted."""
+    prev = previous if isinstance(previous, dict) and isinstance(previous.get("state"), str) else None
+    if prev is not None and not isinstance(prev.get("previous"), (str, type(None))):
+        prev = {**prev, "previous": None}
     if prev is not None and prev.get("state") == observation.state and not observation.repaired:
         notified = bool(prev.get("notified"))
         return {
@@ -293,6 +297,28 @@ def run_check(
     except MachineSourceError as exc:
         _report_failure(status_path, previous, str(exc), stamp, notifier, host)
         raise
+    try:
+        return _check_loaded(entries, previous, stamp, keystore_path, status_path, gateway_url, notifier, ssh_bin, host)
+    except CheckError:
+        raise
+    except Exception as exc:  # the watchdog never goes silent: whatever broke, it is announced
+        logger.exception("check: the run failed unexpectedly")
+        reason = f"unexpected {type(exc).__name__} — see journalctl --user -u remoteos-gateway-check"
+        _report_failure(status_path, previous, reason, stamp, notifier, host)
+        raise CheckError(reason) from exc
+
+
+def _check_loaded(
+    entries: dict[str, MachineEntry],
+    previous: dict,
+    stamp: str,
+    keystore_path: Path,
+    status_path: Path,
+    gateway_url: str,
+    notifier: Callable[[str], bool] | None,
+    ssh_bin: str | None,
+    host: str,
+) -> CheckReport:
     observations, health = asyncio.run(
         observe(
             entries,
@@ -334,7 +360,7 @@ def run_check(
 
 
 class CheckError(Exception):
-    """The check could not keep its state (the status file is not writable)."""
+    """The check could not run to the end (the status file is not writable, or anything unexpected)."""
 
 
 def _write_status(path: Path, status: dict) -> None:
@@ -357,7 +383,11 @@ def _report_failure(
     logger.error("check: cannot run — %s", message)
     if not record["notified"]:
         text = f"MCP brána ({host}): kontrola strojov NEBEŽÍ — {message}"
-        record["notified"] = notifier(text) if notifier is not None else True
+        try:
+            record["notified"] = notifier(text) if notifier is not None else True
+        except Exception as exc:  # the report of a failure must not itself become a new crash
+            logger.error("check: the failure notice could not be sent (%s)", type(exc).__name__)
+            record["notified"] = False
     try:
         _write_status(status_path, {**previous, "checked_at": stamp, "error": record})
     except OSError as exc:
