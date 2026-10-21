@@ -74,3 +74,23 @@ def test_install_ps1_draws_the_key_from_a_csprng() -> None:
     code = "\n".join(line for _, line in _code_lines())
     assert "Get-Random" not in code, "Get-Random is not a CSPRNG (and -Count 32 draws 32 distinct characters)"
     assert "RandomNumberGenerator" in code
+
+
+def test_install_ps1_is_ascii_so_windows_powershell_5_1_parses_it() -> None:
+    """Windows PowerShell 5.1 reads a BOM-less script file (`-File`, Parser::ParseFile) in the
+    ANSI code page. A UTF-8 em dash (E2 80 94) is then cp1252 'â€”', whose 0x94 is U+201D, which
+    PowerShell treats as a closing double quote: the string ends early and the whole file stops
+    parsing (the windows-powershell job: "Missing closing '}'" at an `if` holding such a line).
+    `irm | iex` hides it (the web response is decoded as UTF-8), so ASCII-only is the rule."""
+    data = INSTALLER_WINDOWS.read_bytes()
+    bad = [(n, line.decode("utf-8", "replace").strip())
+           for n, line in enumerate(data.splitlines(), 1) if any(b > 0x7F for b in line)]
+    assert bad == [], f"install.ps1 has non-ASCII lines (5.1 misreads them): {bad}"
+
+
+def test_install_ps1_uses_no_powershell_7_only_syntax() -> None:
+    """The fleet's Windows boxes run Windows PowerShell 5.1: no `??` / `??=`, no `?.` / `?[`,
+    no `&&` / `||` pipeline chains, no `? :` ternary (all PowerShell 7+)."""
+    offenders = [(n, line) for n, line in _code_lines()
+                 if any(token in line for token in ("??", "?.", "?[", "&&", "||", " ? "))]
+    assert offenders == [], f"PowerShell 7-only syntax in install.ps1: {offenders}"
