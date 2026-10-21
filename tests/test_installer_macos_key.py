@@ -168,6 +168,15 @@ class TestMacosKeyPrecedence:
         envs = Path(str(mac.records) + ".env")
         assert K_PLIST_ENV not in envs.read_text(), "a child was started with the key in its environment"
 
+    def test_the_health_check_goes_direct_with_a_proxy_set(self, tmp_path: Path) -> None:
+        """Review round 12: with http_proxy set, a proxied /health check would fail after the
+        LaunchAgent already runs, reporting a working install as broken."""
+        mac = Mac(tmp_path)
+
+        result = mac.run(http_proxy="http://proxy.invalid:3128")
+
+        assert result.returncode == 0, _output(result)
+
     def test_a_signal_while_a_key_file_is_written_leaves_no_temp_copy(self, tmp_path: Path) -> None:
         """Review round 11: write_private's 0600 temp file (it holds the key) goes on any exit,
         as Linux's WRITE_TMP does since round 7."""

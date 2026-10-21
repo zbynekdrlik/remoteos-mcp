@@ -73,6 +73,36 @@ class TestRoRootfsAbort:
         started = {argv[0] for argv in box.argvs()}
         assert not started & {"apt-get", "curl", "systemctl", "git", "python3", "tar"}, box.argvs()
 
+    def test_the_read_only_message_never_advises_editing_fstab(self, tmp_path: Path) -> None:
+        """Review round 12: camera-box's cams are read-only by design (its ro-root.sh) and run
+        this installer inside camera-box's own rw window; telling the operator to turn fstab's
+        `ro` into `defaults` would undo the appliance."""
+        box = linux_box(tmp_path)
+        box.shim("findmnt", 'echo "ro,relatime"\n')
+
+        result = box.run()
+
+        output = result.stdout + result.stderr
+        assert result.returncode != 0, output
+        assert "fstab" not in output, output
+        assert "camera-box" in output and "nothing was changed" in output, output
+
+
+class TestLoopbackCurlsGoDirect:
+    """Review rounds 11-12: every curl to the box's own 127.0.0.1 starts `curl -q --noproxy '*'`.
+    --noproxy keeps a proxy from the environment (kept for pip) or a .curlrc off the request; -q
+    keeps every other .curlrc option (a trace would write the Authorization header) off it."""
+
+    def test_every_loopback_curl_starts_with_q_and_noproxy(self) -> None:
+        for installer in (INSTALLER_LINUX, INSTALLER_MACOS):
+            lines = installer.read_text().splitlines()
+            calls = [(n, line) for n, line in enumerate(lines, 1)
+                     if "curl " in line and not line.lstrip().startswith(("#", "echo", '"'))
+                     and "-o \"$tgz\"" not in line]  # the source download goes through any proxy
+            assert calls, installer
+            bad = [(n, line.strip()) for n, line in calls if "curl -q --noproxy '*' " not in line]
+            assert bad == [], f"{installer.name}: a loopback curl may use a proxy or a .curlrc: {bad}"
+
 
 # ---------------------------------------------------------------------------
 # (c) macOS: version mismatch from /health must cause failure

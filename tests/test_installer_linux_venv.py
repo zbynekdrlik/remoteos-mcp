@@ -406,6 +406,22 @@ class TestCameraBoxAdoption:
         assert box.env_file_key() == box.config_key() == K_ENV
         assert box.state()["service"]["key"] == K_ENV
 
+    def test_key_files_with_the_right_content_but_a_readable_mode_are_rewritten_0600(self, tmp_path: Path) -> None:
+        """Review round 12: write_if_changed compares content AND mode/owner. A key file restored
+        with `cp` or saved by an editor under umask 022 keeps its content but is world-readable;
+        camera-box's verify wants exactly 600."""
+        box = linux_box(tmp_path)
+        box.install_camera_box(K_ENV, source_id=MAIN_SOURCE_ID, version=SOURCE_VERSION)
+        for path in (box.env_file, box.config_file):
+            path.chmod(0o644)
+
+        result = box.run()
+
+        assert result.returncode == 0, output(result)
+        assert mode_of(box.env_file) == 0o600 and mode_of(box.config_file) == 0o600
+        assert "EnvironmentFile: written" in output(result) and "config.json: written" in output(result)
+        assert box.env_file_key() == box.config_key() == K_ENV
+
     def test_a_camera_box_box_at_its_pin_is_upgraded_keeping_its_paths_mode_and_key(self, tmp_path: Path) -> None:
         box = linux_box(tmp_path)  # no graphical session right now: the unit's desktop shape wins
         box.install_camera_box(K_ENV)

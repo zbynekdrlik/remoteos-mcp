@@ -425,10 +425,16 @@ esac
 
 
 def health_shim(shim_dir: Path, version: str) -> None:
-    """curl answering /health with `version` (the post-install self-check)."""
+    """curl answering /health with `version` (the post-install self-check). With a proxy in the
+    environment a loopback request without `--noproxy '*'` goes to it and fails (curl 5), as
+    real curl does."""
     _make_shim(
         shim_dir / "curl",
         f"""\
+if [[ -n "${{http_proxy:-}}${{all_proxy:-}}" && " $* " != *" --noproxy * "* ]]; then
+    echo "curl: (5) Could not resolve proxy" >&2
+    exit 5
+fi
 if [[ "$*" == *"health"* ]]; then
     echo '{{"status":"ok","version":"{version}"}}'
 fi
