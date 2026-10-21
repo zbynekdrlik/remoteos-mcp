@@ -126,6 +126,7 @@ def test_a_valid_manifest_parses_with_defaults():
         ({"projects": {"p": _project(config="relative.json")}}, "config must be"),
         ({"projects": {"p": _project(machines=["a-1", "a-1"])}}, "twice"),
         ({"projects": {"p": _project(machines=["bad name"])}}, "machines must be"),
+        ({"projects": {"p": _project(machines=[])}}, "no machines"),
         ({"projects": {"p": _project(mode="proxy")}}, "mode must be"),
         ({"projects": {"p": _project(), "q": _project()}}, "same config file"),
         ({"projects": {"-bad": _project()}}, "invalid project name"),

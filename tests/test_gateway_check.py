@@ -88,6 +88,7 @@ def test_an_ok_to_401_change_notifies_once_and_a_repeat_does_not(tmp_path, monke
 
         box.accept_keys = [rotated]  # the box was re-keyed outside the key store
         second = check.run(gateway.base_url)
+        changed_at = check.state()["checked_at"]
         third = check.run(gateway.base_url)
 
     assert second.exit_code == 0 and third.exit_code == 0, second.output + third.output
@@ -96,7 +97,8 @@ def test_an_ok_to_401_change_notifies_once_and_a_repeat_does_not(tmp_path, monke
     status = check.state()
     entry = status["machines"]["linux-cam2"]
     assert entry["state"] == "401"
-    assert entry["since"] == status["checked_at"] or entry["since"] < status["checked_at"]
+    assert status["checked_at"] != changed_at  # millisecond stamps: two runs never share one
+    assert entry["since"] == changed_at  # when the change was SEEN, carried through the third run
     assert stat.S_IMODE(os.stat(check.status).st_mode) == 0o600
     assert stat.S_IMODE(os.stat(check.status.parent).st_mode) == 0o700
     texts = [first.output, second.output, third.output, caplog.text, check.status.read_text(), body]
@@ -205,3 +207,80 @@ def test_without_airuleset_a_change_is_a_log_line(tmp_path, monkeypatch, caplog)
     assert any("linux-cam4" in r.getMessage() and "unreachable" in r.getMessage() for r in caplog.records)
     assert check.state()["machines"]["linux-cam4"]["notified"] is True  # the log line WAS the notification
     assert key not in caplog.text
+
+
+# -- review round 1: the repair's failure paths, and a check that cannot run ----------------------
+
+
+def _repair_setup(check, tmp_path, monkeypatch, *, box_key: str, file_key: str | None, ssh_deny: bool = False):
+    install_fake_remote_tools(tmp_path / "bin", monkeypatch)
+    if ssh_deny:
+        monkeypatch.setenv("FAKE_SSH_DENY", "1")
+    key_file = tmp_path / "box" / "config.json"
+    if file_key is not None:
+        write_private_json(key_file, {"auth_key": file_key})
+    return {"ssh": "root@cam2.lan", "key_file": str(key_file)}
+
+
+def test_a_repair_that_cannot_read_or_whose_key_is_rejected_too_stays_401(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    stale, real, wrong = fresh_secret("stale"), fresh_secret("real"), fresh_secret("wrong")
+    with FakeFleetMachine(accept_keys=(real,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        recipe = _repair_setup(check, tmp_path, monkeypatch, box_key=real, file_key=wrong)
+        check.store({"linux-cam2": {"url": box.url, "key": stale, "repair": recipe}})
+        rejected = check.run(gateway.base_url)
+        rejected_detail = check.state()["machines"]["linux-cam2"]["detail"]
+
+        monkeypatch.setenv("FAKE_SSH_DENY", "1")
+        unreadable = check.run(gateway.base_url)
+        unreadable_detail = check.state()["machines"]["linux-cam2"]["detail"]
+
+    assert rejected.exit_code == unreadable.exit_code == 0
+    assert check.state()["machines"]["linux-cam2"]["state"] == "401"
+    assert "not accepted either" in rejected_detail
+    assert "repair failed: ssh root@cam2.lan exit 255" in unreadable_detail
+    assert json.loads(check.keystore.read_text(encoding="utf-8"))["linux-cam2"]["key"] == stale  # never guessed
+    _assert_no_secret([rejected.output, unreadable.output, check.status.read_text()], [stale, real, wrong])
+
+
+def test_a_set_key_during_a_repair_wins_and_the_key_store_is_not_rewritten(tmp_path, monkeypatch):
+    from remoteos.gateway import check as check_module
+
+    check = Check(tmp_path, monkeypatch)
+    stale, real, concurrent = fresh_secret("stale"), fresh_secret("real"), fresh_secret("concurrent")
+    original = check_module.read_key_by_recipe
+    seen: dict = {}
+
+    def recipe_while_set_key_runs(entry, *, ssh_bin):
+        result = original(entry, ssh_bin=ssh_bin)
+        store = json.loads(check.keystore.read_text(encoding="utf-8"))
+        store["linux-cam2"]["key"] = concurrent  # an owner's `machine set-key` lands right now
+        write_private_json(check.keystore, store)
+        seen["stat"] = os.stat(check.keystore)
+        return result
+
+    monkeypatch.setattr(check_module, "read_key_by_recipe", recipe_while_set_key_runs)
+    with FakeFleetMachine(accept_keys=(real,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        recipe = _repair_setup(check, tmp_path, monkeypatch, box_key=real, file_key=real)
+        check.store({"linux-cam2": {"url": box.url, "key": stale, "repair": recipe}})
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(check.keystore.read_text(encoding="utf-8"))["linux-cam2"]["key"] == concurrent
+    after = os.stat(check.keystore)
+    assert (after.st_ino, after.st_mtime_ns) == (seen["stat"].st_ino, seen["stat"].st_mtime_ns)  # untouched
+    assert "changed meanwhile" in check.state()["machines"]["linux-cam2"]["detail"]
+
+
+def test_a_check_that_cannot_run_is_announced_once(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    check.keystore.parent.mkdir(parents=True, exist_ok=True)
+    check.keystore.write_text('{"linux-cam1": {"url": "ftp://bad", "key": "k"}}', encoding="utf-8")
+    with FakeFleetMachine(healthz=True) as gateway:
+        first = check.run(gateway.base_url)
+        second = check.run(gateway.base_url)
+
+    assert first.exit_code == 1 and second.exit_code == 1
+    [body] = check.notifications()  # once, not every 10 minutes
+    assert "key store" in body
+    assert check.state()["error"]["notified"] is True

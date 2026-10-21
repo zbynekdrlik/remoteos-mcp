@@ -440,20 +440,36 @@ def test_an_unparseable_config_is_never_overwritten(fleet):
     assert "camera-box@dev1" not in load_registry(fleet.registry).consumers
 
 
-def test_a_project_leaving_the_manifest_loses_its_managed_consumer_but_a_hand_made_one_is_refused(fleet):
+def test_a_project_leaving_the_manifest_loses_access_keeps_its_token_and_prune_removes_it(fleet):
     path = fleet.write_config("camera-box", fleet.camera_box_text())
     other = fleet.write_config("obs-studio", '{\n  "mcpServers": {}\n}\n')
     obs = {"host": "dev1", "account": ME, "config": str(other), "machines": ["win-stream-snv"]}
     fleet.write_manifest({"camera-box": fleet.camera_box_project(), "obs-studio": obs})
     assert fleet.run().exit_code == 0
-    assert "obs-studio@dev1" in load_registry(fleet.registry).consumers
+    token = fleet.token_of(other, "win-stream-snv")
 
     fleet.write_manifest({"camera-box": fleet.camera_box_project()})
     dropped = fleet.run()
 
     assert dropped.exit_code == 0, dropped.output
+    kept = load_registry(fleet.registry).consumers["obs-studio@dev1"]
+    assert kept.machines == []  # access withdrawn: never broader than the manifest
+    assert kept.sha256 == [token_sha256(token)]  # but the token survives a mistaken edit
+    assert "obs-studio@dev1" in dropped.output and "--prune" in dropped.output
+
+    fleet.write_manifest({"camera-box": fleet.camera_box_project(), "obs-studio": obs})
+    restored = fleet.run()
+
+    assert restored.exit_code == 0, restored.output
+    assert fleet.token_of(other, "win-stream-snv") == token  # same token: no session restart needed
+    assert load_registry(fleet.registry).consumers["obs-studio@dev1"].machines == ["win-stream-snv"]
+
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    pruned = fleet.run("--prune")
+
+    assert pruned.exit_code == 0, pruned.output
     assert "obs-studio@dev1" not in load_registry(fleet.registry).consumers
-    assert "obs-studio@dev1" in dropped.output
+    assert "camera-box@dev1" in load_registry(fleet.registry).consumers
 
     # a consumer of the same name that sync did NOT create is never taken over
     registry = json.loads(fleet.registry.read_text(encoding="utf-8"))
@@ -481,3 +497,126 @@ def test_a_manifest_machine_that_is_not_exposed_is_written_but_warned_about(flee
     assert "linux-cam2" in fleet.servers(path)
     assert "linux-cam2 is not exposed" in result.output
     assert load_registry(fleet.registry).exposed == ["win-stream-snv", "linux-cam1"]  # never re-exposed
+
+
+# -- review round 1: the failure paths ---------------------------------------------------------
+
+
+def test_a_write_that_landed_but_reported_failure_never_leaves_the_file_token_unknown(fleet, monkeypatch):
+    from remoteos.gateway import targets
+
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    original = targets.Target.write
+
+    def landed_then_lost(self, config, text, tag):
+        original(self, config, text, tag)  # the file IS replaced...
+        raise targets.TargetError("ssh: connection lost after the write")  # ...but the reply is lost
+
+    monkeypatch.setattr(targets.Target, "write", landed_then_lost)
+    failed = fleet.run()
+
+    assert failed.exit_code == 1
+    token = fleet.token_of(path, "linux-cam1")
+    consumer = load_registry(fleet.registry).consumers["camera-box@dev1"]
+    assert token_sha256(token) in consumer.sha256  # the gateway knows the token the file holds
+    assert consumer.machines == ["win-stream-snv", "linux-cam1", "linux-cam2"]  # the manifest, no more
+
+    monkeypatch.setattr(targets.Target, "write", original)
+    again = fleet.run()
+
+    assert again.exit_code == 0, again.output
+    assert load_registry(fleet.registry).consumers["camera-box@dev1"].sha256 == [token_sha256(token)]
+    assert fleet.token_of(path, "linux-cam1") == token
+
+
+def test_the_token_is_registered_before_the_file_carrying_it_is_written(fleet, monkeypatch):
+    from remoteos.gateway import targets
+
+    fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    original = targets.Target.write
+    known_at_write: list[bool] = []
+
+    def checking_write(self, config, text, tag):
+        token = json.loads(text)["mcpServers"]["linux-cam1"]["headers"]["Authorization"].split(" ", 1)[1]
+        consumer = load_registry(fleet.registry).consumers.get("camera-box@dev1")
+        known_at_write.append(consumer is not None and token_sha256(token) in consumer.sha256)
+        return original(self, config, text, tag)
+
+    monkeypatch.setattr(targets.Target, "write", checking_write)
+
+    assert fleet.run().exit_code == 0
+    assert known_at_write == [True]
+
+
+def test_a_failing_project_keeps_its_consumer_whose_allow_list_only_narrows(fleet):
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    token = fleet.token_of(path, "linux-cam1")
+
+    path.write_text('{"mcpServers": ', encoding="utf-8")  # the config broke meanwhile
+    fleet.write_manifest(
+        {"camera-box": fleet.camera_box_project(machines=("win-stream-snv", "linux-cam1", "linux-presenter"))}
+    )
+    result = fleet.run()
+
+    assert result.exit_code == 1
+    consumer = load_registry(fleet.registry).consumers["camera-box@dev1"]
+    assert consumer.machines == ["win-stream-snv", "linux-cam1"]  # cam2 withdrawn, presenter NOT granted
+    assert consumer.sha256 == [token_sha256(token)]
+    assert path.read_text(encoding="utf-8") == '{"mcpServers": '
+
+
+def test_an_empty_manifest_is_refused_and_withdraws_nothing(fleet):
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    before = fleet.registry.read_bytes()
+
+    fleet.write_manifest({})  # a truncated or emptied projects.toml
+    result = fleet.run("--prune")
+
+    assert result.exit_code != 0
+    assert "no projects" in result.output
+    assert fleet.registry.read_bytes() == before
+    assert path.exists()
+
+
+def test_a_config_whose_entries_do_not_change_is_left_byte_identical_whatever_its_layout(fleet):
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    compact = json.dumps(json.loads(path.read_text(encoding="utf-8")), separators=(",", ":"))
+    path.write_text(compact, encoding="utf-8")  # same entries, the owner's own compact layout
+    mtime = os.stat(path).st_mtime_ns
+
+    result = fleet.run()
+
+    assert result.exit_code == 0, result.output
+    assert "camera-box: unchanged" in result.output
+    assert path.read_text(encoding="utf-8") == compact
+    assert os.stat(path).st_mtime_ns == mtime
+
+
+def test_direct_mode_is_refused_for_another_account_even_on_the_gateway_host(fleet):
+    fleet.write_manifest(
+        {
+            "fohmixer": {
+                "host": "dev1",
+                "account": "fohmixer" if ME != "fohmixer" else "someoneelse",
+                "config": "~/.claude/mcp-configs/fohmixer.mcp.json",
+                "mode": "direct",
+                "machines": ["linux-cam1"],
+            }
+        }
+    )
+    before = fleet.registry.read_bytes()
+
+    result = fleet.run()
+
+    assert result.exit_code != 0
+    assert f"only for the gateway's own account ({ME}@dev1)" in result.output
+    assert "Nothing was changed" in result.output
+    assert fleet.registry.read_bytes() == before

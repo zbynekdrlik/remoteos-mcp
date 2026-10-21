@@ -38,6 +38,8 @@ def _import(tmp_path, *args, input=None):
             str(tmp_path / "cfg" / "registry.json"),
             "--machines",
             str(tmp_path / "cfg" / "machines.json"),
+            "--manifest",
+            str(tmp_path / "cfg" / "projects.toml"),
             "machine",
             "import",
             *args,
@@ -149,3 +151,58 @@ def test_import_keeps_a_machine_repair_recipe_and_counts_the_store_copy(tmp_path
     store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
     assert store == {"linux-cam2": {"url": box.url, "key": new, "repair": recipe}}
     assert "a DIFFERENT copy is in: key store" in result.output
+
+
+# -- review round 1 -------------------------------------------------------------------------------
+
+
+def test_import_never_replaces_the_key_store_entry_with_an_unverified_copy(tmp_path):
+    newer, stale = fresh_secret("newerkey"), fresh_secret("stalekey")
+    url = closed_port_url()  # the box is down: nothing can be verified
+    write_private_json(tmp_path / "cfg" / "machines.json", {"linux-cam4": {"url": url, "key": newer}})
+    a = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam4": _entry(url, stale)})
+    b = _config(tmp_path / "configs" / "restreamer.mcp.json", {"linux-cam4": _entry(url, stale)})
+
+    result = _import(tmp_path, "--from", str(a), "--from", str(b))
+
+    assert result.exit_code == 0, result.output
+    store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
+    assert store["linux-cam4"]["key"] == newer  # a set-key made while the box was down survives
+    assert "kept the key store's current copy" in result.output
+    for secret in (newer, stale):
+        assert secret not in result.output
+
+
+def test_import_never_re_exposes_a_machine_the_key_store_already_had(tmp_path):
+    key, new_key = fresh_secret("key"), fresh_secret("newkey")
+    with FakeFleetMachine(accept_keys=(key, new_key)) as box:
+        write_private_json(tmp_path / "cfg" / "machines.json", {"linux-cam1": {"url": box.url, "key": key}})
+        write_private_json(tmp_path / "cfg" / "registry.json", {"exposed": [], "consumers": {}})  # unexposed on purpose
+        config = _config(
+            tmp_path / "configs" / "camera-box.mcp.json",
+            {"linux-cam1": _entry(box.url, key), "linux-cam2": _entry(box.url, new_key)},
+        )
+
+        result = _import(tmp_path, "--from", str(config))
+
+    assert result.exit_code == 0, result.output
+    assert load_registry(tmp_path / "cfg" / "registry.json").exposed == ["linux-cam2"]  # only the NEW machine
+
+
+def test_import_skips_entries_of_the_manifest_gateway_url_not_only_the_default(tmp_path):
+    key, token = fresh_secret("key"), fresh_secret("projtoken")
+    manifest = tmp_path / "cfg" / "projects.toml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text('[gateway]\nurl = "http://gw.example.test:9999"\n', encoding="utf-8")
+    with FakeFleetMachine(accept_keys=(key,)) as box:
+        generated = _entry("http://gw.example.test:9999/linux-cam2/mcp", token)
+        config = _config(
+            tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam1": _entry(box.url, key), "linux-cam2": generated}
+        )
+
+        result = _import(tmp_path, "--from", str(config))
+
+    assert result.exit_code == 0, result.output
+    store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
+    assert set(store) == {"linux-cam1"}  # the project token behind the manifest's gateway is no machine key
+    assert token not in result.output
