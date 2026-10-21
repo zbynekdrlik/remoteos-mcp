@@ -9,6 +9,7 @@ under it), and the flags that decide "nothing was switched" are pinned. Same fak
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 from linux_installer_harness import (
@@ -261,3 +262,55 @@ class TestAProxiedBox:
         assert result.returncode == 0, output(result)
         state = box.state()
         assert state["active"] and state["enabled"] and state["service"]["version"] == SOURCE_VERSION
+
+
+class TestNeverFromInsideTheUnit:
+    """Review round 13: from the agent's own MCP Shell the run is inside remoteos-mcp.service's
+    cgroup, so the switch's restart (or the uninstaller's stop) kills the run half-way. It is
+    refused before anything changes."""
+
+    def test_an_install_from_the_agent_s_own_shell_changes_nothing(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        box.run_inside_the_service()
+        before = box.snapshot()
+
+        result = box.run()
+
+        assert result.returncode != 0, output(result)
+        assert "nothing was changed" in output(result) and "SSH" in output(result)
+        assert box.snapshot() == before and box.curl_requests() == []
+        assert box.state()["active"]
+
+    def test_an_uninstall_from_the_agent_s_own_shell_changes_nothing(self, tmp_path: Path) -> None:
+        box = linux_box(tmp_path)
+        assert box.run().returncode == 0
+        box.run_inside_the_service()
+        before = box.snapshot()
+
+        result = box.run(script=box.uninstaller())
+
+        assert result.returncode != 0, output(result)
+        assert "nothing was changed" in output(result)
+        assert box.snapshot() == before and box.state()["active"]
+
+
+class TestTheBuildIsReadableByTheServiceAccount:
+    def test_every_directory_and_file_of_a_new_build_is_readable_by_another_account(self, tmp_path: Path) -> None:
+        """Review round 13: a desktop unit runs as the desktop user. `mktemp -d` makes the build
+        0700 and the lock's umask 077 would make pip's files 0600; the installer's chmod 755 and
+        `umask 022` keep the build readable (the fake systemd never runs as User=, so only this
+        pins them)."""
+        box = linux_box(tmp_path, graphical=True)
+
+        assert box.run().returncode == 0
+        build = box.venv_target()
+        bad = []
+        for path in [build, *build.rglob("*")]:
+            if path.is_symlink():
+                continue
+            mode = path.stat().st_mode
+            need = 0o005 if stat.S_ISDIR(mode) else 0o004
+            if mode & need != need:
+                bad.append(f"{oct(mode & 0o777)} {path.relative_to(build)}")
+        assert bad == [], bad[:8]

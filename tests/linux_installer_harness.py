@@ -243,6 +243,11 @@ class LinuxBox:
         state_path.write_text(json.dumps(state, indent=1))
 
     # --- running -----------------------------------------------------------
+    def run_inside_the_service(self) -> None:
+        """The next runs come from the agent's own Shell: inside remoteos-mcp.service's cgroup,
+        where the unit's restart (or stop) kills them."""
+        (self.root / "cgroup").write_text("0::/system.slice/remoteos-mcp.service\n")
+
     def uninstaller(self) -> Path:
         """uninstall-linux.sh, redirected to this box's paths."""
         return _redirected(UNINSTALLER_LINUX, self.root, self.config_dir, self.unit_path, self.venv_link,
@@ -354,6 +359,7 @@ def _redirected(script: Path, tmp_path: Path, config_dir: Path, unit_path: Path,
         'LOCK_FILE="/run/remoteos-mcp-install.lock"': f'LOCK_FILE="{tmp_path / "install.lock"}"',
         "HEALTH_TRIES=12": "HEALTH_TRIES=3",
         "HEALTH_SLEEP=5": "HEALTH_SLEEP=0",
+        'CGROUP_FILE="/proc/self/cgroup"': f'CGROUP_FILE="{tmp_path / "cgroup"}"',
     }.items():
         content = content.replace(old, new)
     assert str(config_dir) in content and str(unit_path) in content, f"{script.name}'s paths were not redirected"
@@ -377,6 +383,8 @@ def linux_box(tmp_path: Path, *, graphical: bool | str = False, display: str = "
     venv_link.parent.mkdir()
     system_extra = tmp_path / "system-extra"
     system_extra.mkdir()
+    # /proc/self/cgroup of the run: an ssh session's (LinuxBox.run_inside_the_service changes it).
+    (tmp_path / "cgroup").write_text("0::/user.slice/user-1000.slice/session-2.scope\n")
 
     # The SYSTEM python's pip (the pre-#12 layout) is fake_pip.py on a fake /usr/local site.
     pip = setup_fake_pip(tmp_path, shims, new_version=LEGACY_VERSION)
