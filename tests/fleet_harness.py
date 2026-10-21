@@ -181,6 +181,35 @@ def install_fake_remote_tools(bin_dir: Path, monkeypatch) -> Path:
     return log
 
 
+_FAKE_AIRULESET = '''#!{python}
+import json, os, sys
+with open(os.environ["FAKE_NOTIFY_LOG"], "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+sys.exit(int(os.environ.get("FAKE_NOTIFY_EXIT", "0")))
+'''
+
+
+def install_fake_airuleset(directory: Path, monkeypatch) -> tuple[Path, Path]:
+    """A stand-in ``airuleset.py`` whose ``notify`` logs its argv (JSON line) to the returned log.
+
+    ``FAKE_NOTIFY_EXIT`` makes it fail like a Discord send that did not go out.
+    """
+    import sys
+
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "airuleset.py"
+    script.write_text(_FAKE_AIRULESET.format(python=sys.executable), encoding="utf-8")
+    log = directory / "notify-calls.jsonl"
+    monkeypatch.setenv("FAKE_NOTIFY_LOG", str(log))
+    return script, log
+
+
+def notify_calls(log: Path) -> list[list[str]]:
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def remote_calls(log: Path) -> list[dict]:
     if not log.exists():
         return []
