@@ -101,7 +101,7 @@ def read_key_by_recipe(entry: MachineEntry, *, ssh_bin: str) -> tuple[str | None
     try:
         key = json.loads(proc.stdout.decode("utf-8")).get("auth_key")
         validate_key(key if isinstance(key, str) else "")
-    except (ValueError, AttributeError, MachineSourceError):
+    except (ValueError, AttributeError, RecursionError, MachineSourceError):
         return None, f"repair failed: {recipe.key_file} on {recipe.ssh} holds no valid auth_key"
     return key, f"key re-read from {recipe.ssh}:{recipe.key_file}"
 
@@ -124,6 +124,9 @@ async def _repair(name: str, entry: MachineEntry, *, keystore_path: Path, ssh_bi
             entries[name] = MachineEntry(url=current.url, key=key, repair=current.repair)
     except MachineSourceError as exc:  # it turned invalid since the load: the next run announces that
         return Observation(STATE_UNAUTHORIZED, f"repair skipped: the key store is unreadable now ({exc})")
+    except OSError as exc:  # a read-only directory, a full disk, a lock file it cannot create
+        reason = exc.strerror or type(exc).__name__
+        return Observation(STATE_UNAUTHORIZED, f"repair skipped: the key store cannot be written ({reason})")
     logger.warning("check: %s repaired (%s)", name, what)
     return Observation(STATE_OK, f"repaired: {what}", repaired=True)
 
@@ -135,7 +138,11 @@ async def observe(
     observations = {name: Observation(r.state, r.detail) for name, r in results.items()}
     for name, result in results.items():
         if result.state == STATE_UNAUTHORIZED and entries[name].repair is not None:
-            observations[name] = await _repair(name, entries[name], keystore_path=keystore_path, ssh_bin=ssh_bin)
+            try:
+                observations[name] = await _repair(name, entries[name], keystore_path=keystore_path, ssh_bin=ssh_bin)
+            except Exception as exc:  # one box's repair never blinds the run for every other machine
+                logger.error("check: %s repair failed unexpectedly: %s", name, type(exc).__name__)
+                observations[name] = Observation(STATE_UNAUTHORIZED, f"repair failed: {type(exc).__name__}")
     return observations, Observation(health.state, health.detail)
 
 
@@ -148,8 +155,8 @@ def load_status(path: Path) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError, UnicodeDecodeError) as exc:
-        logger.error("check: status file %s unreadable (%s) — starting over", path, exc)
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+        logger.error("check: status file %s unreadable (%s) — starting over", path, type(exc).__name__)
         return {}
     return data if isinstance(data, dict) else {}
 

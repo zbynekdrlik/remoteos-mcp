@@ -160,8 +160,12 @@ paths:
   machine a consumer already allows but that is not exposed (a kill switch from before #51)
   stays unexposed, with a warning; the dry run lists what it would expose.
   - A machine first seen `ok` is not announced.
-  - A repair stores the re-read key only if the machine accepts it AND the stored key did not
-    change meanwhile (a concurrent `set-key` wins).
+  - A repair stores the re-read key only if the machine accepts it AND the stored url + key did
+    not change meanwhile (a concurrent `set-key` wins).
+  - No single machine can blind the run (review rounds 4-5): a probe that raises
+    (`gather_probes`), a key store the repair cannot write (`OSError`), a key file nested too
+    deep (`RecursionError`), or any other repair exception (the guard in `observe`) becomes a
+    result / 401 detail for THAT machine; the status is still written and the rest announced.
   - The notification (Slovak, phone-readable) goes out through
     `airuleset.py notify --body [--owner-name]`. The unit sets
     `REMOTEOS_GATEWAY_NOTIFY_OWNER`: a headless caller has no tmux pane for airuleset to find

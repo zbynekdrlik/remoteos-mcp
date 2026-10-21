@@ -43,9 +43,18 @@ The exception is the remoteos-mcp project itself (`mode = "direct"`). It keeps D
 down. Every other entry (n8n, playwright, codex-bridge, ...) is never touched: it stays
 byte-equal. Edit those by hand as before.
 
+A session's 401 / `AUTH_HEADER_REJECTED` has TWO causes since #51. Tell them apart first, on dev1:
+`remoteos-gateway log --consumer <project>@<host> --tail 5`, or `machines-status.json`.
+
+- outcome `upstream_denied` (status says `401` for the machine): the MACHINE key is stale → `machine set-key`.
+- outcome `denied_unknown_token`: the PROJECT token is not registered (revoked, `--prune`d, a
+  restored old config) → `remoteos-gateway sync-configs` (it mints and registers a new one;
+  the session then needs one restart).
+
 | Situation | Do this (on dev1) |
 |---|---|
-| A machine key changed (a session gets 401 / `AUTH_HEADER_REJECTED`) | `remoteos-gateway machine set-key <machine>` with the key on stdin. Every gateway project gets it on its next call: no config change, no reconnect. Then `remoteos-gateway sync-configs` refreshes the direct remoteos-mcp copy. |
+| A machine key changed (`upstream_denied`) | `remoteos-gateway machine set-key <machine>` with the key on stdin. Every gateway project gets it on its next call: no config change, no reconnect. Then `remoteos-gateway sync-configs` refreshes the direct remoteos-mcp copy. |
+| A project's token is refused (`denied_unknown_token`) | `remoteos-gateway sync-configs`, then restart that project's sessions once. |
 | Add a machine to a project | Add it to `machines` in `projects.toml`, then `remoteos-gateway sync-configs`. |
 | A brand-new machine | `remoteos-gateway machine set-key <machine> --url http://<box>:8092/mcp` (key on stdin, it is probed), then the line above. |
 | A new project | One `[projects.<name>]` table, then `remoteos-gateway sync-configs`, then `link-mcp.sh <project>` (below). |
