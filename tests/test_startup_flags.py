@@ -17,6 +17,7 @@ import datetime
 import ipaddress
 import json
 import os
+import secrets
 import socket
 import ssl
 import subprocess
@@ -89,7 +90,7 @@ def _self_signed_cert(tmp_path):
 
 
 class _Server:
-    def __init__(self, tmp_path, args: list[str]):
+    def __init__(self, tmp_path, args: list[str], env: dict[str, str] | None = None):
         self.port = _free_port()
         self.log_path = tmp_path / "server.log"
         self._log = open(self.log_path, "wb")
@@ -97,7 +98,7 @@ class _Server:
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "remoteos", "--port", str(self.port), "--config", str(config), *args],
             cwd=tmp_path,
-            env=_child_env(tmp_path),
+            env={**_child_env(tmp_path), **(env or {})},
             stdout=self._log,
             stderr=subprocess.STDOUT,
         )
@@ -121,16 +122,15 @@ class _Server:
                 time.sleep(0.2)
         pytest.fail(f"server did not answer {url} within {_START_TIMEOUT}s:\n{self.output()[-3000:]}")
 
-    def call_tool(self, name: str, arguments: dict) -> str:
+    def call_tool(self, name: str, arguments: dict, key: str | None = None) -> str:
         """One stateless MCP ``tools/call`` over streamable HTTP; returns the raw (SSE) response body."""
         body = json.dumps(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
         ).encode()
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}/mcp",
-            data=body,
-            headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
-        )
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/mcp", data=body, headers=headers)
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.read().decode("utf-8", "replace")
 
@@ -149,8 +149,8 @@ class _Server:
 def start_server(tmp_path):
     servers: list[_Server] = []
 
-    def _start(*args: str) -> _Server:
-        srv = _Server(tmp_path, list(args))
+    def _start(*args: str, env: dict[str, str] | None = None) -> _Server:
+        srv = _Server(tmp_path, list(args), env)
         servers.append(srv)
         return srv
 
@@ -187,6 +187,20 @@ def test_debug_log_never_carries_tool_arguments_or_replies(start_server):
     out = srv.output()
     assert "DEBUG remoteos.mcp: debug logging on" in out
     assert marker not in out
+
+
+def test_the_auth_key_from_the_environment_never_reaches_a_tool_s_child(start_server):
+    # The installers hand the key over in REMOTEOS_AUTH_KEY (#12), never an argv. The server
+    # must not pass it on: every Shell/App child would inherit it.
+    key = secrets.token_hex(16)
+    srv = start_server("--enable-all", env={"REMOTEOS_AUTH_KEY": key})
+    srv.health()
+    reply = srv.call_tool("Shell", {"command": "echo marker-$((40+2)); printenv REMOTEOS_AUTH_KEY; true"}, key=key)
+    assert "marker-42" in reply, reply  # authenticated, and the call really ran
+    assert key not in reply, "a Shell child inherited the auth key"
+    with pytest.raises(urllib.error.HTTPError) as refused:
+        srv.call_tool("Shell", {"command": "true"})
+    assert refused.value.code == 401  # the key is still enforced
 
 
 def test_reload_flag_warns_instead_of_crashing(start_server):
