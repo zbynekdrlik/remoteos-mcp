@@ -284,3 +284,17 @@ def test_a_first_import_never_opens_a_machine_whose_kill_switch_was_engaged(tmp_
     assert real.exit_code == 0, real.output
     assert load_registry(tmp_path / "cfg" / "registry.json").exposed == ["linux-cam1"]
     assert "win-pz-server" in real.output and "left unexposed" in real.output
+
+
+# -- review round 4 -------------------------------------------------------------------------------
+
+
+def test_one_unreadable_from_file_next_to_a_good_one_imports_nothing(tmp_path):
+    key = fresh_secret("key")
+    with FakeFleetMachine(accept_keys=(key,)) as box:
+        good = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam1": _entry(box.url, key)})
+        result = _import(tmp_path, "--from", str(good), "--from", str(tmp_path / "configs" / "typo.mcp.json"))
+
+    assert result.exit_code == 1 and "typo.mcp.json" in result.output  # a typo must not import half a fleet
+    assert not (tmp_path / "cfg" / "machines.json").exists()
+    assert key not in result.output

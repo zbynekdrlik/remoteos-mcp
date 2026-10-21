@@ -13,6 +13,7 @@ import json
 import os
 import stat
 
+import pytest
 from click.testing import CliRunner
 from fleet_harness import (
     FakeFleetMachine,
@@ -377,3 +378,120 @@ def test_a_box_re_keyed_after_an_ok_run_is_repaired_and_announced_once(tmp_path,
     assert json.loads(check.keystore.read_text(encoding="utf-8"))["linux-cam2"]["key"] == new
     assert check.state()["machines"]["linux-cam2"]["state"] == "ok"
     _assert_no_secret([body, repaired.output, check.status.read_text()], [old, new])
+
+
+# -- review round 4 -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url", ["http://cam1.lan:99999/mcp", "http://cam1.lan:80a/mcp", "http:///mcp"])
+def test_a_key_store_url_with_a_bad_port_or_no_host_is_announced_never_a_silent_crash(tmp_path, monkeypatch, url):
+    check = Check(tmp_path, monkeypatch)
+    check.keystore.parent.mkdir(parents=True, exist_ok=True)
+    check.keystore.write_text(json.dumps({"linux-cam1": {"url": url, "key": "k1"}}), encoding="utf-8")
+    with FakeFleetMachine(healthz=True) as gateway:
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    [body] = check.notifications()
+    assert "NEBEŽÍ" in body and "linux-cam1" in body
+
+
+def test_one_probe_that_raises_never_takes_the_whole_check_down(tmp_path, monkeypatch):
+    from remoteos.gateway import check as check_module
+
+    check = Check(tmp_path, monkeypatch)
+    key = fresh_secret("key")
+    original = check_module.probe_initialize
+
+    async def flaky(client, url, authorization):
+        if "cam9" in url:
+            raise OverflowError("port out of range")  # whatever a transport may still throw
+        return await original(client, url, authorization)
+
+    monkeypatch.setattr(check_module, "probe_initialize", flaky)
+    with FakeFleetMachine(accept_keys=(key,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        check.store(
+            {"linux-cam1": {"url": box.url, "key": key}, "linux-cam9": {"url": "http://cam9.lan:8092/mcp", "key": key}}
+        )
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 0, result.output
+    machines = check.state()["machines"]
+    assert machines["linux-cam1"]["state"] == "ok"
+    assert machines["linux-cam9"]["state"] == "error" and "OverflowError" in machines["linux-cam9"]["detail"]
+
+
+def test_a_fleet_wide_change_is_announced_in_chunks_that_airuleset_never_cuts(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    names = [f"linux-machine-number-{i:02d}" for i in range(30)]
+    check.store({name: {"url": closed_port_url(), "key": fresh_secret("k")} for name in names})
+    with FakeFleetMachine(healthz=True) as gateway:
+        assert check.run(gateway.base_url).exit_code == 0
+
+    bodies = check.notifications()
+    assert len(bodies) >= 2
+    assert all(len(body) <= 1700 for body in bodies)  # airuleset cuts mention + body at 1900
+    for name in names:
+        assert any(name in body for body in bodies), name
+    assert all(record["notified"] for record in check.state()["machines"].values())
+
+
+def test_only_the_machines_of_a_delivered_chunk_count_as_notified(tmp_path, monkeypatch):
+    from remoteos.gateway import check as check_module
+
+    sent: list[str] = []
+
+    def second_chunk_fails(body: str) -> bool:
+        sent.append(body)
+        return len(sent) != 2
+
+    check = Check(tmp_path, monkeypatch)
+    names = [f"linux-machine-number-{i:02d}" for i in range(30)]
+    check.store({name: {"url": closed_port_url(), "key": fresh_secret("k")} for name in names})
+    with FakeFleetMachine(healthz=True) as gateway:
+        report = check_module.run_check(
+            check.keystore, check.status, gateway_url=gateway.base_url, notifier=second_chunk_fails
+        )
+
+    lost = {name for name in names if name in sent[1]}
+    assert lost
+    machines = report.status["machines"]
+    assert {n for n, r in machines.items() if not r["notified"]} == lost  # retried next run, the rest done
+
+
+def test_a_retried_repair_announcement_still_says_repaired_and_the_sync_hint(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    install_fake_remote_tools(tmp_path / "bin", monkeypatch)
+    old, new = fresh_secret("oldkey"), fresh_secret("newkey")
+    key_file = tmp_path / "box" / "config.json"
+    with FakeFleetMachine(accept_keys=(old,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        check.store(
+            {"linux-cam2": {"url": box.url, "key": old, "repair": {"ssh": "root@cam2.lan", "key_file": str(key_file)}}}
+        )
+        assert check.run(gateway.base_url).exit_code == 0
+        box.accept_keys = [new]
+        write_private_json(key_file, {"auth_key": new})
+        monkeypatch.setenv("FAKE_NOTIFY_STATUS", "error")  # the repaired notice does not go out...
+        assert check.run(gateway.base_url).exit_code == 0
+        monkeypatch.setenv("FAKE_NOTIFY_STATUS", "sent")  # ...and is retried on the next run
+        assert check.run(gateway.base_url).exit_code == 0
+
+    failed, delivered = check.notifications()
+    assert "repaired" in delivered and "sync-configs" in delivered
+
+
+def test_a_sudo_recipe_reads_the_key_file_with_sudo_n_and_a_403_counts_as_401(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    log = install_fake_remote_tools(tmp_path / "bin", monkeypatch)
+    monkeypatch.setenv("FAKE_SSH_DENY", "1")  # log the argv, run nothing (no real sudo in a test)
+    with FakeFleetMachine(status=403) as box, FakeFleetMachine(healthz=True) as gateway:
+        recipe = {"ssh": "admin@cam3.lan", "key_file": "/etc/remoteos-mcp/config.json", "sudo": True}
+        check.store({"linux-cam3": {"url": box.url, "key": fresh_secret("k"), "repair": recipe}})
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 0, result.output
+    assert check.state()["machines"]["linux-cam3"]["state"] == "401"
+    [call] = [c["argv"] for c in remote_calls(log) if c["tool"] == "ssh"]
+    assert call[-1] == "sudo -n cat /etc/remoteos-mcp/config.json"
+    assert "admin@cam3.lan" in call

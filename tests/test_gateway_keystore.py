@@ -219,3 +219,21 @@ def test_the_legacy_mcp_config_shape_still_loads_as_the_machine_source(tmp_path)
     assert machines[MACHINE].url == "http://cam.lan:8092/mcp"
     assert machines[MACHINE].authorization == f"Bearer {key}"
     assert key not in repr(machines)
+
+
+def test_a_no_op_edit_of_a_missing_key_store_creates_nothing(tmp_path):
+    from remoteos.gateway.keystore import edit_keystore
+
+    path = tmp_path / "cfg" / "machines.json"
+    with edit_keystore(path):
+        pass  # e.g. a repair or an import that ends up changing nothing while the store is gone
+
+    assert not path.exists()  # an empty key store = a gateway serving nothing
+
+
+@pytest.mark.parametrize("url", ["http://cam1.lan:99999/mcp", "http://cam1.lan:80a/mcp", "http:///mcp"])
+def test_a_url_with_a_bad_port_or_no_host_is_refused_by_the_key_store(tmp_path, url):
+    from remoteos.gateway.registry import MachineSourceError, parse_keystore
+
+    with pytest.raises(MachineSourceError, match="must be an http"):
+        parse_keystore({MACHINE: {"url": url, "key": "k1"}})

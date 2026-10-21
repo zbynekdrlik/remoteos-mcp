@@ -751,3 +751,22 @@ def test_a_malformed_url_in_a_project_config_is_skipped_by_import_not_a_crash(fl
     assert result.exit_code in (0, 1), result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "linux-cam9 url is not http(s)" in result.output
+
+
+# -- review round 4 -------------------------------------------------------------------------------
+
+
+def test_a_machine_removed_from_a_direct_project_takes_its_key_out_of_that_config(fleet):
+    path = fleet.write_config("remoteos-mcp", '{\n  "mcpServers": {\n    "n8n": {"command": "npx"}\n  }\n}\n')
+    project = {"host": "dev1", "account": ME, "config": str(path), "mode": "direct"}
+    fleet.write_manifest({"remoteos-mcp": {**project, "machines": ["linux-cam1", "linux-cam2"]}})
+    assert fleet.run().exit_code == 0
+    assert fleet.keys["linux-cam2"] in path.read_text(encoding="utf-8")
+
+    fleet.write_manifest({"remoteos-mcp": {**project, "machines": ["linux-cam1"]}})
+    result = fleet.run()
+
+    assert result.exit_code == 0, result.output
+    assert list(fleet.servers(path)) == ["n8n", "linux-cam1"]
+    assert fleet.keys["linux-cam2"] not in path.read_text(encoding="utf-8")  # never broader than the manifest
+    assert "- linux-cam2" in result.output
