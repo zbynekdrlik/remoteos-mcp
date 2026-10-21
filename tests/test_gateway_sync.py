@@ -914,3 +914,46 @@ def test_a_kept_entry_keeps_its_whole_member_text_key_included(fleet):
     assert fleet.run().exit_code == 0
 
     assert '"n8n\\u002dmcp" :  {"command": "npx"}' in path.read_text(encoding="utf-8")  # key, spacing, value
+
+
+# -- review round 8 -------------------------------------------------------------------------------
+
+
+def test_a_machine_removed_together_with_a_gateway_url_change_still_leaves_the_config(fleet):
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+
+    # ONE edit: the gateway moves AND linux-cam2 leaves the project
+    fleet.write_manifest(
+        {"camera-box": fleet.camera_box_project(machines=("win-stream-snv", "linux-cam1"))}, gateway="http://dev1:8796"
+    )
+    result = fleet.run()
+
+    assert result.exit_code == 0, result.output
+    servers = fleet.servers(path)
+    assert "linux-cam2" not in servers  # sync's own entry (its token says so), even at the old url
+    assert "- linux-cam2" in result.output
+    token = fleet.token_of(path, "linux-cam1")
+    assert servers["linux-cam1"]["url"] == "http://dev1:8796/linux-cam1/mcp"
+    assert load_registry(fleet.registry).consumers["camera-box@dev1"].sha256 == [token_sha256(token)]
+    assert "linux-presenter" in servers  # a hand-made entry is still never touched
+
+
+def test_a_config_that_cannot_be_written_as_utf8_fails_that_project_only(fleet):
+    odd = fleet.write_config("odd", '{"note": "\\ud800"}\n')  # no mcpServers + a lone surrogate escape
+    good = fleet.write_config("restreamer", '{\n  "mcpServers": {}\n}\n')
+    fleet.write_manifest(
+        {
+            "odd": {"host": "dev1", "account": ME, "config": str(odd), "machines": ["linux-cam1"]},
+            "restreamer": {"host": "dev1", "account": ME, "config": str(good), "machines": ["linux-cam2"]},
+        }
+    )
+
+    result = fleet.run()
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)  # no traceback
+    assert odd.read_text(encoding="utf-8") == '{"note": "\\ud800"}\n'
+    assert "linux-cam2" in fleet.servers(good)  # the other project still synced
+    assert "odd@dev1" not in load_registry(fleet.registry).consumers  # no token for an unwritable file

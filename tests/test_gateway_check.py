@@ -703,3 +703,21 @@ def test_repairs_run_concurrently_so_slow_boxes_never_exceed_the_unit_timeout(tm
     assert result.exit_code == 0, result.output
     assert elapsed < 4.5  # one after another would take at least 4 x 1.5 = 6 s
     assert all(r["state"] == "401" for r in check.state()["machines"].values())
+
+
+# -- review round 8 -------------------------------------------------------------------------------
+
+
+def test_a_machine_named_gateway_never_collides_with_the_gateways_own_record(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    check.store({"gateway": {"url": closed_port_url(), "key": fresh_secret("k")}})  # a legal machine name
+    down = closed_port_url().rsplit("/mcp", 1)[0]
+
+    result = check.run(down)  # the gateway's /healthz is down too
+
+    assert result.exit_code == 0, result.output
+    [body] = check.notifications()
+    assert "brána (gateway /healthz)" in body and "• gateway:" in body  # two lines, one each
+    status = check.state()
+    assert status["gateway"]["notified"] is True
+    assert status["machines"]["gateway"]["notified"] is True
