@@ -50,6 +50,24 @@ from remoteos.gateway.sync import SyncError, sync_configs
 from remoteos.gateway.targets import TargetError, target_for
 
 _LOCAL_HOST_HELP = "This host's name as the manifest's `host` spells it (dev1); other hosts are reached over ssh."
+_GATEWAY_URL_HELP = f"The gateway (default: the manifest's [gateway] url, else {DEFAULT_GATEWAY_URL})."
+
+
+def _gateway_url(paths, explicit: str | None, *, strict: bool) -> str:
+    """--gateway-url, else the manifest's [gateway] url, else the built-in default. An invalid
+    manifest is an error when *strict*, else (the unattended check) a warning + the default."""
+    if explicit:
+        return explicit.rstrip("/")
+    if not paths.manifest.exists():
+        return DEFAULT_GATEWAY_URL
+    try:
+        return load_manifest(paths.manifest).gateway_url
+    except ManifestError as exc:
+        if strict:
+            raise _fail(exc) from exc
+        log = logging.getLogger("remoteos.gateway.check")
+        log.warning("manifest unreadable (%s) — using %s", exc, DEFAULT_GATEWAY_URL)
+        return DEFAULT_GATEWAY_URL
 
 _RELOAD_NOTE = "A running gateway applies this on its next request (or SIGHUP) — no restart needed."
 
@@ -142,9 +160,7 @@ def machine_list(paths) -> None:
 )
 @click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
 @click.option("--match", default=DEFAULT_IMPORT_MATCH, show_default=True, help="Only entries whose name fully matches.")
-@click.option(
-    "--gateway-url", default=DEFAULT_GATEWAY_URL, show_default=True, help="Entries pointing here are skipped (tokens)."
-)
+@click.option("--gateway-url", default=None, help=_GATEWAY_URL_HELP + " Entries pointing there are skipped (tokens).")
 @click.option("--dry-run", is_flag=True, help="Report the choice per machine; write nothing.")
 @click.pass_obj
 def machine_import(
@@ -153,11 +169,12 @@ def machine_import(
     from_manifest: bool,
     local_host: str,
     match: str,
-    gateway_url: str,
+    gateway_url: str | None,
     dry_run: bool,
 ) -> None:
     """Build the key store from per-project MCP configs. For each machine, the copy the machine
     ACCEPTS (initialize -> 200) wins; conflicts and unverified machines are reported."""
+    gateway_url = _gateway_url(paths, gateway_url, strict=True)
     files = list(sources) or ([] if from_manifest else sorted(LEGACY_MACHINES_PATH.parent.glob("*.mcp.json")))
     texts: list[tuple[str, str]] = []
     for path in files:
@@ -203,7 +220,9 @@ def _import_and_report(paths, texts: list[tuple[str, str]], *, match: str, gatew
         return
     apply_import(paths.machines, decisions)
     click.echo(f"key store {paths.machines} written ({len(decisions)} machine(s) imported)")
-    newly = _expose(paths, [d.name for d in decisions])
+    # Only machines NEW to the key store are exposed: a known machine may be unexposed on
+    # purpose (the kill switch), and a re-import must not undo that.
+    newly = _expose(paths, [d.name for d in decisions if d.name not in existing])
     if newly:
         click.echo(f"exposed in the registry: {', '.join(newly)}")
     click.echo(_RELOAD_NOTE)
@@ -250,8 +269,13 @@ def _describe_recipe(recipe: RepairRecipe) -> str:
 @click.command("sync-configs")
 @click.option("--dry-run", is_flag=True, help="Show what would change (every secret masked); write nothing.")
 @click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
+@click.option(
+    "--prune",
+    is_flag=True,
+    help="Remove the consumers of projects that left the manifest (by default they only lose their machines).",
+)
 @click.pass_obj
-def sync_configs_command(paths, dry_run: bool, local_host: str) -> None:
+def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> None:
     """Generate every project's MCP config from the manifest: fleet entries through the gateway
     (one token per project, allow-list = the manifest); every other entry is left byte-equal."""
     try:
@@ -265,6 +289,7 @@ def sync_configs_command(paths, dry_run: bool, local_host: str) -> None:
             dry_run=dry_run,
             today=_dt.date.today().isoformat(),
             echo=click.echo,
+            prune=prune,
         )
     except (ManifestError, MachineSourceError, RegistryError, SyncError) as exc:
         raise _fail(exc) from exc
@@ -280,11 +305,12 @@ def sync_configs_command(paths, dry_run: bool, local_host: str) -> None:
 @click.option(
     "--status-file",
     type=click.Path(dir_okay=False, path_type=Path),
+    envvar="REMOTEOS_GATEWAY_STATUS_FILE",
     default=DEFAULT_STATUS_PATH,
     show_default=True,
     help="Where the machine states (ok / 401 / unreachable + since) are kept.",
 )
-@click.option("--gateway-url", default=DEFAULT_GATEWAY_URL, show_default=True, help="Its /healthz is probed too.")
+@click.option("--gateway-url", default=None, help=_GATEWAY_URL_HELP + " Its /healthz is probed too.")
 @click.option(
     "--airuleset",
     "airuleset_path",
@@ -298,12 +324,13 @@ def sync_configs_command(paths, dry_run: bool, local_host: str) -> None:
 @click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
 @click.pass_obj
 def check_command(
-    paths, status_file: Path, gateway_url: str, airuleset_path: Path, notify_owner: str | None, local_host: str
+    paths, status_file: Path, gateway_url: str | None, airuleset_path: Path, notify_owner: str | None, local_host: str
 ) -> None:
     """Probe every machine directly with its stored key + the gateway's /healthz; record the
     states and announce each change ONCE. A 401 is repaired only by an explicit recipe."""
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
+    gateway_url = _gateway_url(paths, gateway_url, strict=False)  # the watchdog never stops on the manifest
     try:
         report = run_check(
             paths.machines,

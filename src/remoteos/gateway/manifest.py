@@ -20,7 +20,8 @@
 
 Adding a machine or a project = one line here + ``remoteos-gateway sync-configs``. ``~`` in
 ``config`` is the home of ``account`` on ``host``. ``mode = "direct"`` writes the machine
-keys themselves, so it is allowed only on the gateway's own host (``sync.py`` checks).
+keys themselves, so it is allowed only for the gateway's own account (``sync.py`` checks).
+A project lists at least one machine; to take a project off, remove its table.
 """
 
 from __future__ import annotations
@@ -143,6 +144,8 @@ def _parse_project(name: str, raw: object, source: object) -> Project:
     machines = raw["machines"]
     if not isinstance(machines, list) or not all(isinstance(m, str) and is_valid_machine_name(m) for m in machines):
         raise ManifestError(f"{where} machines must be a list of machine names")
+    if not machines:
+        raise ManifestError(f"{where} lists no machines — remove the project from the manifest instead")
     if len(set(machines)) != len(machines):
         raise ManifestError(f"{where} lists a machine twice")
     mode = raw.get("mode", MODE_GATEWAY)

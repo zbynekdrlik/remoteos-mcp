@@ -42,6 +42,7 @@ from remoteos.gateway.registry import (
     DEFAULT_MACHINES_PATH,
     MachineEntry,
     MachineSourceError,
+    authorization_header,
     is_legacy_mcp_config,
     is_valid_machine_name,
     parse_keystore,
@@ -75,17 +76,6 @@ def bearer_value(header: str) -> str | None:
     return rest if scheme.lower() == "bearer" and rest else None
 
 
-def authorization_header(entry: object) -> str | None:
-    """An MCP-config entry's ``Authorization`` header value (any case), else None."""
-    headers = entry.get("headers") if isinstance(entry, dict) else None
-    if not isinstance(headers, dict):
-        return None
-    for name, value in headers.items():
-        if isinstance(name, str) and name.lower() == "authorization" and isinstance(value, str):
-            return value
-    return None
-
-
 # -- file I/O ---------------------------------------------------------------------------
 
 
@@ -104,20 +94,26 @@ def load_keystore(path: Path, *, missing_ok: bool = False) -> dict[str, MachineE
     return entries
 
 
+def _payload(entries: dict[str, MachineEntry]) -> str:
+    return json.dumps({name: entries[name].to_json() for name in sorted(entries)}, indent=2) + "\n"
+
+
 def save_keystore(path: Path, entries: dict[str, MachineEntry]) -> None:
     """Atomically write the key store, 0600 (its directory 0700 when created)."""
-    payload = json.dumps({name: entries[name].to_json() for name in sorted(entries)}, indent=2) + "\n"
-    fileops.atomic_write(str(path), payload.encode("utf-8"))
+    fileops.atomic_write(str(path), _payload(entries).encode("utf-8"))
     logger.info("key store %s written: %d machine(s)", path, len(entries))
 
 
 @contextlib.contextmanager
 def edit_keystore(path: Path) -> Iterator[dict[str, MachineEntry]]:
-    """Lock, load (missing = empty), yield the dict for editing, then save it."""
+    """Lock, load (missing = empty), yield the dict for editing, then save it — only when it
+    changed: every write makes the running gateway reload, and a no-op must not."""
     with fileops.exclusive_lock(str(path.with_name(path.name + ".lock"))):
         entries = load_keystore(path, missing_ok=True)
+        before = _payload(entries) if path.exists() else None
         yield entries
-        save_keystore(path, entries)
+        if _payload(entries) != before:
+            save_keystore(path, entries)
 
 
 # -- set-key ------------------------------------------------------------------------------
@@ -185,6 +181,7 @@ class ImportDecision:
     copies: int
     distinct: int
     stale_sources: list[str]
+    kept_store: bool = False  # nothing verified, so the key store's own entry was kept
 
     @property
     def flagged(self) -> bool:
@@ -274,10 +271,15 @@ def resolve_import(
         order = list(copies)  # first appearance breaks ties
         ranked = sorted(order, key=lambda c: (-len(copies[c]), order.index(c)))
         ok = [c for c in ranked if results[(name, c)].state == STATE_OK]
+        store_copy = KeyCopy(url=existing[name].url, key=existing[name].key) if name in existing else None
+        kept_store = False
         if ok:
             chosen, verdict, detail = ok[0], "verified", results[(name, ok[0])].detail
         else:
-            chosen = ranked[0]
+            # Nothing verifies: an entry already in the key store (maybe a set-key made while the
+            # box was down) is never replaced by an unverified copy; else the most common copy.
+            kept_store = store_copy is not None
+            chosen = store_copy if store_copy is not None else ranked[0]
             states = {results[(name, c)].state for c in ranked}
             if STATE_UNREACHABLE in states:
                 verdict = STATE_UNREACHABLE
@@ -297,6 +299,7 @@ def resolve_import(
                 copies=sum(len(v) for v in copies.values()),
                 distinct=len(copies),
                 stale_sources=stale,
+                kept_store=kept_store,
             )
         )
     return decisions
@@ -318,7 +321,8 @@ def describe_decision(decision: ImportDecision) -> str:
     if decision.distinct > 1:
         copies += f", {decision.distinct} DIFFERENT (conflict)"
     if decision.flagged:
-        head = f"NOT VERIFIED ({decision.verdict}: {decision.detail}) — kept the most common copy"
+        kept = "the key store's current copy" if decision.kept_store else "the most common copy"
+        head = f"NOT VERIFIED ({decision.verdict}: {decision.detail}) — kept {kept}"
     else:
         head = f"verified ({decision.detail})"
     line = f"  {decision.name}: {copies} — {head}, from {', '.join(decision.chosen_sources)}; url {decision.chosen.url}"

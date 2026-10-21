@@ -108,15 +108,24 @@ paths:
   entry's column). Never "load + json.dump" a project config: that rewrote `reaperiem.mcp.json`
   (not in indent-2 form).
 - **Token order (no window with an unknown token):** register the new hash (keep the old) →
-  save → write the file → prune to `[hash]` → save. A failed write rolls the hash back (a new
-  consumer is deleted) and only ever NARROWS the allow-list. A token is reused only when its
-  hash is registered for THIS managed consumer; an unregistered token in a file is never
-  adopted.
-- **`managed_by: "sync-configs"`** marks a consumer that sync owns. Sync revokes a managed
-  consumer whose project left the manifest, and refuses a same-name consumer it did not create.
+  save → write the file → prune to `[hash]` → save. A write that REPORTS failure may still have
+  landed (an ssh drop after the remote finished, a lost reply, an fsync error after the
+  rename), so it is NEVER rolled back (review round 1): both hashes stay, and the next run
+  reuses whichever token the file holds. A failing project's allow-list only ever NARROWS. A
+  token is reused only when its hash is registered for THIS managed consumer; an unregistered
+  token in a file is never adopted.
+- **`managed_by: "sync-configs"`** marks a consumer that sync owns. A managed consumer whose
+  project left the manifest keeps its hash with `machines = []` (never broader than the
+  manifest; undoing a mistaken edit needs no new token and no restart); `--prune` deletes it.
+  An empty manifest is refused outright. A same-name consumer sync did not create is refused.
   `Consumer.to_json` omits the field when it is empty, so hand-made consumers keep the #25 shape.
 - **Exposure is a kill switch sync never undoes:** sync warns about an unexposed manifest
-  machine. `machine import` and `machine set-key --url` (a new machine) expose.
+  machine. `machine import` and `machine set-key --url` expose only machines NEW to the key store.
+- **Import never downgrades the key store:** when no copy of a machine verifies, the key
+  store's current entry is kept (a set-key made while the box was down), never the most
+  common config copy.
+- **`edit_keystore` saves only when the content changed:** every save makes the running
+  gateway reload, and a no-op (the repair race's early return) must not.
 - **`check`:**
   - `notified: false` survives a failed notification, so the next run retries it.
   - A machine first seen `ok` is not announced.

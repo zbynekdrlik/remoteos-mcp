@@ -467,6 +467,17 @@ def read_json_file(path: Path, what: str) -> object:
         raise MachineSourceError(f"{what} {path} is not valid JSON: {exc}") from exc
 
 
+def authorization_header(entry: object) -> str | None:
+    """An MCP-config entry's ``Authorization`` header value (any case; the last one wins), else None."""
+    headers = entry.get("headers") if isinstance(entry, dict) else None
+    found = None
+    if isinstance(headers, dict):
+        for name, value in headers.items():
+            if isinstance(name, str) and name.lower() == "authorization" and isinstance(value, str):
+                found = value
+    return found
+
+
 def is_legacy_mcp_config(data: object) -> bool:
     """True for the pre-#51 machine source: an MCP config (``mcpServers``), not a key store."""
     return isinstance(data, dict) and "mcpServers" in data
@@ -499,12 +510,7 @@ def load_machines(path: Path) -> dict[str, Upstream]:
         if not isinstance(url, str) or not _is_http_url(url):
             logger.warning("machine source: entry %r has no http(s) url — skipped", name)
             continue
-        headers = entry.get("headers") or {}
-        authorization = None
-        if isinstance(headers, dict):
-            for key, value in headers.items():
-                if isinstance(key, str) and key.lower() == "authorization" and isinstance(value, str):
-                    authorization = value
+        authorization = authorization_header(entry)
         if authorization is None:
             logger.warning("machine source: entry %r has no Authorization header — forwarded without a key", name)
         machines[name] = Upstream(url=url, authorization=authorization)

@@ -44,6 +44,7 @@ from remoteos.gateway.probe import (
     probe_initialize,
 )
 from remoteos.gateway.registry import MachineEntry, MachineSourceError, validate_key
+from remoteos.gateway.targets import SSH_OPTIONS, last_line
 
 logger = logging.getLogger("remoteos.gateway.check")
 
@@ -81,15 +82,13 @@ def read_key_by_recipe(entry: MachineEntry, *, ssh_bin: str) -> tuple[str | None
     recipe = entry.repair
     assert recipe is not None
     remote = shlex.join([*(["sudo", "-n"] if recipe.sudo else []), "cat", recipe.key_file])
-    argv = [ssh_bin, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", recipe.ssh, remote]
+    argv = [ssh_bin, *SSH_OPTIONS, recipe.ssh, remote]
     try:
         proc = subprocess.run(argv, capture_output=True, timeout=REPAIR_TIMEOUT_S, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"repair failed: ssh {recipe.ssh} did not run ({type(exc).__name__})"
     if proc.returncode != 0:
-        lines = [ln for ln in proc.stderr.decode("utf-8", "replace").splitlines() if ln.strip()]
-        reason = "".join(ch if ch.isprintable() else "?" for ch in (lines[-1] if lines else ""))[:200]
-        return None, f"repair failed: ssh {recipe.ssh} exit {proc.returncode} ({reason})"
+        return None, f"repair failed: ssh {recipe.ssh} exit {proc.returncode} ({last_line(proc.stderr)})"
     try:
         key = json.loads(proc.stdout.decode("utf-8")).get("auth_key")
         validate_key(key if isinstance(key, str) else "")
@@ -192,8 +191,8 @@ def airuleset_notifier(script: Path, owner: str | None) -> Callable[[str], bool]
             logger.error("check: notify did not run (%s) — retried on the next run", type(exc).__name__)
             return False
         if proc.returncode != 0:
-            tail = proc.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or [f"exit {proc.returncode}"]
-            logger.error("check: notify FAILED (%s) — retried on the next run", tail[0][:200])
+            reason = last_line(proc.stderr) or f"exit {proc.returncode}"
+            logger.error("check: notify FAILED (%s) — retried on the next run", reason)
             return False
         return True
 
@@ -216,7 +215,13 @@ def run_check(
     host: str = "dev1",
     now: Callable[[], _dt.datetime] | None = None,
 ) -> CheckReport:
-    entries = load_keystore(keystore_path)
+    stamp = (now or (lambda: _dt.datetime.now(_dt.timezone.utc)))().isoformat(timespec="milliseconds")
+    previous = load_status(status_path)
+    try:
+        entries = load_keystore(keystore_path)
+    except MachineSourceError as exc:
+        _report_failure(status_path, previous, str(exc), stamp, notifier, host)
+        raise
     observations, health = asyncio.run(
         observe(
             entries,
@@ -225,8 +230,6 @@ def run_check(
             ssh_bin=ssh_bin or os.environ.get("REMOTEOS_GATEWAY_SSH", "ssh"),
         )
     )
-    stamp = (now or (lambda: _dt.datetime.now(_dt.timezone.utc)))().isoformat(timespec="seconds")
-    previous = load_status(status_path)
     old_machines = previous.get("machines") if isinstance(previous.get("machines"), dict) else {}
     status = {
         "checked_at": stamp,
@@ -243,5 +246,25 @@ def run_check(
         if sent:
             for record in pending.values():
                 record["notified"] = True
-    fileops.atomic_write(str(status_path), (json.dumps(status, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+    _write_status(status_path, status)
     return CheckReport(status=status, sent=sent)
+
+
+def _write_status(path: Path, status: dict) -> None:
+    fileops.atomic_write(str(path), (json.dumps(status, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+def _report_failure(
+    status_path: Path, previous: dict, message: str, stamp: str, notifier: Callable[[str], bool] | None, host: str
+) -> None:
+    """The check itself cannot run (an invalid key store): say so ONCE per distinct failure, so
+    the watchdog never goes silent. The last machine states are kept as they were."""
+    old = previous.get("error") if isinstance(previous.get("error"), dict) else None
+    same = old is not None and old.get("message") == message
+    record = {"message": message, "since": old.get("since", stamp) if same else stamp,
+              "notified": bool(old.get("notified")) if same else False}
+    logger.error("check: cannot run — %s", message)
+    if not record["notified"]:
+        text = f"MCP brána ({host}): kontrola strojov NEBEŽÍ — {message}"
+        record["notified"] = notifier(text) if notifier is not None else True
+    _write_status(status_path, {**previous, "checked_at": stamp, "error": record})

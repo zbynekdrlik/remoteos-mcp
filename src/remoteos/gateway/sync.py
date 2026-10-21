@@ -7,19 +7,24 @@ For each ``[projects.<name>]`` of ``projects.toml``:
   the manifest's machines. Each manifest machine's entry becomes
   ``{"type": "http", "url": "<gateway>/<machine>/mcp", "headers": {"Authorization": "Bearer <token>"}}``
   under the SAME server name, so every tool name (``mcp__<machine>__Shell``) stays.
-- **direct mode** (remoteos-mcp only, dev1 only): the entries carry the key store's url + key,
-  so the project can debug a machine when the gateway is down.
+- **direct mode** (remoteos-mcp; only the gateway's own account on its own host): the entries
+  carry the key store's url + key, so the project can debug a machine when the gateway is down.
 
 Only fleet entries change. An entry is the sync's own when its url is one sync writes (a
 gateway url, or — in direct mode — the key store's url): such an entry whose machine left the
-manifest is removed. Every other entry keeps its ORIGINAL source text, byte for byte. Writes
-are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``); a file whose text
-would not change is not written at all.
+manifest is removed. Every other entry keeps its ORIGINAL source text, byte for byte, and so
+does everything outside ``mcpServers`` (a file with no ``mcpServers`` at all is re-serialised
+as JSON). A config whose entries do not change is not written at all, whatever its layout.
+Writes are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``).
 
-Fail closed: an invalid manifest or key store, or a manifest machine missing from the key
-store, refuses the whole run before anything changes; an unreadable / unparseable config or a
-missing ssh / sudo access fails that project only (its consumer is never given a token no file
-holds, and its allow-list is only ever narrowed). No key or token is ever printed or logged.
+A managed consumer whose project left the manifest keeps its token hash with an EMPTY
+allow-list (``--prune`` removes it), so undoing a mistaken manifest edit needs no new token.
+
+Fail closed: an invalid or empty manifest, an invalid key store, a manifest machine missing
+from the key store, or direct mode off the gateway's own account refuses the whole run before
+anything changes; an unreadable / unparseable config or a missing ssh / sudo access fails that
+project only (its allow-list is only ever narrowed). A file never carries a token the gateway
+does not know. No key or token is ever printed or logged.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from remoteos.gateway.keystore import authorization_header, bearer_value, mask_secret
+from remoteos.gateway.keystore import bearer_value, mask_secret
 from remoteos.gateway.manifest import MODE_DIRECT, MODE_GATEWAY, Manifest, Project
 from remoteos.gateway.registry import (
     SYNC_MANAGER,
@@ -39,10 +44,11 @@ from remoteos.gateway.registry import (
     MachineEntry,
     Registry,
     RegistryTransaction,
+    authorization_header,
     registry_transaction,
     token_sha256,
 )
-from remoteos.gateway.targets import Target, TargetError, target_for
+from remoteos.gateway.targets import Target, TargetError, current_account, target_for
 
 logger = logging.getLogger("remoteos.gateway.sync")
 
@@ -68,15 +74,15 @@ _DECODER = json.JSONDecoder()
 @dataclass
 class ServerEntry:
     name: str
-    value: object
-    raw: str  # the value's exact source text
+    value: object = field(repr=False)  # holds tokens / keys
+    raw: str = field(repr=False)  # the value's exact source text
 
 
 @dataclass
 class ParsedConfig:
     """A config split around its ``mcpServers`` object. ``text is None``: no file yet."""
 
-    text: str | None
+    text: str | None = field(repr=False)
     entries: list[ServerEntry] = field(default_factory=list)
     has_block: bool = False
     start: int = 0  # index just after mcpServers' "{"
@@ -199,8 +205,8 @@ def _url(value: object) -> object:
 class ProjectPlan:
     project: Project
     target: Target
-    old_text: str | None
-    new_text: str
+    old_text: str | None = field(repr=False)  # holds tokens / keys
+    new_text: str = field(repr=False)
     token: str | None = field(default=None, repr=False)  # gateway mode
     new_token: bool = False
     lines: list[str] = field(default_factory=list)  # what changes in the file (masked)
@@ -278,7 +284,10 @@ def plan_project(
             plan.notes.append(
                 f"  ! {machine} is not exposed — its requests get 404 until `remoteos-gateway expose {machine}`"
             )
-    plan.new_text = render_config(parsed, out)
+    if parsed.has_block and out == [(entry.name, entry.raw) for entry in parsed.entries]:
+        plan.new_text = old_text  # nothing changes: the file keeps its own layout, byte for byte
+    else:
+        plan.new_text = render_config(parsed, out)
     return plan
 
 
@@ -330,6 +339,11 @@ class _Saver:
 
 def validate_run(manifest: Manifest, keystore: dict[str, MachineEntry], *, local_host: str) -> None:
     """Whole-run checks, before anything is read or written."""
+    if not manifest.projects:
+        raise SyncError(
+            "the manifest has no projects — refusing to run: an emptied or truncated projects.toml would withdraw"
+            " every project's access. Nothing was changed."
+        )
     missing = sorted(
         {f"{m} (project {p.name})" for p in manifest.projects.values() for m in p.machines if m not in keystore}
     )
@@ -338,11 +352,13 @@ def validate_run(manifest: Manifest, keystore: dict[str, MachineEntry], *, local
             "manifest machines missing from the key store: " + ", ".join(missing)
             + " — add them with `remoteos-gateway machine set-key <name> --url <url>`; nothing was changed"
         )
+    me = current_account()
     for project in manifest.projects.values():
-        if project.mode == MODE_DIRECT and project.host != local_host:
+        if project.mode == MODE_DIRECT and (project.host, project.account) != (local_host, me):
             raise SyncError(
-                f"[projects.{project.name}]: mode = \"direct\" writes the machine keys themselves, so it is allowed "
-                f"only on the gateway's host ({local_host}); {project.name} is on {project.host}. Nothing was changed."
+                f"[projects.{project.name}]: mode = \"direct\" writes the machine keys themselves, so it is allowed"
+                f" only for the gateway's own account ({me}@{local_host}); {project.name} is"
+                f" {project.account}@{project.host}. Nothing was changed."
             )
 
 
@@ -355,9 +371,14 @@ def sync_configs(
     dry_run: bool,
     today: str,
     echo: Callable[[str], None],
+    prune: bool = False,
     mint: Callable[[], str] = mint_token,
 ) -> int:
-    """Run the sync; returns the number of FAILED projects (0 = everything is in place)."""
+    """Run the sync; returns the number of FAILED projects (0 = everything is in place).
+
+    *prune* removes managed consumers whose project left the manifest; without it they keep
+    their token hash with an empty allow-list.
+    """
     validate_run(manifest, keystore, local_host=local_host)
     failures = 0
     changed_projects: list[str] = []
@@ -413,12 +434,22 @@ def sync_configs(
 
         gateway_consumers = {p.consumer for p in manifest.projects.values() if p.mode == MODE_GATEWAY}
         for name, consumer in sorted(registry.consumers.items()):
-            if consumer.managed_by == SYNC_MANAGER and name not in gateway_consumers:
-                echo(f"consumer {name}: its project left the manifest (or is direct now) — " + (
-                    "would be revoked (dry run)" if dry_run else "revoked"
-                ))
+            if consumer.managed_by != SYNC_MANAGER or name in gateway_consumers:
+                continue
+            # Access goes (never broader than the manifest), the token hash stays: a mistaken
+            # manifest edit, undone, restores the project with the SAME token and no restart.
+            if prune:
+                echo(f"consumer {name}: its project left the manifest (or is direct now) — "
+                     + ("would be removed (dry run)" if dry_run else "removed (--prune)"))
                 if not dry_run:
                     del registry.consumers[name]
+                continue
+            withdrawn = "access withdrawn" if consumer.machines else "access stays withdrawn"
+            echo(f"consumer {name}: its project left the manifest (or is direct now) — {withdrawn} (no machines;"
+                 f" its token stays registered, so putting the project back needs no restart)."
+                 " `sync-configs --prune` removes the consumer.")
+            if not dry_run:
+                consumer.machines = []
         if not dry_run:
             saver.commit()
     if dry_run:
@@ -448,16 +479,19 @@ def _consumer_change(registry: Registry, plan: ProjectPlan) -> str | None:
 
 def _apply(plan: ProjectPlan, registry: Registry, saver: _Saver, today: str) -> dict | None:
     """Register the token, write the file, then drop stale token hashes — in that order, so no
-    file ever carries a token the gateway does not know. A failed write rolls the token back."""
+    file ever carries a token the gateway does not know.
+
+    A write that REPORTS failure may still have landed (ssh dropped after the remote finished,
+    a lost reply, an fsync error after the rename), so nothing is rolled back: the consumer
+    keeps the old AND the new hash and the manifest's allow-list (never broader). The next run
+    finds whichever token the file really holds, reuses it and prunes the other.
+    """
     project = plan.project
     consumer = None
-    before: tuple[list[str], list[str]] | None = None
     if project.mode == MODE_GATEWAY:
         assert plan.token is not None
         consumer = registry.consumers.get(project.consumer)
-        if consumer is not None:
-            before = (list(consumer.sha256), list(consumer.machines))
-        else:
+        if consumer is None:
             consumer = Consumer(added=today, managed_by=SYNC_MANAGER)
             registry.consumers[project.consumer] = consumer
         digest = token_sha256(plan.token)
@@ -469,19 +503,7 @@ def _apply(plan: ProjectPlan, registry: Registry, saver: _Saver, today: str) -> 
         if digest not in consumer.sha256:
             consumer.sha256.append(digest)
         saver.commit()
-    written = None
-    if plan.file_changes:
-        try:
-            written = plan.target.write(project.config, plan.new_text, today)
-        except TargetError:
-            if consumer is not None:
-                if before is None:
-                    del registry.consumers[project.consumer]
-                else:
-                    consumer.sha256 = before[0]
-                    consumer.machines = [m for m in before[1] if m in project.machines]
-                saver.commit()
-            raise
+    written = plan.target.write(project.config, plan.new_text, today) if plan.file_changes else None
     if consumer is not None:
         consumer.sha256 = [token_sha256(plan.token)]
         saver.commit()

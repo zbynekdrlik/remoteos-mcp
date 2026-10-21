@@ -431,11 +431,17 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
   - Its token is minted once and lives only in the generated file.
   - Its allow-list is EXACTLY the manifest's `machines`: a machine removed there leaves the
     allow-list AND the config.
-  - A managed consumer whose project left the manifest is revoked.
+  - A managed consumer whose project left the manifest loses every machine but keeps its token,
+    so putting the project back needs no new token and no restart. `sync-configs --prune`
+    removes such consumers. A manifest with no projects at all is refused.
   - A hand-made consumer of the same name is never taken over.
-- **What it writes.** It writes only fleet entries, and only when the text changes. It first
-  backs the file up to `.backup-<date>/` next to it, then writes atomically with mode `0600`.
-  A second run changes nothing.
+  - A write that fails after it may have landed (an ssh drop) keeps the old AND the new token
+    registered; the next run keeps whichever the file holds.
+- **What it writes.** It writes only fleet entries, and only when an entry changes: a config
+  whose entries are already right keeps its own layout, byte for byte. It first backs the file
+  up to `.backup-<date>/` next to it, then writes atomically with mode `0600`. A second run
+  changes nothing. The backups hold the OLD keys and tokens: delete them once the migration
+  is verified.
 - **What it leaves alone.** An entry it did not generate stays as it is, even when its name
   is in the key store, and it is reported (`! … not in the manifest`). For example, a direct
   entry for a machine that dev1 cannot reach.
@@ -446,10 +452,11 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
     the exact one-time step (`ssh-copy-id …`, or the sudoers line) and syncs the other
     projects.
 - **Exposure.** It never re-exposes a machine (`unexpose` stays a kill switch); it warns
-  instead. `machine import` and `machine set-key --url` expose the machines they add.
-- **Fail closed.** A manifest machine missing from the key store, an invalid manifest or key
-  store, or `mode = "direct"` on a host other than dev1 refuses the whole run before
-  anything changes. An unparseable config is never overwritten.
+  instead. `machine import` and `machine set-key --url` expose only machines NEW to the key
+  store.
+- **Fail closed.** A manifest machine missing from the key store, an invalid or empty manifest
+  or key store, or `mode = "direct"` for any account but the gateway's own on dev1 refuses
+  the whole run before anything changes. An unparseable config is never overwritten.
 - After a project's config changed, its RUNNING sessions need ONE restart (Claude Code reads
   `.mcp.json` only at start). After that, a key change never reaches a session again.
 
@@ -462,7 +469,8 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
 - **Notifications.** It announces each state change ONCE, through
   `~/devel/airuleset/airuleset.py notify --body` (owner from
   `REMOTEOS_GATEWAY_NOTIFY_OWNER`). Without airuleset it writes a log line instead. A
-  notification that did not go out is retried on the next run.
+  notification that did not go out is retried on the next run. A check that cannot run at all
+  (an invalid key store) is announced once too, and exits 1.
 - **Auto-repair of a 401** happens only for a machine with an explicit recipe:
   `remoteos-gateway machine repair-recipe linux-cam2 --ssh root@cam2.lan [--sudo]`.
   - The recipe reads the box's installer `config.json` (`/etc/remoteos-mcp/config.json`)
@@ -484,11 +492,17 @@ journalctl --user -u remoteos-gateway-check          # each run's table
    entries).
 3. Build the key store: `remoteos-gateway machine import --from-manifest --dry-run`, then
    without `--dry-run`. For each machine, the copy the machine accepts wins; every conflict
-   and every machine it could not verify is listed.
+   and every machine it could not verify is listed. A machine the key store already has
+   keeps its entry unless a copy verifies.
 4. `systemctl --user restart remoteos-gateway` (it now reads the key store), then check
    `/healthz`.
 5. `remoteos-gateway sync-configs --dry-run`, review, then `remoteos-gateway sync-configs`.
 6. Install the check timer, and restart each project's sessions once.
+
+**Rolling back** to a gateway older than 0.7.0.dev33 after `sync-configs` has run: the old
+version rejects the registry's `managed_by` field (an unknown key) and refuses to start. Drop
+the field from `~/.config/remoteos-gateway/registry.json` first, and point `--machines` back
+at `~/.claude/mcp-configs/remoteos-mcp.mcp.json` (the old default).
 
 ## Uninstall
 

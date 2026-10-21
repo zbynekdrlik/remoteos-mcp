@@ -25,7 +25,7 @@ from remoteos.gateway import fileops
 logger = logging.getLogger("remoteos.gateway.targets")
 
 TARGET_TIMEOUT_S = 60
-_SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
+SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")  # never a prompt, a bounded connect
 
 
 class TargetError(Exception):
@@ -44,7 +44,7 @@ def _helper_source() -> str:
     return Path(fileops.__file__).read_text(encoding="utf-8")
 
 
-def _last_line(data: bytes) -> str:
+def last_line(data: bytes) -> str:
     lines = [line for line in data.decode("utf-8", "replace").splitlines() if line.strip()]
     text = lines[-1].strip() if lines else ""
     return "".join(ch if ch.isprintable() else "?" for ch in text)[:300]
@@ -111,7 +111,7 @@ class Target:
         if self.kind == "sudo":
             return [self.sudo_bin, "-n", "-u", self.account, "--", *helper]
         # ssh hands the rest of its argv to the remote shell as ONE command line: quote it
-        return [self.ssh_bin, *_SSH_OPTIONS, f"{self.account}@{self.host}", shlex.join(helper)]
+        return [self.ssh_bin, *SSH_OPTIONS, f"{self.account}@{self.host}", shlex.join(helper)]
 
     def _run(self, op_args: list[str], stdin: bytes) -> subprocess.CompletedProcess:
         argv = self._argv(op_args)
@@ -128,7 +128,7 @@ class Target:
     def _check(self, proc: subprocess.CompletedProcess, op: str) -> None:
         if proc.returncode == 0:
             return
-        reason = _last_line(proc.stderr) or f"exit {proc.returncode}"
+        reason = last_line(proc.stderr) or f"exit {proc.returncode}"
         me = current_account()
         if self.kind == "ssh" and proc.returncode == 255:
             raise AccessError(
