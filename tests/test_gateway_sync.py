@@ -957,3 +957,67 @@ def test_a_config_that_cannot_be_written_as_utf8_fails_that_project_only(fleet):
     assert odd.read_text(encoding="utf-8") == '{"note": "\\ud800"}\n'
     assert "linux-cam2" in fleet.servers(good)  # the other project still synced
     assert "odd@dev1" not in load_registry(fleet.registry).consumers  # no token for an unwritable file
+
+
+# -- focused review of the round-8 fix ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("mode", "server"),
+    [
+        ("gateway", '"hand": {"url": "http://x/mcp", "headers": {"Authorization": "Bearer ab\\ud800"}}'),
+        ("direct", '"hand": {"url": "http://x/mcp", "headers": {"Authorization": "Bearer ab\\ud800"}}'),
+        ("gateway", '"\\ud800x": {"command": "npx"}'),
+    ],
+    ids=["gateway-bearer", "direct-bearer", "entry-name"],
+)
+def test_a_lone_surrogate_anywhere_in_a_config_fails_that_project_only(fleet, mode, server):
+    odd = fleet.write_config("odd", '{\n  "mcpServers": {\n    ' + server + "\n  }\n}\n")
+    before = odd.read_bytes()
+    good = fleet.write_config("restreamer", '{\n  "mcpServers": {}\n}\n')
+    odd_project = {"host": "dev1", "account": ME, "config": str(odd), "machines": ["linux-cam1"], "mode": mode}
+    fleet.write_manifest(
+        {
+            "odd": odd_project,
+            "restreamer": {"host": "dev1", "account": ME, "config": str(good), "machines": ["linux-cam2"]},
+        }
+    )
+
+    result = fleet.run()
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)  # no traceback
+    assert odd.read_bytes() == before
+    assert "linux-cam2" in fleet.servers(good)  # the other project still synced
+    assert "odd@dev1" not in load_registry(fleet.registry).consumers
+
+
+def test_a_hand_made_alias_carrying_this_projects_token_is_kept(fleet):
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    token = fleet.token_of(path, "linux-cam1")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    alias = {"type": "http", "url": f"{GATEWAY}/linux-cam1/mcp", "headers": {"Authorization": f"Bearer {token}"}}
+    data["mcpServers"]["cam1-alias"] = alias  # a person copied the entry under another name
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    result = fleet.run()
+
+    assert result.exit_code == 0, result.output
+    assert fleet.servers(path)["cam1-alias"] == alias  # not sync's shape (name != machine): never removed
+
+
+def test_an_entry_carrying_another_consumers_token_is_kept(fleet):
+    text = fleet.camera_box_text().replace(
+        '    "reaperiem"',
+        '    "win-old": {"type": "http", "url": "http://old:8796/win-old/mcp",'
+        f' "headers": {{"Authorization": "Bearer {fleet.david_token}"}}}},\n    "reaperiem"',
+    )
+    path = fleet.write_config("camera-box", text)
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+
+    result = fleet.run()
+
+    assert result.exit_code == 0, result.output
+    assert "win-old" in fleet.servers(path)  # only THIS project's own token makes an entry sync's own
