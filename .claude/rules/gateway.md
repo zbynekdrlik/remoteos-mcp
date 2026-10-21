@@ -109,7 +109,9 @@ paths:
   - A symlink is written through (`realpath`): a project's `.mcp.json` symlink stays one.
   - A same-day backup is never overwritten (`name.1`, `.2`, ...).
 - **What sync owns:** an entry whose url is one sync writes (`<gateway>/<name>/mcp`, or in
-  direct mode the key store's url). A manifest machine is always (re)written. An owned entry
+  direct mode the key store's url), or one carrying this project's registered token (only sync
+  writes that: an entry at the gateway's OLD url after a `[gateway] url` change, review round 8).
+  A manifest machine is always (re)written. An owned entry
   whose machine left the manifest is removed. ANY other entry is kept, even when its name is in
   the key store: dev2's `linux-presenter` / `win-marek-nb` may not be reachable from dev1, and
   deleting them would break those projects.

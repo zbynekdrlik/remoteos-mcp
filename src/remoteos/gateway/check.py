@@ -57,7 +57,9 @@ DEFAULT_STATUS_PATH = Path.home() / ".local" / "state" / "remoteos-gateway" / "m
 DEFAULT_AIRULESET_PATH = Path.home() / "devel" / "airuleset" / "airuleset.py"
 REPAIR_TIMEOUT_S = 30
 NOTIFY_TIMEOUT_S = 60
-GATEWAY_KEY = "gateway"
+# The gateway's own record in the in-memory pending map: a key no machine name can be (names are
+# [A-Za-z0-9][A-Za-z0-9._-]*), so a machine named "gateway" never collides with it.
+GATEWAY_KEY = "<gateway>"
 
 _LABELS = {"ok": "funguje", "401": "odmieta kľúč (401)", "unreachable": "nedostupný", "error": "chyba"}
 

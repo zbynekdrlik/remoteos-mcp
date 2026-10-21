@@ -11,8 +11,9 @@ For each ``[projects.<name>]`` of ``projects.toml``:
   carry the key store's url + key, so the project can debug a machine when the gateway is down.
 
 Only fleet entries change. An entry is the sync's own when its url is one sync writes (a
-gateway url, or — in direct mode — the key store's url): such an entry whose machine left the
-manifest is removed. Every other entry keeps its ORIGINAL member text (key as written, the
+gateway url, or — in direct mode — the key store's url) or it carries this project's registered
+token (only sync writes that; e.g. an entry at the gateway's OLD url): such an entry whose
+machine left the manifest is removed. Every other entry keeps its ORIGINAL member text (key as written, the
 colon's spacing, value) byte for byte, and so does everything outside ``mcpServers``; only the
 whitespace BETWEEN entries is rendered on a rewrite (a file with no ``mcpServers`` at all is
 re-serialised as JSON). A config whose entries do not change is not written at all.
@@ -245,16 +246,22 @@ def plan_project(
 ) -> ProjectPlan:
     parsed = parse_config(old_text)
     plan = ProjectPlan(project=project, target=target, old_text=old_text, new_text="")
+    consumer = registry.consumers.get(project.consumer) if project.mode == MODE_GATEWAY else None
+    own_hashes = set(consumer.sha256) if consumer is not None and consumer.managed_by == SYNC_MANAGER else set()
 
     def owned(name: str, value: object) -> bool:
-        """Did sync write this entry? A gateway url always; a key-store url in direct mode."""
+        """Did sync write this entry? A gateway url; a key-store url in direct mode; or ANY entry
+        carrying this project's registered token — only sync puts it into a file (e.g. at the
+        gateway's OLD url, after a url change)."""
         url = _url(value)
         if url == manifest.machine_url(name):
             return True
-        return project.mode == MODE_DIRECT and name in keystore and url == keystore[name].url
+        if project.mode == MODE_DIRECT and name in keystore and url == keystore[name].url:
+            return True
+        token = bearer_value(authorization_header(value) or "")
+        return token is not None and token_sha256(token) in own_hashes
 
     if project.mode == MODE_GATEWAY:
-        consumer = registry.consumers.get(project.consumer)
         if consumer is not None and consumer.managed_by != SYNC_MANAGER:
             raise SyncError(
                 f"consumer {project.consumer} already exists and is not managed by sync-configs — refusing to "
@@ -309,6 +316,12 @@ def plan_project(
         plan.new_text = old_text  # nothing changes: the file keeps its own layout, byte for byte
     else:
         plan.new_text = render_config(parsed, out)
+    try:
+        plan.new_text.encode("utf-8")  # refused HERE, before any token is registered for it
+    except UnicodeEncodeError as exc:
+        raise ConfigFormatError(
+            "the config cannot be written back as UTF-8 (a lone surrogate escape such as \\ud800) — left untouched"
+        ) from exc
     return plan
 
 
