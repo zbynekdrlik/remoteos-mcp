@@ -378,6 +378,7 @@ def _printable(value: object) -> str:
 
 main.add_command(cli_fleet.machine)
 main.add_command(cli_fleet.sync_configs_command)
+main.add_command(cli_fleet.check_command)
 
 if __name__ == "__main__":  # pragma: no cover
     main()

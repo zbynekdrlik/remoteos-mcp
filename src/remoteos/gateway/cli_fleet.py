@@ -6,6 +6,7 @@
     remoteos-gateway machine import [--from <file.mcp.json> ... | --from-manifest] [--dry-run]
     remoteos-gateway machine repair-recipe linux-cam2 --ssh root@cam2.lan [--sudo]
     remoteos-gateway sync-configs [--dry-run]                    # every project's config, from projects.toml
+    remoteos-gateway check                                       # the drift watchdog (timer, every 10 min)
 
 The commands are registered on ``cli.main`` and receive its paths object (``--registry``,
 ``--machines`` = the key store, ``--manifest``). No key or token is ever printed: output shows
@@ -15,12 +16,14 @@ The commands are registered on ``cli.main`` and receive its paths object (``--re
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 import socket
 import sys
 from pathlib import Path
 
 import click
 
+from remoteos.gateway.check import DEFAULT_AIRULESET_PATH, DEFAULT_STATUS_PATH, airuleset_notifier, run_check
 from remoteos.gateway.keystore import (
     DEFAULT_IMPORT_MATCH,
     apply_import,
@@ -268,3 +271,55 @@ def sync_configs_command(paths, dry_run: bool, local_host: str) -> None:
     if failures:
         click.echo(f"{failures} project(s) FAILED — see above; the others are in place.")
         sys.exit(1)
+
+
+# -- check ------------------------------------------------------------------------------
+
+
+@click.command("check")
+@click.option(
+    "--status-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=DEFAULT_STATUS_PATH,
+    show_default=True,
+    help="Where the machine states (ok / 401 / unreachable + since) are kept.",
+)
+@click.option("--gateway-url", default=DEFAULT_GATEWAY_URL, show_default=True, help="Its /healthz is probed too.")
+@click.option(
+    "--airuleset",
+    "airuleset_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    envvar="REMOTEOS_GATEWAY_AIRULESET",
+    default=DEFAULT_AIRULESET_PATH,
+    show_default=True,
+    help="airuleset.py whose `notify --body` announces a state change; missing = a log line instead.",
+)
+@click.option("--notify-owner", envvar="REMOTEOS_GATEWAY_NOTIFY_OWNER", default=None, help="notify --owner-name.")
+@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
+@click.pass_obj
+def check_command(
+    paths, status_file: Path, gateway_url: str, airuleset_path: Path, notify_owner: str | None, local_host: str
+) -> None:
+    """Probe every machine directly with its stored key + the gateway's /healthz; record the
+    states and announce each change ONCE. A 401 is repaired only by an explicit recipe."""
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
+    try:
+        report = run_check(
+            paths.machines,
+            status_file.expanduser(),
+            gateway_url=gateway_url,
+            notifier=airuleset_notifier(airuleset_path.expanduser(), notify_owner),
+            host=local_host,
+        )
+    except MachineSourceError as exc:
+        raise _fail(exc) from exc
+    status = report.status
+    gateway = status["gateway"]
+    click.echo(f"checked {status['checked_at']}: gateway {gateway_url} {gateway['state']} since {gateway['since']}")
+    for name, record in status["machines"].items():
+        click.echo(f"  {name:24} {record['state']:12} since {record['since']}  {record['detail']}")
+    bad = [n for n, r in status["machines"].items() if r["state"] != STATE_OK]
+    click.echo(f"{len(status['machines']) - len(bad)} ok, {len(bad)} not ok" + (f": {', '.join(bad)}" if bad else ""))
+    if report.sent is False:
+        click.echo("the state-change notification did NOT go out — it is retried on the next run")

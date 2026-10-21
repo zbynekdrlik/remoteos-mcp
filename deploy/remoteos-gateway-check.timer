@@ -1,0 +1,15 @@
+# remoteos-gateway key-drift watchdog (#51): run remoteos-gateway-check.service every 10 minutes.
+#
+#   systemctl --user enable --now remoteos-gateway-check.timer
+#   systemctl --user list-timers remoteos-gateway-check.timer
+
+[Unit]
+Description=remoteos MCP gateway — key-drift check every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
