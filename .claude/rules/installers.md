@@ -95,7 +95,9 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     enable-only`): install, write, enable, never start or prove. The old builds ARE pruned (a
     venv run through the link has `sys.prefix` = the link path, so a running process already
     imports from the new build; an old build protects nothing). The old system-python copy
-    stays (a running legacy process imports from it). Default `restart`.
+    stays while a legacy process may still import from it: it goes after a restart run's
+    proof, or at a no-op enable-only run whose running install is proven (it runs our unit's
+    venv; review round 14 — a cam never gets a restart run). Default `restart`.
 - **A pending switch** (`/etc/remoteos-mcp/.switch-pending`): written after `arm`, holding the
   unit's `systemctl show -p InvocationID --value` (systemd makes a new one at every start and
   keeps it while the unit is inactive). Removed after a passed proof, by "Nothing was switched",
@@ -122,12 +124,12 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   at the end. "A unit and no pending mark" alone is NOT proven: it restored the state that had
   just failed its proof, or files the running process never ran.
 - **Order (keep it):**
-  0. Refuse a run inside `remoteos-mcp.service` (`/proc/self/cgroup`, `CGROUP_FILE`, redirected
-     by the harness): from the agent's own Shell the switch's restart (or the uninstaller's stop)
-     kills the run half-way and its rollback waits on that same stop until TimeoutStopSec
-     (review round 13). The uninstaller has the same guard.
   1. Validate the inputs (`REMOTEOS_MCP_REF` default `main`, empty = `main` as camera-box reads
-     it; MODE / USER / POLICY), take `flock -n` on `/run/remoteos-mcp-install.lock` (a
+     it; MODE / USER / POLICY), refuse a run inside `remoteos-mcp.service` (`/proc/self/cgroup`,
+     `CGROUP_FILE`, redirected by the harness: from the agent's own Shell the switch's restart
+     kills the run half-way and its rollback waits on that same stop until TimeoutStopSec; review
+     round 13; the uninstaller has the same guard), take `flock -n` on
+     `/run/remoteos-mcp-install.lock` (a
      second run's prune could delete this run's build; NOT the world-writable `/run/lock`, where
      any local user could hold or pre-create the file and block every install). The lock is
      0600 (`umask 077`, and `chmod 600` for an older run's 0644 one): `flock(2)` works on a

@@ -398,13 +398,14 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   `60fe348` → `bc4fcf5` (the read-only-root refusal never advises editing fstab; the key-file
   mode rewrite and the direct loopback curls pinned); round 13 `1ce9562` → `9fec760` (the
   installer and the uninstaller refuse a run from inside the unit, the agent's own Shell; the
-  build's readable modes pinned).
+  build's readable modes pinned); round 14 `d0b3554` → `e52c4d6` (a proven, no-op enable-only
+  run removes the old system-python copy; two messages corrected) — round 14 had no 🔴/🟡.
 - **Tests:** `tests/test_installer_linux_venv.py` (42), `tests/test_installer_linux_edges.py`
-  (57, the review rounds' edges) and `tests/test_installer_linux_rollback.py` (18, what a failed
+  (57, the review rounds' edges) and `tests/test_installer_linux_rollback.py` (19, what a failed
   run leaves running), on `tests/linux_installer_harness.py` +
   `tests/fake_linux_tools.py` (real venvs, a stateful fake systemd/curl/ss, the argv and the
   environment of every process); `tests/test_installer_macos_key.py` (13, also under GNU bash
   3.2.57); `tests/test_installer_windows_key.py` (5 static) and
   `tests_windows/test_install_ps1_key.py` (real PowerShell 5.1: install.ps1's own functions, real
-  cmd.exe runs of the .bat, the ACL). Result: 905 pass (plus `tests/test_installer_hardening.py`'s read-only and loopback-curl checks), ruff + shellcheck clean;
+  cmd.exe runs of the .bat, the ACL). Result: 906 pass, ruff + shellcheck clean;
   `install-linux.sh` 1000 lines.

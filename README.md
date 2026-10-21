@@ -62,8 +62,11 @@ reaches sudo's environment only; nothing is exported to curl or the rest of the 
   `ss`, from iproute2). An unchanged source changes nothing.
 - **Upgrading a Linux box from the old system-python install** moves it to the venv with the
   same key. The old copy in the system python is removed only after the venv has proved itself.
-  The old unit showed that key to every local account (`systemctl cat`, `ps`): on a box with
-  other local accounts, rotate it with `REMOTEOS_MCP_AUTH_KEY` and update the clients.
+  The old unit showed that key to every local account (`systemctl cat`, `ps`), and the old
+  installers printed it: on a box with other local accounts, or whose earlier install output was
+  logged, rotate it with `REMOTEOS_MCP_AUTH_KEY` and update the clients. The same holds for a
+  migrated mac (the old plist's ProgramArguments) and Windows box (the old `.bat`'s
+  `--auth-key`).
 - **Run the installers over SSH**, never through the agent's own Shell: on Linux that run is
   inside `remoteos-mcp.service`, whose restart would kill it, so it is refused.
 
