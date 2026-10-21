@@ -840,3 +840,47 @@ def test_a_write_that_keeps_failing_never_piles_up_token_hashes(fleet, monkeypat
 
     # one previous hash is kept next to the new one (a failed write may have landed), no more
     assert len(load_registry(fleet.registry).consumers["camera-box@dev1"].sha256) <= 2
+
+
+# -- review round 7 -------------------------------------------------------------------------------
+
+
+def test_the_token_the_file_still_holds_stays_registered_through_any_number_of_failed_writes(fleet, monkeypatch):
+    from remoteos.gateway import targets
+
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    held = fleet.token_of(path, "linux-cam1")  # the token every running session of camera-box uses
+
+    # the gateway moves to a new url: the file's entries no longer match, so a new token is minted...
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()}, gateway="http://dev1:8796")
+
+    def never_lands(self, config, text, tag):
+        raise targets.TargetError("permission denied")
+
+    monkeypatch.setattr(targets.Target, "write", never_lands)
+    for _ in range(3):  # ...and the write keeps failing
+        assert fleet.run().exit_code == 1
+
+    assert fleet.token_of(path, "linux-cam1") == held  # the file did not change
+    consumer = load_registry(fleet.registry).consumers["camera-box@dev1"]
+    assert token_sha256(held) in consumer.sha256  # so its token MUST still be known to the gateway
+    assert len(consumer.sha256) <= 2
+
+
+def test_a_kept_entry_keeps_its_whole_member_text_key_included(fleet):
+    text = (
+        "{\n"
+        '  "mcpServers": {\n'
+        '    "n8n\\u002dmcp" :  {"command": "npx"},\n'
+        '    "linux-cam1": {"type": "http", "url": "http://cam1.lan:8092/mcp"}\n'
+        "  }\n"
+        "}\n"
+    )
+    path = fleet.write_config("camera-box", text)
+    fleet.write_manifest({"camera-box": fleet.camera_box_project(machines=("linux-cam1",))})
+
+    assert fleet.run().exit_code == 0
+
+    assert '"n8n\\u002dmcp" :  {"command": "npx"}' in path.read_text(encoding="utf-8")  # key, spacing, value

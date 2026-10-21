@@ -646,3 +646,60 @@ def test_any_unexpected_failure_after_the_load_is_announced_never_silent(tmp_pat
     [body] = check.notifications()
     assert "NEBEŽÍ" in body and "RuntimeError" in body
     assert check.state()["error"]["notified"] is True
+
+
+# -- review round 7 -------------------------------------------------------------------------------
+
+
+def test_a_valid_state_with_a_hand_edited_previous_is_announced_not_a_crash(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    check.store({"linux-cam4": {"url": closed_port_url(), "key": fresh_secret("k")}})
+    record = {"state": "unreachable", "since": "x", "detail": "d", "previous": ["x"], "notified": False}
+    write_private_json(check.status, {"checked_at": "x", "machines": {"linux-cam4": record}})
+    with FakeFleetMachine(healthz=True) as gateway:
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 0, result.output
+    [body] = check.notifications()
+    assert "linux-cam4" in body
+    assert check.state()["machines"]["linux-cam4"]["notified"] is True
+
+
+def test_a_failure_notifier_that_raises_is_never_a_second_crash(tmp_path, monkeypatch):
+    from remoteos.gateway import check as check_module
+
+    def raising(body: str) -> bool:
+        raise ConnectionError("discord is down")
+
+    check = Check(tmp_path, monkeypatch)
+    check.keystore.parent.mkdir(parents=True, exist_ok=True)
+    check.keystore.write_text('{"linux-cam1": {"url": "ftp://bad", "key": "k"}}', encoding="utf-8")
+    with pytest.raises(check_module.MachineSourceError):  # the key-store error itself, nothing else
+        check_module.run_check(check.keystore, check.status, gateway_url="http://127.0.0.1:9", notifier=raising)
+
+    assert check.state()["error"]["notified"] is False  # so the next run tries again
+
+
+def test_repairs_run_concurrently_so_slow_boxes_never_exceed_the_unit_timeout(tmp_path, monkeypatch):
+    import time
+
+    from remoteos.gateway import check as check_module
+
+    def slow_recipe(entry, *, ssh_bin):
+        time.sleep(1.5)  # an ssh to a box that answers slowly
+        return None, "repair failed: ssh slow"
+
+    monkeypatch.setattr(check_module, "read_key_by_recipe", slow_recipe)
+    check = Check(tmp_path, monkeypatch)
+    with FakeFleetMachine(accept_keys=(fresh_secret("real"),)) as box, FakeFleetMachine(healthz=True) as gateway:
+        recipe = {"ssh": "root@cam.lan"}
+        check.store(
+            {f"linux-cam{i}": {"url": box.url, "key": fresh_secret("stale"), "repair": recipe} for i in range(4)}
+        )
+        started = time.monotonic()
+        result = check.run(gateway.base_url)
+        elapsed = time.monotonic() - started
+
+    assert result.exit_code == 0, result.output
+    assert elapsed < 4.5  # one after another would take at least 4 x 1.5 = 6 s
+    assert all(r["state"] == "401" for r in check.state()["machines"].values())
