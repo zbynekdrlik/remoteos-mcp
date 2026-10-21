@@ -140,7 +140,7 @@ resolve_key() {
         say "Auth key: a NEW auth key was generated — the client's .mcp.json entry for this box needs it"
     fi
     if key_ok "$cfg_key" && [[ "$cfg_key" != "$AUTH_KEY" ]]; then
-        say "[!] config.json held another key; it now holds the installed one"
+        say "[!] config.json holds another key; the switch writes the installed one into it"
     fi
 }
 
@@ -896,7 +896,7 @@ main() {
         fail "Root filesystem is read-only — nothing was changed on this box. A camera-box cam is read-only by design: update it through camera-box's provisioning (its rw window). Elsewhere: mount -o remount,rw / for this run, then rerun."
     fi
     check_inputs
-    ! grep -q "/${SERVICE_NAME}\.service" "$CGROUP_FILE" 2>/dev/null || fail "this run is inside ${SERVICE_NAME}.service (the agent's own Shell): its restart would kill the run — nothing was changed on this box. Run it over SSH."
+    ! grep -q "/${SERVICE_NAME}\.service" "$CGROUP_FILE" 2>/dev/null || fail "this run is inside ${SERVICE_NAME}.service (the agent's own Shell): its restart (or a rollback's stop) would kill the run — nothing was changed on this box. Run it over SSH."
     # One run at a time: a second run's prune could delete the build this one just swapped in.
     command -v flock &>/dev/null || fail "flock (util-linux) is missing — nothing was changed on this box"
     [[ "$POLICY" != restart ]] || command -v ss &>/dev/null \
@@ -967,12 +967,12 @@ main() {
         remove_legacy_system_copy
         prune_builds
     else
-        # A switch stays pending; a no-op on a proven running install leaves it proven. Old builds
-        # go (the link points at the new one); an old system copy stays (a legacy process).
+        # A switch stays pending (a legacy process keeps its system copy); a proven no-op stays proven.
         [[ -n "$CHANGED" ]] || poll_running_install read
         if [[ -n "$PREV_PROVEN" ]]; then
             rm -f "$PENDING_FILE"
             say "Nothing changed (enable-only): the proven running install was not touched"
+            remove_legacy_system_copy  # the proven process runs our unit's venv, not the system copy
         else
             say "Not started (enable-only): the next restart run restarts and proves it; any old system-python copy stays until then"
         fi
