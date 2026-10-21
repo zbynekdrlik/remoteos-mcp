@@ -112,24 +112,25 @@ paths:
   direct mode the key store's url), or sync's gateway SHAPE (`.../<name>/mcp`) at another url
   carrying this project's registered token: an entry left at the gateway's OLD url after a
   `[gateway] url` change (review round 8). A hand-made alias (another name) with the token
-  copied into it is NOT owned. A manifest machine is always (re)written.
-- **A lone surrogate escape (`\ud800`) anywhere in a config** fails that project in
-  `parse_config` (it would break hashing, output and the UTF-8 write-back), before any token. An owned entry
-  whose machine left the manifest is removed. ANY other entry is kept, even when its name is in
-  the key store: dev2's `linux-presenter` / `win-marek-nb` may not be reachable from dev1, and
+  copied into it is NOT owned. A manifest machine is always (re)written. An owned entry whose
+  machine left the manifest is removed. ANY other entry is kept, even when its name is in the
+  key store: dev2's `linux-presenter` / `win-marek-nb` may not be reachable from dev1, and
   deleting them would break those projects.
+- **A lone surrogate escape (`\ud800`) anywhere in a config** fails that project in
+  `parse_config` (it would break hashing, output and the UTF-8 write-back), before any token.
 - **Byte-equal non-fleet entries:** `sync.parse_config` walks `mcpServers` with
-  `JSONDecoder.raw_decode` and keeps each value's source slice. `render_config` re-joins the
-  slices; only generated entries are serialised (`json.dumps(indent=2)` re-indented to the
-  entry's column). Never "load + json.dump" a project config: that rewrote `reaperiem.mcp.json`
-  (not in indent-2 form).
+  `JSONDecoder.raw_decode` and keeps each member's source slice (key as written, colon spacing,
+  value). `render_config` re-joins the slices; only generated entries are serialised
+  (`json.dumps(indent=2)` re-indented to the entry's column) and only the whitespace BETWEEN
+  entries is rendered. Never "load + json.dump" a project config: that rewrote
+  `reaperiem.mcp.json` (not in indent-2 form).
 - **Token order (no window with an unknown token):** register the new hash (keep the old) →
   save → write the file → prune to `[hash]` → save. A write that REPORTS failure may still have
   landed (an ssh drop after the remote finished, a lost reply, an fsync error after the
   rename), so it is NEVER rolled back (review round 1): the last confirmed hash and the new
-  one stay, and the next run reuses whichever token the file holds. A failing project's allow-list only ever NARROWS. A
-  token is reused only when its hash is registered for THIS managed consumer; an unregistered
-  token in a file is never adopted.
+  one stay, and the next run reuses whichever token the file holds. A failing project's
+  allow-list only ever NARROWS. A token is reused only when its hash is registered for THIS
+  managed consumer; an unregistered token in a file is never adopted.
 - **`managed_by: "sync-configs"`** marks a consumer that sync owns. A managed consumer whose
   project left the manifest keeps its hash with `machines = []` (never broader than the
   manifest; undoing a mistaken edit needs no new token and no restart); `--prune` deletes it.
