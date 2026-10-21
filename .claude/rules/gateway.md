@@ -4,7 +4,8 @@ paths:
   - "tests/test_gateway*.py"
   - "tests/gateway_harness.py"
   - "tests/conftest.py"
-  - "deploy/remoteos-gateway.service"
+  - "tests/fleet_harness.py"
+  - "deploy/remoteos-gateway*"
 ---
 
 # remoteos-gateway (dev1 MCP gateway, #25) — gotchas
@@ -73,3 +74,126 @@ paths:
   - `ProtectSystem`/`ProtectHome`/`PrivateTmp` are VERIFIED-INERT there:
     `apparmor_restrict_unprivileged_userns=1` blocks the mount namespace they need.
   - Never claim them as isolation the gateway has.
+
+## Every project through the gateway (#51): key store, manifest, sync-configs, check
+
+- **Modules:** `keystore.py` (machines.json I/O, `set_key`, the import), `manifest.py`
+  (projects.toml), `sync.py` (the generator), `targets.py` (local / `sudo -n -u` /
+  `ssh -o BatchMode=yes`), `fileops.py` (atomic write + backup + lock), `probe.py` (the
+  `initialize` probe), `check.py` (the watchdog), `cli_fleet.py` (the commands, registered on
+  `cli.main`). The dependency direction is one way: `registry` ← `keystore` ← `sync` /
+  `check` ← `cli_fleet` ← `cli`.
+- **The key-store shape lives in `registry.py`** (`parse_keystore`, `MachineEntry`,
+  `RepairRecipe`), because `load_machines` must read it; `keystore.py` builds on it.
+  - `load_machines` tells the shapes apart by the `mcpServers` key: the legacy one skips bad
+    entries with a warning (a shared file), the key store refuses the WHOLE file on one bad
+    entry (the gateway keeps its last good copy).
+  - `--machines` defaults to the key store, so after an upgrade the gateway must not restart
+    before `machine import` ran (README migration order).
+- **`fileops.py` is stdlib-only, py3.8+, with no package imports:** `targets.py` runs its
+  SOURCE as `python3 -c` under sudo or over ssh, so the three writers share one tested
+  implementation.
+  - `write` takes the byte count (never a secret) and refuses a stdin that ended early or ran
+    long: an ssh that died mid-transfer must not install a truncated config (review round 6).
+  - A config inside a git work tree (a `.git` entry upward) is refused at READ and at write:
+    a token there, or its `.backup-*/<name>.1` copies, could be committed. Refusing at read
+    means no token is minted for a file that can never be written.
+  - A new token keeps exactly ONE previous hash next to it (`sync._apply`): the one the file
+    HOLDS right now (`ProjectPlan.held_hashes`), else index 0 (what the last CONFIRMED write
+    left — a confirmed write prunes to exactly its own hash). So the file's token stays known
+    however many writes fail (even after a write that landed but reported failure), and failed
+    mints only rotate the second slot. Never `[-1:]`: that keeps the previous FAILED mint and
+    drops the file's token (review round 7).
+  - File contents go on stdin/stdout only. An argv holds the source, an op and a path.
+  - `~` is the account's passwd home, never `$HOME` (sudo may keep the caller's).
+  - A symlink is written through (`realpath`): a project's `.mcp.json` symlink stays one.
+  - A same-day backup is never overwritten (`name.1`, `.2`, ...).
+- **What sync owns:** an entry whose url is one sync writes (`<gateway>/<name>/mcp`, or in
+  direct mode the key store's url), or sync's gateway SHAPE (`.../<name>/mcp`) at another url
+  carrying this project's registered token: an entry left at the gateway's OLD url after a
+  `[gateway] url` change (review round 8). A hand-made alias (another name) with the token
+  copied into it is NOT owned. A manifest machine is always (re)written. An owned entry whose
+  machine left the manifest is removed. ANY other entry is kept, even when its name is in the
+  key store: dev2's `linux-presenter` / `win-marek-nb` may not be reachable from dev1, and
+  deleting them would break those projects.
+- **A lone surrogate escape (`\ud800`) anywhere in a config** fails that project in
+  `parse_config` (it would break hashing, output and the UTF-8 write-back), before any token.
+- **Byte-equal non-fleet entries:** `sync.parse_config` walks `mcpServers` with
+  `JSONDecoder.raw_decode` and keeps each member's source slice (key as written, colon spacing,
+  value). `render_config` re-joins the slices; only generated entries are serialised
+  (`json.dumps(indent=2)` re-indented to the entry's column) and only the whitespace BETWEEN
+  entries is rendered. Never "load + json.dump" a project config: that rewrote
+  `reaperiem.mcp.json` (not in indent-2 form).
+- **Token order (no window with an unknown token):** register the new hash (keep the old) →
+  save → write the file → prune to `[hash]` → save. A write that REPORTS failure may still have
+  landed (an ssh drop after the remote finished, a lost reply, an fsync error after the
+  rename), so it is NEVER rolled back (review round 1): the last confirmed hash and the new
+  one stay, and the next run reuses whichever token the file holds. A failing project's
+  allow-list only ever NARROWS. A token is reused only when its hash is registered for THIS
+  managed consumer; an unregistered token in a file is never adopted.
+- **`managed_by: "sync-configs"`** marks a consumer that sync owns. A managed consumer whose
+  project left the manifest keeps its hash with `machines = []` (never broader than the
+  manifest; undoing a mistaken edit needs no new token and no restart); `--prune` deletes it.
+  An empty manifest is refused outright. A same-name consumer sync did not create is refused.
+  `Consumer.to_json` omits the field when it is empty, so hand-made consumers keep the #25 shape.
+- **Exposure is a kill switch sync never undoes:** sync warns about an unexposed manifest
+  machine. `machine import` and `machine set-key --url` expose only machines NEW to the key store.
+- **Import never downgrades the key store:** when no copy of a machine verifies, the key
+  store's current entry is kept (a set-key made while the box was down), never the most
+  common config copy. For a machine already in the key store, only copies at ITS url count:
+  a 200 from another url only proves the key fits that url (a stale IP reused by another box).
+  Other-url copies are listed, never probed (the key is not sent there), unless
+  `--accept-url-change`. `apply_import(snapshot=...)` leaves a machine whose entry changed
+  while the import probed.
+- **`consumer add` / `allow` refuse a sync-managed consumer** (`Registry._refuse_if_managed`):
+  its allow-list must stay the manifest's. `deny` / `revoke` (narrowing) still work.
+- **`edit_keystore` saves only when the content changed:** every save makes the running
+  gateway reload, and a no-op (the repair race's early return) must not.
+- **`check`:**
+  - `notified: false` survives a failed notification, so the next run retries it.
+  - **`airuleset.py notify --body` exits 0 even when the Discord post failed** (review round 2):
+    it PRINTS `send()`'s status (`sent` / `dedup` / `dry-run` / `no-config` / `error`). Only a
+    printed `sent` / `dedup` is delivered. Every attempt passes its own `--dedup-key`, so a
+    retry is never deduped away. The test fake prints a status and exits 0, like the real tool.
+  - A check that cannot run because of an invalid key store is announced once per distinct
+    failure, and its recovery is announced too. An UNWRITABLE status file is announced on every
+    run: there is nowhere to remember that it was. Validation messages never repeat a value (a
+    key pasted into `url` would reach Discord): length and scheme only.
+  - `urlsplit` RAISES `ValueError` on some strings (`http://[bad/mcp`, an invalid IPv6 literal),
+    and its `.port` raises on a bad port (`:99999`, `:80a`). `registry._is_http_url` evaluates
+    both inside one `try` and requires a hostname, so such a url is just "not http(s)" in the
+    key store, the gateway reload and import (review rounds 3-4: each crashed check silently).
+    Second line of defence: `probe.gather_probes` turns any probe that still raises into an
+    `error` result for that machine alone.
+  - airuleset CUTS a body at 1900 characters (mention included) and still prints `sent`: a
+    fleet-wide change goes out as several messages of at most `CHUNK_LIMIT` (1700), and only the
+    machines of a DELIVERED message count as notified. While an announcement is still owed, the
+    record keeps the detail of the change (`repaired: ...`), so a retry still says what happened.
+- **Dry run = one choke point:** `sync._Saver(dry_run=True).commit()` never writes. Registry
+  edits of a dry run (narrowing, withdrawing, `--prune`) happen in memory only. Never add a
+  second save path around it.
+- **Import writes no empty key store** (the gateway would then serve nothing, where with no
+  key store it refuses to start): zero machines, or an unreadable `--from`, exits 1. A NEW
+  machine a consumer already allows but that is not exposed (a kill switch from before #51)
+  stays unexposed, with a warning; the dry run lists what it would expose.
+  - A machine first seen `ok` is not announced.
+  - A repair stores the re-read key only if the machine accepts it AND the stored url + key did
+    not change meanwhile (a concurrent `set-key` wins).
+  - Nothing can make the watchdog silent (review round 6): any unexpected exception after the
+    key store loads goes through `_report_failure` (announced, exit 1), and a status record
+    that is not what check writes (a hand edit) is treated as unknown.
+  - No single machine can blind the run (review rounds 4-5): a probe that raises
+    (`gather_probes`), a key store the repair cannot write (`OSError`), a key file nested too
+    deep (`RecursionError`), or any other repair exception (the guard in `observe`) becomes a
+    result / 401 detail for THAT machine; the status is still written and the rest announced.
+  - The notification (Slovak, phone-readable) goes out through
+    `airuleset.py notify --body [--owner-name]`. The unit sets
+    `REMOTEOS_GATEWAY_NOTIFY_OWNER`: a headless caller has no tmux pane for airuleset to find
+    the owner from.
+- **Tests:** `tests/fleet_harness.py`.
+  - `FakeFleetMachine` is a REAL `ThreadingHTTPServer` on 127.0.0.1, so CLI commands that run
+    their own `asyncio.run` can probe it from any thread.
+  - The fake `ssh` / `sudo` / `airuleset.py` log their argv. Assert that no secret is in those
+    argvs: that is the "contents on stdin only" proof.
+  - A CLI call from inside a running loop (the live-reload test) goes through
+    `asyncio.to_thread`.

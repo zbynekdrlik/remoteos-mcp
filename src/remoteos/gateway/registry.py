@@ -1,4 +1,4 @@
-"""Gateway registry (who may reach which machine) and the master MCP config reader.
+"""Gateway registry (who may reach which machine) and the machine source reader.
 
 Two files feed the gateway, both on dev1, neither in git:
 
@@ -9,16 +9,20 @@ Two files feed the gateway, both on dev1, neither in git:
         "exposed": ["win-pjsnvs-pokladna"],
         "consumers": {
           "david3@subdev": {"sha256": ["<64 hex>"], "machines": ["win-pjsnvs-pokladna"],
-                            "added": "2026-10-14"}
+                            "added": "2026-10-14"},
+          "camera-box@dev1": {"sha256": ["<64 hex>"], "machines": ["linux-cam1"],
+                              "added": "2026-10-21", "managed_by": "sync-configs"}
         }
       }
 
   A consumer is known ONLY by the sha256 of its bearer token; the raw token never reaches
-  this box.
+  this box. ``managed_by`` marks a consumer that ``remoteos-gateway sync-configs`` owns (#51).
 
-- The **machine source** (``~/.claude/mcp-configs/remoteos-mcp.mcp.json``, 0600) — the
-  master MCP config every project already symlinks. The gateway READS it to resolve
-  ``machine name -> upstream url + Authorization``; it never copies a key anywhere.
+- The **machine source** is the KEY STORE (``~/.config/remoteos-gateway/machines.json``,
+  0600, #51): ``{"linux-cam1": {"url": "http://cam1.lan:8092/mcp", "key": "<key>"}}``. It
+  resolves ``machine name -> upstream url + key``; ``machine set-key`` edits it, and the
+  running gateway picks the edit up on its next request. For the transition the old shape, an
+  MCP config with ``mcpServers`` (``~/.claude/mcp-configs/remoteos-mcp.mcp.json``), still loads.
 
 ``LiveConfig`` holds the last good copy of both and reloads them when a file changes (or on
 SIGHUP). A file that turns invalid is never applied: the last good copy stays and an ERROR is
@@ -33,25 +37,34 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import re
-import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from remoteos.gateway import fileops
+
 logger = logging.getLogger("remoteos.gateway.registry")
 
 DEFAULT_REGISTRY_PATH = Path.home() / ".config" / "remoteos-gateway" / "registry.json"
-DEFAULT_MACHINES_PATH = Path.home() / ".claude" / "mcp-configs" / "remoteos-mcp.mcp.json"
+DEFAULT_MACHINES_PATH = Path.home() / ".config" / "remoteos-gateway" / "machines.json"  # the key store
+LEGACY_MACHINES_PATH = Path.home() / ".claude" / "mcp-configs" / "remoteos-mcp.mcp.json"
+SYNC_MANAGER = "sync-configs"  # ``managed_by`` of a consumer that sync-configs owns
+DEFAULT_REPAIR_KEY_FILE = "/etc/remoteos-mcp/config.json"  # the Linux installer layout (#12)
 
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
 _CONSUMER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,127}")
 _MACHINE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+# RFC 7235 token68: what can follow "Bearer " in a header. Machine keys are letters and digits
+# (the installers) or token_urlsafe output (win-stream-snv); a space or "Bearer " is refused.
+_KEY_RE = re.compile(r"[A-Za-z0-9._~+/=-]{1,256}")
+_SSH_DEST_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9][A-Za-z0-9.-]{0,252}")
 
 _REGISTRY_KEYS = frozenset({"exposed", "consumers"})
-_CONSUMER_KEYS = frozenset({"sha256", "machines", "added"})
+_CONSUMER_KEYS = frozenset({"sha256", "machines", "added", "managed_by"})
+_KEYSTORE_ENTRY_KEYS = frozenset({"url", "key", "repair"})
+_REPAIR_KEYS = frozenset({"ssh", "key_file", "sudo"})
 
 
 class RegistryError(Exception):
@@ -105,9 +118,13 @@ class Consumer:
     sha256: list[str] = field(default_factory=list)
     machines: list[str] = field(default_factory=list)
     added: str = ""
+    managed_by: str = ""  # "" = edited by hand; SYNC_MANAGER = owned by sync-configs (#51)
 
     def to_json(self) -> dict:
-        return {"sha256": list(self.sha256), "machines": list(self.machines), "added": self.added}
+        data = {"sha256": list(self.sha256), "machines": list(self.machines), "added": self.added}
+        if self.managed_by:  # omitted otherwise: a hand-edited consumer keeps the #25 shape
+            data["managed_by"] = self.managed_by
+        return data
 
 
 @dataclass
@@ -164,7 +181,12 @@ class Registry:
             added = raw.get("added", "")
             if not isinstance(added, str):
                 raise RegistryError(f"consumer {name!r}: 'added' must be a string")
-            consumers[name] = Consumer(sha256=list(hashes), machines=list(machines), added=added)
+            managed_by = raw.get("managed_by", "")
+            if managed_by not in ("", SYNC_MANAGER):
+                raise RegistryError(f"consumer {name!r}: 'managed_by' must be {SYNC_MANAGER!r} when present")
+            consumers[name] = Consumer(
+                sha256=list(hashes), machines=list(machines), added=added, managed_by=managed_by
+            )
 
         return cls(exposed=list(exposed), consumers=consumers)
 
@@ -195,6 +217,7 @@ class Registry:
     def add_consumer(self, name: str, sha256: str, *, today: str | None = None) -> bool:
         """Register *sha256* for *name* (creating the consumer). Returns False if already there."""
         validate_consumer_name(name)
+        self._refuse_if_managed(name)
         digest = normalize_hash(sha256)
         for other, consumer in self.consumers.items():
             if other != name and digest in consumer.sha256:
@@ -226,6 +249,7 @@ class Registry:
     def allow(self, consumer_name: str, machine: str) -> bool:
         validate_machine_name(machine)
         consumer = self._require_consumer(consumer_name)
+        self._refuse_if_managed(consumer_name)
         if machine in consumer.machines:
             return False
         consumer.machines.append(machine)
@@ -251,6 +275,15 @@ class Registry:
         self.exposed.remove(machine)
         return True
 
+    def _refuse_if_managed(self, name: str) -> None:
+        """A hand edit must never widen a consumer sync-configs owns (its allow-list = the manifest)."""
+        consumer = self.consumers.get(name)
+        if consumer is not None and consumer.managed_by == SYNC_MANAGER:
+            raise RegistryError(
+                f"consumer {name!r} is managed by sync-configs: its token and machines come from projects.toml"
+                " — edit that file and run `remoteos-gateway sync-configs`"
+            )
+
     def _require_consumer(self, name: str) -> Consumer:
         consumer = self.consumers.get(name)
         if consumer is None:
@@ -275,7 +308,7 @@ def load_registry(path: Path) -> Registry:
     except (ValueError, RecursionError) as exc:
         raise RegistryError(f"registry {path} is not valid JSON: {exc}") from exc
     registry = Registry.from_json(data)
-    _warn_if_loose_permissions(path)
+    warn_if_loose_permissions(path)
     return registry
 
 
@@ -283,64 +316,54 @@ def save_registry(path: Path, registry: Registry) -> None:
     """Atomically write the registry with mode 0600 (its directory 0700 when we create it)."""
     _ensure_private_dir(path.parent)
     payload = json.dumps(registry.to_json(), indent=2, sort_keys=False) + "\n"
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_name, 0o600)
-        os.replace(tmp_name, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp_name)
-        raise
+    fileops.atomic_write(str(path), payload.encode("utf-8"))
     logger.info("registry %s written: %d exposed, %d consumer(s)", path, len(registry.exposed), len(registry.consumers))
+
+
+@dataclass
+class RegistryTransaction:
+    """The registry, loaded under its lock. ``save()`` may run more than once: sync-configs
+    saves between the steps of a token change, so no step leaves a written token unknown."""
+
+    path: Path
+    registry: Registry
+
+    def save(self) -> None:
+        save_registry(self.path, self.registry)
+
+
+@contextlib.contextmanager
+def registry_transaction(path: Path) -> Iterator[RegistryTransaction]:
+    """Hold the registry lock while the caller loads, edits and saves it."""
+    _ensure_private_dir(path.parent)
+    with fileops.exclusive_lock(str(path.with_name(path.name + ".lock"))):
+        yield RegistryTransaction(path=path, registry=load_registry(path))
 
 
 @contextlib.contextmanager
 def edit_registry(path: Path) -> Iterator[Registry]:
     """Lock, load, yield for editing, then save. Concurrent CLI edits serialise on the lock."""
-    _ensure_private_dir(path.parent)
-    lock_path = path.with_name(path.name + ".lock")
-    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        _lock(lock_fd)
-        registry = load_registry(path)
-        yield registry
-        save_registry(path, registry)
-    finally:
-        os.close(lock_fd)
-
-
-def _lock(fd: int) -> None:
-    try:
-        import fcntl
-    except ImportError:  # non-POSIX: the gateway is a dev1 (Linux) service; no lock there
-        logger.debug("fcntl unavailable — registry edit proceeds without a file lock")
-        return
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    with registry_transaction(path) as transaction:
+        yield transaction.registry
+        transaction.save()
 
 
 def _ensure_private_dir(directory: Path) -> None:
     """Create *directory* as 0700 if missing. An existing directory's mode is left alone."""
-    if directory.exists():
-        return
-    directory.mkdir(parents=True, exist_ok=True)
-    os.chmod(directory, 0o700)
-    logger.info("created private directory %s (0700)", directory)
+    if fileops.ensure_private_dir(str(directory)):
+        logger.info("created private directory %s (0700)", directory)
 
 
-def _warn_if_loose_permissions(path: Path) -> None:
+def warn_if_loose_permissions(path: Path, what: str = "registry") -> None:
     try:
         mode = path.stat().st_mode & 0o777
     except OSError:
         return
     if mode & 0o077:
-        logger.warning("registry %s has mode %o — expected 0600 (chmod 600 it)", path, mode)
+        logger.warning("%s %s has mode %o — expected 0600 (chmod 600 it)", what, path, mode)
 
 
-# -- machine source (master MCP config, read-only) ------------------------------------
+# -- machine source (the key store, or the legacy master MCP config) -------------------
 
 
 @dataclass(frozen=True)
@@ -351,22 +374,148 @@ class Upstream:
     authorization: str | None = field(default=None, repr=False)
 
 
-def load_machines(path: Path) -> dict[str, Upstream]:
-    """Read ``machine name -> Upstream`` from the master MCP config (``mcpServers``).
+@dataclass(frozen=True)
+class RepairRecipe:
+    """How ``check`` may re-read a machine's real key after a 401 (#51), set explicitly per machine.
 
-    Entries without an http(s) URL are skipped with a warning (the file is shared with
-    other tooling); a file that is unreadable, not JSON, or has no ``mcpServers`` object
-    raises ``MachineSourceError``.
+    ``ssh -o BatchMode=yes <ssh> [sudo -n] cat <key_file>`` must print the installer's
+    ``config.json`` (``{"auth_key": ...}``). Without a recipe a 401 is only reported.
     """
+
+    ssh: str
+    key_file: str = DEFAULT_REPAIR_KEY_FILE
+    sudo: bool = False
+
+    def to_json(self) -> dict:
+        return {"ssh": self.ssh, "key_file": self.key_file, "sudo": self.sudo}
+
+
+@dataclass(frozen=True)
+class MachineEntry:
+    """One key-store entry. ``key`` is the machine's bearer key — never logged, never printed."""
+
+    url: str
+    key: str = field(repr=False)
+    repair: RepairRecipe | None = None
+
+    @property
+    def authorization(self) -> str:
+        return f"Bearer {self.key}"
+
+    def to_json(self) -> dict:
+        data: dict = {"url": self.url, "key": self.key}
+        if self.repair is not None:
+            data["repair"] = self.repair.to_json()
+        return data
+
+
+def validate_key(key: str, *, what: str = "key") -> str:
+    """Return *key* when it can follow ``Bearer `` in a header; never echo it in the error."""
+    if not _KEY_RE.fullmatch(key):
+        raise MachineSourceError(
+            f"{what} must be 1-256 characters of letters, digits and ._~+/=- (got {len(key)} characters;"
+            " give the key alone, without 'Bearer ', spaces or a line break)"
+        )
+    return key
+
+
+def validate_http_url(url: str, *, what: str = "url") -> str:
+    """Return *url* when it is a printable http(s) url. The error never repeats the value: a key
+    pasted into a url field by a hand edit would otherwise reach a log line or a notification."""
+    if not isinstance(url, str) or not _is_http_url(url) or not url.isprintable():
+        if isinstance(url, str):
+            scheme = _url_scheme(url) if url.isprintable() else ""
+            got = f"{len(url)} characters, " + (f"scheme {scheme!r}" if scheme.isalnum() else "no http(s) scheme")
+        else:
+            got = type(url).__name__
+        raise MachineSourceError(f"{what} must be an http(s) url (got {got})")
+    return url
+
+
+def parse_repair(raw: object, name: str) -> RepairRecipe:
+    if not isinstance(raw, dict) or set(raw) - _REPAIR_KEYS:
+        raise MachineSourceError(f"key store: machine {name!r} 'repair' must be an object with {sorted(_REPAIR_KEYS)}")
+    ssh = raw.get("ssh")
+    if not isinstance(ssh, str) or not _SSH_DEST_RE.fullmatch(ssh):
+        raise MachineSourceError(f"key store: machine {name!r} repair 'ssh' must be user@host (letters, digits, . _ -)")
+    key_file = raw.get("key_file", DEFAULT_REPAIR_KEY_FILE)
+    if not isinstance(key_file, str) or not key_file.startswith("/") or not key_file.isprintable():
+        raise MachineSourceError(f"key store: machine {name!r} repair 'key_file' must be an absolute path")
+    sudo = raw.get("sudo", False)
+    if not isinstance(sudo, bool):
+        raise MachineSourceError(f"key store: machine {name!r} repair 'sudo' must be true or false")
+    return RepairRecipe(ssh=ssh, key_file=key_file, sudo=sudo)
+
+
+def parse_keystore(data: object, source: object = "key store") -> dict[str, MachineEntry]:
+    """Strictly validate the key-store shape ``{name: {url, key[, repair]}}``.
+
+    Any problem raises ``MachineSourceError`` naming the machine, never the key.
+    """
+    if not isinstance(data, dict):
+        raise MachineSourceError(f"{source}: the key store must be a JSON object of machines")
+    entries: dict[str, MachineEntry] = {}
+    for name, raw in data.items():
+        if not is_valid_machine_name(name):
+            raise MachineSourceError(f"{source}: invalid machine name {name!r}")
+        if not isinstance(raw, dict):
+            raise MachineSourceError(f"{source}: machine {name!r} must be an object")
+        unknown = set(raw) - _KEYSTORE_ENTRY_KEYS
+        if unknown:
+            raise MachineSourceError(f"{source}: machine {name!r} has unknown keys: {sorted(unknown)}")
+        url = validate_http_url(raw.get("url"), what=f"{source}: machine {name!r} 'url'")
+        key = raw.get("key")
+        if not isinstance(key, str):
+            raise MachineSourceError(f"{source}: machine {name!r} has no 'key' string")
+        validate_key(key, what=f"{source}: machine {name!r} 'key'")
+        repair = parse_repair(raw["repair"], name) if "repair" in raw else None
+        entries[name] = MachineEntry(url=url, key=key, repair=repair)
+    return entries
+
+
+def read_json_file(path: Path, what: str) -> object:
+    """Parse *path* as JSON; any failure is a ``MachineSourceError`` (never echoing content)."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        raise MachineSourceError(f"cannot read machine source {path}: {exc}") from exc
+        raise MachineSourceError(f"cannot read {what} {path}: {exc}") from exc
     try:
-        data = json.loads(text)
+        return json.loads(text)
     except (ValueError, RecursionError) as exc:
-        raise MachineSourceError(f"machine source {path} is not valid JSON: {exc}") from exc
-    servers = data.get("mcpServers") if isinstance(data, dict) else None
+        raise MachineSourceError(f"{what} {path} is not valid JSON: {exc}") from exc
+
+
+def authorization_header(entry: object) -> str | None:
+    """An MCP-config entry's ``Authorization`` header value (any case; the last one wins), else None."""
+    headers = entry.get("headers") if isinstance(entry, dict) else None
+    found = None
+    if isinstance(headers, dict):
+        for name, value in headers.items():
+            if isinstance(name, str) and name.lower() == "authorization" and isinstance(value, str):
+                found = value
+    return found
+
+
+def is_legacy_mcp_config(data: object) -> bool:
+    """True for the pre-#51 machine source: an MCP config (``mcpServers``), not a key store."""
+    return isinstance(data, dict) and "mcpServers" in data
+
+
+def load_machines(path: Path) -> dict[str, Upstream]:
+    """Read ``machine name -> Upstream`` from the machine source.
+
+    The key store (``{name: {url, key}}``) is validated strictly: one bad entry refuses the
+    whole file (the gateway then keeps its last good copy). The legacy MCP-config shape
+    (``mcpServers``) is still accepted for the transition; there, entries without an http(s)
+    URL are skipped with a warning, since that file is shared with other tooling. A file that
+    is unreadable or not JSON raises ``MachineSourceError``.
+    """
+    data = read_json_file(path, "machine source")
+    if not is_legacy_mcp_config(data):
+        entries = parse_keystore(data, f"machine source {path}")
+        warn_if_loose_permissions(path, "key store")
+        return {name: Upstream(url=entry.url, authorization=entry.authorization) for name, entry in entries.items()}
+    servers = data["mcpServers"]
     if not isinstance(servers, dict):
         raise MachineSourceError(f"machine source {path} has no 'mcpServers' object")
 
@@ -379,12 +528,7 @@ def load_machines(path: Path) -> dict[str, Upstream]:
         if not isinstance(url, str) or not _is_http_url(url):
             logger.warning("machine source: entry %r has no http(s) url — skipped", name)
             continue
-        headers = entry.get("headers") or {}
-        authorization = None
-        if isinstance(headers, dict):
-            for key, value in headers.items():
-                if isinstance(key, str) and key.lower() == "authorization" and isinstance(value, str):
-                    authorization = value
+        authorization = authorization_header(entry)
         if authorization is None:
             logger.warning("machine source: entry %r has no Authorization header — forwarded without a key", name)
         machines[name] = Upstream(url=url, authorization=authorization)
@@ -392,8 +536,22 @@ def load_machines(path: Path) -> dict[str, Upstream]:
 
 
 def _is_http_url(url: str) -> bool:
-    parts = urlsplit(url)
-    return parts.scheme in ("http", "https") and bool(parts.netloc)
+    """An http(s) url with a host and, if any, a valid port. urlsplit RAISES on some strings
+    ("http://[bad/mcp") and ``.port`` raises on a bad port (":99999", ":80a"): such a url is
+    simply not usable — refused here, never a crash in a probe later."""
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 - evaluated for its ValueError on an invalid port
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
+
+def _url_scheme(url: str) -> str:
+    try:
+        return urlsplit(url).scheme
+    except ValueError:
+        return ""
 
 
 # -- live view with reload ------------------------------------------------------------

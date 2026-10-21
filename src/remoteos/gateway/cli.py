@@ -11,6 +11,9 @@
 
 Every edit is written atomically to the registry; a running gateway picks it up on its next
 request (file change) or on SIGHUP — no restart needed.
+
+The fleet commands (#51) — ``machine set-key|list|import|repair-recipe``, ``sync-configs``
+and ``check`` — live in ``cli_fleet.py`` and are registered on this group.
 """
 
 from __future__ import annotations
@@ -25,7 +28,9 @@ from pathlib import Path
 import click
 
 from remoteos import __version__
+from remoteos.gateway import cli_fleet
 from remoteos.gateway.accesslog import DEFAULT_ACCESS_LOG_PATH, read_access_log
+from remoteos.gateway.manifest import DEFAULT_MANIFEST_PATH
 from remoteos.gateway.registry import (
     DEFAULT_MACHINES_PATH,
     DEFAULT_REGISTRY_PATH,
@@ -47,6 +52,7 @@ class _Paths:
     registry: Path
     machines: Path
     access_log: Path
+    manifest: Path = DEFAULT_MANIFEST_PATH
 
 
 def check_bind_host(host: str) -> str:
@@ -89,7 +95,7 @@ def check_bind_host(host: str) -> str:
     envvar="REMOTEOS_GATEWAY_MACHINES",
     default=DEFAULT_MACHINES_PATH,
     show_default=True,
-    help="Master MCP config the machine URL + key are read from (never copied).",
+    help="The key store (machine url + key). A legacy MCP config (mcpServers) is still read.",
 )
 @click.option(
     "--access-log",
@@ -99,11 +105,24 @@ def check_bind_host(host: str) -> str:
     show_default=True,
     help="JSONL access log.",
 )
+@click.option(
+    "--manifest",
+    type=click.Path(dir_okay=False, path_type=Path),
+    envvar="REMOTEOS_GATEWAY_MANIFEST",
+    default=DEFAULT_MANIFEST_PATH,
+    show_default=True,
+    help="Projects manifest (TOML): which project reaches which machines (sync-configs).",
+)
 @click.version_option(__version__, prog_name="remoteos-gateway")
 @click.pass_context
-def main(ctx: click.Context, registry: Path, machines: Path, access_log: Path) -> None:
+def main(ctx: click.Context, registry: Path, machines: Path, access_log: Path, manifest: Path) -> None:
     """remoteos MCP gateway — expose managed machines to remote fleet consumers."""
-    ctx.obj = _Paths(registry=registry.expanduser(), machines=machines.expanduser(), access_log=access_log.expanduser())
+    ctx.obj = _Paths(
+        registry=registry.expanduser(),
+        machines=machines.expanduser(),
+        access_log=access_log.expanduser(),
+        manifest=manifest.expanduser(),
+    )
 
 
 # -- serve ----------------------------------------------------------------------------
@@ -356,6 +375,10 @@ def _printable(value: object) -> str:
         return text
     return "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in text)
 
+
+main.add_command(cli_fleet.machine)
+main.add_command(cli_fleet.sync_configs_command)
+main.add_command(cli_fleet.check_command)
 
 if __name__ == "__main__":  # pragma: no cover
     main()

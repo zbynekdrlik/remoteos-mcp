@@ -17,6 +17,28 @@ from PIL import Image, ImageGrab
 from tool_test_support import purge_module
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gateway_environment(tmp_path, monkeypatch):
+    """No test ever reaches a real gateway file, a real ssh/sudo, or the real airuleset notify (#51).
+
+    Every ``remoteos-gateway`` default path points into tmp; ``ssh``/``sudo`` default to a binary
+    that does not exist (a test that needs them installs the fakes, which override this); the
+    airuleset script defaults to a missing file, so ``check`` can never post to Discord.
+    """
+    isolated = tmp_path / "isolated-gateway-defaults"
+    for name, file in (
+        ("REMOTEOS_GATEWAY_REGISTRY", "registry.json"),
+        ("REMOTEOS_GATEWAY_MACHINES", "machines.json"),
+        ("REMOTEOS_GATEWAY_MANIFEST", "projects.toml"),
+        ("REMOTEOS_GATEWAY_ACCESS_LOG", "access.jsonl"),
+        ("REMOTEOS_GATEWAY_AIRULESET", "no-airuleset.py"),
+        ("REMOTEOS_GATEWAY_STATUS_FILE", "machines-status.json"),
+    ):
+        monkeypatch.setenv(name, str(isolated / file))
+    monkeypatch.setenv("REMOTEOS_GATEWAY_SSH", str(isolated / "no-ssh"))
+    monkeypatch.setenv("REMOTEOS_GATEWAY_SUDO", str(isolated / "no-sudo"))
+
+
 @pytest.fixture
 def gw(tmp_path) -> Harness:
     h = Harness(

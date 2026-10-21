@@ -1,0 +1,31 @@
+# remoteos-gateway key-drift watchdog (#51) — one run of `remoteos-gateway check`.
+#
+# Started by remoteos-gateway-check.timer every 10 minutes. Install it next to
+# remoteos-gateway.service, as the same account (README "MCP gateway (dev1)"):
+#
+#   cp deploy/remoteos-gateway-check.service deploy/remoteos-gateway-check.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now remoteos-gateway-check.timer
+#
+# Each run probes every machine of the key store DIRECTLY with its stored key, plus the
+# gateway's /healthz, writes ~/.local/state/remoteos-gateway/machines-status.json and announces
+# each state change ONCE through ~/devel/airuleset/airuleset.py (a log line when it is absent).
+#
+# Logs: journalctl --user -u remoteos-gateway-check
+
+[Unit]
+Description=remoteos MCP gateway — machine key-drift check
+Documentation=https://github.com/zbynekdrlik/remoteos-mcp#mcp-gateway-dev1
+After=network-online.target remoteos-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/remoteos-gateway/venv/bin/remoteos-gateway check
+# Whose Discord thread a state change goes to (airuleset notify --owner-name). A headless
+# unit has no tmux pane for airuleset to detect the owner from.
+Environment=REMOTEOS_GATEWAY_NOTIFY_OWNER=zbynek
+# Probes are bounded (5 s connect, 10 s read, concurrent); a repair's ssh is bounded at 30 s.
+TimeoutStartSec=300
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=256M

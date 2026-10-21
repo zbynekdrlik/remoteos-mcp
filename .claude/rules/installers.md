@@ -258,6 +258,15 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 
 ## Windows
 
+- **`install.ps1` stays ASCII-only (#12, PR #55).** Windows PowerShell 5.1 reads a BOM-less
+  script file (`-File`, `Parser::ParseFile`) in the ANSI code page. A UTF-8 em dash
+  (`E2 80 94`) then becomes cp1252 `â€”`, and its `0x94` byte is U+201D, which PowerShell takes
+  as a CLOSING double quote: the string ends early and the whole file stops parsing ("Missing
+  closing '}'"). `irm | iex` hides the bug (the web response is decoded as UTF-8), so only a
+  file run shows it. Write `-` / `--` / `...`, never `—` / `…` / smart quotes, in comments too.
+  Also no PowerShell 7-only syntax (`??`, `?.`, `&&`, `||`, ternary). Guarded by
+  `tests/test_installer_windows_key.py` (`test_install_ps1_is_ascii_so_windows_powershell_5_1_parses_it`,
+  `test_install_ps1_uses_no_powershell_7_only_syntax`).
 - Never truncate or discard pip output (`| Out-Null`): capture it, check `$LASTEXITCODE`, print
   the whole output on failure.
 - The key is resolved BEFORE step 2: step 2 deletes the old winremote config, and an invalid

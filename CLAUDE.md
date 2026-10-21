@@ -13,7 +13,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | Installer code (Linux venv layout + swap/rollback, the key never in a unit/argv/output, key precedence, macOS preflight/rollback, the fake-box tests) | `.claude/rules/installers.md` (auto-loads on its `paths:`) |
 | `.mcp.json` setup, restore after clone, add new machine | `/remoteos-mcp-config` skill |
 | Linux X11 desktop provider (session detection, xdotool/scrot backends, deploy/test) | `.claude/skills/linux-desktop` |
-| MCP gateway on dev1 (`remoteos-gateway`, per-consumer tokens, streaming proxy, rollout) | `.claude/rules/gateway.md` (auto-loads on its `paths:`) + README "MCP gateway (dev1)" |
+| MCP gateway on dev1 (`remoteos-gateway`, per-consumer tokens, streaming proxy, rollout; #51 key store, `projects.toml`, `sync-configs`, `check` watchdog) | `.claude/rules/gateway.md` (auto-loads on its `paths:`) + README "MCP gateway (dev1)" |
 | Screen coordinates: Snapshot frame, scale/origin, image→screen input mapping, Windows DPI order, Retina | `.claude/rules/coordinates.md` (auto-loads on its `paths:`) + README "Screen coordinates" |
 | Mouse wheel / Scroll: clicks + direction, Windows SendInput, Quartz wheel2 sign, xdotool 4-7 | `.claude/rules/scroll.md` (auto-loads on its `paths:`) + README "Scroll units" |
 | Typing text / Type: Unicode keystrokes (SendInput `KEYEVENTF_UNICODE`, Quartz Unicode string), delivered count, `method="paste"` | `.claude/rules/typing.md` (auto-loads on its `paths:`) + README "Typing text (Unicode)" |

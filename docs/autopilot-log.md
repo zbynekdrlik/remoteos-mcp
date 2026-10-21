@@ -409,3 +409,36 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   `tests_windows/test_install_ps1_key.py` (real PowerShell 5.1: install.ps1's own functions, real
   cmd.exe runs of the .bat, the ACL). Result: 906 pass, ruff + shellcheck clean;
   `install-linux.sh` 1000 lines.
+
+## #51 Phase 1 — every project through the gateway: one key store, generated configs, a drift watchdog (0.7.0.dev33)
+
+- **Why:** every project's `.mcp.json` held its own copy of each machine key; a key change made
+  every copy stale and every running session kept the old key until the owner reconnected it.
+- **Design (main session, Approach 1, issuecomment-6306364162):** the #25 gateway becomes the
+  route for EVERY project. ONE key store (`machines.json`) is the gateway's machine source;
+  `projects.toml` lists each project's machines; `sync-configs` writes each project's fleet
+  entries (same server names, one project token, allow-list = the manifest); `check` (a 10-minute
+  user timer) watches for key drift. remoteos-mcp keeps DIRECT entries.
+- **Implementation details decided on the way (all on #51):** `fileops` (stdlib-only, the same
+  code runs locally / under `sudo -n -u` / over `ssh -o BatchMode=yes`, contents on stdin only);
+  a format-preserving `mcpServers` renderer (kept members byte-equal); sync owns only entries it
+  wrote; managed consumers (`managed_by`); exposure is a kill switch sync never undoes; import
+  candidates `^(win|linux|mac)-`; the manifest before the import in the migration.
+- **Commits:** bump `24df568`; RED `d0e2099` + `5ecd240` → GREEN `fb8c63b` (key store, set-key,
+  import); RED `0c89427` → GREEN `d213d29` (sync-configs); RED `9f872c9` → GREEN `7dc10c2`
+  (check + units); `c74cd75` (feature tests), `25fc0b1` (docs).
+- **Review: 8 full rounds + 1 focused round, every 🟡 RED→GREEN:** r1 `86e2c70` → `8bdfa53`
+  (5 🟡: a landed-but-failed write, unverified import downgrade, re-exposure, mass revoke on an
+  empty manifest, untested failure paths); r2 `16df35c` → `3654c18` (3 🟡: airuleset exits 0 on a
+  failed post, import url switch, token-rule mutants); r3 `99bca7a` → `3403c7b` (3 🟡: urlsplit
+  ValueError, dry-run choke point, repaired-after-ok); r4 `98ff852` → `0a99e9a` (5 🟡: bad ports,
+  airuleset cuts at 1900 → chunks, retried repair notice, direct removal, unreadable --from);
+  r5 `6196a0e` → `6fc2854` (2 🟡: a repair failure blinded the run, two untested branches); r6
+  `09fb901` + `63f863d` → `a8b0ddd` (1 🟡 doc; short writes, git work trees, silent watchdog);
+  r7 `75ea49c` → `0d93912` (1 🟡: round 6's hash cap kept the wrong hash); r8 0 🔴 0 🟡, its
+  three 🔵 `5eecf1f` → `2363ea1`; focused review of that fix 0 🔴 0 🟡, its three 🔵 `7d6ad40` →
+  `b426dd5`.
+- **Tests:** `tests/test_gateway_keystore.py`, `test_gateway_import.py`, `test_gateway_sync.py`,
+  `test_gateway_check.py`, `test_gateway_files.py` on `tests/fleet_harness.py` (real loopback
+  machines/gateway, fake ssh/sudo/airuleset at the OS boundary); conftest isolates every gateway
+  default path. Result: 1034 pass (908 before), ruff clean.
