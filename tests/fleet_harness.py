@@ -185,6 +185,8 @@ _FAKE_AIRULESET = '''#!{python}
 import json, os, sys
 with open(os.environ["FAKE_NOTIFY_LOG"], "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
+# like the real `notify --body`: it PRINTS send()'s status and exits 0 even when the post failed
+print(os.environ.get("FAKE_NOTIFY_STATUS", "sent"))
 sys.exit(int(os.environ.get("FAKE_NOTIFY_EXIT", "0")))
 '''
 
@@ -192,7 +194,9 @@ sys.exit(int(os.environ.get("FAKE_NOTIFY_EXIT", "0")))
 def install_fake_airuleset(directory: Path, monkeypatch) -> tuple[Path, Path]:
     """A stand-in ``airuleset.py`` whose ``notify`` logs its argv (JSON line) to the returned log.
 
-    ``FAKE_NOTIFY_EXIT`` makes it fail like a Discord send that did not go out.
+    Like the real one it prints the send status (``FAKE_NOTIFY_STATUS``, default ``sent``; the
+    real ``send()`` returns sent / dedup / dry-run / no-config / error) and exits 0 regardless;
+    ``FAKE_NOTIFY_EXIT`` makes the script itself fail (it did not run).
     """
     import sys
 

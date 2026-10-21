@@ -206,3 +206,44 @@ def test_import_skips_entries_of_the_manifest_gateway_url_not_only_the_default(t
     store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
     assert set(store) == {"linux-cam1"}  # the project token behind the manifest's gateway is no machine key
     assert token not in result.output
+
+
+# -- review round 2 -------------------------------------------------------------------------------
+
+
+def test_import_never_moves_a_known_machine_to_another_url_unless_asked(tmp_path):
+    stored, other = fresh_secret("storedkey"), fresh_secret("otherkey")
+    down = closed_port_url()  # the real box is down right now
+    with FakeFleetMachine(accept_keys=(other,)) as elsewhere:  # e.g. a stale IP now used by another box
+        write_private_json(tmp_path / "cfg" / "machines.json", {"linux-cam1": {"url": down, "key": stored}})
+        config = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam1": _entry(elsewhere.url, other)})
+
+        kept = _import(tmp_path, "--from", str(config))
+        probed_without_flag = list(elsewhere.seen_authorization)
+        moved = _import(tmp_path, "--from", str(config), "--accept-url-change")
+
+    assert kept.exit_code == 0, kept.output
+    assert "ANOTHER url" in kept.output and "--accept-url-change" in kept.output
+    assert probed_without_flag == []  # the key is not even sent to the other url
+    assert moved.exit_code == 0, moved.output
+    store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
+    assert store["linux-cam1"] == {"url": elsewhere.url, "key": other}
+    for secret in (stored, other):
+        assert secret not in kept.output + moved.output
+
+
+def test_an_import_never_writes_back_over_a_key_changed_while_it_probed(tmp_path):
+    from remoteos.gateway.keystore import apply_import, load_keystore, resolve_import, scan_sources
+
+    old, concurrent, fresh = fresh_secret("old"), fresh_secret("concurrent"), fresh_secret("fresh")
+    url = closed_port_url()
+    store_path = write_private_json(tmp_path / "machines.json", {"linux-cam1": {"url": url, "key": old}})
+    snapshot = load_keystore(store_path)
+    scan = scan_sources([("cfg", json.dumps({"mcpServers": {"linux-cam1": _entry(url, fresh)}}))])
+    decisions = resolve_import(scan, snapshot)  # nothing verifies: the store's own copy is the decision
+
+    write_private_json(store_path, {"linux-cam1": {"url": url, "key": concurrent}})  # a set-key meanwhile
+    skipped = apply_import(store_path, decisions, snapshot=snapshot)
+
+    assert json.loads(store_path.read_text(encoding="utf-8"))["linux-cam1"]["key"] == concurrent
+    assert skipped == ["linux-cam1"]

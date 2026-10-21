@@ -79,6 +79,17 @@ def test_the_helper_runs_standalone_from_its_source_with_contents_on_stdin(tmp_p
     assert bad_tag.returncode != 0 and path.read_bytes() == b'{"a": 1}\n'
 
 
+def test_a_bare_relative_file_name_is_written_in_the_current_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    fileops.atomic_write("registry.json", b"{}\n")
+    with fileops.exclusive_lock("registry.json.lock"):
+        pass
+
+    assert (tmp_path / "registry.json").read_bytes() == b"{}\n"
+    assert stat.S_IMODE(os.stat(tmp_path / "registry.json").st_mode) == 0o600
+
+
 def test_expand_refuses_a_relative_path_and_uses_the_account_home():
     with pytest.raises(ValueError):
         fileops.expand("relative/path.json")
@@ -129,6 +140,10 @@ def test_a_valid_manifest_parses_with_defaults():
         ({"projects": {"p": _project(machines=[])}}, "no machines"),
         ({"projects": {"p": _project(mode="proxy")}}, "mode must be"),
         ({"projects": {"p": _project(), "q": _project()}}, "same config file"),
+        (
+            {"projects": {"p": _project(), "q": _project(config="/home/newlevel/.claude/mcp-configs/p.mcp.json")}},
+            "same config file",
+        ),
         ({"projects": {"-bad": _project()}}, "invalid project name"),
     ],
 )

@@ -620,3 +620,75 @@ def test_direct_mode_is_refused_for_another_account_even_on_the_gateway_host(fle
     assert f"only for the gateway's own account ({ME}@dev1)" in result.output
     assert "Nothing was changed" in result.output
     assert fleet.registry.read_bytes() == before
+
+
+# -- review round 2: the token rules -------------------------------------------------------------
+
+
+def _plant_token(path: Path, names: tuple[str, ...], token: str) -> None:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for name in names:
+        data["mcpServers"][name]["headers"]["Authorization"] = f"Bearer {token}"
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def test_a_token_in_the_file_that_is_not_this_consumers_is_never_adopted(fleet):
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    machines = ("win-stream-snv", "linux-cam1", "linux-cam2")
+
+    for planted in (fresh_secret("plantedtoken"), fleet.david_token):  # unregistered / another consumer's
+        _plant_token(path, machines, planted)
+        result = fleet.run()
+
+        assert result.exit_code == 0, result.output
+        minted = fleet.token_of(path, "linux-cam1")
+        assert minted != planted
+        registry = load_registry(fleet.registry)
+        assert registry.consumers["camera-box@dev1"].sha256 == [token_sha256(minted)]
+        assert registry.consumers["david3@subdev"].sha256 == [token_sha256(fleet.david_token)]  # untouched
+        assert all(fleet.token_of(path, m) == minted for m in machines)
+
+
+def test_a_token_change_on_an_existing_consumer_keeps_both_hashes_until_the_file_is_confirmed(fleet, monkeypatch):
+    from remoteos.gateway import targets
+
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    old = fleet.token_of(path, "linux-cam1")
+    _plant_token(path, ("win-stream-snv", "linux-cam1", "linux-cam2"), fresh_secret("lostcopy"))  # forces a new one
+    original = targets.Target.write
+
+    def landed_then_lost(self, config, text, tag):
+        original(self, config, text, tag)
+        raise targets.TargetError("ssh: connection lost after the write")
+
+    monkeypatch.setattr(targets.Target, "write", landed_then_lost)
+    assert fleet.run().exit_code == 1
+    new = fleet.token_of(path, "linux-cam1")
+    assert new != old
+    assert load_registry(fleet.registry).consumers["camera-box@dev1"].sha256 == [token_sha256(old), token_sha256(new)]
+
+    monkeypatch.setattr(targets.Target, "write", original)
+    assert fleet.run().exit_code == 0
+    assert load_registry(fleet.registry).consumers["camera-box@dev1"].sha256 == [token_sha256(new)]  # pruned
+
+
+def test_consumer_add_and_allow_refuse_to_widen_a_sync_managed_consumer(fleet):
+    fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project(machines=("linux-cam1",))})
+    assert fleet.run().exit_code == 0
+    before = fleet.registry.read_bytes()
+    base = ["--registry", str(fleet.registry), "--machines", str(fleet.keystore)]
+
+    allow = CliRunner().invoke(gateway_cli.main, [*base, "allow", "camera-box@dev1", "linux-cam2"])
+    add = CliRunner().invoke(
+        gateway_cli.main, [*base, "consumer", "add", "camera-box@dev1", "--sha256", token_sha256("x" * 43)]
+    )
+
+    assert allow.exit_code == 1 and add.exit_code == 1
+    assert "managed by sync-configs" in allow.output and "projects.toml" in allow.output
+    assert "managed by sync-configs" in add.output
+    assert fleet.registry.read_bytes() == before

@@ -272,15 +272,41 @@ def test_a_set_key_during_a_repair_wins_and_the_key_store_is_not_rewritten(tmp_p
     assert "changed meanwhile" in check.state()["machines"]["linux-cam2"]["detail"]
 
 
-def test_a_check_that_cannot_run_is_announced_once(tmp_path, monkeypatch):
+def test_a_check_that_cannot_run_is_announced_once_and_so_is_its_recovery(tmp_path, monkeypatch):
     check = Check(tmp_path, monkeypatch)
+    pasted = fresh_secret("pastedkey")  # a key pasted into the url field by a hand edit
     check.keystore.parent.mkdir(parents=True, exist_ok=True)
-    check.keystore.write_text('{"linux-cam1": {"url": "ftp://bad", "key": "k"}}', encoding="utf-8")
-    with FakeFleetMachine(healthz=True) as gateway:
+    check.keystore.write_text(json.dumps({"linux-cam1": {"url": pasted, "key": "k"}}), encoding="utf-8")
+    key = fresh_secret("machinekey")
+    with FakeFleetMachine(accept_keys=(key,)) as box, FakeFleetMachine(healthz=True) as gateway:
         first = check.run(gateway.base_url)
         second = check.run(gateway.base_url)
+        assert check.state()["error"]["notified"] is True
+        check.store({"linux-cam1": {"url": box.url, "key": key}})  # the owner fixes it
+        recovered = check.run(gateway.base_url)
+        quiet = check.run(gateway.base_url)
 
     assert first.exit_code == 1 and second.exit_code == 1
-    [body] = check.notifications()  # once, not every 10 minutes
-    assert "key store" in body
-    assert check.state()["error"]["notified"] is True
+    assert recovered.exit_code == 0 and quiet.exit_code == 0
+    broken, back = check.notifications()  # once broken, once back — not every 10 minutes
+    assert "key store" in broken and "NEBEŽÍ" in broken
+    assert "opäť beží" in back
+    assert "error" not in check.state()
+    _assert_no_secret([broken, back, first.output, check.status.read_text()], [pasted, key])
+
+
+def test_a_notification_airuleset_printed_as_not_sent_is_retried(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    check.store({"linux-cam4": {"url": closed_port_url(), "key": fresh_secret("machinekey")}})
+    with FakeFleetMachine(healthz=True) as gateway:
+        for status in ("error", "no-config", "sent", "sent"):
+            monkeypatch.setenv("FAKE_NOTIFY_STATUS", status)
+            assert check.run(gateway.base_url).exit_code == 0
+            if status != "sent":
+                assert check.state()["machines"]["linux-cam4"]["notified"] is False
+
+    calls = notify_calls(check.notify_log)
+    assert len(calls) == 3  # error, no-config, then the delivered retry; then silence
+    keys = [argv[argv.index("--dedup-key") + 1] for argv in calls]
+    assert len(set(keys)) == 3  # one dedup key per attempt: a retry is never deduped away
+    assert check.state()["machines"]["linux-cam4"]["notified"] is True
