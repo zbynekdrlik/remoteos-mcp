@@ -4,7 +4,8 @@ paths:
   - "tests/test_gateway*.py"
   - "tests/gateway_harness.py"
   - "tests/conftest.py"
-  - "deploy/remoteos-gateway.service"
+  - "tests/fleet_harness.py"
+  - "deploy/remoteos-gateway*"
 ---
 
 # remoteos-gateway (dev1 MCP gateway, #25) — gotchas
@@ -73,3 +74,62 @@ paths:
   - `ProtectSystem`/`ProtectHome`/`PrivateTmp` are VERIFIED-INERT there:
     `apparmor_restrict_unprivileged_userns=1` blocks the mount namespace they need.
   - Never claim them as isolation the gateway has.
+
+## Every project through the gateway (#51): key store, manifest, sync-configs, check
+
+- **Modules:** `keystore.py` (machines.json I/O, `set_key`, the import), `manifest.py`
+  (projects.toml), `sync.py` (the generator), `targets.py` (local / `sudo -n -u` /
+  `ssh -o BatchMode=yes`), `fileops.py` (atomic write + backup + lock), `probe.py` (the
+  `initialize` probe), `check.py` (the watchdog), `cli_fleet.py` (the commands, registered on
+  `cli.main`). The dependency direction is one way: `registry` ← `keystore` ← `sync` /
+  `check` ← `cli_fleet` ← `cli`.
+- **The key-store shape lives in `registry.py`** (`parse_keystore`, `MachineEntry`,
+  `RepairRecipe`), because `load_machines` must read it; `keystore.py` builds on it.
+  - `load_machines` tells the shapes apart by the `mcpServers` key: the legacy one skips bad
+    entries with a warning (a shared file), the key store refuses the WHOLE file on one bad
+    entry (the gateway keeps its last good copy).
+  - `--machines` defaults to the key store, so after an upgrade the gateway must not restart
+    before `machine import` ran (README migration order).
+- **`fileops.py` is stdlib-only, py3.8+, with no package imports:** `targets.py` runs its
+  SOURCE as `python3 -c` under sudo or over ssh, so the three writers share one tested
+  implementation.
+  - File contents go on stdin/stdout only. An argv holds the source, an op and a path.
+  - `~` is the account's passwd home, never `$HOME` (sudo may keep the caller's).
+  - A symlink is written through (`realpath`): a project's `.mcp.json` symlink stays one.
+  - A same-day backup is never overwritten (`name.1`, `.2`, ...).
+- **What sync owns:** an entry whose url is one sync writes (`<gateway>/<name>/mcp`, or in
+  direct mode the key store's url). A manifest machine is always (re)written. An owned entry
+  whose machine left the manifest is removed. ANY other entry is kept, even when its name is in
+  the key store: dev2's `linux-presenter` / `win-marek-nb` may not be reachable from dev1, and
+  deleting them would break those projects.
+- **Byte-equal non-fleet entries:** `sync.parse_config` walks `mcpServers` with
+  `JSONDecoder.raw_decode` and keeps each value's source slice. `render_config` re-joins the
+  slices; only generated entries are serialised (`json.dumps(indent=2)` re-indented to the
+  entry's column). Never "load + json.dump" a project config: that rewrote `reaperiem.mcp.json`
+  (not in indent-2 form).
+- **Token order (no window with an unknown token):** register the new hash (keep the old) →
+  save → write the file → prune to `[hash]` → save. A failed write rolls the hash back (a new
+  consumer is deleted) and only ever NARROWS the allow-list. A token is reused only when its
+  hash is registered for THIS managed consumer; an unregistered token in a file is never
+  adopted.
+- **`managed_by: "sync-configs"`** marks a consumer that sync owns. Sync revokes a managed
+  consumer whose project left the manifest, and refuses a same-name consumer it did not create.
+  `Consumer.to_json` omits the field when it is empty, so hand-made consumers keep the #25 shape.
+- **Exposure is a kill switch sync never undoes:** sync warns about an unexposed manifest
+  machine. `machine import` and `machine set-key --url` (a new machine) expose.
+- **`check`:**
+  - `notified: false` survives a failed notification, so the next run retries it.
+  - A machine first seen `ok` is not announced.
+  - A repair stores the re-read key only if the machine accepts it AND the stored key did not
+    change meanwhile (a concurrent `set-key` wins).
+  - The notification (Slovak, phone-readable) goes out through
+    `airuleset.py notify --body [--owner-name]`. The unit sets
+    `REMOTEOS_GATEWAY_NOTIFY_OWNER`: a headless caller has no tmux pane for airuleset to find
+    the owner from.
+- **Tests:** `tests/fleet_harness.py`.
+  - `FakeFleetMachine` is a REAL `ThreadingHTTPServer` on 127.0.0.1, so CLI commands that run
+    their own `asyncio.run` can probe it from any thread.
+  - The fake `ssh` / `sudo` / `airuleset.py` log their argv. Assert that no secret is in those
+    argvs: that is the "contents on stdin only" proof.
+  - A CLI call from inside a running loop (the live-reload test) goes through
+    `asyncio.to_thread`.

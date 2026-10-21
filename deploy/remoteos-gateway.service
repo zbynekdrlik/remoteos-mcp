@@ -1,11 +1,14 @@
 # remoteos MCP gateway — systemd --user unit for dev1 (#25).
 #
-# Install it as the account that owns ~/.claude/mcp-configs/remoteos-mcp.mcp.json. The steps are
-# in the README section "MCP gateway (dev1)": a DEDICATED venv installed with constraints.txt,
-# never the user's shared site-packages. ExecStart below points into that venv.
+# Install it as the account that owns the key store ~/.config/remoteos-gateway/machines.json
+# (#51; build it with `remoteos-gateway machine import` BEFORE the first start of a version
+# >= 0.7.0.dev33, which reads it by default). The steps are in the README section "MCP gateway
+# (dev1)": a DEDICATED venv installed with constraints.txt, never the user's shared
+# site-packages. ExecStart below points into that venv.
 #
-# Registry edits (`remoteos-gateway allow/deny/revoke/...`) apply on the next request, so no
-# restart is needed. `systemctl --user reload remoteos-gateway` forces a re-read (SIGHUP).
+# Registry and key-store edits (`remoteos-gateway allow/deny/revoke/...`, `machine set-key`)
+# apply on the next request, so no restart is needed. `systemctl --user reload
+# remoteos-gateway` forces a re-read (SIGHUP). The drift watchdog is remoteos-gateway-check.timer.
 #
 # Logs:
 #   journalctl --user -u remoteos-gateway    operational log

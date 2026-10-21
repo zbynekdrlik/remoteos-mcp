@@ -287,10 +287,13 @@ leaves dev1.
 - **Listens on dev1's tailscale address only:** `100.104.8.125:8796`. It refuses
   `0.0.0.0` / `::`.
 - **One URL per machine:** `http://100.104.8.125:8796/<machine>/mcp`. The machine name is
-  its key in `~/.claude/mcp-configs/remoteos-mcp.mcp.json`.
+  its name in the key store, `~/.config/remoteos-gateway/machines.json` (#51).
 - **Per-consumer tokens, registered by hash only.** The gateway checks the consumer's
   `Authorization: Bearer <token>`. It then forwards the request with the machine's own key,
-  read from the master MCP config (never copied). The consumer token is never forwarded.
+  read from the key store (never copied). The consumer token is never forwarded.
+- **Every project of the owner goes through it too (#51):** each project's `.mcp.json` is
+  GENERATED from one manifest, so a machine key lives in ONE place. See
+  [Every project through the gateway](#every-project-through-the-gateway-51).
 - **Transparent streaming proxy.** JSON and SSE responses stream back unchanged, including
   `Mcp-Session-Id`.
 
@@ -375,6 +378,117 @@ logged. A deleted registry denies everything.
 - `~/.local/state/remoteos-gateway/access.jsonl` — one line per request: time, consumer,
   machine, JSON-RPC method, tool name, status, duration. It never holds a token, a key, or
   tool arguments. It rotates to `.1` at 20 MiB.
+
+### Every project through the gateway (#51)
+
+Before #51, every project config held its own copy of each machine key. A key change made
+every copy stale, and every running Claude Code session kept sending the old key until the
+owner reconnected it. Now:
+
+- **One key store** — `~/.config/remoteos-gateway/machines.json` (`0600`, dir `0700`), on
+  dev1: `{"<machine>": {"url": "http://<box>:8092/mcp", "key": "<key>"}}`. It is the
+  gateway's machine source (`serve --machines`, the default).
+- **One manifest** — `~/.config/remoteos-gateway/projects.toml`: per project, where its
+  config lives and which machines it may reach.
+- **Generated configs** — `remoteos-gateway sync-configs` writes each project's config. Each
+  fleet entry keeps its server NAME (so `mcp__win-stream-snv__Shell` stays) and points at the
+  gateway with the project's own token. Every other entry (n8n, playwright, …) stays byte-equal.
+- **A drift watchdog** — `remoteos-gateway check`, every 10 minutes (a user timer).
+
+| Task | Do this |
+|---|---|
+| A machine's key changed | `remoteos-gateway machine set-key <machine>` with the key on stdin. Every project gets it on its next call: no config change, no reconnect. |
+| Add a machine to a project | Add it to the project's `machines` in `projects.toml`, then `remoteos-gateway sync-configs`. |
+| Add a NEW machine | `remoteos-gateway machine set-key <machine> --url http://<box>:8092/mcp` (key on stdin), then the step above. |
+| Add a project | One `[projects.<name>]` table in `projects.toml`, then `remoteos-gateway sync-configs`. |
+| See what would change | `remoteos-gateway sync-configs --dry-run` (every key and token masked). |
+| See the machines | `remoteos-gateway machine list` (keys masked) and `~/.local/state/remoteos-gateway/machines-status.json`. |
+
+The manifest:
+
+```toml
+[gateway]
+url = "http://100.104.8.125:8796"
+
+[projects.camera-box]
+host = "dev1"                      # where the project's sessions run (dev1 | dev2)
+account = "newlevel"               # whose ~/.claude it is
+config = "~/.claude/mcp-configs/camera-box.mcp.json"
+machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
+
+[projects.remoteos-mcp]            # keeps DIRECT entries: it debugs machines when the gateway is down
+host = "dev1"
+account = "newlevel"
+config = "~/.claude/mcp-configs/remoteos-mcp.mcp.json"
+mode = "direct"
+machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
+```
+
+**How `sync-configs` behaves:**
+
+- **The consumer.** For each project it keeps a consumer `<project>@<host>` in the registry,
+  marked `"managed_by": "sync-configs"`.
+  - Its token is minted once and lives only in the generated file.
+  - Its allow-list is EXACTLY the manifest's `machines`: a machine removed there leaves the
+    allow-list AND the config.
+  - A managed consumer whose project left the manifest is revoked.
+  - A hand-made consumer of the same name is never taken over.
+- **What it writes.** It writes only fleet entries, and only when the text changes. It first
+  backs the file up to `.backup-<date>/` next to it, then writes atomically with mode `0600`.
+  A second run changes nothing.
+- **What it leaves alone.** An entry it did not generate stays as it is, even when its name
+  is in the key store, and it is reported (`! … not in the manifest`). For example, a direct
+  entry for a machine that dev1 cannot reach.
+- **Where it writes.**
+  - dev2 configs: over `ssh -o BatchMode=yes <account>@dev2`.
+  - Another account's configs: over `sudo -n -u <account>`.
+  - The file content travels on stdin only. When that access is missing, the command prints
+    the exact one-time step (`ssh-copy-id …`, or the sudoers line) and syncs the other
+    projects.
+- **Exposure.** It never re-exposes a machine (`unexpose` stays a kill switch); it warns
+  instead. `machine import` and `machine set-key --url` expose the machines they add.
+- **Fail closed.** A manifest machine missing from the key store, an invalid manifest or key
+  store, or `mode = "direct"` on a host other than dev1 refuses the whole run before
+  anything changes. An unparseable config is never overwritten.
+- After a project's config changed, its RUNNING sessions need ONE restart (Claude Code reads
+  `.mcp.json` only at start). After that, a key change never reaches a session again.
+
+**`check` (the watchdog):**
+
+- **What it probes.** Every key-store machine directly with its stored key (`initialize`),
+  plus the gateway's `/healthz`.
+- **What it records.** `ok` / `401` / `unreachable` / `error`, with `since`, in
+  `machines-status.json`.
+- **Notifications.** It announces each state change ONCE, through
+  `~/devel/airuleset/airuleset.py notify --body` (owner from
+  `REMOTEOS_GATEWAY_NOTIFY_OWNER`). Without airuleset it writes a log line instead. A
+  notification that did not go out is retried on the next run.
+- **Auto-repair of a 401** happens only for a machine with an explicit recipe:
+  `remoteos-gateway machine repair-recipe linux-cam2 --ssh root@cam2.lan [--sudo]`.
+  - The recipe reads the box's installer `config.json` (`/etc/remoteos-mcp/config.json`)
+    over ssh.
+  - It stores the key only if the machine accepts it.
+  - Without a recipe, a 401 is only reported, never guessed.
+
+```bash
+cp deploy/remoteos-gateway-check.service deploy/remoteos-gateway-check.timer ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now remoteos-gateway-check.timer
+journalctl --user -u remoteos-gateway-check          # each run's table
+```
+
+**Migrating from hand-written configs (once, on dev1):**
+
+1. Upgrade the gateway venv (the `pip install … --force-reinstall` line above). Do NOT restart
+   it yet: the new version reads the key store by default.
+2. Write `projects.toml` from today's configs (one table per project, `machines` = its fleet
+   entries).
+3. Build the key store: `remoteos-gateway machine import --from-manifest --dry-run`, then
+   without `--dry-run`. For each machine, the copy the machine accepts wins; every conflict
+   and every machine it could not verify is listed.
+4. `systemctl --user restart remoteos-gateway` (it now reads the key store), then check
+   `/healthz`.
+5. `remoteos-gateway sync-configs --dry-run`, review, then `remoteos-gateway sync-configs`.
+6. Install the check timer, and restart each project's sessions once.
 
 ## Uninstall
 
