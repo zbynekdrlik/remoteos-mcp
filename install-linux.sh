@@ -610,7 +610,7 @@ stop_unproven() {
 }
 
 # The version the service reports on /health (fails when nothing answers). Every loopback curl
-# is `-q --noproxy '*'`: never a proxy from the environment (pip keeps it) or a .curlrc's.
+# is `-q --noproxy '*'`: no proxy (pip keeps the env's) and no .curlrc option (a trace logs the key).
 health_version() {
     local body
     body=$(curl -q --noproxy '*' -fsS --max-time 3 "http://127.0.0.1:${PORT}/health" 2>/dev/null) || return 1
@@ -894,7 +894,7 @@ main() {
     fi
     if [[ "$EUID" -eq 0 ]]; then PIP_HOME=/root; else PIP_HOME="${HOME:-/tmp}"; fi
     if command -v findmnt &>/dev/null && [[ ",$(findmnt -no OPTIONS / 2>/dev/null || true)," == *,ro,* ]]; then
-        fail "Root filesystem is read-only — run: mount -o remount,rw / (and fix /etc/fstab: '/ ext4 ro' → 'defaults') then rerun."
+        fail "Root filesystem is read-only — nothing was changed on this box. A camera-box cam is read-only by design: update it through camera-box's provisioning (its rw window). Elsewhere: mount -o remount,rw / for this run, then rerun."
     fi
     check_inputs
     # One run at a time: a second run's prune could delete the build this one just swapped in.
