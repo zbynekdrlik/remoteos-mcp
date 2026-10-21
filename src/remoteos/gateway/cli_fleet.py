@@ -3,16 +3,19 @@
     remoteos-gateway machine set-key linux-cam2 < key-file      # the key on STDIN, never an argv
     remoteos-gateway machine set-key new-box --url http://new-box.lan:8092/mcp < key-file
     remoteos-gateway machine list                                # keys masked
-    remoteos-gateway machine import [--from <file.mcp.json> ...] [--dry-run]
+    remoteos-gateway machine import [--from <file.mcp.json> ... | --from-manifest] [--dry-run]
     remoteos-gateway machine repair-recipe linux-cam2 --ssh root@cam2.lan [--sudo]
+    remoteos-gateway sync-configs [--dry-run]                    # every project's config, from projects.toml
 
 The commands are registered on ``cli.main`` and receive its paths object (``--registry``,
-``--machines`` = the key store). No key or token is ever printed: output shows
+``--machines`` = the key store, ``--manifest``). No key or token is ever printed: output shows
 ``mask_secret`` (length + a sha256 prefix, comparable with ``remoteos-gateway list``).
 """
 
 from __future__ import annotations
 
+import datetime as _dt
+import socket
 import sys
 from pathlib import Path
 
@@ -29,6 +32,7 @@ from remoteos.gateway.keystore import (
     scan_sources,
     set_key,
 )
+from remoteos.gateway.manifest import DEFAULT_GATEWAY_URL, ManifestError, load_manifest
 from remoteos.gateway.probe import STATE_OK
 from remoteos.gateway.registry import (
     LEGACY_MACHINES_PATH,
@@ -39,8 +43,10 @@ from remoteos.gateway.registry import (
     edit_registry,
     parse_repair,
 )
+from remoteos.gateway.sync import SyncError, sync_configs
+from remoteos.gateway.targets import TargetError, target_for
 
-DEFAULT_GATEWAY_URL = "http://100.104.8.125:8796"  # dev1's tailscale address + the gateway port
+_LOCAL_HOST_HELP = "This host's name as the manifest's `host` spells it (dev1); other hosts are reached over ssh."
 
 _RELOAD_NOTE = "A running gateway applies this on its next request (or SIGHUP) — no restart needed."
 
@@ -126,22 +132,51 @@ def machine_list(paths) -> None:
     type=click.Path(dir_okay=False, path_type=Path),
     help=f"An MCP config to take machine keys from (repeatable). Default: {LEGACY_MACHINES_PATH.parent}/*.mcp.json",
 )
+@click.option(
+    "--from-manifest",
+    is_flag=True,
+    help="Also read every project config of the manifest where it lives (dev2 over ssh, other accounts via sudo).",
+)
+@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
 @click.option("--match", default=DEFAULT_IMPORT_MATCH, show_default=True, help="Only entries whose name fully matches.")
 @click.option(
     "--gateway-url", default=DEFAULT_GATEWAY_URL, show_default=True, help="Entries pointing here are skipped (tokens)."
 )
 @click.option("--dry-run", is_flag=True, help="Report the choice per machine; write nothing.")
 @click.pass_obj
-def machine_import(paths, sources: tuple[Path, ...], match: str, gateway_url: str, dry_run: bool) -> None:
+def machine_import(
+    paths,
+    sources: tuple[Path, ...],
+    from_manifest: bool,
+    local_host: str,
+    match: str,
+    gateway_url: str,
+    dry_run: bool,
+) -> None:
     """Build the key store from per-project MCP configs. For each machine, the copy the machine
     ACCEPTS (initialize -> 200) wins; conflicts and unverified machines are reported."""
-    files = list(sources) or sorted(LEGACY_MACHINES_PATH.parent.glob("*.mcp.json"))
+    files = list(sources) or ([] if from_manifest else sorted(LEGACY_MACHINES_PATH.parent.glob("*.mcp.json")))
     texts: list[tuple[str, str]] = []
     for path in files:
         try:
             texts.append((str(path), Path(path).expanduser().read_text(encoding="utf-8")))
         except (OSError, UnicodeDecodeError) as exc:
             click.echo(f"  {path}: cannot read ({type(exc).__name__}) — skipped")
+    if from_manifest:
+        try:
+            manifest = load_manifest(paths.manifest)
+        except ManifestError as exc:
+            raise _fail(exc) from exc
+        for project in manifest.projects.values():
+            target = target_for(project.host, project.account, local_host=local_host)
+            label = f"{project.name} ({target.label}) {project.config}"
+            try:
+                text = target.read(project.config)
+            except TargetError as exc:
+                click.echo(f"  {label}: cannot read — {exc}")
+                continue
+            if text is not None:
+                texts.append((label, text))
     _import_and_report(paths, texts, match=match, gateway_url=gateway_url, dry_run=dry_run)
 
 
@@ -204,3 +239,32 @@ def machine_repair_recipe(
 
 def _describe_recipe(recipe: RepairRecipe) -> str:
     return f"ssh {recipe.ssh} {'sudo -n ' if recipe.sudo else ''}cat {recipe.key_file}"
+
+
+# -- sync-configs -----------------------------------------------------------------------
+
+
+@click.command("sync-configs")
+@click.option("--dry-run", is_flag=True, help="Show what would change (every secret masked); write nothing.")
+@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
+@click.pass_obj
+def sync_configs_command(paths, dry_run: bool, local_host: str) -> None:
+    """Generate every project's MCP config from the manifest: fleet entries through the gateway
+    (one token per project, allow-list = the manifest); every other entry is left byte-equal."""
+    try:
+        manifest = load_manifest(paths.manifest)
+        keystore = load_keystore(paths.machines)
+        failures = sync_configs(
+            manifest,
+            keystore,
+            paths.registry,
+            local_host=local_host,
+            dry_run=dry_run,
+            today=_dt.date.today().isoformat(),
+            echo=click.echo,
+        )
+    except (ManifestError, MachineSourceError, RegistryError, SyncError) as exc:
+        raise _fail(exc) from exc
+    if failures:
+        click.echo(f"{failures} project(s) FAILED — see above; the others are in place.")
+        sys.exit(1)

@@ -30,6 +30,7 @@ import click
 from remoteos import __version__
 from remoteos.gateway import cli_fleet
 from remoteos.gateway.accesslog import DEFAULT_ACCESS_LOG_PATH, read_access_log
+from remoteos.gateway.manifest import DEFAULT_MANIFEST_PATH
 from remoteos.gateway.registry import (
     DEFAULT_MACHINES_PATH,
     DEFAULT_REGISTRY_PATH,
@@ -51,6 +52,7 @@ class _Paths:
     registry: Path
     machines: Path
     access_log: Path
+    manifest: Path = DEFAULT_MANIFEST_PATH
 
 
 def check_bind_host(host: str) -> str:
@@ -103,11 +105,24 @@ def check_bind_host(host: str) -> str:
     show_default=True,
     help="JSONL access log.",
 )
+@click.option(
+    "--manifest",
+    type=click.Path(dir_okay=False, path_type=Path),
+    envvar="REMOTEOS_GATEWAY_MANIFEST",
+    default=DEFAULT_MANIFEST_PATH,
+    show_default=True,
+    help="Projects manifest (TOML): which project reaches which machines (sync-configs).",
+)
 @click.version_option(__version__, prog_name="remoteos-gateway")
 @click.pass_context
-def main(ctx: click.Context, registry: Path, machines: Path, access_log: Path) -> None:
+def main(ctx: click.Context, registry: Path, machines: Path, access_log: Path, manifest: Path) -> None:
     """remoteos MCP gateway — expose managed machines to remote fleet consumers."""
-    ctx.obj = _Paths(registry=registry.expanduser(), machines=machines.expanduser(), access_log=access_log.expanduser())
+    ctx.obj = _Paths(
+        registry=registry.expanduser(),
+        machines=machines.expanduser(),
+        access_log=access_log.expanduser(),
+        manifest=manifest.expanduser(),
+    )
 
 
 # -- serve ----------------------------------------------------------------------------
@@ -362,6 +377,7 @@ def _printable(value: object) -> str:
 
 
 main.add_command(cli_fleet.machine)
+main.add_command(cli_fleet.sync_configs_command)
 
 if __name__ == "__main__":  # pragma: no cover
     main()
