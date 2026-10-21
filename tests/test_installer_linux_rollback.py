@@ -176,6 +176,22 @@ class TestAPendingSwitchThatHasRunSince:
         assert result.returncode == 0, output(result)
         assert not _pending(box), "a stale mark: the switch has run since the reboot"
 
+    def test_a_proven_enable_only_box_loses_the_old_system_copy(self, tmp_path: Path) -> None:
+        """Review round 14: the copy went only after a restart run's proof, which the cams (an
+        enable-only convention) never get. A proven, no-op enable-only run runs the venv: the
+        system copy protects nothing."""
+        box = linux_box(tmp_path)
+        box.install_legacy(K_UNIT)
+        assert box.run(REMOTEOS_MCP_POLICY="enable-only").returncode == 0
+        assert box.pip.versions("remoteos-mcp") != [], "enable-only removed the copy the legacy process runs"
+        box.boot()  # the cam reboots into the venv
+
+        result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+
+        assert result.returncode == 0, output(result)
+        assert box.pip.versions("remoteos-mcp") == [], "the old system-python copy stays forever"
+        assert box.state()["active"]
+
 
 class TestAServerThatTakesAMomentToBind:
     """Review round 8: the proof and the re-proof poll; a real server binds a moment after
