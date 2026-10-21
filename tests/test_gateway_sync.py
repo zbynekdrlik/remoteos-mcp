@@ -822,4 +822,21 @@ def test_a_project_config_inside_a_git_work_tree_fails_that_project_locally_and_
     assert not local.exists() and not remote.exists()  # a token never lands where git could commit it
     consumers = load_registry(fleet.registry).consumers
     assert "restreamer@dev1" in consumers  # the others still sync
-    assert consumers["camera-box@dev1"].machines == ["linux-cam1"]  # registered, file refused: next run retries
+    # refused already when the config is READ: no token is minted or registered for a file
+    # that can never be written (else every run would register one more unused hash)
+    assert "camera-box@dev1" not in consumers and "presenter@dev2" not in consumers
+
+
+def test_a_write_that_keeps_failing_never_piles_up_token_hashes(fleet, monkeypatch):
+    from remoteos.gateway import targets
+
+    def always_fails(self, config, text, tag):
+        raise targets.TargetError("permission denied")
+
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})  # a new project: no file yet
+    monkeypatch.setattr(targets.Target, "write", always_fails)
+    for _ in range(4):
+        assert fleet.run().exit_code == 1
+
+    # one previous hash is kept next to the new one (a failed write may have landed), no more
+    assert len(load_registry(fleet.registry).consumers["camera-box@dev1"].sha256) <= 2
