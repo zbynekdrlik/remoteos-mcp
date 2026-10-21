@@ -136,13 +136,20 @@ async def observe(
 ) -> tuple[dict[str, Observation], Observation]:
     results, health = await _probe_all(entries, gateway_url)
     observations = {name: Observation(r.state, r.detail) for name, r in results.items()}
-    for name, result in results.items():
-        if result.state == STATE_UNAUTHORIZED and entries[name].repair is not None:
-            try:
-                observations[name] = await _repair(name, entries[name], keystore_path=keystore_path, ssh_bin=ssh_bin)
-            except Exception as exc:  # one box's repair never blinds the run for every other machine
-                logger.error("check: %s repair failed unexpectedly: %s", name, type(exc).__name__)
-                observations[name] = Observation(STATE_UNAUTHORIZED, f"repair failed: {type(exc).__name__}")
+
+    async def guarded(name: str) -> Observation:
+        try:
+            return await _repair(name, entries[name], keystore_path=keystore_path, ssh_bin=ssh_bin)
+        except Exception as exc:  # one box's repair never blinds the run for every other machine
+            logger.error("check: %s repair failed unexpectedly: %s", name, type(exc).__name__)
+            return Observation(STATE_UNAUTHORIZED, f"repair failed: {type(exc).__name__}")
+
+    # Concurrently: a repair can take ~55 s (ssh + a re-probe); several slow boxes in a row would
+    # outlast the unit's TimeoutStartSec, and systemd would kill the run before it says anything.
+    # Each key-store edit is synchronous under its lock, so concurrent repairs never interleave one.
+    repairable = [n for n, r in results.items() if r.state == STATE_UNAUTHORIZED and entries[n].repair is not None]
+    for name, observation in zip(repairable, await asyncio.gather(*(guarded(n) for n in repairable))):
+        observations[name] = observation
     return observations, Observation(health.state, health.detail)
 
 

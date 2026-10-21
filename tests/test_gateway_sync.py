@@ -869,6 +869,36 @@ def test_the_token_the_file_still_holds_stays_registered_through_any_number_of_f
     assert len(consumer.sha256) <= 2
 
 
+def test_a_landed_but_failed_write_then_a_url_change_still_keeps_the_files_token(fleet, monkeypatch):
+    """The token kept next to a new one is the one the file HOLDS — not merely the oldest: a
+    write can land and still report failure, so the file may hold the newest hash."""
+    from remoteos.gateway import targets
+
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    _plant_token(path, ("win-stream-snv", "linux-cam1", "linux-cam2"), fresh_secret("lostcopy"))
+    original = targets.Target.write
+
+    def landed_then_lost(self, config, text, tag):
+        original(self, config, text, tag)
+        raise targets.TargetError("ssh: connection lost after the write")
+
+    monkeypatch.setattr(targets.Target, "write", landed_then_lost)
+    assert fleet.run().exit_code == 1  # mints N, the file now holds N, the reply was lost
+    held = fleet.token_of(path, "linux-cam1")
+
+    def never_lands(self, config, text, tag):
+        raise targets.TargetError("permission denied")
+
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()}, gateway="http://dev1:8796")
+    monkeypatch.setattr(targets.Target, "write", never_lands)
+    assert fleet.run().exit_code == 1  # the url change mints again; this write never lands
+
+    assert fleet.token_of(path, "linux-cam1") == held
+    assert token_sha256(held) in load_registry(fleet.registry).consumers["camera-box@dev1"].sha256
+
+
 def test_a_kept_entry_keeps_its_whole_member_text_key_included(fleet):
     text = (
         "{\n"

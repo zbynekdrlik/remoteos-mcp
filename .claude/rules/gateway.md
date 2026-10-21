@@ -98,8 +98,12 @@ paths:
   - A config inside a git work tree (a `.git` entry upward) is refused at READ and at write:
     a token there, or its `.backup-*/<name>.1` copies, could be committed. Refusing at read
     means no token is minted for a file that can never be written.
-  - A new token keeps only ONE previous hash next to it (`sync._apply`), so a write that keeps
-    failing never piles up registered hashes.
+  - A new token keeps exactly ONE previous hash next to it (`sync._apply`): the one the file
+    HOLDS right now (`ProjectPlan.held_hashes`), else index 0 (what the last CONFIRMED write
+    left — a confirmed write prunes to exactly its own hash). So the file's token stays known
+    however many writes fail (even after a write that landed but reported failure), and failed
+    mints only rotate the second slot. Never `[-1:]`: that keeps the previous FAILED mint and
+    drops the file's token (review round 7).
   - File contents go on stdin/stdout only. An argv holds the source, an op and a path.
   - `~` is the account's passwd home, never `$HOME` (sudo may keep the caller's).
   - A symlink is written through (`realpath`): a project's `.mcp.json` symlink stays one.
@@ -117,8 +121,8 @@ paths:
 - **Token order (no window with an unknown token):** register the new hash (keep the old) →
   save → write the file → prune to `[hash]` → save. A write that REPORTS failure may still have
   landed (an ssh drop after the remote finished, a lost reply, an fsync error after the
-  rename), so it is NEVER rolled back (review round 1): both hashes stay, and the next run
-  reuses whichever token the file holds. A failing project's allow-list only ever NARROWS. A
+  rename), so it is NEVER rolled back (review round 1): the last confirmed hash and the new
+  one stay, and the next run reuses whichever token the file holds. A failing project's allow-list only ever NARROWS. A
   token is reused only when its hash is registered for THIS managed consumer; an unregistered
   token in a file is never adopted.
 - **`managed_by: "sync-configs"`** marks a consumer that sync owns. A managed consumer whose

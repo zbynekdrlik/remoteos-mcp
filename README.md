@@ -435,8 +435,9 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
     so putting the project back needs no new token and no restart. `sync-configs --prune`
     removes such consumers. A manifest with no projects at all is refused.
   - A hand-made consumer of the same name is never taken over.
-  - A write that fails after it may have landed (an ssh drop) keeps the old AND the new token
-    registered; the next run keeps whichever the file holds.
+  - A write that fails after it may have landed (an ssh drop) keeps the last confirmed AND the
+    new token registered; the next run keeps whichever the file holds. However many writes
+    fail, the token the file holds stays registered and no more than two are.
 - **What it writes.** It writes only fleet entries, and only when an entry changes: a config
   whose entries are already right keeps its own layout, byte for byte. It first backs the file
   up to `.backup-<date>/` next to it, then writes atomically with mode `0600`. A second run

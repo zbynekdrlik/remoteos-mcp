@@ -12,9 +12,10 @@ For each ``[projects.<name>]`` of ``projects.toml``:
 
 Only fleet entries change. An entry is the sync's own when its url is one sync writes (a
 gateway url, or — in direct mode — the key store's url): such an entry whose machine left the
-manifest is removed. Every other entry keeps its ORIGINAL source text, byte for byte, and so
-does everything outside ``mcpServers`` (a file with no ``mcpServers`` at all is re-serialised
-as JSON). A config whose entries do not change is not written at all, whatever its layout.
+manifest is removed. Every other entry keeps its ORIGINAL member text (key as written, the
+colon's spacing, value) byte for byte, and so does everything outside ``mcpServers``; only the
+whitespace BETWEEN entries is rendered on a rewrite (a file with no ``mcpServers`` at all is
+re-serialised as JSON). A config whose entries do not change is not written at all.
 Writes are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``).
 
 A managed consumer whose project left the manifest keeps its token hash with an EMPTY
@@ -78,6 +79,7 @@ class ServerEntry:
     name: str
     value: object = field(repr=False)  # holds tokens / keys
     raw: str = field(repr=False)  # the value's exact source text
+    member: str = field(default="", repr=False)  # the whole member's text: key, colon, value
 
 
 @dataclass
@@ -98,10 +100,10 @@ def _ws(text: str, i: int) -> int:
     return _WS.match(text, i).end()
 
 
-def _scan_object(text: str, i: int) -> tuple[list[tuple[str, int, int, object]], int, str, str]:
-    """Members ``(key, value_start, value_end, value)`` of the JSON object whose "{" is at *i*,
-    plus the index of its "}" and the whitespace after "{" / before "}"."""
-    members: list[tuple[str, int, int, object]] = []
+def _scan_object(text: str, i: int) -> tuple[list[tuple[str, int, int, int, object]], int, str, str]:
+    """Members ``(key, key_start, value_start, value_end, value)`` of the JSON object whose "{"
+    is at *i*, plus the index of its "}" and the whitespace after "{" / before "}"."""
+    members: list[tuple[str, int, int, int, object]] = []
     j = _ws(text, i + 1)
     lead = text[i + 1 : j]
     if text[j] == "}":
@@ -109,13 +111,14 @@ def _scan_object(text: str, i: int) -> tuple[list[tuple[str, int, int, object]],
     while True:
         if text[j] != '"':
             raise ConfigFormatError("unexpected JSON layout")
+        key_start = j
         key, j = _DECODER.raw_decode(text, j)
         j = _ws(text, j)
         if text[j] != ":":
             raise ConfigFormatError("unexpected JSON layout")
         value_start = _ws(text, j + 1)
         value, value_end = _DECODER.raw_decode(text, value_start)
-        members.append((key, value_start, value_end, value))
+        members.append((key, key_start, value_start, value_end, value))
         j = _ws(text, value_end)
         if text[j] == ",":
             j = _ws(text, j + 1)
@@ -142,7 +145,7 @@ def parse_config(text: str | None) -> ParsedConfig:
     blocks = [m for m in top if m[0] == "mcpServers"]
     if len(blocks) != 1:
         raise ConfigFormatError("'mcpServers' appears more than once — left untouched")
-    _, value_start, _, _ = blocks[0]
+    _, _, value_start, _, _ = blocks[0]
     members, close, lead, trail = _scan_object(text, value_start)
     names = [m[0] for m in members]
     if len(set(names)) != len(names):
@@ -151,7 +154,7 @@ def parse_config(text: str | None) -> ParsedConfig:
     line_indent = text[line_start : _ws(text, line_start)].replace("\n", "").replace("\r", "")
     return ParsedConfig(
         text=text,
-        entries=[ServerEntry(name=k, value=v, raw=text[s:e]) for k, s, e, v in members],
+        entries=[ServerEntry(name=k, value=v, raw=text[s:e], member=text[ks:e]) for k, ks, s, e, v in members],
         has_block=True,
         start=value_start + 1,
         end=close,
@@ -166,8 +169,9 @@ def render_entry(value: dict, indent: str) -> str:
 
 
 def render_config(parsed: ParsedConfig, entries: list[tuple[str, str]]) -> str:
-    """The config with mcpServers = *entries* ``(name, raw value text)``; everything outside
-    mcpServers, and every raw text passed in, is kept byte for byte."""
+    """The config with mcpServers = *entries* ``(name, raw value text)``. Everything outside
+    mcpServers is kept byte for byte, and so is every KEPT entry's whole member text (its key as
+    written, the colon's spacing, its value): only the whitespace between entries is rendered."""
     if not parsed.has_block:
         data = json.loads(parsed.text) if parsed.text is not None else {}
         data["mcpServers"] = {name: json.loads(raw) for name, raw in entries}
@@ -179,7 +183,15 @@ def render_config(parsed: ParsedConfig, entries: list[tuple[str, str]]) -> str:
     # an EMPTY block's inner whitespace is the closing brace's indent, not an entry's: never reuse it
     lead = parsed.lead if (parsed.entries and "\n" in parsed.lead) else "\n" + indent
     trail = parsed.trail if (parsed.entries and "\n" in parsed.trail) else "\n" + parsed.line_indent
-    body = ("," + lead).join(f"{json.dumps(name, ensure_ascii=False)}: {raw}" for name, raw in entries)
+    kept = {entry.name: entry for entry in parsed.entries}
+
+    def member(name: str, raw: str) -> str:
+        original = kept.get(name)
+        if original is not None and original.raw == raw and original.member:
+            return original.member  # e.g. "n8n-mcp" :  {...} stays exactly as written
+        return f"{json.dumps(name, ensure_ascii=False)}: {raw}"
+
+    body = ("," + lead).join(member(name, raw) for name, raw in entries)
     return parsed.text[: parsed.start] + lead + body + trail + parsed.text[parsed.end :]
 
 
@@ -212,6 +224,7 @@ class ProjectPlan:
     new_text: str = field(repr=False)
     token: str | None = field(default=None, repr=False)  # gateway mode
     new_token: bool = False
+    held_hashes: frozenset[str] = frozenset()  # sha256 of every bearer token the file holds NOW
     lines: list[str] = field(default_factory=list)  # what changes in the file (masked)
     notes: list[str] = field(default_factory=list)  # warnings (masked)
 
@@ -250,6 +263,11 @@ def plan_project(
         plan.token = _reusable_token(parsed, manifest, consumer)
         if plan.token is None:
             plan.token, plan.new_token = mint(), True
+        plan.held_hashes = frozenset(
+            token_sha256(token)
+            for entry in parsed.entries
+            if (token := bearer_value(authorization_header(entry.value) or "")) is not None
+        )
         desired = {m: gateway_entry(manifest.machine_url(m), plan.token) for m in project.machines}
     else:
         desired = {m: direct_entry(keystore[m]) for m in project.machines}
@@ -487,8 +505,8 @@ def _apply(plan: ProjectPlan, registry: Registry, saver: _Saver, today: str) -> 
 
     A write that REPORTS failure may still have landed (ssh dropped after the remote finished,
     a lost reply, an fsync error after the rename), so nothing is rolled back: the consumer
-    keeps the old AND the new hash and the manifest's allow-list (never broader). The next run
-    finds whichever token the file really holds, reuses it and prunes the other.
+    keeps the last CONFIRMED hash AND the new one, and the manifest's allow-list (never broader).
+    The next run finds whichever token the file really holds, reuses it and prunes the other.
     """
     project = plan.project
     consumer = None
@@ -505,9 +523,12 @@ def _apply(plan: ProjectPlan, registry: Registry, saver: _Saver, today: str) -> 
         consumer.managed_by = SYNC_MANAGER
         consumer.machines = list(project.machines)
         if digest not in consumer.sha256:
-            # keep ONE previous hash next to the new one (the last write may have landed); a
-            # write that keeps failing must not pile up one more registered hash per run
-            consumer.sha256 = consumer.sha256[-1:] + [digest]
+            # Keep exactly ONE previous hash next to the new one — the one the file HOLDS right
+            # now (its running sessions use it; the coming write may fail or may have landed), else
+            # the first one, which the last confirmed write left. However many writes fail, the
+            # file's token stays known and failed mints only rotate the second slot: never a pile.
+            held = [h for h in consumer.sha256 if h in plan.held_hashes]
+            consumer.sha256 = (held[:1] or consumer.sha256[:1]) + [digest]
         saver.commit()
     written = plan.target.write(project.config, plan.new_text, today) if plan.file_changes else None
     if consumer is not None:
