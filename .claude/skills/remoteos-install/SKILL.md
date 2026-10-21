@@ -98,7 +98,7 @@ Verify after a run (from dev1 and on the box):
 - The key-out-of-the-environment guarantee needs a source at or after the #12 merge: an older `REMOTEOS_MCP_REF` (e.g. camera-box's pin before its bump) runs a server that keeps `REMOTEOS_AUTH_KEY` in its environment, so Shell children inherit it.
 - `another process holds :8092, not the unit's`: something else listens on the port (`sudo ss -ltnp 'sport = :8092'`). The key was not sent. Stop that process, then rerun.
 
-**Gotcha — cam boxes can boot with a read-only rootfs** (fstab `ro`). The installer now refuses to run until remounted rw + fstab fixed (`mount -o remount,rw /` then edit `/etc/fstab`). Both Linux and macOS installers also verify after restart that the `/health` endpoint reports the version just installed — a stale pre-existing install is caught and reported as failure.
+**Gotcha — camera-box cams run a read-only rootfs by design** (camera-box's `scripts/lib/ro-root.sh`; its provisioning opens an rw window and runs this installer inside it). The installer refuses a read-only root and changes nothing: update a cam through camera-box's provisioning, never by editing its `/etc/fstab`. On any other box, `mount -o remount,rw /` for the run. Both Linux and macOS installers also verify after restart that the `/health` endpoint reports the version just installed — a stale pre-existing install is caught and reported as failure.
 
 The pip gotchas below are history of the system-python layout. They still apply to macOS (and Windows) and explain the old Linux boxes; a Linux install now runs pip only in a fresh venv.
 
