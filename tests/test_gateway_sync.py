@@ -748,7 +748,7 @@ def test_a_malformed_url_in_a_project_config_is_skipped_by_import_not_a_crash(fl
         ],
     )
 
-    assert result.exit_code in (0, 1), result.output
+    assert result.exit_code == 1, result.output  # its only entry is skipped: no machine, nothing written
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert "linux-cam9 url is not http(s)" in result.output
 
@@ -770,3 +770,29 @@ def test_a_machine_removed_from_a_direct_project_takes_its_key_out_of_that_confi
     assert list(fleet.servers(path)) == ["n8n", "linux-cam1"]
     assert fleet.keys["linux-cam2"] not in path.read_text(encoding="utf-8")  # never broader than the manifest
     assert "- linux-cam2" in result.output
+
+
+# -- review round 5 -------------------------------------------------------------------------------
+
+
+def test_a_new_project_gets_its_config_created_locally_and_over_ssh(fleet, monkeypatch):
+    install_fake_remote_tools(fleet.tmp / "bin", monkeypatch)
+    local = fleet.tmp / "home" / "new-local" / ".claude" / "mcp-configs" / "fresh.mcp.json"  # dirs missing too
+    remote = fleet.tmp / "dev2-home" / ".claude" / "mcp-configs" / "fresh2.mcp.json"
+    fleet.write_manifest(
+        {
+            "fresh": {"host": "dev1", "account": ME, "config": str(local), "machines": ["linux-cam1"]},
+            "fresh2": {"host": "dev2", "account": "newlevel", "config": str(remote), "machines": ["linux-cam2"]},
+        }
+    )
+
+    first = fleet.run()
+    second = fleet.run()
+
+    assert first.exit_code == 0, first.output
+    assert first.output.count("backup: none — new file") == 2
+    for path, name in ((local, "linux-cam1"), (remote, "linux-cam2")):
+        assert list(fleet.servers(path)) == [name]
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(path.parent).st_mode) == 0o700
+    assert second.exit_code == 0 and "fresh: unchanged" in second.output and "fresh2: unchanged" in second.output

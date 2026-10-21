@@ -495,3 +495,115 @@ def test_a_sudo_recipe_reads_the_key_file_with_sudo_n_and_a_403_counts_as_401(tm
     [call] = [c["argv"] for c in remote_calls(log) if c["tool"] == "ssh"]
     assert call[-1] == "sudo -n cat /etc/remoteos-mcp/config.json"
     assert "admin@cam3.lan" in call
+
+
+# -- review round 5 -------------------------------------------------------------------------------
+
+
+def test_a_key_store_that_cannot_be_written_never_blinds_the_run_for_the_other_machines(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    install_fake_remote_tools(tmp_path / "bin", monkeypatch)
+    stale, real = fresh_secret("stale"), fresh_secret("real")
+    key_file = tmp_path / "box" / "config.json"
+    write_private_json(key_file, {"auth_key": real})
+    with FakeFleetMachine(accept_keys=(real,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        check.store(
+            {
+                "linux-cam2": {
+                    "url": box.url,
+                    "key": stale,
+                    "repair": {"ssh": "root@cam2.lan", "key_file": str(key_file)},
+                },
+                "linux-cam4": {"url": closed_port_url(), "key": fresh_secret("k")},
+            }
+        )
+        check.keystore.parent.chmod(0o500)  # the repair cannot write (nor create the lock file)
+        try:
+            result = check.run(gateway.base_url)
+        finally:
+            check.keystore.parent.chmod(0o700)
+
+    assert result.exit_code == 0, result.output
+    machines = check.state()["machines"]  # the status IS written
+    assert machines["linux-cam2"]["state"] == "401" and "cannot be written" in machines["linux-cam2"]["detail"]
+    assert machines["linux-cam4"]["state"] == "unreachable"
+    [body] = check.notifications()
+    assert "linux-cam2" in body and "linux-cam4" in body
+    assert json.loads(check.keystore.read_text(encoding="utf-8"))["linux-cam2"]["key"] == stale
+
+
+def test_a_pathologically_nested_key_file_is_a_failed_repair_not_a_crash(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    install_fake_remote_tools(tmp_path / "bin", monkeypatch)
+    key_file = tmp_path / "box" / "config.json"
+    key_file.parent.mkdir(parents=True)
+    key_file.write_text("[" * 100_000, encoding="utf-8")
+    with FakeFleetMachine(accept_keys=(fresh_secret("real"),)) as box, FakeFleetMachine(healthz=True) as gateway:
+        recipe = {"ssh": "root@cam2.lan", "key_file": str(key_file)}
+        check.store({"linux-cam2": {"url": box.url, "key": fresh_secret("stale"), "repair": recipe}})
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 0, result.output
+    record = check.state()["machines"]["linux-cam2"]
+    assert record["state"] == "401" and "holds no valid auth_key" in record["detail"]
+
+
+def test_any_other_repair_failure_is_contained_to_that_machine(tmp_path, monkeypatch):
+    from remoteos.gateway import check as check_module
+
+    def broken_recipe(entry, *, ssh_bin):
+        raise RuntimeError("something nobody foresaw")
+
+    monkeypatch.setattr(check_module, "read_key_by_recipe", broken_recipe)
+    check = Check(tmp_path, monkeypatch)
+    with FakeFleetMachine(accept_keys=(fresh_secret("real"),)) as box, FakeFleetMachine(healthz=True) as gateway:
+        recipe = {"ssh": "root@cam2.lan"}
+        check.store(
+            {
+                "linux-cam2": {"url": box.url, "key": fresh_secret("stale"), "repair": recipe},
+                "linux-cam4": {"url": closed_port_url(), "key": fresh_secret("k")},
+            }
+        )
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 0, result.output
+    machines = check.state()["machines"]
+    assert machines["linux-cam2"]["state"] == "401" and "RuntimeError" in machines["linux-cam2"]["detail"]
+    assert machines["linux-cam4"]["state"] == "unreachable"
+
+
+def test_an_unwritable_status_file_is_announced_on_every_run(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    check.store({"linux-cam1": {"url": closed_port_url(), "key": fresh_secret("k")}})
+    check.status.parent.mkdir(parents=True)
+    check.status.parent.chmod(0o500)  # the status cannot be written: nowhere to remember anything
+    try:
+        with FakeFleetMachine(healthz=True) as gateway:
+            first = check.run(gateway.base_url)
+            second = check.run(gateway.base_url)
+    finally:
+        check.status.parent.chmod(0o700)
+
+    assert first.exit_code == 1 and second.exit_code == 1
+    status_notices = [b for b in check.notifications() if "NEBEŽÍ" in b and "status file" in b]
+    assert len(status_notices) == 2
+
+
+def test_a_recovery_notice_that_did_not_go_out_is_retried_once(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    key = fresh_secret("key")
+    with FakeFleetMachine(accept_keys=(key,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        check.keystore.parent.mkdir(parents=True, exist_ok=True)
+        check.keystore.write_text('{"linux-cam1": {"url": "ftp://bad", "key": "k"}}', encoding="utf-8")
+        assert check.run(gateway.base_url).exit_code == 1  # broken: announced
+        check.store({"linux-cam1": {"url": box.url, "key": key}})
+        monkeypatch.setenv("FAKE_NOTIFY_STATUS", "error")
+        assert check.run(gateway.base_url).exit_code == 0  # back, but the notice does not go out
+        assert check.state().get("recovery_pending") is True
+        monkeypatch.setenv("FAKE_NOTIFY_STATUS", "sent")
+        assert check.run(gateway.base_url).exit_code == 0  # retried
+        assert check.run(gateway.base_url).exit_code == 0  # and then silence
+
+    bodies = check.notifications()
+    assert [("opäť beží" in b) for b in bodies] == [False, True, True]
+    assert "recovery_pending" not in check.state()
