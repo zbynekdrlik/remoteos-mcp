@@ -22,6 +22,12 @@ if [[ "$EUID" -ne 0 ]]; then
     echo "  [X] This uninstaller must be run as root (via sudo)."
     exit 1
 fi
+# From the agent's own Shell this run is inside the unit's cgroup: stopping the unit kills it.
+CGROUP_FILE="/proc/self/cgroup"
+if grep -q "/${SERVICE_NAME}\.service" "$CGROUP_FILE" 2>/dev/null; then
+    echo "  [X] This run is inside ${SERVICE_NAME}.service (the agent's own Shell): stopping it would kill the run — nothing was changed. Run it over SSH."
+    exit 1
+fi
 
 # --- [1/6] Stop service ---
 echo "  [1/6] Stopping service..."

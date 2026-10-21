@@ -590,8 +590,7 @@ restore_previous() {
     fi
 }
 
-# poll_running_install await|read: check_running_install up to HEALTH_TRIES times, until proven
-# (await), or while the unit is active but does not answer yet (read: it may be binding).
+# poll_running_install await|read: re-check until proven (await) or while not answering yet (read).
 poll_running_install() {
     local i
     for ((i = 0; i < HEALTH_TRIES; i++)); do
@@ -720,8 +719,7 @@ remove_new_build() {
     [[ -z "$STORE_CREATED" ]] || rmdir "$VENV_STORE" 2>/dev/null || true
 }
 
-# The new install did not prove itself. Immune to signals and a lost console until the undo is
-# done (disarming first let the next echo end the run before anything was restored).
+# The new install did not prove itself: immune to signals and a lost console until undone.
 health_failed() {
     trap '' PIPE HUP INT TERM
     ARMED=""
@@ -860,6 +858,7 @@ main() {
     VENV_LINK="/opt/remoteos-mcp-venv"
     VENV_STORE="/opt/remoteos-mcp-venvs"
     LOCK_FILE="/run/remoteos-mcp-install.lock"
+    CGROUP_FILE="/proc/self/cgroup"
     HEALTH_TRIES=12
     HEALTH_SLEEP=5
     CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -897,6 +896,7 @@ main() {
         fail "Root filesystem is read-only — nothing was changed on this box. A camera-box cam is read-only by design: update it through camera-box's provisioning (its rw window). Elsewhere: mount -o remount,rw / for this run, then rerun."
     fi
     check_inputs
+    ! grep -q "/${SERVICE_NAME}\.service" "$CGROUP_FILE" 2>/dev/null || fail "this run is inside ${SERVICE_NAME}.service (the agent's own Shell): its restart would kill the run — nothing was changed on this box. Run it over SSH."
     # One run at a time: a second run's prune could delete the build this one just swapped in.
     command -v flock &>/dev/null || fail "flock (util-linux) is missing — nothing was changed on this box"
     [[ "$POLICY" != restart ]] || command -v ss &>/dev/null \
