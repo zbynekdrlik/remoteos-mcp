@@ -126,3 +126,62 @@ def write_private_json(path: Path, data: dict) -> Path:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     os.chmod(path, 0o600)
     return path
+
+
+# -- fake ssh / sudo (the OS boundary of the other-host / other-account writers) -----------
+#
+# Each fake logs its argv as one JSON line to $FAKE_REMOTE_LOG and then runs the command
+# LOCALLY with stdin passed through, as the real tool would on the far side. Set
+# FAKE_SSH_DENY / FAKE_SUDO_DENY to make it fail the way a missing key login / sudoers rule does.
+
+_FAKE_SSH = '''#!{python}
+import json, os, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_REMOTE_LOG"], "a") as log:
+    log.write(json.dumps({{"tool": "ssh", "argv": args}}) + "\\n")
+if os.environ.get("FAKE_SSH_DENY"):
+    sys.stderr.write("newlevel@dev2: Permission denied (publickey).\\n")
+    sys.exit(255)
+i = 0
+while i < len(args) and args[i].startswith("-"):
+    i += 2 if args[i] in ("-o", "-p", "-i", "-l") else 1
+# ssh hands everything after the destination to the remote shell as ONE command line
+sys.exit(subprocess.run(["/bin/sh", "-c", " ".join(args[i + 1:])]).returncode)
+'''
+
+_FAKE_SUDO = '''#!{python}
+import json, os, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_REMOTE_LOG"], "a") as log:
+    log.write(json.dumps({{"tool": "sudo", "argv": args}}) + "\\n")
+if os.environ.get("FAKE_SUDO_DENY"):
+    sys.stderr.write("sudo: a password is required\\n")
+    sys.exit(1)
+assert args[:2] == ["-n", "-u"] and args[3] == "--", args
+sys.exit(subprocess.run(args[4:]).returncode)
+'''
+
+
+def install_fake_remote_tools(bin_dir: Path, monkeypatch) -> Path:
+    """Write fake ``ssh`` and ``sudo`` into *bin_dir* and point the gateway at them.
+
+    Returns the JSON-lines log path (one ``{"tool", "argv"}`` record per call).
+    """
+    import sys
+
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    log = bin_dir / "remote-calls.jsonl"
+    for name, template in (("ssh", _FAKE_SSH), ("sudo", _FAKE_SUDO)):
+        path = bin_dir / name
+        path.write_text(template.format(python=sys.executable), encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setenv("REMOTEOS_GATEWAY_SSH", str(bin_dir / "ssh"))
+    monkeypatch.setenv("REMOTEOS_GATEWAY_SUDO", str(bin_dir / "sudo"))
+    monkeypatch.setenv("FAKE_REMOTE_LOG", str(log))
+    return log
+
+
+def remote_calls(log: Path) -> list[dict]:
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
