@@ -189,6 +189,7 @@ def test_an_invalid_key_store_at_reload_keeps_the_last_good_copy(tmp_path):
             {MACHINE: {"url": "ftp://x/mcp", "key": key}},  # not http(s)
             {MACHINE: {"url": box.url, "key": "has space"}},  # not a header-safe key
             {MACHINE: "not-an-object"},
+            {MACHINE: {"url": "http://[bad/mcp", "key": key}},  # urlsplit raises ValueError on this
         ]
 
         async def go():
@@ -205,7 +206,7 @@ def test_an_invalid_key_store_at_reload_keeps_the_last_good_copy(tmp_path):
             await app.state.gateway.aclose()
             return codes
 
-        assert asyncio.run(go()) == [200, 200, 200, 200, 401]
+        assert asyncio.run(go()) == [200, 200, 200, 200, 200, 401]
 
 
 def test_the_legacy_mcp_config_shape_still_loads_as_the_machine_source(tmp_path):

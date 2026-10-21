@@ -310,3 +310,70 @@ def test_a_notification_airuleset_printed_as_not_sent_is_retried(tmp_path, monke
     keys = [argv[argv.index("--dedup-key") + 1] for argv in calls]
     assert len(set(keys)) == 3  # one dedup key per attempt: a retry is never deduped away
     assert check.state()["machines"]["linux-cam4"]["notified"] is True
+
+
+# -- review round 3 -------------------------------------------------------------------------------
+
+
+def test_a_url_change_during_a_repair_wins_too(tmp_path, monkeypatch):
+    from remoteos.gateway import check as check_module
+
+    check = Check(tmp_path, monkeypatch)
+    stale, real = fresh_secret("stale"), fresh_secret("real")
+    original = check_module.read_key_by_recipe
+
+    with FakeFleetMachine(accept_keys=(real,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        moved_to = closed_port_url()
+
+        def recipe_while_url_moves(entry, *, ssh_bin):
+            result = original(entry, ssh_bin=ssh_bin)
+            store = json.loads(check.keystore.read_text(encoding="utf-8"))
+            store["linux-cam2"]["url"] = moved_to  # `machine set-key --url` with the SAME key, right now
+            write_private_json(check.keystore, store)
+            return result
+
+        monkeypatch.setattr(check_module, "read_key_by_recipe", recipe_while_url_moves)
+        recipe = _repair_setup(check, tmp_path, monkeypatch, box_key=real, file_key=real)
+        check.store({"linux-cam2": {"url": box.url, "key": stale, "repair": recipe}})
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 0, result.output
+    stored = json.loads(check.keystore.read_text(encoding="utf-8"))["linux-cam2"]
+    assert (stored["url"], stored["key"]) == (moved_to, stale)  # the key verified at the OLD url is not stored
+    assert "changed meanwhile" in check.state()["machines"]["linux-cam2"]["detail"]
+
+
+def test_a_malformed_url_in_the_key_store_is_announced_never_a_silent_crash(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    check.keystore.parent.mkdir(parents=True, exist_ok=True)
+    check.keystore.write_text('{"linux-cam1": {"url": "http://[bad/mcp", "key": "k1"}}', encoding="utf-8")
+    with FakeFleetMachine(healthz=True) as gateway:
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)  # no ValueError traceback
+    [body] = check.notifications()
+    assert "NEBEŽÍ" in body and "linux-cam1" in body
+    assert check.state()["error"]["notified"] is True
+
+
+def test_a_box_re_keyed_after_an_ok_run_is_repaired_and_announced_once(tmp_path, monkeypatch):
+    check = Check(tmp_path, monkeypatch)
+    install_fake_remote_tools(tmp_path / "bin", monkeypatch)
+    old, new = fresh_secret("oldkey"), fresh_secret("newkey")
+    key_file = tmp_path / "box" / "config.json"
+    with FakeFleetMachine(accept_keys=(old,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        recipe = {"ssh": "root@cam2.lan", "key_file": str(key_file)}
+        check.store({"linux-cam2": {"url": box.url, "key": old, "repair": recipe}})
+        assert check.run(gateway.base_url).exit_code == 0  # seen ok: not news
+        box.accept_keys = [new]  # the box was reinstalled with a new key
+        write_private_json(key_file, {"auth_key": new})
+        repaired = check.run(gateway.base_url)
+        quiet = check.run(gateway.base_url)
+
+    assert repaired.exit_code == 0 and quiet.exit_code == 0
+    [body] = check.notifications()
+    assert "linux-cam2" in body and "repaired" in body and "sync-configs" in body
+    assert json.loads(check.keystore.read_text(encoding="utf-8"))["linux-cam2"]["key"] == new
+    assert check.state()["machines"]["linux-cam2"]["state"] == "ok"
+    _assert_no_secret([body, repaired.output, check.status.read_text()], [old, new])

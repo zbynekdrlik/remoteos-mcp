@@ -247,3 +247,40 @@ def test_an_import_never_writes_back_over_a_key_changed_while_it_probed(tmp_path
 
     assert json.loads(store_path.read_text(encoding="utf-8"))["linux-cam1"]["key"] == concurrent
     assert skipped == ["linux-cam1"]
+
+
+# -- review round 3 -------------------------------------------------------------------------------
+
+
+def test_an_unreadable_from_file_or_no_machine_at_all_never_creates_a_key_store(tmp_path):
+    missing = _import(tmp_path, "--from", str(tmp_path / "configs" / "typo.mcp.json"))
+    empty = _config(tmp_path / "configs" / "reaperiem.mcp.json", {"reaperiem": {"command": "/usr/bin/python3"}})
+    nothing = _import(tmp_path, "--from", str(empty))
+
+    assert missing.exit_code == 1 and "typo.mcp.json" in missing.output
+    assert nothing.exit_code == 1 and "nothing written" in nothing.output
+    assert not (tmp_path / "cfg" / "machines.json").exists()  # an empty key store = a gateway with no machines
+    assert not (tmp_path / "cfg" / "registry.json").exists()
+
+
+def test_a_first_import_never_opens_a_machine_whose_kill_switch_was_engaged(tmp_path):
+    key, other = fresh_secret("key"), fresh_secret("other")
+    with FakeFleetMachine(accept_keys=(key, other)) as box:
+        # before #51: win-pz-server was unexposed (the kill switch), david3 still lists it
+        registry = {
+            "exposed": [],
+            "consumers": {"david3@subdev": {"sha256": ["0" * 64], "machines": ["win-pz-server"], "added": "x"}},
+        }
+        write_private_json(tmp_path / "cfg" / "registry.json", registry)
+        config = _config(
+            tmp_path / "configs" / "devbridge.mcp.json",
+            {"win-pz-server": _entry(box.url, key), "linux-cam1": _entry(box.url, other)},
+        )
+
+        dry = _import(tmp_path, "--from", str(config), "--dry-run")
+        real = _import(tmp_path, "--from", str(config))
+
+    assert "would expose: linux-cam1" in dry.output
+    assert real.exit_code == 0, real.output
+    assert load_registry(tmp_path / "cfg" / "registry.json").exposed == ["linux-cam1"]
+    assert "win-pz-server" in real.output and "left unexposed" in real.output

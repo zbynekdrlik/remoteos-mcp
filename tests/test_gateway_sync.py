@@ -692,3 +692,62 @@ def test_consumer_add_and_allow_refuse_to_widen_a_sync_managed_consumer(fleet):
     assert "managed by sync-configs" in allow.output and "projects.toml" in allow.output
     assert "managed by sync-configs" in add.output
     assert fleet.registry.read_bytes() == before
+
+
+# -- review round 3 -------------------------------------------------------------------------------
+
+
+def test_a_dry_run_changes_no_consumer_on_any_path_not_even_with_prune(fleet):
+    camera = fleet.write_config("camera-box", fleet.camera_box_text())
+    obs = fleet.write_config("obs-studio", '{\n  "mcpServers": {}\n}\n')
+    obs_project = {"host": "dev1", "account": ME, "config": str(obs), "machines": ["win-stream-snv"]}
+    fleet.write_manifest({"camera-box": fleet.camera_box_project(), "obs-studio": obs_project})
+    assert fleet.run().exit_code == 0
+
+    camera.write_text('{"mcpServers": ', encoding="utf-8")  # camera-box will FAIL (narrowing path)
+    narrowed = fleet.camera_box_project(machines=("win-stream-snv",))
+    fleet.write_manifest({"camera-box": narrowed})  # obs-studio LEFT the manifest (withdraw path)
+    before = fleet.registry.read_bytes()
+
+    plain = fleet.run("--dry-run")
+    pruned = fleet.run("--dry-run", "--prune")  # the delete path
+
+    assert plain.exit_code == 1 and pruned.exit_code == 1  # camera-box still fails
+    assert "obs-studio@dev1" in plain.output and "would be removed" in pruned.output
+    assert fleet.registry.read_bytes() == before  # not one consumer touched
+
+
+def test_rendering_into_an_empty_block_holding_a_newline_indents_like_json_dumps():
+    from remoteos.gateway.sync import parse_config, render_config, render_entry
+
+    entry = {"type": "http", "url": "http://gw.test/a/mcp", "headers": {"Authorization": "Bearer x"}}
+    parsed = parse_config('{\n  "mcpServers": {\n  }\n}\n')
+
+    text = render_config(parsed, [("linux-a", render_entry(entry, "    "))])
+
+    assert text == json.dumps({"mcpServers": {"linux-a": entry}}, indent=2) + "\n"
+
+
+def test_a_malformed_url_in_a_project_config_is_skipped_by_import_not_a_crash(fleet):
+    entry = {"type": "http", "url": "http://[bad/mcp", "headers": {"Authorization": "Bearer abcdef"}}
+    config = write_private_json(fleet.tmp / "bad.mcp.json", {"mcpServers": {"linux-cam9": entry}})
+    result = CliRunner().invoke(
+        gateway_cli.main,
+        [
+            "--registry",
+            str(fleet.registry),
+            "--machines",
+            str(fleet.keystore),
+            "--manifest",
+            str(fleet.manifest),
+            "machine",
+            "import",
+            "--from",
+            str(config),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code in (0, 1), result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "linux-cam9 url is not http(s)" in result.output
