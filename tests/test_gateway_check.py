@@ -607,3 +607,42 @@ def test_a_recovery_notice_that_did_not_go_out_is_retried_once(tmp_path, monkeyp
     bodies = check.notifications()
     assert [("opäť beží" in b) for b in bodies] == [False, True, True]
     assert "recovery_pending" not in check.state()
+
+
+# -- review round 6 -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [["x"], {"y": 1}, 7])
+def test_a_hand_edited_status_record_is_treated_as_unknown_never_a_crash(tmp_path, monkeypatch, bad):
+    check = Check(tmp_path, monkeypatch)
+    check.store({"linux-cam4": {"url": closed_port_url(), "key": fresh_secret("k")}})
+    write_private_json(
+        check.status,
+        {"checked_at": "x", "machines": {"linux-cam4": {"state": bad, "previous": bad, "notified": True}}},
+    )
+    with FakeFleetMachine(healthz=True) as gateway:
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 0, result.output
+    record = check.state()["machines"]["linux-cam4"]
+    assert record["state"] == "unreachable" and record["notified"] is True
+    [body] = check.notifications()
+    assert "linux-cam4" in body
+
+
+def test_any_unexpected_failure_after_the_load_is_announced_never_silent(tmp_path, monkeypatch):
+    from remoteos.gateway import check as check_module
+
+    async def broken_observe(*args, **kwargs):
+        raise RuntimeError("something nobody foresaw")
+
+    monkeypatch.setattr(check_module, "observe", broken_observe)
+    check = Check(tmp_path, monkeypatch)
+    check.store({"linux-cam1": {"url": closed_port_url(), "key": fresh_secret("k")}})
+    with FakeFleetMachine(healthz=True) as gateway:
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 1
+    [body] = check.notifications()
+    assert "NEBEŽÍ" in body and "RuntimeError" in body
+    assert check.state()["error"]["notified"] is True

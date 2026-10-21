@@ -796,3 +796,30 @@ def test_a_new_project_gets_its_config_created_locally_and_over_ssh(fleet, monke
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
         assert stat.S_IMODE(os.stat(path.parent).st_mode) == 0o700
     assert second.exit_code == 0 and "fresh: unchanged" in second.output and "fresh2: unchanged" in second.output
+
+
+# -- review round 6 -------------------------------------------------------------------------------
+
+
+def test_a_project_config_inside_a_git_work_tree_fails_that_project_locally_and_over_ssh(fleet, monkeypatch):
+    install_fake_remote_tools(fleet.tmp / "bin", monkeypatch)
+    repo = fleet.tmp / "repos" / "camera-box"
+    (repo / ".git").mkdir(parents=True)
+    local, remote = repo / ".mcp.json", repo / "sub" / "dev2.mcp.json"
+    good = fleet.write_config("restreamer", '{\n  "mcpServers": {}\n}\n')
+    fleet.write_manifest(
+        {
+            "camera-box": {"host": "dev1", "account": ME, "config": str(local), "machines": ["linux-cam1"]},
+            "presenter": {"host": "dev2", "account": "newlevel", "config": str(remote), "machines": ["linux-cam1"]},
+            "restreamer": {"host": "dev1", "account": ME, "config": str(good), "machines": ["linux-cam2"]},
+        }
+    )
+
+    result = fleet.run()
+
+    assert result.exit_code == 1
+    assert result.output.count("git work tree") == 2
+    assert not local.exists() and not remote.exists()  # a token never lands where git could commit it
+    consumers = load_registry(fleet.registry).consumers
+    assert "restreamer@dev1" in consumers  # the others still sync
+    assert consumers["camera-box@dev1"].machines == ["linux-cam1"]  # registered, file refused: next run retries

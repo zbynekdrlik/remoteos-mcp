@@ -198,3 +198,41 @@ def test_import_from_manifest_reads_each_project_config_where_it_lives(tmp_path,
     assert "presenter (ssh newlevel@dev2)" in result.output
     assert [c["tool"] for c in remote_calls(log)] == ["ssh"]
     assert key not in result.output and key not in json.dumps(remote_calls(log))
+
+
+# -- review round 6 -------------------------------------------------------------------------------
+
+
+def test_a_write_whose_content_arrived_short_is_refused_and_the_file_kept(tmp_path):
+    source = open(fileops.__file__, encoding="utf-8").read()
+    path = tmp_path / "configs" / "camera-box.mcp.json"
+    path.parent.mkdir()
+    path.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    full = b'{"mcpServers": {"linux-cam1": {"type": "http"}}}\n'
+
+    short = subprocess.run(
+        [sys.executable, "-c", source, "write", str(path), "2026-10-21", str(len(full))],
+        input=full[: len(full) // 2],  # an ssh that died mid-transfer: EOF too early
+        capture_output=True,
+    )
+    whole = subprocess.run(
+        [sys.executable, "-c", source, "write", str(path), "2026-10-21", str(len(full))],
+        input=full,
+        capture_output=True,
+    )
+
+    assert short.returncode != 0 and b"bytes" in short.stderr
+    assert whole.returncode == 0 and path.read_bytes() == full
+    backups = sorted(p.name for p in (path.parent / ".backup-2026-10-21").iterdir())
+    assert backups == ["camera-box.mcp.json"]  # the refused write did not even make a backup
+
+
+def test_a_config_inside_a_git_work_tree_is_never_written(tmp_path):
+    repo = tmp_path / "some-project"
+    (repo / ".git").mkdir(parents=True)  # a git work tree: a token here could be committed
+    target = repo / "nested" / ".mcp.json"
+
+    with pytest.raises(ValueError, match="git work tree"):
+        fileops.write_with_backup(fileops.expand(str(target)), b"{}\n", "2026-10-21")
+
+    assert not target.exists()
