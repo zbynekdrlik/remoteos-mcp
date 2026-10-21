@@ -469,8 +469,9 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
 - **Notifications.** It announces each state change ONCE, through
   `~/devel/airuleset/airuleset.py notify --body` (owner from
   `REMOTEOS_GATEWAY_NOTIFY_OWNER`). Without airuleset it writes a log line instead. A
-  notification that did not go out is retried on the next run. A check that cannot run at all
-  (an invalid key store) is announced once too, and exits 1.
+  notification that did not go out (airuleset did not print `sent`) is retried on the next
+  run. A check that cannot run at all (an invalid key store) is announced once too, exits 1,
+  and its recovery is announced.
 - **Auto-repair of a 401** happens only for a machine with an explicit recipe:
   `remoteos-gateway machine repair-recipe linux-cam2 --ssh root@cam2.lan [--sudo]`.
   - The recipe reads the box's installer `config.json` (`/etc/remoteos-mcp/config.json`)

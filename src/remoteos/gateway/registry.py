@@ -217,6 +217,7 @@ class Registry:
     def add_consumer(self, name: str, sha256: str, *, today: str | None = None) -> bool:
         """Register *sha256* for *name* (creating the consumer). Returns False if already there."""
         validate_consumer_name(name)
+        self._refuse_if_managed(name)
         digest = normalize_hash(sha256)
         for other, consumer in self.consumers.items():
             if other != name and digest in consumer.sha256:
@@ -248,6 +249,7 @@ class Registry:
     def allow(self, consumer_name: str, machine: str) -> bool:
         validate_machine_name(machine)
         consumer = self._require_consumer(consumer_name)
+        self._refuse_if_managed(consumer_name)
         if machine in consumer.machines:
             return False
         consumer.machines.append(machine)
@@ -272,6 +274,15 @@ class Registry:
             return False
         self.exposed.remove(machine)
         return True
+
+    def _refuse_if_managed(self, name: str) -> None:
+        """A hand edit must never widen a consumer sync-configs owns (its allow-list = the manifest)."""
+        consumer = self.consumers.get(name)
+        if consumer is not None and consumer.managed_by == SYNC_MANAGER:
+            raise RegistryError(
+                f"consumer {name!r} is managed by sync-configs: its token and machines come from projects.toml"
+                " — edit that file and run `remoteos-gateway sync-configs`"
+            )
 
     def _require_consumer(self, name: str) -> Consumer:
         consumer = self.consumers.get(name)
@@ -409,8 +420,15 @@ def validate_key(key: str, *, what: str = "key") -> str:
 
 
 def validate_http_url(url: str, *, what: str = "url") -> str:
+    """Return *url* when it is a printable http(s) url. The error never repeats the value: a key
+    pasted into a url field by a hand edit would otherwise reach a log line or a notification."""
     if not isinstance(url, str) or not _is_http_url(url) or not url.isprintable():
-        raise MachineSourceError(f"{what} must be an http(s) url, got {url!r}")
+        if isinstance(url, str):
+            scheme = urlsplit(url).scheme if url.isprintable() else ""
+            got = f"{len(url)} characters, " + (f"scheme {scheme!r}" if scheme.isalnum() else "no http(s) scheme")
+        else:
+            got = type(url).__name__
+        raise MachineSourceError(f"{what} must be an http(s) url (got {got})")
     return url
 
 
@@ -419,7 +437,7 @@ def parse_repair(raw: object, name: str) -> RepairRecipe:
         raise MachineSourceError(f"key store: machine {name!r} 'repair' must be an object with {sorted(_REPAIR_KEYS)}")
     ssh = raw.get("ssh")
     if not isinstance(ssh, str) or not _SSH_DEST_RE.fullmatch(ssh):
-        raise MachineSourceError(f"key store: machine {name!r} repair 'ssh' must be user@host, got {ssh!r}")
+        raise MachineSourceError(f"key store: machine {name!r} repair 'ssh' must be user@host (letters, digits, . _ -)")
     key_file = raw.get("key_file", DEFAULT_REPAIR_KEY_FILE)
     if not isinstance(key_file, str) or not key_file.startswith("/") or not key_file.isprintable():
         raise MachineSourceError(f"key store: machine {name!r} repair 'key_file' must be an absolute path")

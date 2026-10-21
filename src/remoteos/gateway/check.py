@@ -10,7 +10,9 @@ gateway's own ``/healthz``, then writes ``~/.local/state/remoteos-gateway/machin
 States: ``ok`` / ``401`` / ``unreachable`` / ``error`` (``probe.py``). ``since`` is when the
 current state began. A state CHANGE is announced once — through ``airuleset.py notify --body``
 when that script exists, else as a WARNING log line. A notification that did not go out stays
-``notified: false`` and is retried on the next run. A machine first seen ``ok`` is not news.
+``notified: false`` and is retried on the next run (airuleset exits 0 even when the post failed,
+so only its printed ``sent`` counts). A machine first seen ``ok`` is not news. A check that
+cannot run (an invalid key store) is announced once per distinct failure, and so is its recovery.
 
 A 401 is auto-repaired ONLY for a machine with an explicit ``repair`` recipe in the key store:
 ``ssh -o BatchMode=yes <ssh> [sudo -n] cat <key_file>`` reads the installer's ``config.json``,
@@ -25,10 +27,12 @@ import datetime as _dt
 import json
 import logging
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,11 +109,14 @@ async def _repair(name: str, entry: MachineEntry, *, keystore_path: Path, ssh_bi
         result = await probe_initialize(client, entry.url, f"Bearer {key}")
     if result.state != STATE_OK:
         return Observation(STATE_UNAUTHORIZED, f"repair failed: the key on the box is not accepted either ({what})")
-    with edit_keystore(keystore_path) as entries:
-        current = entries.get(name)
-        if current is None or current.key != entry.key:  # a set-key won the race: leave it alone
-            return Observation(STATE_UNAUTHORIZED, "repair skipped: the key store changed meanwhile")
-        entries[name] = MachineEntry(url=current.url, key=key, repair=current.repair)
+    try:
+        with edit_keystore(keystore_path) as entries:
+            current = entries.get(name)
+            if current is None or current.key != entry.key:  # a set-key won the race: leave it alone
+                return Observation(STATE_UNAUTHORIZED, "repair skipped: the key store changed meanwhile")
+            entries[name] = MachineEntry(url=current.url, key=key, repair=current.repair)
+    except MachineSourceError as exc:  # it turned invalid since the load: the next run announces that
+        return Observation(STATE_UNAUTHORIZED, f"repair skipped: the key store is unreadable now ({exc})")
     logger.warning("check: %s repaired (%s)", name, what)
     return Observation(STATE_OK, f"repaired: {what}", repaired=True)
 
@@ -161,9 +168,9 @@ def _advance(previous: object, observation: Observation, now: str) -> dict:
     }
 
 
-def compose_message(pending: dict[str, dict], host: str) -> str:
+def compose_message(pending: dict[str, dict], host: str, *, recovered: bool = False) -> str:
     """The notification text (Slovak, phone-readable): names, states, details — never a key."""
-    lines = [f"MCP brána ({host}): zmena stavu strojov"]
+    lines = [f"MCP brána ({host}): " + ("kontrola strojov opäť beží" if recovered else "zmena stavu strojov")]
     for name, record in pending.items():
         old = record.get("previous")
         before = _LABELS.get(old, old) if old else "nový"
@@ -171,18 +178,31 @@ def compose_message(pending: dict[str, dict], host: str) -> str:
         label = "brána (gateway /healthz)" if name == GATEWAY_KEY else name
         lines.append(f"• {label}: {before} → {after} [{old or 'new'} → {record['state']}] — {record['detail']}")
     if any(r["state"] == STATE_UNAUTHORIZED for r in pending.values()):
-        lines.append("Kľúč: `remoteos-gateway machine set-key <stroj>` (kľúč na stdin) — projekty sa nemenia.")
+        lines.append("Kľúč: `remoteos-gateway machine set-key <stroj>` (kľúč na stdin).")
+    if any(r["state"] == STATE_UNAUTHORIZED or r["detail"].startswith("repaired") for r in pending.values()):
+        lines.append(
+            "Projekty cez bránu sa nemenia; priamu kópiu kľúčov (projekt remoteos-mcp) obnoví"
+            " `remoteos-gateway sync-configs`."
+        )
     return "\n".join(lines)
 
 
+# What `airuleset.py notify --body` prints (send()'s status). It EXITS 0 EVEN WHEN THE POST FAILED,
+# so only these printed statuses count as delivered ("dedup" = already delivered under that key).
+_DELIVERED = frozenset({"sent", "dedup"})
+
+
 def airuleset_notifier(script: Path, owner: str | None) -> Callable[[str], bool] | None:
-    """``python3 <airuleset.py> notify --body <text>``; None when the script is not there."""
+    """``python3 <airuleset.py> notify --body <text> --dedup-key <per attempt>``; None when the
+    script is not there. Delivered = it ran AND printed ``sent`` (or ``dedup``)."""
     if not script.is_file():
         return None
     python = shutil.which("python3") or sys.executable
 
     def send(body: str) -> bool:
-        argv = [python, str(script), "notify", "--body", body]
+        # one key per ATTEMPT: a retry of an undelivered message must never be deduped away
+        attempt = f"remoteos-gateway-check#{time.time_ns()}#{secrets.token_hex(4)}"
+        argv = [python, str(script), "notify", "--body", body, "--dedup-key", attempt]
         if owner:
             argv += ["--owner-name", owner]
         try:
@@ -190,9 +210,13 @@ def airuleset_notifier(script: Path, owner: str | None) -> Callable[[str], bool]
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.error("check: notify did not run (%s) — retried on the next run", type(exc).__name__)
             return False
-        if proc.returncode != 0:
-            reason = last_line(proc.stderr) or f"exit {proc.returncode}"
-            logger.error("check: notify FAILED (%s) — retried on the next run", reason)
+        status = last_line(proc.stdout)
+        if proc.returncode != 0 or status not in _DELIVERED:
+            if proc.returncode == 0:
+                reason = f"printed {status!r}"
+            else:
+                reason = last_line(proc.stderr) or f"exit {proc.returncode}"
+            logger.error("check: notify NOT delivered (%s) — retried on the next run", reason)
             return False
         return True
 
@@ -238,16 +262,30 @@ def run_check(
     }
     pending = {GATEWAY_KEY: status["gateway"]} if not status["gateway"]["notified"] else {}
     pending.update({n: r for n, r in status["machines"].items() if not r["notified"]})
+    # The check could not run last time (or that recovery was not announced yet): say it is back.
+    recovered = isinstance(previous.get("error"), dict) or previous.get("recovery_pending") is True
     for name, record in pending.items():
         logger.warning("check: %s is %s (was %s) — %s", name, record["state"], record["previous"], record["detail"])
     sent: bool | None = None
-    if pending:
-        sent = notifier(compose_message(pending, host)) if notifier is not None else True
+    if pending or recovered:
+        message = compose_message(pending, host, recovered=recovered)
+        sent = notifier(message) if notifier is not None else True
         if sent:
             for record in pending.values():
                 record["notified"] = True
-    _write_status(status_path, status)
+        elif recovered:
+            status["recovery_pending"] = True
+    try:
+        _write_status(status_path, status)
+    except OSError as exc:
+        reason = f"cannot write the status file {status_path} ({exc.strerror or type(exc).__name__})"
+        _report_failure(status_path, previous, reason, stamp, notifier, host)
+        raise CheckError(reason) from exc
     return CheckReport(status=status, sent=sent)
+
+
+class CheckError(Exception):
+    """The check could not keep its state (the status file is not writable)."""
 
 
 def _write_status(path: Path, status: dict) -> None:
@@ -257,14 +295,21 @@ def _write_status(path: Path, status: dict) -> None:
 def _report_failure(
     status_path: Path, previous: dict, message: str, stamp: str, notifier: Callable[[str], bool] | None, host: str
 ) -> None:
-    """The check itself cannot run (an invalid key store): say so ONCE per distinct failure, so
-    the watchdog never goes silent. The last machine states are kept as they were."""
+    """The check itself cannot run: say so ONCE per distinct failure, so the watchdog never goes
+    silent. The last machine states are kept. If even the status file cannot be written, the
+    failure is announced on every run (there is nowhere to remember it was)."""
     old = previous.get("error") if isinstance(previous.get("error"), dict) else None
     same = old is not None and old.get("message") == message
-    record = {"message": message, "since": old.get("since", stamp) if same else stamp,
-              "notified": bool(old.get("notified")) if same else False}
+    record = {
+        "message": message,
+        "since": old.get("since", stamp) if same else stamp,
+        "notified": bool(old.get("notified")) if same else False,
+    }
     logger.error("check: cannot run — %s", message)
     if not record["notified"]:
         text = f"MCP brána ({host}): kontrola strojov NEBEŽÍ — {message}"
         record["notified"] = notifier(text) if notifier is not None else True
-    _write_status(status_path, {**previous, "checked_at": stamp, "error": record})
+    try:
+        _write_status(status_path, {**previous, "checked_at": stamp, "error": record})
+    except OSError as exc:
+        logger.error("check: the status file %s cannot be written either (%s)", status_path, exc.strerror or exc)

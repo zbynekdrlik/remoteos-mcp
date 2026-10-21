@@ -23,7 +23,13 @@ from pathlib import Path
 
 import click
 
-from remoteos.gateway.check import DEFAULT_AIRULESET_PATH, DEFAULT_STATUS_PATH, airuleset_notifier, run_check
+from remoteos.gateway.check import (
+    DEFAULT_AIRULESET_PATH,
+    DEFAULT_STATUS_PATH,
+    CheckError,
+    airuleset_notifier,
+    run_check,
+)
 from remoteos.gateway.keystore import (
     DEFAULT_IMPORT_MATCH,
     apply_import,
@@ -161,6 +167,11 @@ def machine_list(paths) -> None:
 @click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
 @click.option("--match", default=DEFAULT_IMPORT_MATCH, show_default=True, help="Only entries whose name fully matches.")
 @click.option("--gateway-url", default=None, help=_GATEWAY_URL_HELP + " Entries pointing there are skipped (tokens).")
+@click.option(
+    "--accept-url-change",
+    is_flag=True,
+    help="Also consider copies at another url than the key store's (the machine really moved).",
+)
 @click.option("--dry-run", is_flag=True, help="Report the choice per machine; write nothing.")
 @click.pass_obj
 def machine_import(
@@ -170,6 +181,7 @@ def machine_import(
     local_host: str,
     match: str,
     gateway_url: str | None,
+    accept_url_change: bool,
     dry_run: bool,
 ) -> None:
     """Build the key store from per-project MCP configs. For each machine, the copy the machine
@@ -197,16 +209,20 @@ def machine_import(
                 continue
             if text is not None:
                 texts.append((label, text))
-    _import_and_report(paths, texts, match=match, gateway_url=gateway_url, dry_run=dry_run)
+    _import_and_report(
+        paths, texts, match=match, gateway_url=gateway_url, dry_run=dry_run, accept_url_change=accept_url_change
+    )
 
 
-def _import_and_report(paths, texts: list[tuple[str, str]], *, match: str, gateway_url: str, dry_run: bool) -> None:
+def _import_and_report(
+    paths, texts: list[tuple[str, str]], *, match: str, gateway_url: str, dry_run: bool, accept_url_change: bool
+) -> None:
     scan = scan_sources(texts, match=match, skip_url_prefix=gateway_url)
     try:
         existing = load_keystore(paths.machines, missing_ok=True)
     except MachineSourceError as exc:
         raise _fail(exc) from exc
-    decisions = resolve_import(scan, existing)
+    decisions = resolve_import(scan, existing, accept_url_change=accept_url_change)
     click.echo(f"read {len(texts)} config(s); {len(decisions)} machine(s) found")
     for note in scan.notes:
         click.echo(f"  note: {note}")
@@ -218,8 +234,9 @@ def _import_and_report(paths, texts: list[tuple[str, str]], *, match: str, gatew
     if dry_run:
         click.echo("dry run — nothing written")
         return
-    apply_import(paths.machines, decisions)
-    click.echo(f"key store {paths.machines} written ({len(decisions)} machine(s) imported)")
+    for name in apply_import(paths.machines, decisions, snapshot=existing):
+        click.echo(f"  {name}: its key-store entry changed while the import probed — left as it is now")
+    click.echo(f"key store {paths.machines} up to date ({len(decisions)} machine(s) considered)")
     # Only machines NEW to the key store are exposed: a known machine may be unexposed on
     # purpose (the kill switch), and a re-import must not undo that.
     newly = _expose(paths, [d.name for d in decisions if d.name not in existing])
@@ -339,7 +356,7 @@ def check_command(
             notifier=airuleset_notifier(airuleset_path.expanduser(), notify_owner),
             host=local_host,
         )
-    except MachineSourceError as exc:
+    except (MachineSourceError, CheckError) as exc:
         raise _fail(exc) from exc
     status = report.status
     gateway = status["gateway"]

@@ -24,7 +24,8 @@ Fail closed: an invalid or empty manifest, an invalid key store, a manifest mach
 from the key store, or direct mode off the gateway's own account refuses the whole run before
 anything changes; an unreadable / unparseable config or a missing ssh / sudo access fails that
 project only (its allow-list is only ever narrowed). A file never carries a token the gateway
-does not know. No key or token is ever printed or logged.
+does not know — except the config of a project removed with ``--prune``, whose consumer is gone
+on purpose. No key or token is ever printed or logged.
 """
 
 from __future__ import annotations

@@ -123,11 +123,24 @@ paths:
   machine. `machine import` and `machine set-key --url` expose only machines NEW to the key store.
 - **Import never downgrades the key store:** when no copy of a machine verifies, the key
   store's current entry is kept (a set-key made while the box was down), never the most
-  common config copy.
+  common config copy. For a machine already in the key store, only copies at ITS url count:
+  a 200 from another url only proves the key fits that url (a stale IP reused by another box).
+  Other-url copies are listed, never probed (the key is not sent there), unless
+  `--accept-url-change`. `apply_import(snapshot=...)` leaves a machine whose entry changed
+  while the import probed.
+- **`consumer add` / `allow` refuse a sync-managed consumer** (`Registry._refuse_if_managed`):
+  its allow-list must stay the manifest's. `deny` / `revoke` (narrowing) still work.
 - **`edit_keystore` saves only when the content changed:** every save makes the running
   gateway reload, and a no-op (the repair race's early return) must not.
 - **`check`:**
   - `notified: false` survives a failed notification, so the next run retries it.
+  - **`airuleset.py notify --body` exits 0 even when the Discord post failed** (review round 2):
+    it PRINTS `send()`'s status (`sent` / `dedup` / `dry-run` / `no-config` / `error`). Only a
+    printed `sent` / `dedup` is delivered. Every attempt passes its own `--dedup-key`, so a
+    retry is never deduped away. The test fake prints a status and exits 0, like the real tool.
+  - A check that cannot run (an invalid key store, an unwritable status file) is announced
+    once per distinct failure, and its recovery is announced too. Validation messages never
+    repeat a value (a key pasted into `url` would reach Discord): length and scheme only.
   - A machine first seen `ok` is not announced.
   - A repair stores the re-read key only if the machine accepts it AND the stored key did not
     change meanwhile (a concurrent `set-key` wins).

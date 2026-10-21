@@ -171,7 +171,8 @@ class KeyCopy:
 @dataclass
 class ImportDecision:
     """How one machine's key was chosen. ``verdict``: ``verified`` (a copy answered 200) or
-    the reason none did (``unreachable`` / ``401`` / ``error``) — the most common copy is kept."""
+    the reason none did (``unreachable`` / ``401`` / ``error``) — then the key store's own entry,
+    else the most common copy, is kept."""
 
     name: str
     chosen: KeyCopy
@@ -182,6 +183,7 @@ class ImportDecision:
     distinct: int
     stale_sources: list[str]
     kept_store: bool = False  # nothing verified, so the key store's own entry was kept
+    other_url_sources: list[str] = field(default_factory=list)  # copies at ANOTHER url, ignored
 
     @property
     def flagged(self) -> bool:
@@ -244,16 +246,26 @@ def resolve_import(
     existing: dict[str, MachineEntry],
     *,
     prober: Callable[[list[tuple[object, str, str | None]]], dict[object, ProbeResult]] | None = None,
+    accept_url_change: bool = False,
 ) -> list[ImportDecision]:
     """Pick one copy per machine: the copy that answers ``initialize`` with 200 wins (several:
-    the most common of them). When none does, the most common copy is kept and FLAGGED. The
-    key store's own current entry counts as one more copy (source ``key store``)."""
+    the most common of them). When none does, the key store's current entry is kept, else the
+    most common copy — FLAGGED. The key store's own entry counts as one more copy (``key store``).
+
+    For a machine the key store already has, only copies at ITS url count: a 200 from another
+    url proves the key fits that url, not that it is this machine (a stale IP now used by
+    another box). Those copies are listed, never probed (the key is not sent there) and never
+    chosen, unless *accept_url_change*."""
     candidates: dict[str, dict[KeyCopy, list[str]]] = {}
+    other_url: dict[str, list[str]] = {}
     for name, copies in scan.copies.items():
         merged: dict[KeyCopy, list[str]] = {}
         if name in existing:
             merged[KeyCopy(url=existing[name].url, key=existing[name].key)] = ["key store"]
         for copy, labels in copies.items():
+            if name in existing and not accept_url_change and copy.url != existing[name].url:
+                other_url.setdefault(name, []).extend(labels)
+                continue
             merged.setdefault(copy, []).extend(labels)
         candidates[name] = merged
 
@@ -300,19 +312,40 @@ def resolve_import(
                 distinct=len(copies),
                 stale_sources=stale,
                 kept_store=kept_store,
+                other_url_sources=sorted(set(other_url.get(name, []))),
             )
         )
     return decisions
 
 
-def apply_import(path: Path, decisions: list[ImportDecision]) -> None:
-    """Write every decision into the key store (keeping each machine's repair recipe)."""
+def apply_import(
+    path: Path, decisions: list[ImportDecision], *, snapshot: dict[str, MachineEntry] | None = None
+) -> list[str]:
+    """Write the decisions into the key store (keeping each machine's repair recipe).
+
+    *snapshot* is the key store the decisions were made from. Under the lock, a machine whose
+    entry changed since (a set-key or a repair while the import probed) is left as it is now,
+    and a decision that only repeats the snapshot is a no-op. Returns the machines left alone
+    because they changed meanwhile."""
+    changed_meanwhile: list[str] = []
     with edit_keystore(path) as entries:
         for decision in decisions:
             existing = entries.get(decision.name)
+            if snapshot is not None:
+                before = snapshot.get(decision.name)
+                if _pair(existing) != _pair(before):
+                    changed_meanwhile.append(decision.name)
+                    continue
+                if _pair(before) == (decision.chosen.url, decision.chosen.key):
+                    continue
             entries[decision.name] = MachineEntry(
                 url=decision.chosen.url, key=decision.chosen.key, repair=existing.repair if existing else None
             )
+    return changed_meanwhile
+
+
+def _pair(entry: MachineEntry | None) -> tuple[str, str] | None:
+    return (entry.url, entry.key) if entry is not None else None
 
 
 def describe_decision(decision: ImportDecision) -> str:
@@ -328,4 +361,9 @@ def describe_decision(decision: ImportDecision) -> str:
     line = f"  {decision.name}: {copies} — {head}, from {', '.join(decision.chosen_sources)}; url {decision.chosen.url}"
     if decision.stale_sources:
         line += f"\n      a DIFFERENT copy is in: {', '.join(decision.stale_sources)}"
+    if decision.other_url_sources:
+        line += (
+            f"\n      a copy at ANOTHER url is in: {', '.join(decision.other_url_sources)} — ignored (not probed);"
+            " re-run with --accept-url-change if the machine really moved"
+        )
     return line

@@ -60,7 +60,7 @@ def ensure_private_dir(directory: str) -> bool:
 def atomic_write(path: str, data: bytes) -> None:
     """Replace *path* with *data* atomically: a 0600 temp file in the same directory, fsync,
     rename, fsync the directory. A reader sees the old file or the new one, never a mix."""
-    directory = os.path.dirname(path)
+    directory = os.path.dirname(os.path.abspath(path))  # "" for a bare file name otherwise
     ensure_private_dir(directory)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + os.path.basename(path) + ".", suffix=".tmp")
     try:
@@ -101,7 +101,7 @@ def backup(path: str, tag: str):
     data = read_bytes(path)
     if data is None:
         return None
-    backup_dir = os.path.join(os.path.dirname(path), ".backup-" + tag)
+    backup_dir = os.path.join(os.path.dirname(os.path.abspath(path)), ".backup-" + tag)
     ensure_private_dir(backup_dir)
     name = os.path.basename(path)
     target = os.path.join(backup_dir, name)
@@ -123,7 +123,7 @@ def write_with_backup(path: str, data: bytes, tag: str) -> dict:
 @contextlib.contextmanager
 def exclusive_lock(lock_path: str):
     """Hold an exclusive ``flock`` on *lock_path* (created 0600). Edits of one file serialise on it."""
-    ensure_private_dir(os.path.dirname(lock_path))
+    ensure_private_dir(os.path.dirname(os.path.abspath(lock_path)))
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, PRIVATE_FILE_MODE)
     try:
         try:

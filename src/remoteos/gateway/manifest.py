@@ -26,6 +26,7 @@ A project lists at least one machine; to take a project off, remove its table.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,12 +115,23 @@ def parse_manifest(data: dict, source: object = "manifest") -> Manifest:
     projects: dict[str, Project] = {}
     files: dict[tuple[str, str, str], str] = {}
     for name, raw in projects_raw.items():
-        projects[name] = _parse_project(name, raw, source)
-        where = (projects[name].host, projects[name].account, projects[name].config)
+        project = projects[name] = _parse_project(name, raw, source)
+        where = (project.host, project.account, _same_file_key(project.account, project.config))
         if where in files:
             raise ManifestError(f"{source}: projects {files[where]!r} and {name!r} write the same config file")
         files[where] = name
     return Manifest(gateway_url=gateway_url.rstrip("/"), projects=projects)
+
+
+def _same_file_key(account: str, config: str) -> str:
+    """One spelling per file, for the duplicate check: ``/home/<account>/x`` (``/root/x`` for
+    root) is ``~/x``, and ``.`` / ``..`` / doubled slashes are folded. Symlinks on another host
+    cannot be resolved here; two spellings through a symlink are the owner's to avoid."""
+    path = posixpath.normpath(config)
+    home = "/root" if account == "root" else f"/home/{account}"
+    if path == home or path.startswith(home + "/"):
+        path = "~" + path[len(home) :]
+    return path
 
 
 def _parse_project(name: str, raw: object, source: object) -> Project:
