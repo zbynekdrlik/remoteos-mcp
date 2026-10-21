@@ -1638,6 +1638,12 @@ def cli(
     oauth_client_secret: str | None,
 ):
     """Start the remoteos MCP server."""
+    # The installers hand the key over in REMOTEOS_AUTH_KEY, never an argv (#12). click has read
+    # it (and the OAuth secret) by now: drop both, so no child (Shell, App, ...) inherits them.
+    # (The process's initial environment, /proc/<pid>/environ, keeps them: root and this
+    # account can read that, as they can read the 0600 key files.)
+    for secret in ("REMOTEOS_AUTH_KEY", "REMOTEOS_OAUTH_CLIENT_SECRET"):
+        os.environ.pop(secret, None)
     if ctx.invoked_subcommand is not None:
         return  # subcommand will handle it
 

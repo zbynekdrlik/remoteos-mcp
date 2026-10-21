@@ -3,52 +3,291 @@ paths:
   - "install-linux.sh"
   - "install.sh"
   - "install.ps1"
+  - "uninstall-linux.sh"
   - "tests/test_installer_*.py"
   - "tests/installer_harness.py"
+  - "tests/linux_installer_harness.py"
+  - "tests/fake_linux_tools.py"
   - "tests/fake_pip.py"
+  - "tests_windows/test_install_ps1_key.py"
 ---
 
 # One-liner installers (install-linux.sh / install.sh / install.ps1) — gotchas
 
 The live-deploy procedure lives in the `/remoteos-install` skill. This file covers the code.
 
-- **One shared install block.** `install-linux.sh` and `install.sh` carry the same `# >>> shared install block` … `# <<< shared install block`, byte for byte (`TestSharedInstallBlock` guards it). Edit it in one file and copy it to the other. Only `PIP_FLAGS` (Linux adds `--ignore-installed`) and `SERVICE_DESC` sit outside it.
-- **Order inside the block (since 0.7.0.dev24, #12). Keep it.**
-  1. Pin ONE commit of main (`git ls-remote`). Code `@<sha>` and `PIP_CONSTRAINT` `raw…/<sha>/constraints.txt` come from it. `raw.githubusercontent.com` caches `…/main/` for minutes.
-  2. Record the installed version.
-  3. Run the `pip install --dry-run --report` preflight through `pip_install_remoteos`, so it uses the same flags as the real install.
-  4. Plan: decide which deps are *changed* (pip-owned, pinned version differs) and which are *added* (not pip-owned yet). Abort if remoteos-mcp, fastmcp or fastmcp-slim has no RECORD.
-  5. Snapshot the RECORD files of the three plus the changed deps. Abort if a RECORD does not list its own METADATA.
-  6. **ARM** (`ROLLBACK_ARMED=1`, HUP/INT/TERM → `exit`, SIGPIPE ignored).
-  7. Pre-uninstall.
-  8. Install.
-  9. Verify the version AND `import remoteos.__main__, fastmcp; from fastmcp import FastMCP`.
-  10. **DISARM**.
+## The key, on every OS (#12, since 0.7.0.dev32)
 
-  Before ARM nothing has changed. While armed, **any** exit goes through the EXIT trap (`on_exit` → `rollback_install`): a failed step, a signal, a lost console (the write fails, set -e exits), or a truncated download. The rollback removes every visible pip-owned copy of the three, the changed and the added deps, one name per pip call, then restores the snapshot and re-checks version + import. The installer exits non-zero and never touches the service. A failed rollback keeps the work dir and prints the restore command + log.
-  - Never arm on a list of signals alone. A no-tty `ssh … | sudo bash` drop sends no SIGHUP; bash just dies on SIGPIPE.
-  - Armed pip steps run through `shield` (a subshell ignoring HUP/INT/TERM). Ctrl-C, a tty hang-up and a killpg timeout hit the whole process group, and pip writes a wheel's RECORD last, so a killed pip leaves files no rollback can find.
-  - The rollback also fails loudly on `leftovers`: dist-infos of the affected names that were not there before.
-  - plan refuses a dep owned by another installer (uv, conda, …) whose pin changes.
-  - Both installers run inside `main()`, called on the last line, so a truncated download fails to parse instead of half-running.
-  - Never let pip write to the console: pip writes to logs, and the logs are printed afterwards.
-  - Strih-pp was once left with no package, the service alive only from memory. That is what this order prevents.
-- **The rollback helper reads dists through `importlib.metadata`** (RECORD + INSTALLER, the visible dist first on sys.path, which is what pip sees). It never parses `pip show` text: real pip prints a multi-line License raw, including a literal `---` and a `Name:` line. "pip-owned" = INSTALLER `pip` + a RECORD. Apt dists (`debian`, no RECORD) and other installers (`uv`) are never uninstalled.
-- **`--ignore-installed` is required on Linux.** Debian's pip (Ubuntu 26.04+, Debian 13) refuses to uninstall apt-owned `python3-*` packages ("installed by debian"), so the pinned set must overlay them in `/usr/local`. This is safe only because the block pre-uninstalls every pip-owned copy it is about to replace. Otherwise the old dist-info + RECORD stays next to the new files: the dev14 stale-package problem, and the monolithic-fastmcp `__init__.py` deletion. Never drop the pre-uninstall, and never use `--force-reinstall` (static tests in `tests/test_installer_hardening.py`). macOS does not get the flag.
-- **Never truncate or discard pip output** (`| tail -N || true`, `| Out-Null`). Capture it to a log, check pip's exit code (Windows: `$LASTEXITCODE`), and print the whole log on failure.
-- **macOS runs this under bash 3.2** (`curl | bash` uses `/bin/bash`):
-  - No heredoc inside `$(…)`: the helper is written to `$WORK_DIR/rollback.py` with a plain heredoc.
-  - Expand a maybe-empty array as `${arr[@]+"${arr[@]}"}` (`set -u`).
-  - No `mapfile`.
-  - Check it with the `bash:3.2` container. `RealMetadata` needs a pip-installed pytest, and apk's has no INSTALLER:
+- **The key is never in a unit, a plist's ProgramArguments, a command line, an argv or the
+  installer's output.** The server reads `REMOTEOS_AUTH_KEY` (`__main__.py`, the click
+  `envvar`), and an env value counts as explicit, so it also beats a `remoteos.toml` `auth_key`.
+  - Linux: 0600 `/etc/remoteos-mcp/config.json` + the 0600 EnvironmentFile
+    `/etc/remoteos-mcp/remoteos-mcp.env` (`REMOTEOS_AUTH_KEY=<key>`).
+  - macOS: the plist's `EnvironmentVariables`; the plist and `config.json` are 0600.
+  - Windows: `start-remoteos.bat` does `set "REMOTEOS_AUTH_KEY=<key>"` right before the server
+    line and `set "REMOTEOS_AUTH_KEY="` right after `set EXIT_CODE=%errorlevel%`: every program
+    cmd.exe starts inherits its environment, so the loop's netstat, findstr and timeout never get
+    the key (review round 10). `Get-RemoteOSKeyFromStartScript` matches a non-empty value only.
+    The `.bat` and `config.json` get a protected ACL: the desktop user, SYSTEM, Administrators.
+- **One key precedence:** explicit `REMOTEOS_MCP_AUTH_KEY` (validated: 1-128 `[A-Za-z0-9]`,
+  else refused BEFORE anything changes), else the key the RUNNING service gets (Linux: the
+  unit's legacy `--auth-key`, else its EnvironmentFile; macOS: the plist's legacy
+  `--auth-key`, else `EnvironmentVariables`; Windows: the start script's `set` line or legacy
+  `--auth-key`), else `config.json`, (Windows: else `remoteos.toml` `[server] auth_key`, else
+  the old winremote config), else a new key. A re-run never changes the key (#51): the FIRST
+  key the box has decides, and one that is not 1-128 letters/digits is refused, never skipped
+  for a new key (that silently cuts the clients off).
+- **The server drops `REMOTEOS_AUTH_KEY` (and `REMOTEOS_OAUTH_CLIENT_SECRET`) from
+  `os.environ` at the start of `cli()`**, after click read it: otherwise every Shell/App child
+  inherits the key (`Shell("printenv REMOTEOS_AUTH_KEY")` printed it, review round 1).
+- **Never `sudo VAR=<secret> bash`:** the secret is then in sudo's argv. Linux docs say
+  `read -rs k` + `… | REMOTEOS_MCP_AUTH_KEY="$k" sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash`:
+  the prefix assignment reaches only sudo's environment, never an argv, and nothing is exported
+  to curl or the rest of the shell (round 8; `export` leaked it to every later command).
+- **The server side of "the key never in a child's environment" starts at the #12 merge.** A
+  `REMOTEOS_MCP_REF` older than that (camera-box's pin before its bump) installs a server that
+  keeps `REMOTEOS_AUTH_KEY` in `os.environ`, so Shell children inherit it. camera-box's pin must
+  be at or after the merge commit when it delegates to this installer.
+- **Never put the key into an argv on the way either.** Python reads a key file from stdin or
+  by path and prints the key to a `$(…)`; files are written by `printf` / a here-string into a
+  0600 temp file, then renamed (macOS `write_private` and Linux `write_if_changed` keep the
+  temp path in `WRITE_TMP`, which `on_exit` removes); the health check sends `Authorization:
+  Bearer` with `curl -H @-`; `GH_TOKEN` goes the same way. **Every loopback curl is `curl -q
+  --noproxy '*'`** (review rounds 11-12): `--noproxy` keeps an `http_proxy`/`all_proxy` from the
+  environment (kept for pip) or a `.curlrc` proxy off `http://127.0.0.1` — a remote proxy cannot
+  reach the box (every check fails, a working agent is stopped), a local one would read the key;
+  `-q` keeps every other `.curlrc` option off the request that carries the key (a `trace` would
+  write the Authorization header to a file). A static test pins both; the source download is
+  exempt (it may need the proxy). Read the secret env vars and `unset` them (Windows:
+  `Remove-Item Env:`) BEFORE the installer's FIRST child — the Python check, `query user`, brew,
+  winget — not after it: every child inherits them (review round 9; pinned on Linux and macOS by
+  the child-environment tests, on Windows by a static order test).
+- Windows keys come from `RandomNumberGenerator` (rejection sampling, no modulo bias), never
+  `Get-Random` (no CSPRNG; `-Count 32` drew 32 DISTINCT characters).
+- PowerShell: `-cmatch '^[A-Za-z0-9]+\z'`, never `$` (it matches before a trailing newline);
+  compare keys with `-cne` / `-ceq`, never the case-insensitive `-ne`.
+- Do not spell out a 62-character `[A-Za-z0-9]` set: `block-sensitive-staging.sh` reads it as
+  a secret. Bash: `[!A-Za-z0-9]` under `shopt -s globasciiranges` (Linux) or inside a
+  `LC_ALL=C` subshell (macOS bash 3.2 has no globasciiranges). PowerShell: build the alphabet
+  from code points.
 
-    ```
-    docker run --rm -v <worktree>:/w:ro bash:3.2 sh -c 'ln -sf /usr/local/bin/bash /bin/bash; apk add -q python3 py3-pytest; adduser -D -u 1000 t; su t -c "cd /w && INSTALLER_TEST_BASH=/bin/bash python3 -m pytest -q --noconftest -k \"not RealMetadata\" tests/test_installer_*.py"'
-    ```
-- **Tests.**
-  - `tests/fake_pip.py` is a stateful Debian-pip stand-in with TWO site dirs: pip's (`/usr/local`) shadows the apt one behind it. It supports `--report`, `show -v -f`, an uninstall that aborts the list at the first refusal like real pip, and modes for a failing dry-run, a failing, delayed, no-op or broken install, `fail_after`, a blocked restore, a damaged snapshot, and a signal to the installer.
-  - `installer_harness.setup_fake_pip` routes `-m pip` to it. It runs the import check and `…/rollback.py` with only the box's site dirs on sys.path (`-S -B`).
-  - `start_installer` lets a test close the installer's console.
-  - Assert on the real files (`FakePipBox.files()`) and on `work_dirs()`, not only on which commands ran. `TestRollbackHelperOnRealMetadata` checks the helper against the test interpreter's own real dists (read-only).
-  - The git shims answer `ls-remote`. A test must never reach the real git or the network.
-- **Static checks find the first code line** (`_find_first_code_line`). It skips `#` and `Write-Host` lines, but NOT bash `echo` lines. In the bash installers, keep `pip install … remoteos-mcp` and `pip uninstall … remoteos-mcp` out of `echo` text, or those tests silently match the message instead of the command.
+## Linux: the venv layout (camera-box's, #12)
+
+- **Layout:** `/opt/remoteos-mcp-venv` is what the unit runs. It is a SYMLINK to the current
+  build `/opt/remoteos-mcp-venvs/<source-id>.<random>`. A real venv DIRECTORY there (camera-box's
+  `scripts/lib/remoteos-mcp.sh`) is adopted as it is.
+- **The unit is camera-box's shape** (its verify checks the exact `ExecStart=` and
+  `EnvironmentFile=` lines). desktop: `User=`, `DISPLAY=<display>`,
+  `XDG_RUNTIME_DIR=/run/user/<uid>`, `After=… graphical-session.target`. headless: the cams.
+  - The existing unit's `Description=` is KEPT (else ours): a cosmetic difference alone
+    restarted a live camera-box box on every run and flip-flopped with camera-box's lib.
+  - The mode: `REMOTEOS_MCP_MODE`, else the existing unit (`Environment=DISPLAY=` or
+    `After=…graphical-session.target` → desktop), else the session check (loginctl x11/wayland).
+    `User=`: `REMOTEOS_MCP_USER`, else the existing unit, else `SUDO_USER`, else root. A re-run
+    never changes the box's shape or account.
+  - `DISPLAY`: the existing unit's, else the X11 session's (`loginctl show-session -p Display`,
+    GDM's Xorg is often `:1`); a Wayland session, or a desktop unit of ours with no `DISPLAY` (the
+    saved Wayland choice, on a re-run with nobody logged in), gets NO `DISPLAY`; else `:0`
+    (camera-box's). No `DISPLAY` on Wayland because, for
+    a non-root `User=` the server trusts its environment first, and a forced `:0` would make it
+    treat Wayland as X11.
+  - `REMOTEOS_MCP_POLICY=enable-only` (camera-box's cams: `remoteos_mcp_install root headless
+    enable-only`): install, write, enable, never start or prove. The old builds ARE pruned (a
+    venv run through the link has `sys.prefix` = the link path, so a running process already
+    imports from the new build; an old build protects nothing). The old system-python copy
+    stays while a legacy process may still import from it: it goes after a restart run's
+    proof, or at a no-op enable-only run whose running install is proven (it runs our unit's
+    venv; review round 14 — a cam never gets a restart run). Default `restart`.
+- **A pending switch** (`/etc/remoteos-mcp/.switch-pending`): written after `arm`, holding the
+  unit's `systemctl show -p InvocationID --value` (systemd makes a new one at every start and
+  keeps it while the unit is inactive). Removed after a passed proof, by "Nothing was switched",
+  by a no-op enable-only run on a proven box; `restore_previous` puts it back to its pre-run
+  state. A run that finds it with the SAME InvocationID restarts instead of taking the files as
+  unchanged: after enable-only or a run killed with no trap (SIGKILL), the running process is
+  not what the files say, and `systemctl start` on an active unit loads nothing new. Another
+  InvocationID = the unit started since (a cam rebooted into its enable-only switch): the mark
+  is stale and `check_running_install` judges what runs (round 8: a stale mark stopped and
+  disabled a working cam on the next failing restart run). An enable-only run that changed nothing removes the mark it wrote ONLY when
+  `check_running_install` finds the running install proven (round 5, narrowed in round 6): a
+  cam whose venv camera-box's lib upgraded in place without a restart runs another version
+  than its files, so its no-op run keeps the mark. A mark an earlier run left sets `CHANGED`.
+- **Reading what runs polls like the proof (review round 10).** `check_running_install` sets
+  `NO_ANSWER` for an active unit whose `/health` does not reply (it may be binding);
+  `poll_running_install read` (before a restart run's switch, at a no-op enable-only run's end)
+  polls only while that holds, so one missed poll never turns a working box into "nothing
+  proven". A definite answer (inactive, another version, authentication off) returns at once.
+- **PROVEN (`check_running_install`, review round 6)** = the unit existed, no pending switch,
+  the service is active, `/health` reports the version the unit's own ExecStart python has
+  (`python_version`, the interpreter is the ExecStart's first word, `python*` only), and an
+  unauthenticated `POST /mcp` answers 401. Read-only, the key is never sent. A restart run
+  reads it BEFORE the switch (what a failure may go back to); a no-op enable-only run reads it
+  at the end. "A unit and no pending mark" alone is NOT proven: it restored the state that had
+  just failed its proof, or files the running process never ran.
+- **Order (keep it):**
+  1. Validate the inputs (`REMOTEOS_MCP_REF` default `main`, empty = `main` as camera-box reads
+     it; MODE / USER / POLICY), refuse a run inside `remoteos-mcp.service` (`/proc/self/cgroup`,
+     `CGROUP_FILE`, redirected by the harness: from the agent's own Shell the switch's restart
+     kills the run half-way and its rollback waits on that same stop until TimeoutStopSec; review
+     round 13; the uninstaller has the same guard), take `flock -n` on
+     `/run/remoteos-mcp-install.lock` (a
+     second run's prune could delete this run's build; NOT the world-writable `/run/lock`, where
+     any local user could hold or pre-create the file and block every install). The lock is
+     0600 (`umask 077`, and `chmod 600` for an older run's 0644 one): `flock(2)` works on a
+     read-only fd, so a readable lock lets any account block every install (review round 5).
+     Read the existing unit; resolve the key.
+  2. `fetch_source`: ONE GitHub API tarball of the ref (`api.github.com/repos/…/tarball/<ref>`).
+     Its top directory (`zbynekdrlik-remoteos-mcp-<sha7>`) is the source id. Code and
+     `constraints.txt` come from the same tarball.
+  3. Desktop mode: `install_desktop_tools` FIRST (it brings `python3-gi`, which the venv links).
+  4. `venv_is_current` (the marker = the id, the installed version = the source's pyproject
+     version, and the import check) → no pip at all. The marker is ours, else camera-box's; BOTH
+     in one venv means camera-box's lib upgraded our build in place (it writes into whatever the
+     link points at): rebuild.
+  5. Else `build_venv` in the store, side by side: `python3 -m venv` (apt `python3-venv` when
+     ensurepip is missing), `pip install --no-cache-dir <src>` with `PIP_CONSTRAINT=<src>/constraints.txt`
+     under `env -i` + an allowlist (PATH, HOME, LANG, TMPDIR, proxies, CA/index vars), then the
+     version + `import remoteos.__main__, fastmcp; from fastmcp import FastMCP`. Desktop mode
+     links ONLY the system `gi` package: `<build>/system-gi/gi` → the system gi, named by a
+     `.pth` (not the whole dist-packages). An unchanged desktop build of ours without gi gets it
+     linked (`ensure_system_gi`, only when the system python has a gi: no gi = nothing switched)
+     and a restart; camera-box's adopted directory is never written.
+     **A failed download or build changes NOTHING** (it removes its build and an empty store).
+  6. Save the previous unit / EnvironmentFile / config.json. ARM (every box, a fresh one too).
+     Swap the link (`ln -sfn` + `mv -Tf`: one rename(2)); a real directory is moved into the
+     store first. Write the files (`write_if_changed`: content + mode + owner, through a 0600
+     temp file kept in `WRITE_TMP`, which `on_exit` removes: a signal never leaves a copy of a
+     key file, round 7). daemon-reload,
+     enable, and `is-enabled` must be literally `enabled` (camera-box's verify) or roll back;
+     `restart` on a change, else `start` — but an unchanged box whose running install is not
+     PROVEN (another version, e.g. camera-box's enable-only in-place upgrade; no answer; a
+     stopped service; authentication off) is restarted too. `MODIFIED` marks what the run changed
+     (a key file or the unit written, the venv swapped, the gi link added), each set BEFORE its
+     change so a signal in between still counts it.
+  7. `prove_health` (writes NOTHING): active + `/health` = the built version, an authenticated
+     `initialize` 200, an unauthenticated `POST /mcp` 401. **The key goes only to the unit's own
+     process** (`port_is_ours`, review round 6): `systemctl show -p MainPID --value` must be the
+     ONE pid `ss -Hltnp 'sport = :8092'` lists, else the proof fails with the key unsent. A local
+     account holding the port in the restart window (a loopback-only squatter gets no client
+     traffic) could otherwise take the key and fake a passing proof. Checked live on dev1: the
+     real server under systemd is its own listener. A restart run needs `ss` (iproute2), checked
+     before anything changes. Clients still send the key to whoever holds the port; closing that
+     is the transport's job (systemd socket activation), a follow-up candidate.
+     Failure → `health_failed`, which
+     keeps SIGPIPE/HUP/INT/TERM ignored and `set +e` until `undo_switch` is done, then exits 1.
+     **`undo_switch` (also the armed EXIT trap) leaves up only what proves itself AFTER the
+     undo**: PROVEN and `MODIFIED` → `restore_previous` (files, link or directory, the gi link
+     taken out, daemon-reload, restart); PROVEN with nothing switched → nothing restored. Then
+     `poll_running_install await` (`check_running_install` up to HEALTH_TRIES times, read-only,
+     no key): proven
+     → "Rolled back … proved itself" / "Nothing was switched" (the pending mark removed); not
+     proven → `stop_unproven` (round 7: the restored FILES may not be what the process ran, e.g.
+     an EnvironmentFile changed under it to an empty key = authentication off). Not PROVEN before
+     the run (a fresh box, a pending switch, files never run, auth off) → `stop_unproven`, the
+     files + the pending marker kept for a re-run; `stop_unproven` re-stamps a kept mark AFTER the
+     disable (systemd unloads an inactive, disabled unit: its InvocationID reads empty until it
+     starts again; the fake models that), so the re-run takes it as pending, not as "has run
+     since" (rounds 9-10). An
+     unproven state may be an agent with authentication off (a full shell on 0.0.0.0): it is
+     never "rolled back" into running (review round 3). **enable-only never starts or stops
+     anything**: its failure puts the previous files back with no restart (a fresh box: the unit is
+     only disabled) and leaves the running process alone (review round 4). `restore_previous`
+     puts `.switch-pending` back to its pre-run state (removed only when this run created it).
+     The pending mark is written AFTER `arm`, and `undo_switch` removes a build nothing points at
+     yet (a signal between `arm` and the swap).
+  8. DISARM, then print the proof. Only then `remove_legacy_system_copy` (the pre-venv
+     system-python `remoteos-mcp fastmcp fastmcp-slim`, `--break-system-packages`) and
+     `prune_builds`.
+  - While ARMED, any exit (a failed step, HUP/INT/TERM, a lost console: SIGPIPE is ignored, so
+    the write fails and set -e exits) goes through the EXIT trap → `undo_switch`. Never arm
+    on a list of signals alone: a no-tty `ssh … | sudo bash` drop sends no signal.
+  - **The proof decides, not the console.** Before it, a lost console rolls back; during it,
+    its result decides (a failure rolls back with no console); after it, the proven switch stays
+    even if the next write kills the run (the legacy copy then waits for a re-run).
+  - Never DISARM before a restore: `disarm` clears ARMED and puts SIGPIPE back to default, so
+    the next echo to a dead console ends the run with ARMED already cleared: the EXIT trap runs
+    but restores nothing (review round 1). Signals before ARM and after DISARM still go through
+    `on_signal` → the EXIT trap, which removes a build nothing points at yet.
+  - **Every step of the swap must be undoable**: `swap_venv` sets `SWAPPED` before the first
+    rename, and `restore_venv` reads the state each step leaves (the directory moved aside, the
+    `.link` temp, the new link). Tests inject `kill -HUP $$` after each step
+    (`LinuxBox.inject_after`).
+  - **One file, ~1000 lines (decided in review round 6).** `curl … | sudo bash` delivers ONE
+    file, and camera-box installs pinned older refs, so the installer cannot source a second file
+    from the ref's tarball or from `main` (raw caches `main` for minutes: version skew). At the
+    budget, trim comments into this rule; if it must grow, split the SOURCE into parts that a
+    generator concatenates into the committed `install-linux.sh`, with a test that they match.
+  - Everything runs inside `main()`, called on the last line (a truncated download never
+    half-runs).
+- **Unset every name that ever holds the key before using it** (`AUTH_KEY`, `cfg_key`,
+  `line`, `OLD_UNIT`, …): bash keeps the export flag of a name the caller exported, for globals
+  AND locals, and the key would reach every child's environment. The shims log `export -p`
+  (`box.child_environments()`).
+- **The script is not sourceable** (the design said "sourced and tested like camera-box's lib"):
+  `main "$@"` on the last line keeps a truncated `curl | bash` from half-running, and a source
+  guard would break the piped one-liner. The tests run the whole script on the fake box instead.
+- **Checks never write the venv:** `venv_python` sets `PYTHONDONTWRITEBYTECODE=1`, so an adopted
+  venv stays byte-identical.
+- **Never rename a venv directory in place to "swap" it**: console-script shebangs and
+  `bin/activate` keep the build path. Build at the final path, swap a link.
+- `uninstall-linux.sh` removes the link (or directory), the store, the unit, `/etc/remoteos-mcp`
+  and a system-python copy (`--break-system-packages`).
+
+## macOS: the system-python install block
+
+- `install.sh` keeps the dev24 `# >>> shared install block` (the name stayed; Linux carried a
+  twin until dev32). Order: pin ONE commit of main (`git ls-remote`) → record the installed
+  version → `pip install --dry-run --report` preflight → plan + snapshot → ARM → pre-uninstall →
+  install → verify version AND import → DISARM. While armed, any exit rolls the snapshot back
+  (`rollback_install`). Details that still hold:
+  - The rollback helper reads dists through `importlib.metadata` (RECORD + INSTALLER), never
+    `pip show` text. "pip-owned" = INSTALLER `pip` + a RECORD.
+  - Armed pip steps run through `shield` (a subshell ignoring HUP/INT/TERM): pip writes a
+    wheel's RECORD last.
+  - plan refuses a dep owned by another installer whose pin changes; the rollback fails loudly
+    on `leftovers`.
+  - Never let pip write to the console; never `--force-reinstall`; never drop the pre-uninstall.
+- **macOS runs under bash 3.2** (`curl | bash` uses `/bin/bash`): no heredoc inside `$(…)` (the
+  helper is written with a plain heredoc), `${arr[@]+"${arr[@]}"}` for a maybe-empty array,
+  no `mapfile`, no `shopt -s globasciiranges`. Check with the `bash:3.2` container
+  (`RealMetadata` needs a pip-installed pytest; apk's has no INSTALLER). From a worktree agent,
+  run it through a small python driver (the worktree guard refuses `sh -c` text):
+
+  ```
+  docker run --rm -v <worktree>:/w:ro bash:3.2 sh -c 'ln -sf /usr/local/bin/bash /bin/bash; apk add -q python3 py3-pytest; adduser -D -u 1000 t; su t -c "cd /w && INSTALLER_TEST_BASH=/bin/bash python3 -m pytest -q -p no:cacheprovider --noconftest -k \"not RealMetadata\" tests/test_installer_macos_key.py tests/test_installer_preflight_rollback.py"'
+  ```
+
+## Windows
+
+- Never truncate or discard pip output (`| Out-Null`): capture it, check `$LASTEXITCODE`, print
+  the whole output on failure.
+- The key is resolved BEFORE step 2: step 2 deletes the old winremote config, and an invalid
+  explicit key must be refused first.
+
+## Tests
+
+- **Linux:** `tests/linux_installer_harness.py` (`linux_box`) + `tests/fake_linux_tools.py`.
+  - The venvs are REAL (`python -m venv --without-pip`) with a stub `pip` package that runs
+    `tests/fake_pip.py` against the venv's own site-packages, so the installer's version and
+    import checks run against real files, under its `env -i`.
+  - The fake systemd is stateful: `daemon-reload` loads the unit; `start`/`restart` "run" it (the
+    version its ExecStart python has, the key from `--auth-key` or the EnvironmentFile);
+    `start` on an active unit loads nothing new. The fake curl answers the tarball, `/health`
+    and `/mcp` (Bearer from `-H @-`) from that state.
+  - Every shim and a logging shim for each common command record their argv (`box.argvs()`):
+    that is what the "never in an argv" checks read. `box.snapshot()` (inode + mtime + bytes)
+    proves "nothing changed".
+  - The same harness runs the pre-dev32 installer (system pip via fake_pip, git ls-remote), so a
+    RED test fails for the right reason.
+  - Fixture keys look like secrets: append `# airuleset:secret-ok <reason>` to the `git add`
+    and the `git commit`.
+- **macOS:** `tests/test_installer_macos_key.py` and the block's
+  `tests/test_installer_preflight_rollback.py` (fake_pip, two site dirs, signals, a lost
+  console). `installer_harness.log_every_command` records argv there.
+- **Windows:** `tests_windows/test_install_ps1_key.py` loads install.ps1's own functions (AST,
+  `FunctionDefinitionAst`, dot-sourced in a `foreach` statement, not `ForEach-Object`, so they
+  land in the script scope) into powershell.exe 5.1, plus one real cmd.exe run of the generated
+  `.bat`. Probe them locally with pwsh 7 (`.claude/rules/child-output.md` describes the
+  tarball) through a python driver; ACL and cmd stay Windows-only.
+- **Static checks find the first code line** (`_find_first_code_line`). It skips `#` and
+  `Write-Host` lines, but NOT bash `echo` lines. Keep `pip install … remoteos-mcp` and
+  `pip uninstall … remoteos-mcp` out of `echo` text.

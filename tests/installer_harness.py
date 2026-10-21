@@ -1,4 +1,5 @@
-"""Shared harness for the installer tests (install-linux.sh, install.sh, install.ps1).
+"""Shared harness for the installer tests (install.sh, install.ps1, and the pieces
+tests/linux_installer_harness.py builds on for install-linux.sh).
 
 The installers are copied to tmp_path with root-only paths redirected, then run
 under bash with a FAKE PATH of shim scripts — no root, no network, no system
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -46,38 +48,6 @@ def _make_shim(path: Path, content: str) -> None:
 def _real_python() -> str:
     """Absolute path to the real Python interpreter running pytest."""
     return sys.executable
-
-
-def _prepare_linux_installer(tmp_path: Path) -> Path:
-    """Copy install-linux.sh to tmp with test patches (no-root, tmp dirs)."""
-    content = INSTALLER_LINUX.read_text()
-
-    etc_dir = tmp_path / "etc-remoteos-mcp"
-    etc_dir.mkdir(parents=True, exist_ok=True)
-
-    # Disable EUID root check — tests run as unprivileged user
-    content = content.replace(
-        'if [[ "$EUID" -ne 0 ]]; then',
-        "if false; then",
-    )
-    content = content.replace(
-        'ACTUAL_USER="${SUDO_USER:-root}"',
-        'ACTUAL_USER="testuser"',
-    )
-    # Redirect writable paths to tmp
-    content = content.replace(
-        'CONFIG_DIR="/etc/remoteos-mcp"',
-        f'CONFIG_DIR="{etc_dir}"',
-    )
-    content = content.replace(
-        'SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"',
-        f'SERVICE_FILE="{tmp_path}/remoteos-mcp.service"',
-    )
-
-    script = tmp_path / "install-linux.sh"
-    script.write_text(content)
-    script.chmod(0o755)
-    return script
 
 
 def _prepare_macos_installer(tmp_path: Path) -> Path:
@@ -120,120 +90,6 @@ def _stateless_site(shim_dir: Path, installed_version: str) -> Path:
     site = shim_dir.parent / "stateless-site"
     write_dist(site, "remoteos-mcp", installed_version, {})
     return site
-
-
-def _create_linux_shims(
-    shim_dir: Path,
-    invocations: Path,
-    *,
-    installed_version: str = "0.7.0.dev13",
-) -> None:
-    """Create the full set of shims for install-linux.sh testing."""
-    real_py = _real_python()
-    stateless_site = _stateless_site(shim_dir, installed_version)
-
-    # python3 — intercept pip calls, delegate -c to real python
-    _make_shim(
-        shim_dir / "python3",
-        f"""\
-case "$1" in
-    --version)
-        echo "Python 3.12.0"
-        exit 0
-        ;;
-    -m)
-        if [[ "$2" == "pip" ]]; then
-            shift 2
-            echo "python3 -m pip $*" >> "{invocations}"
-            case "$1" in
-                --version)
-                    echo "pip 24.0 from /test (python 3.12)"
-                    exit 0
-                    ;;
-                install)
-                    # --dry-run --report <file>: an empty resolution report
-                    prev=""
-                    for arg in "$@"; do
-                        if [[ "$prev" == "--report" ]]; then echo '{{"version": "1", "install": []}}' > "$arg"; fi
-                        prev="$arg"
-                    done
-                    echo "Successfully installed remoteos-mcp-{installed_version}"
-                    exit 0
-                    ;;
-                show)
-                    echo "Name: remoteos-mcp"
-                    echo "Version: {installed_version}"
-                    exit 0
-                    ;;
-                *)
-                    exit 0
-                    ;;
-            esac
-        elif [[ "$2" == "ensurepip" ]]; then
-            exit 0
-        else
-            exec "{real_py}" "$@"
-        fi
-        ;;
-    -c)
-        # The installer's post-install import check: this stateless box's
-        # package always imports (never the test interpreter's own packages).
-        if [[ "$2" == *"import remoteos"* ]]; then
-            exit 0
-        fi
-        exec "{real_py}" "$@"
-        ;;
-    */rollback.py)
-        # The installer's rollback helper sees only this box's site dir.
-        PYTHONPATH="{stateless_site}" exec "{real_py}" -S -B "$@"
-        ;;
-    *)
-        exec "{real_py}" "$@"
-        ;;
-esac
-""",
-    )
-
-    # git
-    _make_shim(shim_dir / "git", _FAKE_GIT)
-
-    # apt-get — logs all invocations
-    _make_shim(shim_dir / "apt-get", f'echo "apt-get $*" >> "{invocations}"\nexit 0')
-
-    # systemctl — logs all invocations
-    _make_shim(
-        shim_dir / "systemctl",
-        f'echo "systemctl $*" >> "{invocations}"\nexit 0',
-    )
-
-    # loginctl — no graphical sessions (headless)
-    _make_shim(
-        shim_dir / "loginctl",
-        """\
-if [[ "$1" == "list-sessions" ]]; then
-    echo ""
-fi
-exit 0
-""",
-    )
-
-    # hostname
-    _make_shim(
-        shim_dir / "hostname",
-        """\
-if [[ "$1" == "-I" ]]; then
-    echo "192.168.1.100"
-elif [[ "$1" == "-s" ]]; then
-    echo "testhost"
-else
-    echo "testhost"
-fi
-""",
-    )
-
-    # ufw / firewall-cmd — not available
-    _make_shim(shim_dir / "ufw", "exit 1")
-    _make_shim(shim_dir / "firewall-cmd", "exit 1")
 
 
 def _create_macos_shims(
@@ -342,6 +198,7 @@ def _run_installer(
     tmp_path: Path,
     *,
     timeout: int = 60,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run an installer script with controlled PATH (see `_installer_env`), in
     its own session: a fake pip may signal the installer's whole process group
@@ -350,7 +207,7 @@ def _run_installer(
         _installer_argv(script),
         capture_output=True,
         text=True,
-        env=_installer_env(shim_dir, tmp_path),
+        env={**_installer_env(shim_dir, tmp_path), **(extra_env or {})},
         timeout=timeout,
         start_new_session=True,
     )
@@ -568,10 +425,16 @@ esac
 
 
 def health_shim(shim_dir: Path, version: str) -> None:
-    """curl answering /health with `version` (the post-install self-check)."""
+    """curl answering /health with `version` (the post-install self-check). With a proxy in the
+    environment a loopback request without `--noproxy '*'` goes to it and fails (curl 5), as
+    real curl does."""
     _make_shim(
         shim_dir / "curl",
         f"""\
+if [[ -n "${{http_proxy:-}}${{all_proxy:-}}" && " $* " != *" --noproxy * "* ]]; then
+    echo "curl: (5) Could not resolve proxy" >&2
+    exit 5
+fi
 if [[ "$*" == *"health"* ]]; then
     echo '{{"status":"ok","version":"{version}"}}'
 fi
@@ -580,7 +443,32 @@ exit 0
     )
 
 
-def rollback_helper(path: Path, installer: Path = INSTALLER_LINUX) -> Path:
+_LOGGED_COMMANDS = (
+    "awk basename cat chmod chown cmp cp cut date dirname env find grep head install ln ls "
+    "mkdir mktemp mv plutil readlink realpath rm sed seq sleep sort stat tail tar tee touch tr uname wc xargs"
+).split()
+
+
+def log_every_command(shim_dir: Path, records: Path) -> None:
+    """Record the argv of every process the installer starts by name: each shim in `shim_dir`
+    is wrapped, and each command of `_LOGGED_COMMANDS` gets a shim in front of the real one.
+    Read the records with `fake_linux_tools.records(records)` (`[tool, arg, ...]` each); the
+    environment each one was started with is in `<records>.env` (`export -p` text)."""
+    real_dir = shim_dir / ".real"
+    real_dir.mkdir()
+    log = (f'printf "%s\\x1f" "${{0##*/}}" "$@" >> "{records}"; printf "\\x1e" >> "{records}"; '
+           f'export -p >> "{records}.env"\n')
+    for shim in sorted(p for p in shim_dir.iterdir() if p.is_file()):
+        target = real_dir / shim.name
+        shim.rename(target)
+        _make_shim(shim, f'{log}exec "{target}" "$@"\n')
+    for name in _LOGGED_COMMANDS:
+        real = shutil.which(name, path="/usr/bin:/bin:/usr/sbin:/sbin")
+        if real and not (shim_dir / name).exists():
+            _make_shim(shim_dir / name, f'{log}exec "{real}" "$@"\n')
+
+
+def rollback_helper(path: Path, installer: Path = INSTALLER_MACOS) -> Path:
     """Write the installer's embedded rollback helper (its `cat >"$ROLLBACK_PY"`
     heredoc) to `path`, to run it directly against a real environment."""
     text = installer.read_text()

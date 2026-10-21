@@ -349,3 +349,63 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   concurrent Shell snapshot can copy (needs a lock shared with `desktop.py`); the provider's
   `/proc` scan can pick a detached Shell-started program's stale `DISPLAY`/`XAUTHORITY` after a
   re-login on another display (match `/proc/<pid>/sessionid`).
+
+## #12 — one installer per OS: camera-box's venv layout, pinned ref, the key never in a unit or an argv (0.7.0.dev32)
+
+- **Why:** two installers managed `remoteos-mcp.service`. Ours installed into the system python
+  from `main` and wrote `--auth-key <key>` into the unit's ExecStart (world-readable, in `ps`);
+  camera-box's `scripts/lib/remoteos-mcp.sh` used a venv, a pinned ref and 0600 key files, and on
+  16.10 its run reverted strih-pp/stream-pp from dev31 to its pin (dev20). macOS had the key in
+  the plist's ProgramArguments, Windows on the `.bat`'s server command line.
+- **Design (main session, Approach 1, issuecomment-6293340521):** adopt camera-box's lib as the
+  base of `install-linux.sh` (resolve_key, fetch_source, build_venv side by side + swap,
+  camera-box's desktop/headless unit, 0600 EnvironmentFile, prove_health, then
+  remove_legacy_system_copy), and the same key rule on macOS and Windows.
+- **Implementation details decided on the way (all on #12, issuecomment-6293797059):** the swap
+  is a symlink (`/opt/remoteos-mcp-venv` → a build in `/opt/remoteos-mcp-venvs/`; a venv cannot
+  be renamed); a failed fetch/build exits 1 changing nothing; a failed proof or an interrupted
+  switch goes back to the previous unit/key files/venv only when that state was PROVEN (a unit
+  existed, no `.switch-pending`, and the running process answers with its files' version and
+  refuses a request without the key), else the service is stopped and disabled (an unproven
+  agent may have authentication off); enable-only never starts or stops anything, and a no-op
+  run on a proven box keeps it proven; desktop venvs get one `.pth` to the
+  system gi (AT-SPI); the mode and User= follow the existing unit; the installers never print
+  the key; Windows keys come from a CSPRNG; an empty `REMOTEOS_MCP_REF` means main; the import
+  checks never write bytecode (an adopted venv stays byte-identical); `uninstall-linux.sh`
+  knows the layout; the install skill moved to `.claude/skills/remoteos-install/` (a hook
+  blocks a skill that shadows `/install`).
+- **Commits:** `3edbc91` bump; RED `e1942ac`, `327bc4a`, `8a8c922`, `ca49f09`, `e57935c`,
+  `46ccae2`; the system-python block's tests moved to `install.sh` and the Linux ones the venv
+  replaces retired in `12aaf35`; GREEN `5f5dcf3` (Linux), `afe8ed0` (macOS), `115ec17`
+  (Windows), `87de551` (uninstall-linux.sh).
+- **Review rounds (each RED → GREEN, recorded on #12):** round 1 `7a105f4` → `74f1dd5`,
+  `282acd4`, `ea177ab`/`b51a9e8` (the server drops the key names from its environment, refuse
+  a key the installer cannot carry); round 2 `2a9812e` → `229480a`, `dc15f27`; round 3 `6b7d74e`
+  → `ebfecd5` (only a proven state is restarted); round 4 `c57d6a3` → `90d9323` (enable-only
+  never stops the running agent); round 5 `13c4e14` → `aa798fa` (a no-op enable-only run keeps
+  a proven box proven; the lock is 0600); round 6 `bc736d9` → `6dec457` (PROVEN = the running
+  install answers with its files' version and refuses a request without the key; nothing
+  switched → left as it ran; the gi link undone; the key only to the unit's own listener, `ss`);
+  round 7 `443ce91` → `6c53a05` (the rollback re-proves what it restarts, else stop + disable;
+  no gi flag without a system gi; no key temp copy left on a signal); round 8 `796006f` →
+  `2f365c7` (the pending mark holds the unit's InvocationID: a switch the unit has started since
+  is checked as it runs; the proof's and the re-proof's polling pinned); round 9 `91b0cb6` →
+  `57e1093` (macOS and Windows drop the explicit key before their first child; a stopped
+  switch's kept mark names the stopped unit); round 10 `7c4ca82` → `a380342` (the start
+  script sets the key only around the server line; the read of what runs gives a
+  not-yet-answering unit the proof's polls); round 11 `e4f0c1e` → `d5a38b1` (every loopback
+  check goes direct, `-q --noproxy '*'`; macOS removes write_private's temp key copy); round 12
+  `60fe348` → `bc4fcf5` (the read-only-root refusal never advises editing fstab; the key-file
+  mode rewrite and the direct loopback curls pinned); round 13 `1ce9562` → `9fec760` (the
+  installer and the uninstaller refuse a run from inside the unit, the agent's own Shell; the
+  build's readable modes pinned); round 14 `d0b3554` → `e52c4d6` (a proven, no-op enable-only
+  run removes the old system-python copy; two messages corrected) — round 14 had no 🔴/🟡.
+- **Tests:** `tests/test_installer_linux_venv.py` (42), `tests/test_installer_linux_edges.py`
+  (57, the review rounds' edges) and `tests/test_installer_linux_rollback.py` (19, what a failed
+  run leaves running), on `tests/linux_installer_harness.py` +
+  `tests/fake_linux_tools.py` (real venvs, a stateful fake systemd/curl/ss, the argv and the
+  environment of every process); `tests/test_installer_macos_key.py` (13, also under GNU bash
+  3.2.57); `tests/test_installer_windows_key.py` (5 static) and
+  `tests_windows/test_install_ps1_key.py` (real PowerShell 5.1: install.ps1's own functions, real
+  cmd.exe runs of the .bat, the ACL). Result: 906 pass, ruff + shellcheck clean;
+  `install-linux.sh` 1000 lines.
