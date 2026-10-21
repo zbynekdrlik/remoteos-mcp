@@ -1,0 +1,300 @@
+"""``remoteos-gateway machine import`` (#51): build the key store from today's per-project configs.
+
+Today every project config carries its own copy of each machine key, and the copies drift.
+The import must pick, per machine, the copy the machine ACCEPTS (``initialize`` -> 200), and
+report every conflict and every machine it could not verify. Real loopback machines
+(``fleet_harness.FakeFleetMachine``); every key is generated per run; no key may appear in the
+output.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import stat
+
+from click.testing import CliRunner
+from fleet_harness import FakeFleetMachine, closed_port_url, fresh_secret, write_private_json
+
+from remoteos.gateway import cli as gateway_cli
+from remoteos.gateway.registry import load_registry
+
+GATEWAY = "http://100.104.8.125:8796"
+
+
+def _entry(url: str, key: str) -> dict:
+    return {"type": "http", "url": url, "headers": {"Authorization": f"Bearer {key}"}}
+
+
+def _config(path, servers: dict):
+    return write_private_json(path, {"mcpServers": servers})
+
+
+def _import(tmp_path, *args, input=None):
+    return CliRunner().invoke(
+        gateway_cli.main,
+        [
+            "--registry",
+            str(tmp_path / "cfg" / "registry.json"),
+            "--machines",
+            str(tmp_path / "cfg" / "machines.json"),
+            "--manifest",
+            str(tmp_path / "cfg" / "projects.toml"),
+            "machine",
+            "import",
+            *args,
+        ],
+        input=input,
+    )
+
+
+def test_import_conflict_the_copy_the_machine_accepts_wins_and_the_stale_copies_are_named(tmp_path):
+    good, stale = fresh_secret("goodkey"), fresh_secret("stalekey")
+    with FakeFleetMachine(accept_keys=(good,)) as box:
+        # the stale key is the MOST COMMON copy (2 of 3) — it must still lose
+        a = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam1": _entry(box.url, stale)})
+        b = _config(tmp_path / "configs" / "remoteos-mcp.mcp.json", {"linux-cam1": _entry(box.url, good)})
+        c = _config(tmp_path / "configs" / "songplayer.mcp.json", {"linux-cam1": _entry(box.url, stale)})
+
+        result = _import(tmp_path, "--from", str(a), "--from", str(b), "--from", str(c))
+
+    assert result.exit_code == 0, result.output
+    store_path = tmp_path / "cfg" / "machines.json"
+    store = json.loads(store_path.read_text(encoding="utf-8"))
+    assert store == {"linux-cam1": {"url": box.url, "key": good}}
+    assert stat.S_IMODE(os.stat(store_path).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(store_path.parent).st_mode) == 0o700
+    assert "linux-cam1" in load_registry(tmp_path / "cfg" / "registry.json").exposed
+    out = result.output
+    assert "3 copies, 2 DIFFERENT (conflict)" in out
+    assert "verified (HTTP 200)" in out
+    assert "a DIFFERENT copy is in:" in out and str(a) in out and str(c) in out
+    for secret in (good, stale):
+        assert secret not in out
+
+
+def test_import_unreachable_machine_keeps_the_most_common_copy_and_is_flagged(tmp_path):
+    common, rare = fresh_secret("commonkey"), fresh_secret("rarekey")
+    url = closed_port_url()
+    a = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam4": _entry(url, rare)})
+    b = _config(tmp_path / "configs" / "remoteos-mcp.mcp.json", {"linux-cam4": _entry(url, common)})
+    c = _config(tmp_path / "configs" / "restreamer.mcp.json", {"linux-cam4": _entry(url, common)})
+
+    result = _import(tmp_path, "--from", str(a), "--from", str(b), "--from", str(c))
+
+    assert result.exit_code == 0, result.output
+    store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
+    assert store == {"linux-cam4": {"url": url, "key": common}}
+    assert "linux-cam4: 3 copies, 2 DIFFERENT (conflict) — NOT VERIFIED (unreachable" in result.output
+    assert "kept the most common copy" in result.output
+    assert "1 machine(s) NOT verified" in result.output
+    for secret in (common, rare):
+        assert secret not in result.output
+
+
+def test_import_takes_only_fleet_machines_never_other_servers_or_gateway_entries(tmp_path):
+    key, other_secret, token = fresh_secret("machinekey"), fresh_secret("cfsecret"), fresh_secret("projtoken")
+    with FakeFleetMachine(accept_keys=(key,)) as box:
+        config = _config(
+            tmp_path / "configs" / "codex-bridge.mcp.json",
+            {
+                "win-pz-server": _entry(box.url, key),
+                # another MCP server with a bearer header: not a fleet machine name
+                "n8n-mcp": _entry("https://n8n.example.test/mcp", other_secret),
+                # Cloudflare Access secrets under other header names
+                "codex-bridge": {
+                    "type": "http",
+                    "url": "https://codex.example.test/mcp",
+                    "headers": {"CF-Access-Client-Id": other_secret, "CF-Access-Client-Secret": other_secret},
+                },
+                # an entry generated by sync-configs: a PROJECT token, never a machine key
+                "linux-cam1": _entry(f"{GATEWAY}/linux-cam1/mcp", token),
+                "reaperiem": {"command": "/usr/bin/python3", "args": ["-m", "reaperiem_mcp.server"]},
+            },
+        )
+
+        result = _import(tmp_path, "--from", str(config))
+
+    assert result.exit_code == 0, result.output
+    store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
+    assert store == {"win-pz-server": {"url": box.url, "key": key}}
+    for secret in (key, other_secret, token):
+        assert secret not in result.output
+
+
+def test_import_dry_run_writes_nothing_and_shows_no_key(tmp_path):
+    key = fresh_secret("machinekey")
+    with FakeFleetMachine(accept_keys=(key,)) as box:
+        config = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam1": _entry(box.url, key)})
+        result = _import(tmp_path, "--from", str(config), "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "linux-cam1: 1 copy — verified (HTTP 200)" in result.output
+    assert "dry run" in result.output.lower()
+    assert not (tmp_path / "cfg" / "machines.json").exists()
+    assert not (tmp_path / "cfg" / "registry.json").exists()
+    assert key not in result.output
+
+
+def test_import_keeps_a_machine_repair_recipe_and_counts_the_store_copy(tmp_path):
+    old, new = fresh_secret("storedkey"), fresh_secret("configkey")
+    recipe = {"ssh": "root@cam2.lan", "key_file": "/etc/remoteos-mcp/config.json", "sudo": False}
+    with FakeFleetMachine(accept_keys=(new,)) as box:
+        write_private_json(
+            tmp_path / "cfg" / "machines.json", {"linux-cam2": {"url": box.url, "key": old, "repair": recipe}}
+        )
+        config = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam2": _entry(box.url, new)})
+
+        result = _import(tmp_path, "--from", str(config))
+
+    assert result.exit_code == 0, result.output
+    store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
+    assert store == {"linux-cam2": {"url": box.url, "key": new, "repair": recipe}}
+    assert "a DIFFERENT copy is in: key store" in result.output
+
+
+# -- review round 1 -------------------------------------------------------------------------------
+
+
+def test_import_never_replaces_the_key_store_entry_with_an_unverified_copy(tmp_path):
+    newer, stale = fresh_secret("newerkey"), fresh_secret("stalekey")
+    url = closed_port_url()  # the box is down: nothing can be verified
+    write_private_json(tmp_path / "cfg" / "machines.json", {"linux-cam4": {"url": url, "key": newer}})
+    a = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam4": _entry(url, stale)})
+    b = _config(tmp_path / "configs" / "restreamer.mcp.json", {"linux-cam4": _entry(url, stale)})
+
+    result = _import(tmp_path, "--from", str(a), "--from", str(b))
+
+    assert result.exit_code == 0, result.output
+    store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
+    assert store["linux-cam4"]["key"] == newer  # a set-key made while the box was down survives
+    assert "kept the key store's current copy" in result.output
+    for secret in (newer, stale):
+        assert secret not in result.output
+
+
+def test_import_never_re_exposes_a_machine_the_key_store_already_had(tmp_path):
+    key, new_key = fresh_secret("key"), fresh_secret("newkey")
+    with FakeFleetMachine(accept_keys=(key, new_key)) as box:
+        write_private_json(tmp_path / "cfg" / "machines.json", {"linux-cam1": {"url": box.url, "key": key}})
+        write_private_json(tmp_path / "cfg" / "registry.json", {"exposed": [], "consumers": {}})  # unexposed on purpose
+        config = _config(
+            tmp_path / "configs" / "camera-box.mcp.json",
+            {"linux-cam1": _entry(box.url, key), "linux-cam2": _entry(box.url, new_key)},
+        )
+
+        result = _import(tmp_path, "--from", str(config))
+
+    assert result.exit_code == 0, result.output
+    assert load_registry(tmp_path / "cfg" / "registry.json").exposed == ["linux-cam2"]  # only the NEW machine
+
+
+def test_import_skips_entries_of_the_manifest_gateway_url_not_only_the_default(tmp_path):
+    key, token = fresh_secret("key"), fresh_secret("projtoken")
+    manifest = tmp_path / "cfg" / "projects.toml"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text('[gateway]\nurl = "http://gw.example.test:9999"\n', encoding="utf-8")
+    with FakeFleetMachine(accept_keys=(key,)) as box:
+        generated = _entry("http://gw.example.test:9999/linux-cam2/mcp", token)
+        config = _config(
+            tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam1": _entry(box.url, key), "linux-cam2": generated}
+        )
+
+        result = _import(tmp_path, "--from", str(config))
+
+    assert result.exit_code == 0, result.output
+    store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
+    assert set(store) == {"linux-cam1"}  # the project token behind the manifest's gateway is no machine key
+    assert token not in result.output
+
+
+# -- review round 2 -------------------------------------------------------------------------------
+
+
+def test_import_never_moves_a_known_machine_to_another_url_unless_asked(tmp_path):
+    stored, other = fresh_secret("storedkey"), fresh_secret("otherkey")
+    down = closed_port_url()  # the real box is down right now
+    with FakeFleetMachine(accept_keys=(other,)) as elsewhere:  # e.g. a stale IP now used by another box
+        write_private_json(tmp_path / "cfg" / "machines.json", {"linux-cam1": {"url": down, "key": stored}})
+        config = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam1": _entry(elsewhere.url, other)})
+
+        kept = _import(tmp_path, "--from", str(config))
+        probed_without_flag = list(elsewhere.seen_authorization)
+        moved = _import(tmp_path, "--from", str(config), "--accept-url-change")
+
+    assert kept.exit_code == 0, kept.output
+    assert "ANOTHER url" in kept.output and "--accept-url-change" in kept.output
+    assert probed_without_flag == []  # the key is not even sent to the other url
+    assert moved.exit_code == 0, moved.output
+    store = json.loads((tmp_path / "cfg" / "machines.json").read_text(encoding="utf-8"))
+    assert store["linux-cam1"] == {"url": elsewhere.url, "key": other}
+    for secret in (stored, other):
+        assert secret not in kept.output + moved.output
+
+
+def test_an_import_never_writes_back_over_a_key_changed_while_it_probed(tmp_path):
+    from remoteos.gateway.keystore import apply_import, load_keystore, resolve_import, scan_sources
+
+    old, concurrent, fresh = fresh_secret("old"), fresh_secret("concurrent"), fresh_secret("fresh")
+    url = closed_port_url()
+    store_path = write_private_json(tmp_path / "machines.json", {"linux-cam1": {"url": url, "key": old}})
+    snapshot = load_keystore(store_path)
+    scan = scan_sources([("cfg", json.dumps({"mcpServers": {"linux-cam1": _entry(url, fresh)}}))])
+    decisions = resolve_import(scan, snapshot)  # nothing verifies: the store's own copy is the decision
+
+    write_private_json(store_path, {"linux-cam1": {"url": url, "key": concurrent}})  # a set-key meanwhile
+    skipped = apply_import(store_path, decisions, snapshot=snapshot)
+
+    assert json.loads(store_path.read_text(encoding="utf-8"))["linux-cam1"]["key"] == concurrent
+    assert skipped == ["linux-cam1"]
+
+
+# -- review round 3 -------------------------------------------------------------------------------
+
+
+def test_an_unreadable_from_file_or_no_machine_at_all_never_creates_a_key_store(tmp_path):
+    missing = _import(tmp_path, "--from", str(tmp_path / "configs" / "typo.mcp.json"))
+    empty = _config(tmp_path / "configs" / "reaperiem.mcp.json", {"reaperiem": {"command": "/usr/bin/python3"}})
+    nothing = _import(tmp_path, "--from", str(empty))
+
+    assert missing.exit_code == 1 and "typo.mcp.json" in missing.output
+    assert nothing.exit_code == 1 and "nothing written" in nothing.output
+    assert not (tmp_path / "cfg" / "machines.json").exists()  # an empty key store = a gateway with no machines
+    assert not (tmp_path / "cfg" / "registry.json").exists()
+
+
+def test_a_first_import_never_opens_a_machine_whose_kill_switch_was_engaged(tmp_path):
+    key, other = fresh_secret("key"), fresh_secret("other")
+    with FakeFleetMachine(accept_keys=(key, other)) as box:
+        # before #51: win-pz-server was unexposed (the kill switch), david3 still lists it
+        registry = {
+            "exposed": [],
+            "consumers": {"david3@subdev": {"sha256": ["0" * 64], "machines": ["win-pz-server"], "added": "x"}},
+        }
+        write_private_json(tmp_path / "cfg" / "registry.json", registry)
+        config = _config(
+            tmp_path / "configs" / "devbridge.mcp.json",
+            {"win-pz-server": _entry(box.url, key), "linux-cam1": _entry(box.url, other)},
+        )
+
+        dry = _import(tmp_path, "--from", str(config), "--dry-run")
+        real = _import(tmp_path, "--from", str(config))
+
+    assert "would expose: linux-cam1" in dry.output
+    assert real.exit_code == 0, real.output
+    assert load_registry(tmp_path / "cfg" / "registry.json").exposed == ["linux-cam1"]
+    assert "win-pz-server" in real.output and "left unexposed" in real.output
+
+
+# -- review round 4 -------------------------------------------------------------------------------
+
+
+def test_one_unreadable_from_file_next_to_a_good_one_imports_nothing(tmp_path):
+    key = fresh_secret("key")
+    with FakeFleetMachine(accept_keys=(key,)) as box:
+        good = _config(tmp_path / "configs" / "camera-box.mcp.json", {"linux-cam1": _entry(box.url, key)})
+        result = _import(tmp_path, "--from", str(good), "--from", str(tmp_path / "configs" / "typo.mcp.json"))
+
+    assert result.exit_code == 1 and "typo.mcp.json" in result.output  # a typo must not import half a fleet
+    assert not (tmp_path / "cfg" / "machines.json").exists()
+    assert key not in result.output

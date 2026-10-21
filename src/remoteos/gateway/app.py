@@ -15,7 +15,7 @@ Decision order for ``/{machine}/mcp`` (the design's numbered order, plus two gua
 3. machine allowed but not exposed (the ``unexpose`` kill switch)      → **404**
 4. request body over ``MAX_BODY_BYTES``                                → **413**
 5. otherwise proxy: the consumer's ``Authorization`` is REPLACED by the machine key from the
-   master MCP config and the upstream response (JSON or ``text/event-stream``) is streamed
+   key store (#51) and the upstream response (JSON or ``text/event-stream``) is streamed
    back byte-for-byte with its headers (``Mcp-Session-Id`` included).
 
 Upstream unreachable (connect error / timeout / any transport error before headers) → **503**
@@ -429,7 +429,7 @@ class Gateway:
             # response instead of a well-formed end of stream that looks like success.
             raise
         if entry.status in (401, 403):
-            # The MACHINE rejected the key from the master config (stale/rotated key). The status
+            # The MACHINE rejected the key from the key store (stale/rotated key). The status
             # is relayed unchanged; the outcome makes it distinguishable from our own 401/403.
             entry.outcome = "upstream_denied"
         else:
