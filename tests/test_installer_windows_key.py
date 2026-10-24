@@ -333,7 +333,11 @@ def test_the_download_comes_before_the_stop_and_the_uninstall() -> None:
     flow = _flow_lines()
     preflight = [n for n, line in flow if line.startswith("$preflight = New-RemoteOSWheelhouse -Python $python")]
     assert len(preflight) == 1, preflight
-    changes = [n for n, line in flow if any(change in line for change in _STATE_CHANGES)]
+    # A Python install (winget, the python.org installer) may come first: the download needs a
+    # Python, and installing one leaves the running server alone
+    python_install = ("winget install", "curl.exe", "& $installerPath")
+    changes = [n for n, line in flow
+               if any(change in line for change in _STATE_CHANGES if change not in python_install)]
     assert preflight[0] < min(changes), (preflight[0], min(changes))
     block = _if_block("if (-not $preflight.Ok) {")
     assert any("-- nothing was changed on this box" in line for _, line in block), block

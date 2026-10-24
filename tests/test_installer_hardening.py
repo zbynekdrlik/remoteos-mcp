@@ -190,13 +190,14 @@ class TestWindowsVersionSelfCheck:
             "install.ps1 must read the installed package version (via "
             "importlib.metadata or pip show) to compare with /health"
         )
-        # Must exit on mismatch: the line after the mismatch message exits 1, directly or through
-        # Exit-RemoteOSInstaller (#57)
-        after_mismatch = content[content.index("but service reports"):].split("\n")[1].strip()
-        assert after_mismatch == "exit 1" or after_mismatch.startswith("Exit-RemoteOSInstaller -Code 1"), (
-            "install.ps1 must exit non-zero when installed version does not "
-            "match the running service version"
+        # Must fail on mismatch: since #64 the proof is Test-RemoteOSServerHealth (the rollback
+        # proves the old version with it too); its failure goes through Exit-RemoteOSAfterFailure
+        mismatch = next(line.strip() for line in content.split("\n") if "but service reports" in line)
+        assert mismatch.startswith("return [pscustomobject]@{ Ok = $false;"), (
+            "install.ps1 must fail when installed version does not match the running service version"
         )
+        failure = content.index("if (-not $health.Ok) {")
+        assert "Exit-RemoteOSAfterFailure -Reason $health.Message" in content[failure : content.index("\n}", failure)]
 
     def test_windows_installer_exits_on_health_timeout(self) -> None:
         """install.ps1 must exit non-zero if health endpoint does not respond."""
@@ -228,38 +229,16 @@ class TestWindowsStopBeforePip:
         """The stop-task/kill-process block must appear textually BEFORE the
         pip install command in install.ps1."""
         content = INSTALLER_WINDOWS.read_text()
-        # Find position of process kill (the definitive stop)
-        stop_pos = content.find("Stop-Process")
-        assert stop_pos != -1, (
-            "install.ps1 must contain a Stop-Process call to kill the old "
-            "server before pip install"
+        # Since #64 the stop and the offline install are functions; the flow calls them in order
+        assert "Stop-Process" in content[content.index("function Stop-RemoteOSServer("):], (
+            "install.ps1 must contain a Stop-Process call to kill the old server before pip install"
         )
-        # Find position of the MAIN pip install command (the one installing
-        # from the GitHub source archive, not the fastmcp-slim recovery line).
-        lines = content.split("\n")
-        pip_line_offset = 0
-        pip_found = False
-        for line in lines:
-            stripped = line.strip()
-            if (
-                "pip" in stripped
-                and "install" in stripped
-                and "archive/" in stripped
-                and not stripped.startswith("#")
-                and not stripped.startswith("REM")
-                and "Write-Host" not in stripped
-                and "fastmcp" not in stripped
-            ):
-                pip_found = True
-                break
-            pip_line_offset += len(line) + 1  # +1 for newline
-        assert pip_found, "install.ps1 must contain a pip install command"
-        assert stop_pos < pip_line_offset, (
-            f"install.ps1 must stop the running server (Stop-Process at char "
-            f"{stop_pos}) BEFORE running pip install (at char "
-            f"{pip_line_offset}). Running pip while the old service is alive "
-            f"corrupts packages on Windows because open files cannot be "
-            f"deleted."
+        stop_pos = content.find("\nStop-RemoteOSServer -Port $Port")
+        pip_pos = content.find("\n$install = Install-RemoteOSWheelhouse -Python $python")
+        assert stop_pos != -1 and pip_pos != -1, "install.ps1 must stop the server and install in its flow"
+        assert stop_pos < pip_pos, (
+            "install.ps1 must stop the running server BEFORE running pip install. Running pip while "
+            "the old service is alive corrupts packages on Windows because open files cannot be deleted."
         )
 
     def test_import_check_fails_hard(self) -> None:
@@ -271,11 +250,12 @@ class TestWindowsStopBeforePip:
             "install.ps1 must have a post-install import sanity check for "
             "remoteos and/or fastmcp"
         )
-        # The import check block must exit 1 (fail hard): directly, or through
-        # Exit-RemoteOSInstaller (#57), which pauses a piped console run first
-        failure = content.index("Import check failed")
-        block = content[failure : content.index("\n}", failure)]
-        assert "exit 1" in block or "Exit-RemoteOSInstaller -Code 1" in block, (
+        # The import check fails the install (Install-RemoteOSWheelhouse returns Ok = $false), and
+        # the flow then rolls back and exits 1 (#64) — never a repair
+        failure = next(line.strip() for line in content.split("\n") if "Import check failed" in line)
+        assert failure.startswith("return [pscustomobject]@{ Ok = $false;"), failure
+        block = content[content.index("if (-not $install.Ok) {"):]
+        assert block.split("\n")[1].strip().startswith("Exit-RemoteOSAfterFailure -Reason $install.Error"), (
             "install.ps1 import check must exit 1 on failure — never repair"
         )
 
@@ -306,8 +286,9 @@ class TestDeterministicPreUninstall:
         """install.ps1 must pip uninstall remoteos-mcp, fastmcp, AND
         fastmcp-slim before the main pip install."""
         content = INSTALLER_WINDOWS.read_text()
-        uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
-        install_pos = _find_first_code_line(content, "pip", "install", "archive/")
+        # Since #64: Install-RemoteOSWheelhouse, offline from the commit's wheelhouse
+        uninstall_pos = _find_first_code_line(content, "Pip", "'uninstall'", "'remoteos-mcp'")
+        install_pos = _find_first_code_line(content, "Pip", "'install'", "'--no-index'")
         assert uninstall_pos is not None, (
             "install.ps1 must pip uninstall remoteos-mcp before install"
         )

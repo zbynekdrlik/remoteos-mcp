@@ -8,13 +8,7 @@ from __future__ import annotations
 
 import pathlib
 import re
-import sys
-
-# tomllib is stdlib from 3.11+; fall back to tomli for 3.10
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib  # type: ignore[no-redef]
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 

@@ -204,7 +204,8 @@ $r = New-RemoteOSWheelhouse -Python {_q(python)} -Root {_q(root)} -Sha '{SHA_NEW
 
 class TestOfflineInstallAndRollback:
     def _point(self, path: Path, version: str) -> str:
-        return f"[pscustomobject]@{{ Ref = '{SHA_OLD}'; Path = {_q(path)}; Version = '{version}' }}"
+        # In parentheses: in argument mode a bare [pscustomobject]@{...} is a string
+        return f"([pscustomobject]@{{ Ref = '{SHA_OLD}'; Path = {_q(path)}; Version = '{version}' }})"
 
     _FAKES = """
 $global:calls = @()

@@ -699,9 +699,12 @@ class TestRollbackHelperOnRealMetadata:
 
 
 class TestWindowsPipErrorOutput:
+    # Since #64 the main install is Install-RemoteOSWheelhouse (offline from the wheelhouse); its
+    # result goes to Exit-RemoteOSAfterFailure, which prints the output before it rolls back
+
     def _main_install(self) -> tuple[str, str]:
         content = INSTALLER_WINDOWS.read_text()
-        idx = _find_first_code_line(content, "pip", "install", "archive/", exclude="uninstall")
+        idx = _find_first_code_line(content, "Invoke-RemoteOSPip", "'install'", "'--no-index'")
         assert idx is not None, "install.ps1 must have the main pip install line"
         return content, content.split("\n")[idx].strip()
 
@@ -710,18 +713,21 @@ class TestWindowsPipErrorOutput:
         install printed nothing but '[X] pip install failed'."""
         content, line = self._main_install()
         assert "Out-Null" not in line, f"the main pip install output is discarded: {line!r}"
-        match = re.match(r"\$(\w+)\s*=\s*&\s*\$python\s+-m\s+pip\s+install\b", line)
-        assert match, f"the main pip install output must be captured into a variable: {line!r}"
-        failure = content.index("[X] pip install failed")
-        branch = content[failure : content.index("\n}", failure)]
-        assert f"${match.group(1)}" in branch, "the failure branch must print the captured pip output"
+        assert line.startswith("$install = Invoke-RemoteOSPip $Python @('install'"), line
+        native = content[content.index("function Invoke-RemoteOSNative("):]
+        native = native[: native.index("\n}")]
+        assert "2>&1 | ForEach-Object { \"$_\" } | Out-String" in native, "the child's output is not captured whole"
+        assert "Output = $install.Output" in content, "the failure result must carry the pip output"
+        assert "$install = Install-RemoteOSWheelhouse" in content
+        assert "Exit-RemoteOSAfterFailure -Reason $install.Error -Output $install.Output @rollback" in content
+        failure = content[content.index("function Exit-RemoteOSAfterFailure("):]
+        assert "if ($Output) { Write-Host $Output }" in failure[: failure.index("\n}")]
 
     def test_main_pip_install_exit_code_decides_failure(self) -> None:
         """A failed pip that leaves an old remoteos dist behind must still be a
         failure (and print its output) — not 'Installed v<old>'."""
         content, line = self._main_install()
-        after = content[content.index(line) + len(line) :]
-        match = re.match(r"\s*\$(\w+)\s*=\s*\$LASTEXITCODE\b", after)
-        assert match, "the pip exit code must be captured right after the main pip install"
-        condition = after[after.index("if ") : after.index("{", after.index("if "))]
-        assert f"${match.group(1)}" in condition, f"the success test must use the pip exit code: {condition!r}"
+        after = content[content.index(line) + len(line):]
+        condition = after[after.index("if ("): after.index("{", after.index("if ("))]
+        assert "$install.Exit -ne 0" in condition and "$installed -ne $Version" in condition, (
+            f"the success test must use the pip exit code and the installed version: {condition!r}")
