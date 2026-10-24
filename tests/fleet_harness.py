@@ -22,6 +22,31 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")  # this checkout's src/, not whatever is installed
+
+
+def free_port() -> int:
+    """A loopback port that was free a moment ago (for a real server started in a subprocess)."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def hermetic_child_env(home: Path) -> dict[str, str]:
+    """The environment of a real server started as a child: no ``REMOTEOS_*`` / ``FASTMCP_*`` from
+    the runner, *home* as HOME and XDG_DATA_HOME's parent, FastMCP's PyPI update check and banner
+    off, and this checkout's ``src`` first on PYTHONPATH."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("REMOTEOS_", "FASTMCP_"))}
+    env.update(
+        PYTHONUNBUFFERED="1",
+        PYTHONPATH=os.pathsep.join(p for p in (SRC_DIR, env.get("PYTHONPATH", "")) if p),
+        HOME=str(home),
+        XDG_DATA_HOME=str(home / "xdg-data"),
+        FASTMCP_CHECK_FOR_UPDATES="off",  # no call to pypi.org, no version cache written
+        FASTMCP_SHOW_SERVER_BANNER="false",
+    )
+    return env
+
 
 def fresh_secret(prefix: str) -> str:
     """A throwaway fixture key/token: letters and digits only, like the installers' keys."""

@@ -571,7 +571,8 @@ current directory. The machine entry's `url` and `Authorization` header are read
 gateway reads them (`gateway/registry.py`: any spelling of the header name, an http(s) url with
 a host). Only `win-…`, `linux-…` and `mac-…` entries count as machines. The token is read from
 that file only: it is never in an argv, an output line or a log record. The request goes
-straight to the url: `HTTP(S)_PROXY` and `~/.netrc` are ignored.
+straight to the url: `HTTP(S)_PROXY`, `~/.netrc` and `SSL_CERT_FILE`/`SSL_CERT_DIR` are ignored
+(an https url is verified with httpx2's default CA store).
 
 **Exit codes:**
 
@@ -581,6 +582,7 @@ straight to the url: `HTTP(S)_PROXY` and `~/.netrc` are ignored.
 | 0 | put/get/any other tool succeeded |
 | 125 | the tool failed (the MCP result is an error: `Command timed out after 30s`, `File not found: …`, `Unknown tool: …`, invalid arguments), or a put/get size check failed |
 | 126 | the CLI got no result: no or broken config, an unknown machine, connection refused, 401/403/404, 413 (request too large), no reply in time, a dropped connection, a local file it cannot read or write. After a timeout or a dropped connection the remote command MAY have run, or may still run: do not blindly retry a command that is not idempotent. |
+| 130 | interrupted (Ctrl-C); the remote command may still run |
 | 141 | stdout was closed (a broken pipe, e.g. `\| head`) |
 | 2 | a usage error |
 
@@ -607,13 +609,14 @@ Shell's reply is plain text, so some output cannot round-trip:
 **put / get.** `put` sends the whole file in ONE FileUpload call and checks the byte count the
 machine wrote. A machine takes at most 4 MiB per request (the mcp transport's limit; the gateway
 allows 16 MiB), so a `put` carries about 3 MB; a larger one fails with 413 (exit 126). `get`
-checks the byte count FileDownload declared, then writes the local file through a fsynced temp
-file in the same directory (never a half-written file); an existing file keeps its mode, a new
-one gets `0666 & ~umask`. A `get` reply may be up to 256 MiB of base64 (about 190 MB of file). `--timeout` is
-how long the client waits (default 300 s).
+checks the byte count FileDownload declared, then writes the local file like `cp` (through a
+symlink, an existing file keeps its mode, a new one gets `0666 & ~umask`), but through a fsynced
+temp file in the same directory, so never a half-written file. A `get` reply may be up to
+256 MiB of base64 (about 190 MB of file). `--timeout` is how long the client waits (default 300 s).
 
 **Any tool.** `--json` passes the tool's arguments as a JSON object; the reply's text goes to
-stdout. A non-text block (a Snapshot image) is printed as `[image block: image/png]`. A call
+stdout. A non-text block is named, never dumped: a Snapshot prints `[image block: image/jpeg]`
+and then its text. A call
 that declares its runtime (Shell's `timeout`, Wait's `seconds`) is waited for that long plus
 60 s, unless `--timeout` says otherwise.
 

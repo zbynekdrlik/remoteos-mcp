@@ -30,39 +30,17 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from fleet_harness import closed_port_url, fresh_secret
+from fleet_harness import SRC_DIR, closed_port_url, free_port, fresh_secret, hermetic_child_env
+from mcp.types import TextContent
 
-import remoteos
 from remoteos import cli_call
 from remoteos.cli_call import main
 from remoteos.gateway.registry import token_sha256
 
-_SRC = str(Path(remoteos.__file__).resolve().parents[1])
 _START_TIMEOUT = 60.0
 MACHINE = "linux-cli-test"
 OTHER_MACHINE = "linux-cli-other"  # exposed, but the consumer may not reach it
 CONSUMER = "cli-test@dev1"
-
-
-def _free_port() -> int:
-    import socket
-
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _child_env(home: Path) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("REMOTEOS_", "FASTMCP_"))}
-    env.update(
-        PYTHONUNBUFFERED="1",
-        PYTHONPATH=os.pathsep.join(p for p in (_SRC, env.get("PYTHONPATH", "")) if p),
-        HOME=str(home),
-        XDG_DATA_HOME=str(home / "xdg-data"),
-        FASTMCP_CHECK_FOR_UPDATES="off",
-        FASTMCP_SHOW_SERVER_BANNER="false",
-    )
-    return env
 
 
 class _Process:
@@ -72,7 +50,7 @@ class _Process:
         self.log_path = home / log_name
         self._log = open(self.log_path, "wb")
         self.proc = subprocess.Popen(
-            argv, cwd=home, env={**_child_env(home), **(env or {})}, stdout=self._log, stderr=subprocess.STDOUT
+            argv, cwd=home, env={**hermetic_child_env(home), **(env or {})}, stdout=self._log, stderr=subprocess.STDOUT
         )
 
     def output(self) -> str:
@@ -148,7 +126,7 @@ def stack(tmp_path_factory) -> Stack:
     (home / "remoteos.toml").write_text("")
     machine_key = fresh_secret("machinekey")
     token = fresh_secret("consumer")
-    server_port, gateway_port = _free_port(), _free_port()
+    server_port, gateway_port = free_port(), free_port()
     server = _Process(
         [sys.executable, "-m", "remoteos", "--host", "127.0.0.1", "--port", str(server_port)]
         + ["--config", str(home / "remoteos.toml"), "--enable-all"],
@@ -580,6 +558,7 @@ def test_a_broken_config_is_126_without_echoing_its_content(stack, run, tmp_path
         ("--list", MACHINE),
         ("--list", "--timeout", "5"),
         ("--list", "--json", "{}"),
+        (MACHINE, "Shell", "true", "--cwd", ""),
         ("--project", "../escape", MACHINE, "Shell", "true"),
         ("--config", "x.json", "--project", "p", MACHINE, "Shell", "true"),
     ],
@@ -608,7 +587,7 @@ def _script_process(stack, tmp_path, command: str) -> tuple[list[str], dict[str,
     argv = [str(script), MACHINE, "Shell", command]
     assert stack.token not in " ".join(argv)
     env = {k: v for k, v in os.environ.items() if not k.startswith(("REMOTEOS_", "FASTMCP_"))}
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (_SRC, env.get("PYTHONPATH", "")) if p)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (SRC_DIR, env.get("PYTHONPATH", "")) if p)
     env["FASTMCP_LOG_LEVEL"] = "DEBUG"  # fastmcp's own stderr handler must still stay silent
     assert all(stack.token not in value for value in env.values())  # nor in the environment
     return argv, env, project
@@ -638,14 +617,14 @@ def test_a_closed_stdout_pipe_exits_141_without_a_traceback(stack, tmp_path):
 @pytest.mark.parametrize(
     ("reply", "expected"),
     [
-        ("[task:ab12] hello", ("hello", "", 0)),
-        ("[task:ab12] (no output)", ("", "", 0)),
-        ("[task:ab12] [Exit code: 2]", ("", "", 2)),
-        ("[task:ab12] [STDERR] boom\n\n[Exit code: 1]", ("", "boom", 1)),
-        ("[task:ab12] out\n\n[STDERR] err\n\n[Exit code: 5]", ("out", "err", 5)),
+        ("hello", ("hello", "", 0)),
+        ("(no output)", ("", "", 0)),
+        ("[Exit code: 2]", ("", "", 2)),
+        ("[STDERR] boom\n\n[Exit code: 1]", ("", "boom", 1)),
+        ("out\n\n[STDERR] err\n\n[Exit code: 5]", ("out", "err", 5)),
         ("out\n[STDERR] e1\n[STDERR] e2", ("out", "e1\n[STDERR] e2", 0)),  # split at the first marker
         ("a\n[Exit code: 3] not the end", ("a\n[Exit code: 3] not the end", "", 0)),  # only a final line counts
-        ("[task:ab12] [Exit code: -15]", ("", "", -15)),
+        ("[Exit code: -15]", ("", "", -15)),
         ("hi\n[Exit code: 9]", ("hi", "", 9)),  # a line the command printed itself: documented limit
     ],
 )
@@ -833,9 +812,78 @@ def test_a_non_text_block_is_named_never_dumped(remote_replies, capsys):
 
     queued, _ = remote_replies
     image = ImageContent(type="image", data=base64.b64encode(b"png-bytes").decode(), mimeType="image/png")
-    queued.append(CallToolResult(content=[image], structured_content=None, meta=None, is_error=False))
+    # the shape taskmanager.wrap_sync_tool gives a reply with no text: the prefix alone comes first
+    only_prefix = TextContent(type="text", text="[task:c1]")
+    queued.append(CallToolResult(content=[only_prefix, image], structured_content=None, meta=None, is_error=False))
     assert cli_call.run_tool(_M, "Snapshot", {}, 9.0) == 0
     assert capsys.readouterr().out == "[image block: image/png]\n"
+
+
+def test_the_task_prefix_is_stripped_from_the_first_text_block_even_after_an_image(remote_replies, capsys):
+    from fastmcp.client.client import CallToolResult
+    from mcp.types import ImageContent
+
+    queued, _ = remote_replies
+    # Snapshot: the image first, the prefixed text second (taskmanager.wrap_sync_tool)
+    image = ImageContent(type="image", data=base64.b64encode(b"jpg").decode(), mimeType="image/jpeg")
+    text = TextContent(type="text", text="[task:c2] Monitor 1: 1920x1080\n[task:zz] not a prefix")
+    queued.append(CallToolResult(content=[image, text], structured_content=None, meta=None, is_error=False))
+    assert cli_call.run_tool(_M, "Snapshot", {}, 9.0) == 0
+    assert capsys.readouterr().out == "[image block: image/jpeg]\nMonitor 1: 1920x1080\n[task:zz] not a prefix\n"
+
+
+def test_stdout_that_itself_starts_like_a_task_prefix_is_kept(remote_replies, capsys):
+    queued, _ = remote_replies
+    queued.append(_reply("[task:c3] [task:abc] printed by the command"))
+    assert cli_call.run_shell(_M, "echo", 30, None) == 0
+    assert capsys.readouterr().out == "[task:abc] printed by the command\n"
+
+
+def test_an_interrupt_exits_130_never_1(run, monkeypatch):
+    def interrupted(*_args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_call, "_run", interrupted)
+    ran = run(MACHINE, "Shell", "sleep 100")
+    assert (ran.code, ran.stderr) == (130, "remoteos-call: interrupted (the remote command may still run)\n")
+
+
+def test_an_incompatible_sdk_is_named_not_a_bare_type(run, monkeypatch):
+    from mcp.client import streamable_http
+
+    monkeypatch.setattr(streamable_http, "EventSource", object)
+    ran = run(MACHINE, "Shell", "echo never")
+    assert ran.code == 126
+    assert ran.stderr == (
+        "remoteos-call: this mcp SDK is incompatible: mcp.client.streamable_http no longer uses "
+        "httpx2.EventSource (replies over 1 MiB could not be received)\n"
+    )
+
+
+def test_an_unexpected_error_shows_its_message_with_the_token_scrubbed(run, stack, monkeypatch):
+    def broken(machine, *_args):
+        raise ValueError(f"bug near {machine.authorization}\nsecond line")
+
+    monkeypatch.setattr(cli_call, "_run", broken)
+    ran = run(MACHINE, "Shell", "true")
+    assert (ran.code, ran.stderr) == (126, "remoteos-call: unexpected ValueError: bug near <authorization>\n")
+
+
+def test_a_dropped_connection_says_the_command_may_have_run():
+    failure = cli_call._transport_failure(_mcp_error(-32000, "SSE stream ended without a response"), _M)
+    assert failure.message == (
+        "linux-x: connection closed before the reply (the command may have run): "
+        "SSE stream ended without a response (http://h:81/mcp)"
+    )
+
+
+def test_write_atomically_writes_through_a_symlink(tmp_path):
+    real = tmp_path / "real.txt"
+    real.write_bytes(b"old")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    cli_call.write_atomically(link, b"new")
+    assert link.is_symlink() and real.read_bytes() == b"new"
 
 
 # -- the local write of get ------------------------------------------------------------------------

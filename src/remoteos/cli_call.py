@@ -2,7 +2,7 @@
 
     remoteos-call --list
     remoteos-call linux-stream-snv Shell 'sudo -n true; echo ok' [--timeout 60] [--cwd /tmp]
-    remoteos-call linux-stream-snv put ./pkg.deb /tmp/pkg.deb
+    remoteos-call linux-stream-snv put ./config.tar /tmp/config.tar   # one request: about 3 MB at most
     remoteos-call linux-stream-snv get /var/log/syslog ./syslog
     remoteos-call win-resolume-pp GetSystemInfo --json '{}'
 
@@ -22,6 +22,7 @@ Exit codes:
 - 126: the CLI got no result: a missing/broken config, an unknown machine, a refused connection,
   401/403/404/413, no reply in time, a dropped connection, a local file it cannot read/write.
   After a timeout or a dropped connection the remote command MAY have run (or still run).
+- 130: interrupted (Ctrl-C); the remote command may still run.
 - 141: stdout was closed (a broken pipe, e.g. ``| head``).
 - 2: a usage error (click).
 
@@ -37,8 +38,8 @@ import json
 import logging
 import os
 import re
+import secrets
 import sys
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +54,7 @@ log = logging.getLogger("remoteos.cli_call")
 
 EXIT_TOOL_ERROR = 125
 EXIT_NO_CALL = 126
+EXIT_INTERRUPTED = 130  # 128 + SIGINT, what a shell reports for Ctrl-C
 EXIT_BROKEN_PIPE = 141  # 128 + SIGPIPE, what a shell reports for a writer whose reader went away
 
 # The fleet's MCP names: ``win-…``, ``linux-…``, ``mac-…`` (an http entry with another name, e.g.
@@ -165,7 +167,6 @@ def parse_shell_reply(text: str) -> ShellReply:
     exit code, a literal ``(no output)`` reads as nothing, and the strip loses leading whitespace
     of stdout and trailing whitespace of the last part.
     """
-    text = strip_task_prefix(text)
     exit_code = 0
     match = _EXIT_CODE_RE.search(text)
     if match:
@@ -189,11 +190,23 @@ def process_exit_code(remote: int) -> int:
 
 
 def result_text(result) -> str:
-    """The text blocks of a ``CallToolResult``, joined; other blocks are named, never dumped."""
+    """The text blocks of a ``CallToolResult``, joined; other blocks are named, never dumped.
+
+    The task manager puts ``[task:<id>] `` in front of the FIRST text block, which is not always
+    the first block (Snapshot: the image comes first), and adds a text block holding only the
+    prefix when there is none (taskmanager.wrap_sync_tool). That prefix is removed here, once,
+    and a block left empty by it is dropped.
+    """
     parts = []
+    prefix_seen = False
     for block in result.content:
         text = getattr(block, "text", None)
         if isinstance(text, str):
+            if not prefix_seen:
+                prefix_seen = True
+                text = strip_task_prefix(text)
+                if not text:
+                    continue
             parts.append(text)
         else:
             parts.append(f"[{getattr(block, 'type', 'content')} block: {getattr(block, 'mime_type', None) or '?'}]")
@@ -255,7 +268,7 @@ def _transport_failure(exc: BaseException, machine: Machine, status: int | None 
     """One stderr line for a call that produced no tool result (exit 126)."""
     import httpx2
     from mcp.shared.exceptions import MCPError
-    from mcp.types import REQUEST_TIMEOUT
+    from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
 
     leaf = _innermost(exc)
     if isinstance(leaf, httpx2.HTTPStatusError):
@@ -266,6 +279,9 @@ def _transport_failure(exc: BaseException, machine: Machine, status: int | None 
         isinstance(leaf, MCPError) and leaf.code == REQUEST_TIMEOUT
     ):
         reason = "timed out waiting for the reply (the command may still run)"
+    elif isinstance(leaf, MCPError) and leaf.code == CONNECTION_CLOSED:
+        # a dropped stream, the gateway's 600 s upstream cutoff, a reply over MAX_REPLY_EVENT_BYTES
+        reason = f"connection closed before the reply (the command may have run): {leaf.message}"
     elif isinstance(leaf, httpx2.ConnectError):
         reason = "cannot connect (connection refused or host unreachable)"
     else:
@@ -309,7 +325,11 @@ def _allow_large_replies() -> None:
 
     current = getattr(streamable_http, "EventSource", None)
     if current is None or not (isinstance(current, type) and issubclass(current, httpx2.EventSource)):
-        raise RuntimeError("mcp.client.streamable_http no longer uses httpx2.EventSource")
+        raise CallFailed(
+            EXIT_NO_CALL,
+            "this mcp SDK is incompatible: mcp.client.streamable_http no longer uses httpx2.EventSource "
+            "(replies over 1 MiB could not be received)",
+        )
     if current is not httpx2.EventSource:
         return  # already swapped
 
@@ -322,8 +342,17 @@ def _allow_large_replies() -> None:
 
 def _quiet_library_logging() -> None:
     """Silence the libraries' own loggers (fastmcp configures its stderr handler at import)."""
+    import fastmcp  # noqa: F401 - imported first: its import sets the fastmcp logger's level
+
     for name in _LIBRARY_LOGGERS:
         logging.getLogger(name).setLevel(logging.CRITICAL + 1)
+
+
+def prepare_process() -> None:
+    """The CLI's two process-wide settings, made once by ``main`` before a call (never by a
+    library function, so an in-process caller of ``call_tool`` keeps its own logging and SDK)."""
+    _quiet_library_logging()
+    _allow_large_replies()
 
 
 async def call_tool(machine: Machine, tool: str, arguments: dict, wait_s: float):
@@ -332,8 +361,6 @@ async def call_tool(machine: Machine, tool: str, arguments: dict, wait_s: float)
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
-    _quiet_library_logging()
-    _allow_large_replies()
     http_errors = _HttpErrors()
 
     def http_client(headers=None, timeout=None, auth=None, **_ignored) -> httpx2.AsyncClient:
@@ -371,7 +398,7 @@ def _run(machine: Machine, tool: str, arguments: dict, wait_s: float):
 
 
 def _tool_failed(result) -> CallFailed:
-    return CallFailed(EXIT_TOOL_ERROR, strip_task_prefix(result_text(result)))
+    return CallFailed(EXIT_TOOL_ERROR, result_text(result))
 
 
 def _echo(text: str, err: bool = False) -> None:
@@ -406,7 +433,7 @@ def run_put(machine: Machine, local: Path, remote: str, wait_s: float) -> int:
     result = _run(machine, "FileUpload", {"path": remote, "data_base64": base64.b64encode(data).decode()}, wait_s)
     if result.is_error:
         raise _tool_failed(result)
-    reply = strip_task_prefix(result_text(result))
+    reply = result_text(result)
     match = _UPLOAD_RE.match(reply)
     if not match:
         raise CallFailed(EXIT_TOOL_ERROR, f"put: unexpected FileUpload reply: {reply[:200]}")
@@ -420,7 +447,7 @@ def run_get(machine: Machine, remote: str, local: Path, wait_s: float) -> int:
     result = _run(machine, "FileDownload", {"path": remote}, wait_s)
     if result.is_error:
         raise _tool_failed(result)
-    reply = strip_task_prefix(result_text(result))
+    reply = result_text(result)
     match = _DOWNLOAD_RE.match(reply)
     if not match:
         raise CallFailed(EXIT_TOOL_ERROR, f"get: unexpected FileDownload reply: {reply[:200]}")
@@ -435,40 +462,57 @@ def run_get(machine: Machine, remote: str, local: Path, wait_s: float) -> int:
     return 0
 
 
-def _new_file_mode(path: Path) -> int:
-    """An existing file keeps its mode; a new one gets ``0o666 & ~umask``, as ``scp`` and ``cp`` do."""
+def _fsync_directory(directory: Path) -> None:
+    """Make the rename durable. A directory that cannot be opened or synced is logged, not fatal:
+    the file itself is complete and in place."""
     try:
-        return path.stat().st_mode & 0o7777
-    except OSError:
-        umask = os.umask(0)  # read the umask: only setting it returns it (the CLI is single-threaded)
-        os.umask(umask)
-        return 0o666 & ~umask
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        log.debug("directory fsync skipped: %s", type(exc).__name__)
 
 
 def write_atomically(path: Path, data: bytes) -> None:
-    """Write *data* to *path* through a fsynced temp file in the same directory: never a half file."""
-    directory = path.parent
+    """Write *data* to *path* like ``cp`` would, but never as a half-written file.
+
+    A symlink is written through (its target is replaced). An existing file keeps its mode; a new
+    one is created ``0o666`` minus the umask (the kernel applies it). The data goes to a fsynced
+    temp file in the same directory, renamed over the target, and the directory is fsynced.
+    """
+    target = Path(os.path.realpath(path))
     try:
-        fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.", suffix=".part")
+        mode = target.stat().st_mode & 0o7777
+    except FileNotFoundError:
+        mode = None
     except OSError as exc:
-        raise CallFailed(EXIT_NO_CALL, f"cannot write into {directory}: {exc.strerror}") from None
+        raise CallFailed(EXIT_NO_CALL, f"cannot write {path}: {exc.strerror}") from None
+    tmp = target.parent / f".{target.name}.{secrets.token_hex(6)}.part"
+    try:
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    except OSError as exc:
+        raise CallFailed(EXIT_NO_CALL, f"cannot write into {target.parent}: {exc.strerror}") from None
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp, _new_file_mode(path))
-        os.replace(tmp, path)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, target)
     except OSError as exc:
-        Path(tmp).unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise CallFailed(EXIT_NO_CALL, f"cannot write {path}: {exc.strerror}") from None
+    _fsync_directory(target.parent)
 
 
 def run_tool(machine: Machine, tool: str, arguments: dict, wait_s: float) -> int:
     result = _run(machine, tool, arguments, wait_s)
     if result.is_error:
         raise _tool_failed(result)
-    text = strip_task_prefix(result_text(result))
+    text = result_text(result)
     if text:
         _echo(text)
     return 0
@@ -495,6 +539,8 @@ def plan(
     A usage error is exit 2 whatever the config holds, and nothing is called.
     """
     wait = DEFAULT_WAIT_S if timeout is None else float(timeout)
+    if cwd == "":
+        raise click.UsageError("--cwd must not be empty")
     if json_args is not None:
         if args or cwd is not None:
             raise click.UsageError("--json carries all of the tool's arguments: no positional arguments, no --cwd")
@@ -551,12 +597,14 @@ def main(machine, tool, args, config, project, list_machines, timeout, cwd, json
     """Run TOOL on MACHINE over MCP: Shell COMMAND, put LOCAL REMOTE, get REMOTE LOCAL, or TOOL --json.
 
     Exit codes: Shell = the remote exit code; 0 = success; 125 = the tool failed; 126 = no result
-    (config, unknown machine, connection, auth, timeout); 141 = broken pipe; 2 = usage.
+    (config, unknown machine, connection, auth, timeout); 130 = interrupted; 141 = broken pipe;
+    2 = usage.
     """
     if config is not None and project is not None:
         raise click.UsageError("--config and --project are exclusive")
     _check_options(machine, tool, project, list_machines, timeout, cwd, json_args)
     call = None if list_machines else plan(tool, args, timeout, cwd, json_args)
+    target = None  # the resolved machine: its token is scrubbed from any unexpected message
     try:
         path = config_path(config, project)
         if call is None:
@@ -564,7 +612,9 @@ def main(machine, tool, args, config, project, list_machines, timeout, cwd, json
                 _echo(name)
             code = 0
         else:
-            code = call(resolve_machine(load_servers(path), machine, path))
+            target = resolve_machine(load_servers(path), machine, path)
+            prepare_process()
+            code = call(target)
         sys.stdout.flush()  # a closed pipe surfaces here, inside the handler, not at exit
     except CallFailed as failure:
         _echo(f"remoteos-call: {failure.message}", err=True)
@@ -576,11 +626,21 @@ def main(machine, tool, args, config, project, list_machines, timeout, cwd, json
         except (OSError, ValueError) as exc:  # no real file descriptor behind stdout
             log.debug("stdout not redirected after the broken pipe: %s", type(exc).__name__)
         code = EXIT_BROKEN_PIPE
+    except KeyboardInterrupt:  # click would print "Aborted!" and exit 1, a remote exit 1's code
+        _echo("remoteos-call: interrupted (the remote command may still run)", err=True)
+        code = EXIT_INTERRUPTED
     except Exception as exc:  # never a traceback (it could carry a request), never exit 1
         log.debug("unexpected failure: %s", type(exc).__name__)
-        _echo(f"remoteos-call: unexpected {type(exc).__name__}", err=True)
+        _echo(f"remoteos-call: unexpected {_unexpected_text(exc, target)}", err=True)
         code = EXIT_NO_CALL
     sys.exit(code)
+
+
+def _unexpected_text(exc: BaseException, machine: Machine | None) -> str:
+    """``<Type>: <first line of the message>``, the token scrubbed: a bug report a user can act on."""
+    lines = str(exc).splitlines()
+    text = f"{type(exc).__name__}: {lines[0]}" if lines and lines[0] else type(exc).__name__
+    return _scrub(text, machine) if machine is not None else text
 
 
 if __name__ == "__main__":
