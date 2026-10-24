@@ -478,18 +478,24 @@ def _fsync_directory(directory: Path) -> None:
 def write_atomically(path: Path, data: bytes) -> None:
     """Write *data* to *path* like ``cp`` would, but never as a half-written file.
 
-    A symlink is written through (its target is replaced). An existing file keeps its mode; a new
-    one is created ``0o666`` minus the umask (the kernel applies it). The data goes to a fsynced
-    temp file in the same directory, renamed over the target, and the directory is fsynced.
+    A symlink is written through (its target is replaced), but only after the KERNEL followed it
+    (``os.stat``), so ``fs.protected_symlinks`` still refuses a link another user planted in a
+    sticky directory, and a dangling link is refused like GNU ``cp`` does. An existing file keeps
+    its mode; a new one is created ``0o666`` minus the umask (the kernel applies it). The data goes
+    to a fsynced temp file in the same directory, renamed over the target, and the directory is
+    fsynced.
     """
-    target = Path(os.path.realpath(path))
     try:
-        mode = target.stat().st_mode & 0o7777
+        mode = os.stat(path).st_mode & 0o7777  # follows a symlink in the kernel, with its checks
     except FileNotFoundError:
+        if path.is_symlink():
+            raise CallFailed(EXIT_NO_CALL, f"not writing through dangling symlink {path}") from None
         mode = None
     except OSError as exc:
         raise CallFailed(EXIT_NO_CALL, f"cannot write {path}: {exc.strerror}") from None
-    tmp = target.parent / f".{target.name}.{secrets.token_hex(6)}.part"
+    target = Path(os.path.realpath(path))
+    # a long name stays under NAME_MAX (255) with the temp file's 18 extra characters
+    tmp = target.parent / f".{target.name[:200]}.{secrets.token_hex(6)}.part"
     try:
         fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
     except OSError as exc:

@@ -12,7 +12,12 @@ paths:
   code, 0, 125 tool error, 126 no result, 130 interrupted, 141 broken pipe, 2 usage) is what
   camera-box#1480 and restreamer#422 build on: never renumber it. `main` turns ANY other
   exception into one `remoteos-call: unexpected <Type>: <first line>` line (the token scrubbed)
-  and 126, and Ctrl-C into 130: never a traceback, never exit 1 (a remote 1).
+  and 126, and Ctrl-C into 130 (`sys.exit`, not a re-raised SIGINT: a re-raise would kill a
+  `CliRunner` test process, and the README tells bash loops to check for 130): never a traceback,
+  never exit 1 (a remote 1) — except a Ctrl-C during the imports, before `main` runs.
+- **`write_atomically` follows a symlink only after `os.stat` did in the kernel**, so
+  `fs.protected_symlinks` still applies (a link planted in a sticky dir is EACCES -> 126); a
+  dangling link is refused, like GNU `cp`.
 - **The config is read with the gateway's helpers** (`gateway/registry.py`: `read_json_file`,
   `authorization_header` (any spelling, the last one wins), `is_http_url` (urlsplit can RAISE)),
   so the CLI and the gateway agree on what a valid entry is.

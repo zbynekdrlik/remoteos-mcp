@@ -886,6 +886,20 @@ def test_write_atomically_writes_through_a_symlink(tmp_path):
     assert link.is_symlink() and real.read_bytes() == b"new"
 
 
+def test_write_atomically_refuses_a_dangling_symlink_like_cp(tmp_path):
+    link = tmp_path / "dangling"
+    link.symlink_to(tmp_path / "missing-target")
+    failure = _expect_failure(lambda: cli_call.write_atomically(link, b"x"))
+    assert (failure.code, failure.message) == (126, f"not writing through dangling symlink {link}")
+    assert not (tmp_path / "missing-target").exists()
+
+
+def test_write_atomically_handles_a_255_character_name(tmp_path):
+    long_name = tmp_path / ("n" * 255)
+    cli_call.write_atomically(long_name, b"x")
+    assert long_name.read_bytes() == b"x"
+
+
 # -- the local write of get ------------------------------------------------------------------------
 
 

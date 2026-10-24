@@ -52,7 +52,7 @@ paths:
   - Real-OS checks: `test_startup_flags` (initialize over HTTP on the Linux runner) and
     `tests_windows/test_identity_windows.py`.
 - **Startup tests start the real server in a subprocess.** The env must be hermetic (see
-  `_child_env`):
+  `tests/fleet_harness.py` `hermetic_child_env`, shared with `test_cli_call`):
   - `FASTMCP_CHECK_FOR_UPDATES=off`; otherwise the banner calls pypi.org and writes
     `~/.local/share/fastmcp/version_cache.json`.
   - A temp HOME and XDG_DATA_HOME, `--config` with an empty file, and this checkout's

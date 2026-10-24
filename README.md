@@ -572,7 +572,7 @@ gateway reads them (`gateway/registry.py`: any spelling of the header name, an h
 a host). Only `win-…`, `linux-…` and `mac-…` entries count as machines. The token is read from
 that file only: it is never in an argv, an output line or a log record. The request goes
 straight to the url: `HTTP(S)_PROXY`, `~/.netrc` and `SSL_CERT_FILE`/`SSL_CERT_DIR` are ignored
-(an https url is verified with httpx2's default CA store).
+(an https url is verified against the system trust store).
 
 **Exit codes:**
 
@@ -587,7 +587,10 @@ straight to the url: `HTTP(S)_PROXY`, `~/.netrc` and `SSL_CERT_FILE`/`SSL_CERT_D
 | 2 | a usage error |
 
 The CLI's own failures are always ONE stderr line that starts with `remoteos-call:`. A remote
-command that itself exits 125 or 126 prints no such line.
+command that itself exits 125, 126, 130 or 141 prints no such line. On Ctrl-C the CLI exits 130
+rather than dying from the signal, so a bash loop over machines carries on: check for 130 to
+stop it. Ctrl-C while the CLI is still starting (its first fraction of a second, the imports)
+gives Python's own traceback.
 
 **Server version.** Machines must run remoteos-mcp 0.7.0.dev28 or later (#32). Before that, a
 failing tool answered with success text (`Error in Shell: …`) and the CLI would exit 0.
