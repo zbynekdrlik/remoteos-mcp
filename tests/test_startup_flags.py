@@ -297,3 +297,36 @@ def test_stdio_stdout_carries_only_json_rpc(tmp_path):
         except ValueError:
             pytest.fail(f"non-JSON line on the stdio stdout: {line!r}")
     assert json.loads(lines[-1])["id"] == 1
+
+
+def _exits_without_serving(srv) -> None:
+    """The server process ends before ``/health`` ever answers (a refused start, never a served one)."""
+    deadline = time.monotonic() + _START_TIMEOUT
+    while srv.proc.poll() is None and time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/health", timeout=2):
+                pytest.fail(f"the server started:\n{srv.output()[-2000:]}")
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            time.sleep(0.2)
+
+
+@pytest.mark.parametrize("tier3", [["--enable-all"], ["--enable-tier3"], ["--tools", "Shell"]])
+def test_an_unauthenticated_lan_bind_with_tier3_refuses_to_start(start_server, tier3):
+    # #39 (upstream PR #76's rule): an open full shell on the LAN is never started
+    srv = start_server("--host", "0.0.0.0", *tier3)
+    _exits_without_serving(srv)
+    assert srv.proc.returncode == 2, srv.output()[-2000:]
+    assert "refusing to bind 0.0.0.0 without an auth key while Tier 3" in srv.output()
+
+
+def test_a_keyed_lan_bind_with_tier3_starts(start_server):
+    # every installer starts `--enable-all` with a key on a LAN address
+    key = secrets.token_hex(16)
+    srv = start_server("--host", "0.0.0.0", "--enable-all", env={"REMOTEOS_AUTH_KEY": key})
+    assert srv.health() == _health()
+
+
+def test_an_unauthenticated_lan_bind_with_tier_1_2_only_starts_with_the_warning(start_server):
+    srv = start_server("--host", "0.0.0.0")
+    assert srv.health() == _health()
+    assert "open to the network without auth" in srv.output()

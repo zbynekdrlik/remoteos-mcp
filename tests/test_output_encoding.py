@@ -573,7 +573,7 @@ def test_posix_run_command_reads_the_locale_exactly():
     ("call", "script"),
     [
         (lambda: win_services.service_list(), "Get-Service | Format-Table Name, DisplayName, Status -AutoSize"),
-        (lambda: win_services.task_delete("t"), 'schtasks /Delete /TN "t" /F'),
+        (lambda: win_services.task_delete("t"), "schtasks /Delete /TN 't' /F"),  # #39: a literal
         (
             lambda: win_services.event_log("System", 5),
             "Get-WinEvent -LogName 'System' -MaxEvents 5"
@@ -604,20 +604,23 @@ def test_windows_launch_app_runs_powershell_under_the_trampoline(win_session, wi
     monkeypatch.setattr("subprocess.Popen", popen_answered_by(_run))
     assert mod.launch_app("notepad", "C:\\Users\\Žltý kôň.txt") == "Launched notepad"
     [argv] = calls
-    assert_runs_powershell(argv, windows_python, 'Start-Process "notepad" -ArgumentList "C:\\Users\\Žltý kôň.txt"')
+    # #39: the name and the arguments are single-quoted literals, never expandable strings
+    assert_runs_powershell(argv, windows_python, "Start-Process 'notepad' -ArgumentList 'C:\\Users\\Žltý kôň.txt'")
 
 
 def test_windows_notification_runs_powershell_under_the_trampoline(win_session, windows_python, monkeypatch):
     mod, _ = win_session
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], dict]] = []
 
     def _run(cmd, **kwargs):
-        calls.append(list(cmd))
+        calls.append((list(cmd), kwargs))
         return run_result(kwargs)
 
     monkeypatch.setattr("subprocess.Popen", popen_answered_by(_run))
     assert mod.show_notification("Titulok", "Žltý kôň") == "Notification shown"
-    [argv] = calls
+    [(argv, kwargs)] = calls
     assert_runs_powershell(argv, windows_python, argv[-1])
     assert argv[-1].startswith("\n[Windows.UI.Notifications.ToastNotificationManager")  # the script as written
-    assert "<text>Žltý kôň</text>" in argv[-1]
+    # #39: the text reaches PowerShell in the environment, exact, never in the script
+    assert "Žltý kôň" not in argv[-1]
+    assert kwargs["env"]["REMOTEOS_TOAST_MESSAGE"] == "Žltý kôň"
