@@ -333,6 +333,7 @@ _SCRAPE_POLICY_PROBE = """
 import sys
 import remoteos.__main__ as server
 from remoteos import scrape
+scrape.BLOCK_PRIVATE = True  # not the default: the False cases then prove the start-up configured it
 server.mcp.run = lambda **kw: print("BLOCK_PRIVATE=" + str(scrape.BLOCK_PRIVATE), flush=True)
 sys.argv = ["remoteos", *sys.argv[1:]]
 server.cli()
@@ -357,6 +358,19 @@ def test_scrape_block_private_is_configured_at_start_up(tmp_path, how, expected)
     )
     out = done.stdout.decode("utf-8", "replace")
     assert f"BLOCK_PRIVATE={expected}" in out, (out + done.stderr.decode("utf-8", "replace"))[-2000:]
+
+
+def test_oauth_without_a_secret_warns_at_start_up(start_server):
+    # review round 2 (#39): authorize approves every client, so a token is free for anyone
+    srv = start_server("--oauth-client-id", "c1")
+    srv.health()
+    assert "WARNING: OAuth is on without --oauth-client-secret" in srv.output()
+
+
+def test_oauth_with_a_secret_starts_without_that_warning(start_server):
+    srv = start_server("--oauth-client-id", "c1", env={"REMOTEOS_OAUTH_CLIENT_SECRET": "s-" + secrets.token_hex(8)})
+    srv.health()
+    assert "OAuth is on without" not in srv.output()
 
 
 def test_an_unauthenticated_lan_bind_with_tier_1_2_only_starts_with_the_warning(start_server):

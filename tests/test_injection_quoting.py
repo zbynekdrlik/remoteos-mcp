@@ -257,8 +257,9 @@ def test_mac_event_log_level_is_a_word_never_a_predicate(monkeypatch):
 
     calls = []
     monkeypatch.setattr(subprocess, "Popen", popen_answered_by(lambda cmd, **kw: calls.append(cmd) or run_result(kw)))
-    with pytest.raises(ValueError, match="level must be a single word"):
-        mac_services.event_log(level="error OR 1 == 1")
+    for bad in ("error OR 1 == 1", "érror"):
+        with pytest.raises(ValueError, match="level must be a single word"):
+            mac_services.event_log(level=bad)
     assert calls == []
     mac_services.event_log(level="error")
     [cmd] = calls

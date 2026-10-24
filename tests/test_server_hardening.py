@@ -177,6 +177,13 @@ def test_a_malformed_token_request_is_a_400_never_a_500(body):
     assert response.json()["error"] == "invalid_request"
 
 
+def test_a_token_request_with_invalid_json_is_a_400_never_a_500():
+    client = TestClient(_oauth_client().app, raise_server_exceptions=False)
+    response = client.post("/oauth/token", content=b"{not json", headers={"content-type": "application/json"})
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+
+
 def test_without_a_configured_secret_a_public_client_needs_none():
     client = _oauth_client()
     assert _token(client, _code(_authorize(client, "c1")), "c1").status_code == 200
@@ -295,12 +302,15 @@ def test_scrape_never_reads_a_redirect_s_own_body(pages):
     base, handler = pages
     handler.bodies["/target"] = b"<p>tu</p>"
     handler.redirect_body = b"r" * (40 * 1024 * 1024)
+    was_tracing = tracemalloc.is_tracing()  # PYTHONTRACEMALLOC or a plugin may already trace
     tracemalloc.start()
+    tracemalloc.reset_peak()
     try:
         assert server.Scrape(f"{base}/redirect/target").strip() == "tu"
         _, peak = tracemalloc.get_traced_memory()
     finally:
-        tracemalloc.stop()
+        if not was_tracing:
+            tracemalloc.stop()
     assert peak < 8 * 1024 * 1024, f"{peak} bytes allocated: the redirect body was read"
 
 
