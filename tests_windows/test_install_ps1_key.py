@@ -286,6 +286,36 @@ $i = Test-RemoteOSInteractiveSession -SshConnection {_q(ssh_connection)} -SshCli
         assert out["interactive"] is expected
 
 
+class TestExitHelper:
+    """Exit-RemoteOSInstaller: a piped run in a person's console waits for Enter before it exits
+    (`exit` in `irm | iex` closes the console), every other run exits at once (review round 2)."""
+
+    def _exit(self, tmp_path: Path, pause: bool, read_host: str) -> tuple[int, bool]:
+        marker = tmp_path / "read-host-called.txt"
+        script = tmp_path / "exit-probe.ps1"
+        body = (f"function Read-Host {{ Set-Content -LiteralPath {_q(marker)} -Value 1; {read_host} }}\n"
+                f"Exit-RemoteOSInstaller -Code 3 -Pause {'$true' if pause else '$false'}\n"
+                "Write-Output 'not exited'\nexit 0\n")
+        script.write_text(_PRELUDE.format(installer=str(INSTALLER).replace("'", "''")) + body, encoding="utf-8-sig")
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+        )
+        assert "not exited" not in result.stdout, result.stdout
+        return result.returncode, marker.exists()
+
+    def test_a_pause_reads_enter_then_exits_with_the_code(self, tmp_path: Path) -> None:
+        assert self._exit(tmp_path, True, "'stub'") == (3, True)
+
+    def test_no_pause_exits_at_once(self, tmp_path: Path) -> None:
+        assert self._exit(tmp_path, False, "'stub'") == (3, False)
+
+    def test_a_read_host_that_cannot_read_still_exits(self, tmp_path: Path) -> None:
+        """-NonInteractive makes Read-Host throw; inside the health loop's catch-all that would be
+        swallowed and the run would go on."""
+        assert self._exit(tmp_path, True, "throw 'PowerShell is in NonInteractive mode'") == (3, True)
+
+
 class TestElevatedRelaunch:
     SHA = "0123456789abcdef0123456789abcdef01234567"
 

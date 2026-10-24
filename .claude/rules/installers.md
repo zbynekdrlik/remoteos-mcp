@@ -294,7 +294,7 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     `Get-RemoteOSRelaunchCommand`, run for real in tests_windows): `Start-Process powershell
     -Verb RunAs -PassThru` + `WaitForExit()`, never `-Wait` (5.1's `-Wait` also waits for every
     descendant, and the elevated run leaves the server running). Only `Start-Process` is in the
-    try (a refused UAC → `$null` → "nothing was changed"); a `$null` ExitCode counts as 1. The
+    try (a refused UAC, or no process object → `$null` → "nothing was changed"). The
     elevated window runs the installer as a CHILD powershell and then `Read-Host`s, because an
     `exit` inside the installer would close the window before the person reads it. The command
     goes over as `-EncodedCommand` (no quoting). An explicit key is never relaunched: the
@@ -303,14 +303,22 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     resolved ref, `REMOTEOS_MCP_RELAUNCHED=1`) is set inside the encoded command. A relaunched
     run that is still not elevated (UAC off for a standard user: RunAs gives the same token, no
     prompt) fails instead of relaunching again; it also does not pause at exit.
-  - **Every failure exit after the gate is `Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit`**
-    (never a bare `return`: it exits 0, and the relaunch forwarded that as success).
+  - The gate's inputs are `[Parameter(Mandatory)]` and static tests pin the call-site arguments
+    (`-InputRedirected ([Console]::IsInputRedirected)`, `-Relaunched $relaunched`): a dropped
+    `[bool]` argument would silently read as `$false` (review round 2 mutants).
+  - **Every exit after the gate is `Exit-RemoteOSInstaller -Code <n> -Pause $pauseOnExit`**
+    (never a bare `return`: it exits 0, and the relaunch forwarded that as success; never a bare
+    `exit`; a static test). Its `Read-Host` is in a try: under `-NonInteractive` it throws, and the
+    health loop's catch-all would swallow that and go on.
     `$pauseOnExit` = interactive, no `$PSCommandPath` (piped), not relaunched: `exit` inside
     `irm | iex` closes the person's console, so it waits for Enter first. Tests that bound a
     failure block read it up to its closing brace.
   - After the gate, the scheduled-task and firewall `catch` blocks exit 1: the run is
     elevated, so a failure is real.
-  - Non-interactive (SSH, session 0): never `Start-Process wscript` (it dies with the SSH
+  - `$startDirect` = interactive AND `$env:USERNAME -ieq $desktopUser`. Otherwise (SSH, session
+    0, or elevated as ANOTHER account: a standard user typed an admin's password at UAC, so a
+    direct start would run as that admin, pass the health check, and hide that the task's user
+    may not reach this run's per-user Python): never `Start-Process wscript` (it dies with the SSH
     session); `schtasks /End` + `schtasks /Run /TN RemoteOSMCP` under `$ErrorActionPreference =
     "Continue"` (5.1 turns native stderr under `2>&1` into a terminating error with `Stop`), then
     the health loop also requires `Get-RemoteOSListenerSessionId -Port` != 0 (session 0 = exit 1,

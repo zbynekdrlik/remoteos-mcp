@@ -185,7 +185,9 @@ function Set-RemoteOSOwnerOnlyAcl([string]$Path, [string]$User) {
 # never crosses the elevation (only an argv or a file could carry it), so that run fails too and
 # the person is told to open an admin PowerShell.
 
-function Get-RemoteOSElevationAction([bool]$IsAdmin, [bool]$Interactive, [bool]$ExplicitKey, [bool]$Relaunched) {
+function Get-RemoteOSElevationAction([Parameter(Mandatory)][bool]$IsAdmin, [Parameter(Mandatory)][bool]$Interactive,
+                                     [Parameter(Mandatory)][bool]$ExplicitKey, [Parameter(Mandatory)][bool]$Relaunched) {
+    # Every input is Mandatory: a call that drops one fails loudly instead of reading it as $false
     # -> 'proceed' | 'relaunch' | 'fail' (pure: the caller probes the environment). A run that
     # is already the relaunch and still not elevated (UAC off and a standard user: RunAs starts
     # it with the same token, no prompt) fails, so relaunches never chain.
@@ -194,8 +196,8 @@ function Get-RemoteOSElevationAction([bool]$IsAdmin, [bool]$Interactive, [bool]$
     return 'fail'
 }
 
-function Test-RemoteOSInteractiveSession([string]$SshConnection, [string]$SshClient, [int]$SessionId,
-                                         [bool]$InputRedirected) {
+function Test-RemoteOSInteractiveSession([string]$SshConnection, [string]$SshClient, [Parameter(Mandatory)][int]$SessionId,
+                                         [Parameter(Mandatory)][bool]$InputRedirected) {
     # A desktop session a person sits at: not over SSH, not session 0 (services, OpenSSH), and
     # stdin is the console. A pasted one-liner or a -File run in a console has the console as
     # stdin; a program running the installer (the remoteos Shell tool: stdin NUL, an ssh pipe)
@@ -206,7 +208,9 @@ function Test-RemoteOSInteractiveSession([string]$SshConnection, [string]$SshCli
 function Exit-RemoteOSInstaller([int]$Code, [bool]$Pause) {
     # exit $Code. A piped run (irm | iex) in a person's console would close that console with the
     # message unread: with $Pause it waits for Enter first.
-    if ($Pause) { Read-Host "  Press Enter to close" | Out-Null }
+    # A Read-Host that cannot read (-NonInteractive) must not keep the run alive: inside the
+    # health loop's catch-all it would be swallowed and the loop would go on
+    if ($Pause) { try { Read-Host "  Press Enter to close" | Out-Null } catch {} }
     exit $Code
 }
 
@@ -263,9 +267,12 @@ function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$Installer
         Write-Host "  [X] The elevation was cancelled or failed ($_) -- nothing was changed on this box" -ForegroundColor Red
         return $null
     }
+    if (-not $process) {
+        Write-Host "  [X] The elevated PowerShell did not start -- nothing was changed on this box" -ForegroundColor Red
+        return $null
+    }
     $null = $process.Handle  # keep the process handle: ExitCode needs it after the exit
     $process.WaitForExit()
-    if ($null -eq $process.ExitCode) { return 1 }
     return [int]$process.ExitCode
 }
 
@@ -326,7 +333,7 @@ if ($elevation -eq 'relaunch') {
     $elevatedExit = Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl -SourceRef $sourceSha
     if ($null -eq $elevatedExit) { Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit }
     Write-Host "  The elevated install finished with exit code $elevatedExit." -ForegroundColor Gray
-    exit $elevatedExit
+    Exit-RemoteOSInstaller -Code $elevatedExit -Pause $pauseOnExit
 }
 
 # --- Detect logged-in desktop user (may differ from SSH user) ---
@@ -617,14 +624,19 @@ if ($currentUserConfig -ne $ConfigDir -and (Test-Path $currentUserConfig)) {
 }
 
 # --- Start server now (hidden) ---
-if ($interactive) {
-    # A person's desktop session: start it here (the task starts it at every logon)
+# Directly only from the desktop user's own desktop run. SSH / session 0: a server started from
+# here dies with the SSH session (#57 amendment, resolume-pp). Another account (a standard user
+# who typed an admin's password at the UAC prompt): a server started from here would run as that
+# admin and pass the health check, while the task, which runs as the desktop user, may not even
+# reach this run's Python. In both cases the task starts it, and the health check proves the
+# task's own server.
+$startDirect = $interactive -and ($env:USERNAME -ieq $desktopUser)
+if ($startDirect) {
+    # The desktop user's own session: start it here (the task starts it at every logon)
     Write-Host "  Starting server..." -ForegroundColor Cyan
     Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-remoteos.vbs`""
 } else {
-    # SSH / session 0: a server started from here dies with the SSH session (#57 amendment,
-    # resolume-pp). The task runs it in the desktop user's session instead.
-    Write-Host "  Starting server through the scheduled task (this run is not at a desktop)..." -ForegroundColor Cyan
+    Write-Host "  Starting server through the scheduled task, as $desktopUser in the desktop session..." -ForegroundColor Cyan
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
@@ -648,12 +660,12 @@ for ($attempt = 1; $attempt -le 6; $attempt++) {
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5 -ErrorAction Stop
         $healthVer = $health.version
-        if ($healthVer -eq $PKG_VER -and -not $interactive) {
+        if ($healthVer -eq $PKG_VER -and -not $startDirect) {
             $healthAnswered = $true
             # The server must be the task's, in a desktop session: one in session 0 dies with SSH
             $serverSession = Get-RemoteOSListenerSessionId -Port $Port
             if ($serverSession -eq 0) {
-                Write-Host "  [X] The server on port $Port runs in session 0: it would die with this SSH session" -ForegroundColor Red
+                Write-Host "  [X] The server on port $Port runs in session 0 (no desktop): it would die with this session" -ForegroundColor Red
                 Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
             }
             if ($null -ne $serverSession) {
@@ -678,8 +690,9 @@ if (-not $healthOk -and $healthAnswered) {
 }
 if (-not $healthOk) {
     Write-Host "  [X] Health endpoint (http://127.0.0.1:${Port}/health) did not respond within 30s" -ForegroundColor Red
-    if (-not $interactive) {
-        Write-Host "      The task runs the server in ${desktopUser}'s desktop session: that user must be logged in." -ForegroundColor Yellow
+    if (-not $startDirect) {
+        Write-Host "      The task runs the server in ${desktopUser}'s desktop session: that user must be logged in," -ForegroundColor Yellow
+        Write-Host "      and must be able to run $pythonPath (a per-user Python of another account cannot be)." -ForegroundColor Yellow
     }
     Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }

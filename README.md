@@ -22,11 +22,14 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 
 ```
 
 The installer needs an admin PowerShell and checks it before it changes anything. From a normal
-window it relaunches itself elevated (one UAC prompt). Over SSH as a non-admin account, or with an
-explicit `REMOTEOS_MCP_AUTH_KEY` (it never crosses the elevation), it stops with
-`nothing was changed on this box`: open PowerShell as Administrator (or use an admin account) and
-run it again. Over SSH it starts the server through the scheduled task, in the logged-in desktop
-user's session (a server started from the SSH session would die with it).
+window it relaunches itself elevated (one UAC prompt). It stops with
+`nothing was changed on this box` instead when it runs as a non-admin account over SSH, from a
+program with no console input (e.g. an agent's Shell tool), with an explicit
+`REMOTEOS_MCP_AUTH_KEY` (it never crosses the elevation), or when even the relaunch is not
+elevated (UAC turned off for a standard user): open PowerShell as Administrator (or use an admin
+account) and run it again. Over SSH, or elevated as another account, it starts the server through
+the scheduled task, in the logged-in desktop user's session (a server started from the SSH
+session would die with it).
 
 It installs ONE commit: `REMOTEOS_MCP_REF` (a branch, tag or commit; default `main`, as on Linux)
 is resolved through the GitHub API to a commit sha, and both the code and its `constraints.txt`

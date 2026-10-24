@@ -193,7 +193,39 @@ def test_an_ssh_run_starts_the_server_through_the_scheduled_task() -> None:
     direct = [n for n, line in flow if line.startswith("Start-Process") and "wscript.exe" in line]
     assert len(direct) == 1, direct
     branch = [line for n, line in flow if n < direct[0] and line.startswith("if (")][-1]
-    assert branch.startswith("if ($interactive)"), f"the direct start is not inside the interactive branch: {branch}"
+    assert branch.startswith("if ($startDirect)"), f"the direct start is not inside the startDirect branch: {branch}"
+    # Review round 2: directly only from the desktop user's own desktop run; another account (an
+    # admin's password typed at the UAC prompt) goes through the task as well
+    assert "$startDirect = $interactive -and ($env:USERNAME -ieq $desktopUser)" in code
+
+
+def test_the_probe_and_the_relaunch_marker_reach_the_gate() -> None:
+    """Review round 2: these call-site arguments were droppable without any test failing."""
+    flow_code = "\n".join(line for _, line in _flow_lines())
+    assert "-InputRedirected ([Console]::IsInputRedirected)" in flow_code
+    assert "-Relaunched $relaunched" in flow_code
+    assert "$pauseOnExit = $interactive -and -not $PSCommandPath -and -not $relaunched" in flow_code
+    lines = _code_lines()
+    read = next(n for n, line in lines if line == "$relaunched = [bool]$env:REMOTEOS_MCP_RELAUNCHED")
+    removed = next(n for n, line in lines if line.startswith("Remove-Item Env:REMOTEOS_MCP_RELAUNCHED"))
+    assert read < removed < _gate_line(), (read, removed)
+
+
+def _gate_line() -> int:
+    return next(n for n, line in _flow_lines() if "Get-RemoteOSElevationAction -IsAdmin" in line)
+
+
+def test_every_failure_after_the_gate_exits_1_through_the_helper() -> None:
+    """Review rounds 1-2: a bare `return` exited 0 (the relaunch forwarded it as success), and a
+    bare `exit` closes a piped run's console with the message unread."""
+    after_gate = [(n, line) for n, line in _flow_lines() if n > _gate_line()]
+    bare = [(n, line) for n, line in after_gate if line == "return" or line.startswith("exit ")]
+    assert bare == [], f"failure exits that bypass Exit-RemoteOSInstaller: {bare}"
+    content = INSTALLER_WINDOWS.read_text()
+    for message in ("[X] pip install failed", "[X] Could not install Python"):
+        start = content.index(message)
+        block = content[start:content.index("\n}", start)]
+        assert "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit" in block, (message, block)
 
 
 # --- #12: the code and its constraints come from ONE commit ------------------------------------
