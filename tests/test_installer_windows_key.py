@@ -398,7 +398,8 @@ def test_the_wheelhouse_root_is_protected_before_the_download() -> None:
     preflight = next(n for n, line in flow if line.startswith("$preflight = New-RemoteOSWheelhouse"))
     assert len(protect) == 1 and protect[0] < preflight, (protect, preflight)
     block = _if_block("if ($protectError) {")
-    assert any("-- nothing was changed on this box" in line for _, line in block), block
+    # (an untrusted root may already be gone: "nothing was changed" would not be true, review round 2)
+    assert any("-- the running server and package were not touched" in line for _, line in block), block
     assert block[-2][1] == "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit", block
 
 
@@ -445,3 +446,14 @@ def test_the_installed_version_is_read_from_a_marked_line() -> None:
     """A late warning on the merged output must not read as the version (a needless rollback)."""
     body = "\n".join(_function_code("Get-RemoteOSInstalledVersion"))
     assert "REMOTEOS_VER=" in body
+
+
+def test_an_elevated_delete_never_follows_a_link() -> None:
+    """Review round 2: Windows PowerShell 5.1's Remove-Item -Recurse enters a junction. Every
+    recursive delete in the wheelhouse code goes through Remove-RemoteOSTree (.NET, link-safe)."""
+    for name in ("Protect-RemoteOSWheelhouseRoot", "New-RemoteOSWheelhouse", "Remove-RemoteOSStaleWheelhouses"):
+        body = _function_code(name)
+        assert not any("Remove-Item" in line and "-Recurse" in line for line in body), name
+        assert any("Remove-RemoteOSTree" in line for line in body), name
+    tree = "\n".join(_function_code("Remove-RemoteOSTree"))
+    assert "[System.IO.Directory]::Delete($Path)" in tree and "[System.IO.Directory]::Delete($Path, $true)" in tree

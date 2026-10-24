@@ -504,6 +504,73 @@ $err = Protect-RemoteOSWheelhouseRoot -Root $root -User $env:USERNAME
         assert "ReadAndExecute" in rights[out["user"]], rights
         assert not any(word in rights[out["user"]] for word in ("Write", "Modify", "FullControl", "Delete")), rights
 
+    @pytest.mark.parametrize("change", [
+        "$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("
+        "(New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'Write', 'Allow')))",
+        "$acl.SetOwner((New-Object System.Security.Principal.NTAccount($env:USERNAME)))",
+        "$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("
+        "(New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')), "
+        "[System.Security.AccessControl.FileSystemRights]0x40000000, 'Allow')))",
+    ], ids=["users-write", "user-owned", "generic-write"])
+    def test_a_protected_root_with_a_foreign_writer_or_owner_is_not_trusted(self, tmp_path: Path,
+                                                                            change: str) -> None:
+        """Review round 2: the owner check and the write-rights check were never exercised."""
+        root = tmp_path / "wheelhouse"
+        planted = root / SHA_NEW / "remoteos_mcp-6.6.6-py3-none-any.whl"
+
+        out = _ps(tmp_path, f"""
+$root = {_q(root)}
+$null = Protect-RemoteOSWheelhouseRoot -Root $root -User $env:USERNAME
+$acl = Get-Acl -LiteralPath $root
+{change}
+Set-Acl -LiteralPath $root -AclObject $acl
+New-Item -ItemType Directory -Path {_q(planted.parent)} -Force | Out-Null
+Set-Content -LiteralPath {_q(planted)} -Value 'not a wheel'
+$before = Test-RemoteOSWheelhouseRootTrusted $root
+$err = Protect-RemoteOSWheelhouseRoot -Root $root -User $env:USERNAME
+""" + self._STATE)
+
+        assert out["before"] is False, f"trusted after: {change}"
+        assert out["err"] is None and out["trusted"] is True and out["owner"] == "S-1-5-32-544", out
+        assert not planted.exists(), "a wheel planted in an untrusted root survived"
+
+    def test_a_planted_link_is_removed_and_its_target_left_alone(self, tmp_path: Path) -> None:
+        """Review round 2: Get-Acl/Set-Acl follow a junction, so the ACL rewrite and the deletes
+        would hit the target."""
+        root = tmp_path / "wheelhouse"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("precious")
+
+        out = _ps(tmp_path, _LINK + f"""
+New-Item -ItemType $linkType -Path {_q(root)} -Target {_q(outside)} | Out-Null
+$root = {_q(root)}
+$before = $false
+$err = Protect-RemoteOSWheelhouseRoot -Root $root -User $env:USERNAME
+""" + self._STATE)
+
+        assert out["err"] is None and out["trusted"] is True, out
+        assert (outside / "keep.txt").read_text() == "precious"
+        assert not (root / "keep.txt").exists(), "the root is still the link"
+        acl = _ps(tmp_path, f"@{{ p = (Get-Acl -LiteralPath {_q(outside)}).AreAccessRulesProtected }} | "
+                            "ConvertTo-Json -Compress")
+        assert acl["p"] is False, "the link target's ACL was rewritten"
+
+    def test_a_config_folder_that_is_a_link_is_refused(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside"
+        (outside / "wheelhouse").mkdir(parents=True)
+        (outside / "wheelhouse" / "keep.txt").write_text("precious")
+        config = tmp_path / "cfg"
+
+        out = _ps(tmp_path, _LINK + f"""
+New-Item -ItemType $linkType -Path {_q(config)} -Target {_q(outside)} | Out-Null
+@{{ err = (Protect-RemoteOSWheelhouseRoot -Root {_q(config / "wheelhouse")} -User $env:USERNAME) }} |
+    ConvertTo-Json -Compress
+""")
+
+        assert out["err"] and "link" in out["err"], out
+        assert (outside / "wheelhouse" / "keep.txt").read_text() == "precious"
+
     def test_a_root_someone_else_made_is_replaced_with_everything_in_it(self, tmp_path: Path) -> None:
         planted = tmp_path / "wheelhouse" / SHA_NEW / "remoteos_mcp-6.6.6-py3-none-any.whl"
         planted.parent.mkdir(parents=True)
@@ -514,3 +581,45 @@ $err = Protect-RemoteOSWheelhouseRoot -Root $root -User $env:USERNAME
         assert out["before"] is False, "a root with the profile's inherited ACL was trusted"
         assert out["err"] is None and out["trusted"] is True, out
         assert not planted.exists(), "a wheel planted in an untrusted root survived"
+
+
+# --- review round 2: links, the trusted check itself, the marked version line -----------------
+
+_LINK = "$linkType = 'Junction'; if ($IsLinux) { $linkType = 'SymbolicLink' }\n"
+
+
+class TestNoLinkIsFollowed:
+    """An elevated delete must never follow a link the desktop user planted (Windows PowerShell
+    5.1's Remove-Item -Recurse enters a junction and deletes the target's contents)."""
+
+    def test_pruning_removes_a_planted_link_never_its_target(self, tmp_path: Path) -> None:
+        root = tmp_path / "wheelhouse"
+        _wheelhouse(root / SHA_NEW, "1.0")
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("precious")
+
+        out = _ps(tmp_path, _LINK + f"""
+New-Item -ItemType $linkType -Path {_q(root / ("3" * 40))} -Target {_q(outside)} | Out-Null
+$removed = Remove-RemoteOSStaleWheelhouses -Root {_q(root)} -Keep @('{SHA_NEW}')
+@{{ removed = @($removed) }} | ConvertTo-Json -Compress
+""")
+
+        assert out["removed"] == ["3" * 40]
+        assert (outside / "keep.txt").read_text() == "precious", "the prune followed the link"
+        assert sorted(p.name for p in root.iterdir()) == [SHA_NEW]
+
+
+class TestInstalledVersion:
+    def test_a_late_warning_on_stderr_is_not_the_version(self, tmp_path: Path, venv: Path) -> None:
+        """Review round 2: the marked line was only text-matched. A .pth atexit hook writes a
+        warning to stderr AFTER the version line, as a late DeprecationWarning would."""
+        wheelhouse = _wheelhouse(tmp_path / "wh", "1.0")
+        subprocess.run([str(venv), "-m", "pip", "install", "-q", "--no-index", "--find-links", str(wheelhouse),
+                        "remoteos-mcp==1.0"], check=True, timeout=300)
+        site = subprocess.run([str(venv), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        Path(site, "late_warning.pth").write_text(
+            "import atexit, sys; atexit.register(lambda: sys.stderr.write('DeprecationWarning: late\\n'))\n")
+
+        assert _installed(tmp_path, venv) == "1.0"
