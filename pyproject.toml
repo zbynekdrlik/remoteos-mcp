@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remoteos-mcp"
-version = "0.7.0.dev37"
+version = "0.7.0.dev38"
 description = "Remote OS MCP Server - control Windows, macOS, and Linux machines via MCP protocol"
 readme = "README.md"
 license = "MIT"
@@ -42,6 +42,7 @@ dependencies = [
 [project.scripts]
 remoteos-mcp = "remoteos.__main__:cli"
 remoteos-gateway = "remoteos.gateway.cli:main"
+remoteos-call = "remoteos.cli_call:main"
 
 [project.optional-dependencies]
 ocr = ["pytesseract>=0.3.10"]

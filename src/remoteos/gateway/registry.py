@@ -422,7 +422,7 @@ def validate_key(key: str, *, what: str = "key") -> str:
 def validate_http_url(url: str, *, what: str = "url") -> str:
     """Return *url* when it is a printable http(s) url. The error never repeats the value: a key
     pasted into a url field by a hand edit would otherwise reach a log line or a notification."""
-    if not isinstance(url, str) or not _is_http_url(url) or not url.isprintable():
+    if not isinstance(url, str) or not is_http_url(url) or not url.isprintable():
         if isinstance(url, str):
             scheme = _url_scheme(url) if url.isprintable() else ""
             got = f"{len(url)} characters, " + (f"scheme {scheme!r}" if scheme.isalnum() else "no http(s) scheme")
@@ -525,7 +525,7 @@ def load_machines(path: Path) -> dict[str, Upstream]:
             logger.warning("machine source: entry %r is not an object — skipped", name)
             continue
         url = entry.get("url")
-        if not isinstance(url, str) or not _is_http_url(url):
+        if not isinstance(url, str) or not is_http_url(url):
             logger.warning("machine source: entry %r has no http(s) url — skipped", name)
             continue
         authorization = authorization_header(entry)
@@ -535,7 +535,7 @@ def load_machines(path: Path) -> dict[str, Upstream]:
     return machines
 
 
-def _is_http_url(url: str) -> bool:
+def is_http_url(url: str) -> bool:
     """An http(s) url with a host and, if any, a valid port. urlsplit RAISES on some strings
     ("http://[bad/mcp") and ``.port`` raises on a bad port (":99999", ":80a"): such a url is
     simply not usable — refused here, never a crash in a probe later."""

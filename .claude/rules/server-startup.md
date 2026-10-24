@@ -52,7 +52,7 @@ paths:
   - Real-OS checks: `test_startup_flags` (initialize over HTTP on the Linux runner) and
     `tests_windows/test_identity_windows.py`.
 - **Startup tests start the real server in a subprocess.** The env must be hermetic (see
-  `_child_env`):
+  `tests/fleet_harness.py` `hermetic_child_env`, shared with `test_cli_call`):
   - `FASTMCP_CHECK_FOR_UPDATES=off`; otherwise the banner calls pypi.org and writes
     `~/.local/share/fastmcp/version_cache.json`.
   - A temp HOME and XDG_DATA_HOME, `--config` with an empty file, and this checkout's
@@ -151,6 +151,11 @@ paths:
 - **FileUpload checks the cap and decodes with `validate=True` BEFORE any mkdir/write.** Only
   whitespace is dropped (`str.translate`). Catch `ValueError`: non-ASCII input raises a plain
   one, not `binascii.Error`.
+  - Over HTTP the 100 MB cap is never reached: the mcp transport refuses a request body over
+    4 MiB (`mcp/server/transport_security.py` `DEFAULT_MAX_REQUEST_BODY_SIZE`, 413), so one
+    FileUpload carries about 3 MB of file (#70, `remoteos-call put`). fastmcp 4.1.2 does not pass
+    mcp's `max_request_body_size` through. Replies have no such cap on the server side; the mcp
+    CLIENT's 1 MiB SSE event limit is in `.claude/rules/cli-call.md`.
 - **Task status writes go through `TaskManager._transition`.** It checks `is_cancelled` and
   writes the status in one step under `_lock`, the same lock `cancel_task` and
   `_cleanup_old` use. Never write `task.status` directly in the wrapper.

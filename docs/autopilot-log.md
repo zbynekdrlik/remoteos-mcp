@@ -491,3 +491,45 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   (toast `Show()` works on windows-latest). Local 1188 pass; CI all green on PR and main.
 - **Open for the owner:** Python 3.10 keeps Pillow 12.3.0 (CVEs; Pillow 13 needs 3.11) — drop 3.10,
   ignore entry, or accept. Follow-up candidate: OAuth without a secret (authorize approves all).
+
+## #64 — Windows installer: download first, install offline, roll back; macOS ref input; Python 3.11 (PR #69, merge `173cfe1`, 0.7.0.dev37)
+
+- **Design:** main's Approach 1. install.ps1: preflight into `<config>\wheelhouse\<sha>` (constraints
+  via urllib, `pip download --timeout 60 --retries 10`, `pip wheel --no-deps` over every sdist,
+  `<sha>.partial` renamed when whole, reused when this Python installs it), dry-run of the new and
+  the rollback wheelhouse before the stop, offline install, every failure after the stop rolls back
+  (`Exit-RemoteOSAfterFailure @rollback`), prune to current+previous after the proven install.
+  The wheelhouse root is Administrators-owned (elevated pip); no elevated `Remove-Item -Recurse`
+  (junctions). install.sh: `REMOTEOS_MCP_REF`. Python >= 3.11 everywhere, constraints for 3.11.
+- **Commits:** bump 9900d68; RED 2610972 → GREEN ed8bbea (+ 8496ff4 older static checks moved);
+  review RED eba93dd → GREEN 197b38b, RED 7a6d5ed → GREEN eef4936, RED cd0bc79 → GREEN 12e8902,
+  bf5e4d8 → 09a3df6 (tree walk: .NET Framework's recursive delete throws on a junction).
+- **Tests:** `tests_windows/test_install_ps1_wheelhouse.py` (real pip in a venv, a local index with
+  in-tree-backend sdists, no network; ACL/junction cases Windows-only), static checks in
+  `tests/test_installer_windows_key.py`, `tests/test_installer_python_gate.py` (also bash 3.2),
+  `TestMacosSourceRef`. CI all green on PR and main; local 1225 pass.
+- **Follow-up candidates (listed on the ticket):** wheelhouse in %ProgramData% (profile swap
+  residual), a Windows trap for a run killed between stop and install, uninstall.ps1 elevation +
+  desktop profile, generator split of install.ps1 (999 lines) before the updater ticket.
+
+## #70 — `remoteos-call`: scripts reach a machine over MCP, not SSH (part b of #67, 0.7.0.dev38)
+
+- **What:** console script `remoteos-call` (`src/remoteos/cli_call.py`): `MACHINE Shell CMD`
+  (stdout/stderr split, remote exit code), `put`/`get` (FileUpload/FileDownload, size-checked),
+  `TOOL --json`, `--list`; config from `--config` / `--project` / `./.mcp.json`; exits 125 tool
+  error, 126 no result, 130, 141, 2. Design by the main session on #70 (Approach 1).
+- **Decisions:** fastmcp `Client` with `mode="legacy"`; an httpx response hook recovers the HTTP
+  status the SDK hides; `trust_env=False`; the SDK's 1 MiB SSE event limit lifted by a
+  process-local `EventSource` swap (loud if the SDK changes); config read with
+  `gateway/registry.py`'s helpers (`is_http_url` and `taskmanager.declared_runtime` made public).
+- **Commits:** bump 021e4d3 → feature 4375cfd → review rounds 69f9458, dbe5071, 4cdacb2 (three
+  fresh-context reviews: 2🔴8🟡7🔵 → 0🔴2🟡8🔵 → 0🔴1🟡6🔵, all fixed or dispositioned).
+- **Tests:** `tests/test_cli_call.py` against a REAL server + REAL gateway (subprocesses on
+  loopback): exit-code mapping, stderr split, put/get sha256 round trips (5 MB get), 2.5 MB Shell
+  output, 125/126 paths, the token never in output/logs/access log/argv; console script run as a
+  process (closed pipe → 141, `FASTMCP_LOG_LEVEL=DEBUG` silent). Local 1334 pass.
+- **Follow-up candidates (for the supervisor):** `put` is capped at about 3 MB by the machine's
+  4 MiB mcp request limit (raise it server-side or add chunked/append FileUpload) — restreamer's
+  `.deb` installs will hit it; structured Shell output (exit code / stderr as fields) to remove
+  the plain-text round-trip limits; the gateway's 600 s upstream read timeout cuts Shell calls
+  over ~540 s (SSE keep-alive pings).

@@ -16,7 +16,6 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import json
-import os
 import platform
 import secrets
 import socket
@@ -29,12 +28,11 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from fleet_harness import free_port, hermetic_child_env
 
-import remoteos
 from remoteos import __version__
 
 _START_TIMEOUT = 60.0  # a cold interpreter imports fastmcp + uvicorn + PIL before it binds
-_SRC = str(Path(remoteos.__file__).resolve().parents[1])  # this checkout's src/, not whatever is installed
 
 
 def _runner_os() -> str:
@@ -45,25 +43,6 @@ def _runner_os() -> str:
 def _health() -> dict:
     """``/health`` on this runner: status + version (the installers' contract) and #59's os + hostname."""
     return {"status": "ok", "version": __version__, "os": _runner_os(), "hostname": socket.gethostname()}
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _child_env(tmp_path) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("REMOTEOS_", "FASTMCP_"))}
-    env.update(
-        PYTHONUNBUFFERED="1",
-        PYTHONPATH=os.pathsep.join(p for p in (_SRC, env.get("PYTHONPATH", "")) if p),
-        HOME=str(tmp_path),
-        XDG_DATA_HOME=str(tmp_path / "xdg-data"),
-        FASTMCP_CHECK_FOR_UPDATES="off",  # no call to pypi.org, no version cache written
-        FASTMCP_SHOW_SERVER_BANNER="false",
-    )
-    return env
 
 
 def _empty_config(tmp_path) -> Path:
@@ -102,14 +81,14 @@ def _self_signed_cert(tmp_path):
 
 class _Server:
     def __init__(self, tmp_path, args: list[str], env: dict[str, str] | None = None):
-        self.port = _free_port()
+        self.port = free_port()
         self.log_path = tmp_path / "server.log"
         self._log = open(self.log_path, "wb")
         config = _empty_config(tmp_path)
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "remoteos", "--port", str(self.port), "--config", str(config), *args],
             cwd=tmp_path,
-            env={**_child_env(tmp_path), **(env or {})},
+            env={**hermetic_child_env(tmp_path), **(env or {})},
             stdout=self._log,
             stderr=subprocess.STDOUT,
         )
@@ -285,7 +264,7 @@ def test_stdio_stdout_carries_only_json_rpc(tmp_path):
         [sys.executable, "-m", "remoteos", "--transport", "stdio", "--config", str(_empty_config(tmp_path))],
         input=json.dumps(initialize).encode() + b"\n",
         cwd=tmp_path,
-        env=_child_env(tmp_path),
+        env=hermetic_child_env(tmp_path),
         capture_output=True,
         timeout=_START_TIMEOUT,
     )
@@ -346,13 +325,17 @@ server.cli()
 def test_scrape_block_private_is_configured_at_start_up(tmp_path, how, expected):
     # review (#39): the flag and the remoteos.toml key reach the Scrape policy; the default allows the LAN
     config = tmp_path / "remoteos.toml"
-    config.write_text({"toml": "[security]\nscrape_block_private = true\n",
-                       "toml-false": "[security]\nscrape_block_private = \"no\"\n"}.get(how, ""))
+    config.write_text(
+        {
+            "toml": "[security]\nscrape_block_private = true\n",
+            "toml-false": '[security]\nscrape_block_private = "no"\n',
+        }.get(how, "")
+    )
     args = ["--config", str(config), *(["--scrape-block-private"] if how == "flag" else [])]
     done = subprocess.run(
         [sys.executable, "-c", _SCRAPE_POLICY_PROBE, *args],
         cwd=tmp_path,
-        env=_child_env(tmp_path),
+        env=hermetic_child_env(tmp_path),
         capture_output=True,
         timeout=_START_TIMEOUT,
     )

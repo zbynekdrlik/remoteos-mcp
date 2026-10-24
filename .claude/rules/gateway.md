@@ -160,7 +160,7 @@ paths:
     run: there is nowhere to remember that it was. Validation messages never repeat a value (a
     key pasted into `url` would reach Discord): length and scheme only.
   - `urlsplit` RAISES `ValueError` on some strings (`http://[bad/mcp`, an invalid IPv6 literal),
-    and its `.port` raises on a bad port (`:99999`, `:80a`). `registry._is_http_url` evaluates
+    and its `.port` raises on a bad port (`:99999`, `:80a`). `registry.is_http_url` evaluates
     both inside one `try` and requires a hostname, so such a url is just "not http(s)" in the
     key store, the gateway reload and import (review rounds 3-4: each crashed check silently).
     Second line of defence: `probe.gather_probes` turns any probe that still raises into an

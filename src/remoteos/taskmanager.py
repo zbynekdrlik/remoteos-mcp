@@ -97,7 +97,7 @@ _RUNTIME_ARGS = ("timeout", "seconds")
 _TIMEOUT_HEADROOM_S = 60
 
 
-def _declared_runtime(kwargs: dict) -> float | None:
+def declared_runtime(kwargs: dict) -> float | None:
     """The longest runtime a call declares through a numeric ``_RUNTIME_ARGS`` argument, plus headroom."""
     declared = [
         float(value)
@@ -289,7 +289,7 @@ class TaskManager:
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            task = self.create_task(tool_name, max_runtime=_declared_runtime(kwargs))
+            task = self.create_task(tool_name, max_runtime=declared_runtime(kwargs))
             prefix = f"[task:{task.task_id}]"
 
             # Try to acquire semaphore — wait up to 60s
