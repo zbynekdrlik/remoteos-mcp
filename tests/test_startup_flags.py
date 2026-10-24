@@ -326,6 +326,39 @@ def test_a_keyed_lan_bind_with_tier3_starts(start_server):
     assert srv.health() == _health()
 
 
+# Runs the real CLI start-up and, in place of serving (FastMCP's mcp.run, the transport), prints the
+# Scrape policy the start-up configured. Scrape itself is excluded on Linux (tiers), so the policy
+# is read where the tool reads it.
+_SCRAPE_POLICY_PROBE = """
+import sys
+import remoteos.__main__ as server
+from remoteos import scrape
+server.mcp.run = lambda **kw: print("BLOCK_PRIVATE=" + str(scrape.BLOCK_PRIVATE), flush=True)
+sys.argv = ["remoteos", *sys.argv[1:]]
+server.cli()
+"""
+
+
+@pytest.mark.parametrize(
+    ("how", "expected"), [("default", "False"), ("flag", "True"), ("toml", "True"), ("toml-false", "False")]
+)
+def test_scrape_block_private_is_configured_at_start_up(tmp_path, how, expected):
+    # review (#39): the flag and the remoteos.toml key reach the Scrape policy; the default allows the LAN
+    config = tmp_path / "remoteos.toml"
+    config.write_text({"toml": "[security]\nscrape_block_private = true\n",
+                       "toml-false": "[security]\nscrape_block_private = \"no\"\n"}.get(how, ""))
+    args = ["--config", str(config), *(["--scrape-block-private"] if how == "flag" else [])]
+    done = subprocess.run(
+        [sys.executable, "-c", _SCRAPE_POLICY_PROBE, *args],
+        cwd=tmp_path,
+        env=_child_env(tmp_path),
+        capture_output=True,
+        timeout=_START_TIMEOUT,
+    )
+    out = done.stdout.decode("utf-8", "replace")
+    assert f"BLOCK_PRIVATE={expected}" in out, (out + done.stderr.decode("utf-8", "replace"))[-2000:]
+
+
 def test_an_unauthenticated_lan_bind_with_tier_1_2_only_starts_with_the_warning(start_server):
     srv = start_server("--host", "0.0.0.0")
     assert srv.health() == _health()

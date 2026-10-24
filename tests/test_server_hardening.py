@@ -22,6 +22,7 @@ import http.server
 import secrets
 import socket
 import threading
+import tracemalloc
 import urllib.request
 
 import pytest
@@ -164,6 +165,18 @@ def test_a_configured_secret_is_required_at_the_token_endpoint(client_id):
     assert good.status_code == 200, good.text
 
 
+@pytest.mark.parametrize(
+    "body",
+    [["not", "a", "dict"], {"grant_type": "authorization_code", "code": ["x"]},
+     {"grant_type": "authorization_code", "code": "c", "client_id": {"a": 1}}],
+    ids=["list-body", "list-code", "dict-client-id"],
+)
+def test_a_malformed_token_request_is_a_400_never_a_500(body):
+    response = _oauth_client().post("/oauth/token", json=body)
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_request"
+
+
 def test_without_a_configured_secret_a_public_client_needs_none():
     client = _oauth_client()
     assert _token(client, _code(_authorize(client, "c1")), "c1").status_code == 200
@@ -177,6 +190,7 @@ def test_without_a_configured_secret_a_public_client_needs_none():
 class _Pages(http.server.BaseHTTPRequestHandler):
     bodies: dict[str, bytes] = {}
     hits: list[str] = []
+    redirect_body = b""  # the body a 302 carries (no Content-Length: read until the connection ends)
 
     def do_GET(self):  # noqa: N802 (http.server's name)
         self.hits.append(self.path)
@@ -185,6 +199,10 @@ class _Pages(http.server.BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", self.path[len("/redirect"):] or "/")
             self.end_headers()
+            try:
+                self.wfile.write(self.redirect_body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the client never reads a redirect's body: it closed the connection
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -201,6 +219,7 @@ class _Pages(http.server.BaseHTTPRequestHandler):
 def pages():
     _Pages.bodies = {}
     _Pages.hits = []
+    _Pages.redirect_body = b""
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Pages)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -269,6 +288,20 @@ def test_scrape_block_private_refuses_a_redirect_to_a_private_address(monkeypatc
     request = urllib.request.Request("http://public.example/x")
     with pytest.raises(ValueError, match="refusing a private or local address"):
         scrape._RefusePrivateRedirects().redirect_request(request, None, 302, "Found", {}, "http://127.0.0.1/admin")
+
+
+def test_scrape_never_reads_a_redirect_s_own_body(pages):
+    # review: CPython's redirect handler read the 30x body with a bare fp.read(), past the cap
+    base, handler = pages
+    handler.bodies["/target"] = b"<p>tu</p>"
+    handler.redirect_body = b"r" * (40 * 1024 * 1024)
+    tracemalloc.start()
+    try:
+        assert server.Scrape(f"{base}/redirect/target").strip() == "tu"
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024, f"{peak} bytes allocated: the redirect body was read"
 
 
 def test_scrape_default_follows_a_redirect_on_the_lan(pages):

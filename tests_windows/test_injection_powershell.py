@@ -9,7 +9,7 @@ App name went into double-quoted strings and the toast text into an expandable h
 
 from __future__ import annotations
 
-import os
+import time
 from pathlib import Path
 
 import pytest
@@ -35,6 +35,11 @@ def workdir(tmp_path, monkeypatch) -> Path:
     return tmp_path
 
 
+def _squeezed(text: str) -> str:
+    """``text`` without any whitespace: PowerShell may wrap an error record at its console width."""
+    return "".join(text.split())
+
+
 def _nothing_ran(workdir: Path) -> None:
     assert not (workdir / "x").exists(), "the payload ran as PowerShell"
 
@@ -52,7 +57,7 @@ def test_a_service_name_is_literal_text(payload, workdir):
         services.service_start(payload)
     # Start-Service names the service it could not find: the payload, verbatim (lines joined in
     # case PowerShell wraps the error record at its console width)
-    assert payload in "".join(str(exc.value).splitlines()), str(exc.value)
+    assert _squeezed(payload) in _squeezed(str(exc.value)), str(exc.value)
     _nothing_ran(workdir)
 
 
@@ -60,7 +65,7 @@ def test_a_service_name_is_literal_text(payload, workdir):
 def test_an_event_log_name_is_literal_text(payload, workdir):
     reply = services.event_log(payload, 1)
     # "There is not an event log on the localhost computer that matches <name>."
-    assert payload in "".join(reply.splitlines()), reply
+    assert _squeezed(payload) in _squeezed(reply), reply
     _nothing_ran(workdir)
 
 
@@ -79,10 +84,11 @@ def test_an_app_name_and_its_arguments_are_literal_text(payload, workdir):
     app = apps / f"{payload}.cmd"
     app.write_text(f'@echo off\r\n>"{marker}" echo %*\r\n', encoding="ascii")
     desktop.launch_app(str(app), "$(Set-Content x pwned)")
-    for _ in range(100):
+    deadline = time.monotonic() + 60  # a cold runner starts a .cmd through ShellExecute slowly
+    while time.monotonic() < deadline:
         if marker.exists() and marker.read_text(encoding="ascii").strip():
             break
-        os.system("ping -n 1 127.0.0.1 >nul")  # ~1 s, no sleep in a test helper
+        time.sleep(0.2)
     assert marker.read_text(encoding="ascii").strip() == "$(Set-Content x pwned)"
     _nothing_ran(workdir)
     _nothing_ran(apps)

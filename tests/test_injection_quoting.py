@@ -251,6 +251,20 @@ def test_mac_notification_escapes_a_backslash_before_a_quote(mac_session, monkey
     ]
 
 
+def test_mac_event_log_level_is_a_word_never_a_predicate(monkeypatch):
+    # review: the level went into `log show --predicate "messageType == <level>"` unchecked
+    from remoteos.platform.mac import services as mac_services
+
+    calls = []
+    monkeypatch.setattr(subprocess, "Popen", popen_answered_by(lambda cmd, **kw: calls.append(cmd) or run_result(kw)))
+    with pytest.raises(ValueError, match="level must be a single word"):
+        mac_services.event_log(level="error OR 1 == 1")
+    assert calls == []
+    mac_services.event_log(level="error")
+    [cmd] = calls
+    assert cmd[-2:] == ["--predicate", "messageType == error"]
+
+
 def test_mac_focus_window_title_is_an_applescript_literal(mac_session, monkeypatch):
     mod, _ = mac_session
     scripts = _osascript_recorder(mod, monkeypatch)
