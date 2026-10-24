@@ -31,6 +31,22 @@ jobs:
       - run: pip install -e '.[test]'
       - run: pytest
 
+  # The bash installers (#12): shellcheck, and the macOS installer tests under bash 3.2 (macOS's
+  # /bin/bash, which `curl | bash` runs there: no heredoc in $(...), no mapfile, no
+  # globasciiranges). RealMetadata needs a pip-installed pytest (apk's has no INSTALLER file).
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck --version
+      - run: shellcheck install-linux.sh install.sh uninstall*.sh
+      - name: macOS installer tests under bash 3.2
+        run: >-
+          docker run --rm -v "$PWD":/w:ro bash:3.2 sh -c '
+          ln -sf /usr/local/bin/bash /bin/bash && apk add -q python3 py3-pytest && adduser -D -u 1000 t &&
+          su t -c "cd /w && INSTALLER_TEST_BASH=/bin/bash python3 -m pytest -q -p no:cacheprovider --noconftest
+          -k \"not RealMetadata\" tests/test_installer_macos_key.py tests/test_installer_preflight_rollback.py"'
+
   # Real Windows PowerShell 5.1, no fakes (#48 round 2): en-US, OEM code page 437 like resolume-pp.
   # Its own directory, which the Linux job never collects (testpaths = tests).
   # cmd, not the default pwsh 7 (review round 2): pwsh puts its own module folders first in

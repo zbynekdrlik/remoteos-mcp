@@ -701,7 +701,7 @@ class TestRollbackHelperOnRealMetadata:
 class TestWindowsPipErrorOutput:
     def _main_install(self) -> tuple[str, str]:
         content = INSTALLER_WINDOWS.read_text()
-        idx = _find_first_code_line(content, "pip", "install", "main.zip", exclude="uninstall")
+        idx = _find_first_code_line(content, "pip", "install", "archive/", exclude="uninstall")
         assert idx is not None, "install.ps1 must have the main pip install line"
         return content, content.split("\n")[idx].strip()
 
@@ -713,7 +713,7 @@ class TestWindowsPipErrorOutput:
         match = re.match(r"\$(\w+)\s*=\s*&\s*\$python\s+-m\s+pip\s+install\b", line)
         assert match, f"the main pip install output must be captured into a variable: {line!r}"
         failure = content.index("[X] pip install failed")
-        branch = content[failure : content.index("return", failure)]
+        branch = content[failure : content.index("\n}", failure)]
         assert f"${match.group(1)}" in branch, "the failure branch must print the captured pip output"
 
     def test_main_pip_install_exit_code_decides_failure(self) -> None:

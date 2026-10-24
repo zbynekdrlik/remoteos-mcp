@@ -190,8 +190,10 @@ class TestWindowsVersionSelfCheck:
             "install.ps1 must read the installed package version (via "
             "importlib.metadata or pip show) to compare with /health"
         )
-        # Must exit on mismatch
-        assert "exit 1" in content or "exit(1)" in content, (
+        # Must exit on mismatch: the line after the mismatch message exits 1, directly or through
+        # Exit-RemoteOSInstaller (#57)
+        after_mismatch = content[content.index("but service reports"):].split("\n")[1].strip()
+        assert after_mismatch == "exit 1" or after_mismatch.startswith("Exit-RemoteOSInstaller -Code 1"), (
             "install.ps1 must exit non-zero when installed version does not "
             "match the running service version"
         )
@@ -233,7 +235,7 @@ class TestWindowsStopBeforePip:
             "server before pip install"
         )
         # Find position of the MAIN pip install command (the one installing
-        # from main.zip, not the fastmcp-slim recovery line).
+        # from the GitHub source archive, not the fastmcp-slim recovery line).
         lines = content.split("\n")
         pip_line_offset = 0
         pip_found = False
@@ -242,7 +244,7 @@ class TestWindowsStopBeforePip:
             if (
                 "pip" in stripped
                 and "install" in stripped
-                and "main.zip" in stripped
+                and "archive/" in stripped
                 and not stripped.startswith("#")
                 and not stripped.startswith("REM")
                 and "Write-Host" not in stripped
@@ -269,8 +271,11 @@ class TestWindowsStopBeforePip:
             "install.ps1 must have a post-install import sanity check for "
             "remoteos and/or fastmcp"
         )
-        # The import check block must contain exit 1 (fail hard)
-        assert "exit 1" in content, (
+        # The import check block must exit 1 (fail hard): directly, or through
+        # Exit-RemoteOSInstaller (#57), which pauses a piped console run first
+        failure = content.index("Import check failed")
+        block = content[failure : content.index("\n}", failure)]
+        assert "exit 1" in block or "Exit-RemoteOSInstaller -Code 1" in block, (
             "install.ps1 import check must exit 1 on failure — never repair"
         )
 
@@ -302,7 +307,7 @@ class TestDeterministicPreUninstall:
         fastmcp-slim before the main pip install."""
         content = INSTALLER_WINDOWS.read_text()
         uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
-        install_pos = _find_first_code_line(content, "pip", "install", "main.zip")
+        install_pos = _find_first_code_line(content, "pip", "install", "archive/")
         assert uninstall_pos is not None, (
             "install.ps1 must pip uninstall remoteos-mcp before install"
         )
@@ -323,7 +328,7 @@ class TestDeterministicPreUninstall:
     def test_windows_no_force_reinstall(self) -> None:
         """install.ps1 must NOT use --force-reinstall on the main install."""
         content = INSTALLER_WINDOWS.read_text()
-        assert _find_first_code_line(content, "pip", "install", "--force-reinstall", "main.zip") is None, (
+        assert _find_first_code_line(content, "pip", "install", "--force-reinstall", "archive/") is None, (
             "install.ps1 must not use --force-reinstall on the main install "
             "(cascades to deps and corrupts fastmcp/__init__.py)"
         )
