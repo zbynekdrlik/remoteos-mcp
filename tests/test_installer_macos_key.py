@@ -22,7 +22,10 @@ from pathlib import Path
 import pytest
 from fake_linux_tools import records
 from installer_harness import (
+    DEV_SHA,
+    FAKE_SHA,
     NEW_VERSION,
+    TAG_SHA,
     _create_macos_shims,
     _prepare_macos_installer,
     _run_installer,
@@ -238,3 +241,45 @@ class TestMacosKeyPrecedence:
         assert "REMOTEOS_MCP_AUTH_KEY" in _output(result)
         assert mac.plist.read_bytes() == plist_before
         assert mac.pip.calls("install") == [] and mac.pip.calls("uninstall") == []
+
+
+class TestMacosSourceRef:
+    """#64: install.sh pinned ONE commit of main only; it now takes REMOTEOS_MCP_REF (a commit
+    sha, a tag or a branch, default main) like install-linux.sh, resolved to one sha that the
+    install and its constraints both use (#60's updater runs installers pinned to a release)."""
+
+    def _sources(self, mac: Mac) -> set[str]:
+        installs = mac.pip.calls("install") + mac.pip.calls("dry-run")
+        assert installs, "pip install never ran"
+        urls = {a for e in installs for a in e["argv"] if a.startswith("git+")}
+        constraints = {e["PIP_CONSTRAINT"] for e in installs}
+        return urls | constraints
+
+    @pytest.mark.parametrize(("ref", "sha"), [
+        (None, FAKE_SHA), ("main", FAKE_SHA), ("dev", DEV_SHA), ("v1.0", TAG_SHA), ("a" * 40, "a" * 40),
+    ], ids=["default", "main", "branch", "annotated-tag", "sha"])
+    def test_the_ref_resolves_to_one_commit_for_the_code_and_the_constraints(
+            self, tmp_path: Path, ref: str | None, sha: str) -> None:
+        mac = Mac(tmp_path)
+
+        result = mac.run(**({"REMOTEOS_MCP_REF": ref} if ref else {}))
+
+        assert result.returncode == 0, _output(result)
+        assert self._sources(mac) == {
+            f"git+https://github.com/zbynekdrlik/remoteos-mcp.git@{sha}",
+            f"https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/{sha}/constraints.txt",
+        }
+        assert f"@ {sha[:12]}" in result.stdout
+
+    @pytest.mark.parametrize("ref", ["--upload-pack=touch x", "a..b", "-x", "bad ref", "nosuchbranch"])
+    def test_a_bad_or_unknown_ref_changes_nothing(self, tmp_path: Path, ref: str) -> None:
+        mac = Mac(tmp_path)
+        before = mac.pip.files()
+
+        result = mac.run(REMOTEOS_MCP_REF=ref)
+
+        assert result.returncode != 0, _output(result)
+        assert "nothing was changed on this box" in _output(result)
+        assert mac.pip.calls("install") == [] and mac.pip.calls("uninstall") == []
+        assert mac.pip.files() == before
+        assert not mac.plist.exists()

@@ -103,11 +103,20 @@ def test_install_ps1_uses_no_powershell_7_only_syntax() -> None:
 # Lines of the script's own flow that change the box: the first one must come after the gate.
 _STATE_CHANGES = ("pip uninstall", "pip install", "Remove-Item -Recurse", "Unregister-ScheduledTask",
                   "Remove-NetFirewallRule", "schtasks /End", "Stop-Process", "Set-Content", "New-Item",
-                  "winget install", "curl.exe", "& $installerPath")
+                  "winget install", "curl.exe", "& $installerPath", "Stop-RemoteOSServer",
+                  "Install-RemoteOSWheelhouse")
 
 
 def _function_names() -> set[str]:
     return {line.split()[1].split("(")[0] for _, line in _code_lines() if line.startswith("function ")}
+
+
+def _function_code(name: str) -> list[str]:
+    """The code lines of install.ps1's top-level function `name`, its closing brace included."""
+    lines = INSTALLER_WINDOWS.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith((f"function {name}(", f"function {name} ")))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    return [line.strip() for line in lines[start:end + 1] if line.strip() and not line.strip().startswith("#")]
 
 
 def _flow_lines() -> list[tuple[int, str]]:
@@ -180,26 +189,35 @@ def test_a_failing_scheduled_task_or_firewall_rule_fails_the_run() -> None:
     """After the gate the run is elevated, so a failure there is real: exit 1, never a warning."""
     for marker in ("Register-ScheduledTask -TaskName", "New-NetFirewallRule -DisplayName"):
         block = _catch_block_after(marker)
-        assert "exit 1" in block or "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit" in block, (
-            f"the catch after {marker} only warns: {block}")
+        # After the stop a failure rolls back first (#64), then exits 1
+        assert any(line.startswith("Exit-RemoteOSAfterFailure -Reason") and line.endswith("@rollback")
+                   for line in block), f"the catch after {marker} does not fail the run: {block}"
 
 
 def test_an_ssh_run_starts_the_server_through_the_scheduled_task() -> None:
     """A server started from session 0 (SSH) dies with the SSH session (resolume-pp, #57
     amendment). Off the desktop the installer runs the task instead and proves the listener is
     the task's process; only an interactive run starts the server itself."""
+    # The start and the proof are functions since #64: the rollback starts and proves the old
+    # version the same way
+    start = _function_code("Start-RemoteOSServer")
+    assert 'schtasks /Run /TN "RemoteOSMCP"' in "\n".join(start)
+    direct = [i for i, line in enumerate(start) if line.startswith("Start-Process") and "wscript.exe" in line]
+    assert len(direct) == 1, direct
+    branch = [line for line in start[:direct[0]] if line.startswith("if (")][-1]
+    assert branch.startswith("if ($StartDirect)"), f"the direct start is not inside the StartDirect branch: {branch}"
     flow = _flow_lines()
     code = "\n".join(line for _, line in flow)
-    assert 'schtasks /Run /TN "RemoteOSMCP"' in code
-    assert "Get-RemoteOSListenerSessionId" in _function_names()
-    direct = [n for n, line in flow if line.startswith("Start-Process") and "wscript.exe" in line]
-    assert len(direct) == 1, direct
-    branch = [line for n, line in flow if n < direct[0] and line.startswith("if (")][-1]
-    assert branch.startswith("if ($startDirect)"), f"the direct start is not inside the startDirect branch: {branch}"
+    assert not any("wscript.exe" in line and line.startswith("Start-Process") for _, line in flow)
     # Review round 2: directly only from the desktop user's own desktop run; another account (an
     # admin's password typed at the UAC prompt) goes through the task as well
     assert "$startDirect = $interactive -and ($env:USERNAME -ieq $desktopUser)" in code
-    assert "if ($healthVer -eq $PKG_VER -and -not $startDirect) {" in code, "the task's server is not proven"
+    assert "Start-RemoteOSServer -ConfigDir $ConfigDir -StartDirect $startDirect" in code
+    assert "Test-RemoteOSServerHealth -Port $Port -Version $preflight.Version -StartDirect $startDirect" in code
+    health = _function_code("Test-RemoteOSServerHealth")
+    session = next(i for i, line in enumerate(health) if "Get-RemoteOSListenerSessionId" in line)
+    direct_ok = next(i for i, line in enumerate(health) if line.startswith("if ($StartDirect) {"))
+    assert direct_ok < session, "the task's server is not proven to run in a desktop session"
 
 
 def test_another_account_s_python_is_refused_before_anything_changes() -> None:
@@ -239,10 +257,28 @@ def test_every_failure_after_the_gate_exits_1_through_the_helper() -> None:
     bare = [(n, line) for n, line in unquoted if re.search(r"(^|[;{]\s*)(return|exit)\b", line)]
     assert bare == [], f"exits that bypass Exit-RemoteOSInstaller: {bare}"
     content = INSTALLER_WINDOWS.read_text()
-    for message in ("[X] pip install failed", "[X] Could not install Python"):
+    for message in ("[X] could not download remoteos-mcp", "[X] Could not install Python"):
         start = content.index(message)
         block = content[start:content.index("\n}", start)]
         assert "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit" in block, (message, block)
+
+
+def _stop_line() -> int:
+    stops = [n for n, line in _flow_lines() if line.startswith("Stop-RemoteOSServer")]
+    assert len(stops) == 1, stops
+    return stops[0]
+
+
+def test_every_failure_after_the_stop_rolls_back_before_it_exits() -> None:
+    """#64: a failure after the server was stopped (pip, the import check, the task, the firewall,
+    the start, the health proof) reinstalls the previous wheelhouse before it exits 1."""
+    after_stop = [line for n, line in _flow_lines() if n > _stop_line()]
+    assert not any("Exit-RemoteOSInstaller" in line for line in after_stop), "an exit after the stop skips the rollback"
+    failures = [line for line in after_stop if line.startswith("Exit-RemoteOSAfterFailure ")]
+    assert len(failures) >= 5 and all(line.endswith("@rollback") for line in failures), failures
+    body = _function_code("Exit-RemoteOSAfterFailure")
+    assert sum(line == "Exit-RemoteOSInstaller -Code 1 -Pause $Pause" for line in body) == 2, body
+    assert any("Invoke-RemoteOSRollback" in line for line in body)
 
 
 # --- #12: the code and its constraints come from ONE commit ------------------------------------
@@ -252,13 +288,12 @@ def test_the_constraints_and_the_source_archive_come_from_one_resolved_commit() 
     requests for "main", and raw caches /main/ for minutes, so a merge that changes the pins could
     pair new code with old constraints (#12). Now $Ref resolves to ONE sha that both URLs use."""
     flow = _flow_lines()
-    constraint = [line for _, line in flow if line.startswith("$env:PIP_CONSTRAINT")]
-    archive = [line for _, line in flow
-               if "pip install" in line and "archive/" in line and not line.startswith("Write-Host")]
-    assert len(constraint) == 1 and len(archive) == 1, (constraint, archive)
-    assert "/$sourceSha/constraints.txt" in constraint[0], constraint
-    assert "archive/$sourceSha.zip" in archive[0], archive
     code = "\n".join(line for _, line in flow)
+    # #64: the preflight downloads both into the commit's wheelhouse; the install reads only that
+    assert '-SourceUrl "https://github.com/zbynekdrlik/remoteos-mcp/archive/$sourceSha.zip"' in code
+    assert ('-ConstraintsUrl "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$sourceSha/constraints.txt"'
+            in code)
+    assert "$env:PIP_CONSTRAINT" not in code, "a URL constraint would make the offline install reach the network"
     assert "main.zip" not in code and "/main/constraints.txt" not in code
 
 
@@ -287,3 +322,60 @@ def test_the_elevated_relaunch_runs_the_same_commit() -> None:
     assert '$InstallerUrl = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$sourceSha/install.ps1"' in code
     assert ("Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl"
             " -SourceRef $sourceSha") in code
+
+
+# --- #64: download first, install offline, roll back ------------------------------------------
+
+def test_the_download_comes_before_the_stop_and_the_uninstall() -> None:
+    """install.ps1 stopped the server and pre-uninstalled BEFORE its one online pip install: a
+    read timeout on PyPI then left resolume-pp without MCP (~10 min, then ~1 h). Now every wheel
+    is in the commit's wheelhouse before anything changes, and a failed download exits 1."""
+    flow = _flow_lines()
+    preflight = [n for n, line in flow if line.startswith("$preflight = New-RemoteOSWheelhouse -Python $python")]
+    assert len(preflight) == 1, preflight
+    changes = [n for n, line in flow if any(change in line for change in _STATE_CHANGES)]
+    assert preflight[0] < min(changes), (preflight[0], min(changes))
+    block = _if_block("if (-not $preflight.Ok) {")
+    assert any("-- nothing was changed on this box" in line for _, line in block), block
+    assert block[-2][1] == "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit", block
+    point = [n for n, line in flow if line == "$rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir"]
+    assert len(point) == 1 and preflight[0] < point[0] < _stop_line(), (point, _stop_line())
+
+
+def test_the_preflight_downloads_with_timeouts_and_builds_every_source_archive() -> None:
+    body = "\n".join(_function_code("New-RemoteOSWheelhouse"))
+    assert "@('download', '--timeout', '60', '--retries', '10', '-c', $constraints, '-d', $partial, $SourceUrl)" in body
+    assert "@('wheel', '--no-deps', '--timeout', '60', '--retries', '10', '-c', $constraints, '-w', $partial)" in body
+    assert "Move-Item -LiteralPath $partial -Destination $final" in body, "a wheelhouse is not whole-or-absent"
+
+
+def test_the_install_is_offline_from_the_wheelhouse() -> None:
+    body = _function_code("Install-RemoteOSWheelhouse")
+    installs = [line for line in body if "@('install'" in line]
+    assert installs == ["$install = Invoke-RemoteOSPip $Python @('install', '--no-index', '--find-links', $Wheelhouse,"
+                        " '-c', (Join-Path $Wheelhouse 'constraints.txt'), \"remoteos-mcp==$Version\")"], installs
+    uninstall = next(i for i, line in enumerate(body)
+                     if "@('uninstall', '-y', 'remoteos-mcp', 'fastmcp', 'fastmcp-slim')" in line)
+    assert uninstall < body.index(installs[0]), "the pre-uninstall (#12 RECORD clash) must come first"
+    code = "\n".join(line for _, line in _code_lines())
+    assert "--force-reinstall" not in code
+    flow = "\n".join(line for _, line in _flow_lines())
+    assert ("$install = Install-RemoteOSWheelhouse -Python $python -Wheelhouse $preflight.Path"
+            " -Version $preflight.Version") in flow
+
+
+def test_old_wheelhouses_are_pruned_only_after_the_proven_install() -> None:
+    flow = _flow_lines()
+    health = next(n for n, line in flow if line.startswith("$health = Test-RemoteOSServerHealth"))
+    ref = next(n for n, line in flow if "installed-ref.txt" in line and "Set-Content" in line)
+    prune = [n for n, line in flow
+             if "Remove-RemoteOSStaleWheelhouses -Root $wheelhouseRoot -Keep @($sourceSha, $rollbackPoint.Ref)" in line]
+    assert len(prune) == 1 and health < ref < prune[0], (health, ref, prune)
+
+
+def test_python_3_11_or_newer_is_required() -> None:
+    """#64 (decided on #39): Pillow 13, the fixed release of its CVEs, needs Python 3.11."""
+    code = "\n".join(line for _, line in _code_lines())
+    assert 'if (Test-RemoteOSPythonVersion "$ver") {' in code
+    assert "-ge 10" not in code and "3.10+" not in code
+    assert "-ge 11" in "\n".join(_function_code("Test-RemoteOSPythonVersion"))
