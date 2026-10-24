@@ -442,3 +442,15 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   `test_gateway_check.py`, `test_gateway_files.py` on `tests/fleet_harness.py` (real loopback
   machines/gateway, fake ssh/sudo/airuleset at the OS boundary); conftest isolates every gateway
   default path. Result: 1034 pass (908 before), ruff clean.
+
+## #59 — server announces its real hostname, OS and shell (PR #61, merge `030d65b`, 0.7.0.dev34)
+
+- **Design:** main's Approach 1 (`Design-by: main`): pure `src/remoteos/identity.py`
+  (`server_instructions` + `machine_identity`), FastMCP `instructions` built once at import,
+  `/health` adds `os` + `hostname` (status/version unchanged). Rejected: a `WhoAmI` tool, gateway-side rename.
+- **Commits:** `628a34d` bump, `82d7a7f` feature, `509fecd` review round 1 (Windows Server named by
+  build — CPython 3.12 says "2022Server" for builds ≥ 20348; non-UTF-8 os-release falls back
+  instead of stopping the server; `/health` is keyless so its fields are public).
+- **Tests:** `tests/test_identity.py` (OS variants, fallbacks, Shell runs what is announced),
+  `test_startup_flags.py::test_initialize_and_health_name_this_machine_its_os_and_its_shell` (real
+  initialize over HTTP), `tests_windows/test_identity_windows.py`. 1053 pass, ruff clean, CI all green.

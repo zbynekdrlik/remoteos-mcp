@@ -48,8 +48,9 @@ paths:
   - Linux OS name = os-release `PRETTY_NAME`, else `platform.system() release()`. CPython caches
     os-release and defaults `PRETTY_NAME` to "Linux", so the fallback fires only without a file,
     with a file that is not UTF-8 (`UnicodeDecodeError`, caught as `ValueError`: `identity` runs
-    at import and must never stop the server), or with an empty value. Real-OS checks: `test_startup_flags` (initialize over HTTP on the
-    Linux runner) and `tests_windows/test_identity_windows.py`.
+    at import and must never stop the server), or with an empty value.
+  - Real-OS checks: `test_startup_flags` (initialize over HTTP on the Linux runner) and
+    `tests_windows/test_identity_windows.py`.
 - **Startup tests start the real server in a subprocess.** The env must be hermetic (see
   `_child_env`):
   - `FASTMCP_CHECK_FOR_UPDATES=off`; otherwise the banner calls pypi.org and writes
