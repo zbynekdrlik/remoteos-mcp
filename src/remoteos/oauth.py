@@ -291,6 +291,8 @@ def build_oauth_routes(
             except Exception:
                 return JSONResponse({"error": "invalid_request"}, status_code=400)
 
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
         grant_type = body.get("grant_type", "")
         if grant_type != "authorization_code":
             return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
@@ -300,6 +302,8 @@ def build_oauth_routes(
         client_id = body.get("client_id", "")
         redirect_uri = body.get("redirect_uri", "")
 
+        if not all(isinstance(v, str) for v in (code_value, code_verifier, client_id, redirect_uri)):
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
         auth_code = store.codes.get(code_value)
         if not auth_code:
             return JSONResponse({"error": "invalid_grant", "error_description": "unknown code"}, status_code=400)

@@ -561,16 +561,22 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps
   task names, EventLog's log name, App's path and arguments) is a single-quoted literal; the
   toast title and message reach PowerShell in environment variables. macOS AppleScript strings
   escape `\` before `"`
-- **Scrape (#39):** http(s) only, at most 5 MiB read (a larger body is an error). LAN and private
+- **Scrape (#39):** http(s) only, at most 5 MiB read (a larger body is an error; a redirect's own
+  body is never read). LAN and private
   addresses are allowed; `--scrape-block-private` (or `scrape_block_private = true` under
   `[security]` in `remoteos.toml`) refuses them, every resolved address and redirect checked
 - **OAuth (optional, off unless `--oauth-client-id`/`--oauth-client-secret`, #39):** PKCE S256
   only; redirect URIs must be `https://` or loopback `http://`; a configured client secret is
-  required at the token endpoint and never returned by registration
+  required at the token endpoint and never returned by registration. The authorize endpoint
+  approves every client, so OAuth WITHOUT `--oauth-client-secret` lets anyone obtain a token
+  (accepted next to the auth key): never turn it on without a secret
+- **App (Windows):** the name and the arguments are taken literally since #39: `$env:VAR` or
+  `$(...)` in them is no longer expanded by PowerShell
 - **`remoteos.toml` booleans** are real TOML booleans or the strings `true`/`false`/`1`/`0`/
   `yes`/`no`; anything else stops the server with an error naming the key (#39)
-- **Dependency audit (#39):** CI runs `pip-audit -r constraints.txt` with no ignore list; a
-  finding is fixed by upgrading the pin
+- **Dependency audit (#39):** CI runs `pip-audit -r constraints.txt` (Python 3.12 on Linux,
+  Windows and macOS) with no ignore list; a finding is fixed by upgrading the pin. On Python 3.10
+  the server keeps Pillow 12.3.0 (Pillow 13 needs 3.11), which carries known CVEs
 
 ## Powered by
 

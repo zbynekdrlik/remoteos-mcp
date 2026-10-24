@@ -31,12 +31,19 @@ jobs:
       - run: pip install -e '.[test]'
       - run: pytest
 
-  # Known vulnerabilities in the pinned dependency set (#39), audited for the Python every installer
-  # installs (3.12). There is no ignore list: a finding is fixed by upgrading the pin (pyproject.toml,
-  # then the uv command at the top of constraints.txt). An advisory with no fixed release needs the
+  # Known vulnerabilities in the pinned dependency set (#39), on Python 3.12 (what install.ps1 and
+  # the macOS installer install) for each OS, so the Windows- and macOS-only pins are audited too.
+  # pip-audit evaluates the markers for its own interpreter: the Python 3.10-only pin
+  # (Pillow 12.3.0, whose CVEs are fixed only in Pillow 13, which needs 3.11) is NOT audited here;
+  # see #39. There is no ignore list: a finding is fixed by upgrading the pin (pyproject.toml, then
+  # the uv command at the top of constraints.txt); an advisory with no fixed release needs the
   # owner's decision before anything is ignored.
   pip-audit:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

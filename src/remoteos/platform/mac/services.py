@@ -104,6 +104,8 @@ def event_log(log_name: str = "system", count: int = 20, level: str = "") -> str
     """Read macOS unified log entries."""
     cmd = ["log", "show", "--last", "1h", "--style", "compact"]
     if level:
+        if not level.isalpha():  # a bare word, never a predicate expression (#39 review)
+            raise ValueError("level must be a single word (e.g. error, fault, info, debug)")
         cmd += ["--predicate", f"messageType == {level}"]
     raw = _run(cmd, timeout=60)
     lines = raw.splitlines()

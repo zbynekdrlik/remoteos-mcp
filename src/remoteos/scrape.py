@@ -5,6 +5,9 @@
 - At most ``SCRAPE_MAX_BYTES`` (5 MiB) are read: ``resp.read(cap + 1)``, and a body over the cap is
   an error, never a silent cut. (The old ``resp.read()`` held the whole body in memory first; the
   50 000-character markdown cut came after.) A ``Content-Length`` over the cap fails before reading.
+  A redirect's own body is never read: CPython's redirect handler calls a bare ``fp.read()`` on the
+  30x response, so ``redirect_request`` closes it first (a closed response reads ``b""``);
+  otherwise a 302 with a huge body bypassed the cap (review round 1).
 - Private / LAN / loopback addresses are ALLOWED by default: fleet agents scrape LAN pages. With
   ``--scrape-block-private`` (``security.scrape_block_private``) they are refused: the host is
   resolved with ``getaddrinfo`` and EVERY address must be public, for the URL and for each redirect.
@@ -75,6 +78,8 @@ class _RefusePrivateRedirects(urllib.request.HTTPRedirectHandler):
         self.block_private = block_private
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if fp is not None:
+            fp.close()  # http_error_30x reads the 30x body unbounded after this returns
         _check_scheme(newurl)
         if self.block_private:
             refuse_private(newurl)

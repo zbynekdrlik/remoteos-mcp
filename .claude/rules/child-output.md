@@ -99,8 +99,12 @@ paths:
   - **`run_child(cmd, timeout, windows, cwd, env)`** is the one runner of Shell, `run_command` and
     Windows OCR: `Popen` in binary mode, its own console (Windows) or session (POSIX), then
     `decode_output` and `ChildOutput.reply()` (stdout, `[STDERR] …`, `[Exit code: N]`).
-    - `env` is the child's WHOLE environment, `None` = the server's. Only the Linux Shell passes
-      one: `shell_env()`, the server user's session variables (#52, `.claude/rules/server-startup.md`).
+    - `env` is the child's WHOLE environment, `None` = the server's. The Linux Shell passes
+      `shell_env()`, the server user's session variables (#52, `.claude/rules/server-startup.md`);
+      the Windows toast passes `toast_environment(title, message)` through `run_command(env=)`
+      (#39). Free text never goes INTO a PowerShell script: a caller value in the script is
+      `platform/win/psquote.ps_literal(value)` (a single-quoted literal, the typographic quotes
+      doubled too), and multi-line text travels in an environment variable read as `$env:NAME`.
     - **A timeout kills the whole tree** (`kill_process_tree`) and re-raises
       `subprocess.TimeoutExpired`. It names the PowerShell argv, never the trampoline: the
       client's error text is what it was before round 2. Any other exception while waiting kills
