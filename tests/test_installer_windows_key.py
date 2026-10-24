@@ -157,7 +157,8 @@ def test_a_failing_scheduled_task_or_firewall_rule_fails_the_run() -> None:
     """After the gate the run is elevated, so a failure there is real: exit 1, never a warning."""
     for marker in ("Register-ScheduledTask -TaskName", "New-NetFirewallRule -DisplayName"):
         block = _catch_block_after(marker)
-        assert "exit 1" in block, f"the catch after {marker} only warns: {block}"
+        assert "exit 1" in block or "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit" in block, (
+            f"the catch after {marker} only warns: {block}")
 
 
 def test_an_ssh_run_starts_the_server_through_the_scheduled_task() -> None:

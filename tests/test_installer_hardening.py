@@ -269,8 +269,11 @@ class TestWindowsStopBeforePip:
             "install.ps1 must have a post-install import sanity check for "
             "remoteos and/or fastmcp"
         )
-        # The import check block must contain exit 1 (fail hard)
-        assert "exit 1" in content, (
+        # The import check block must exit 1 (fail hard): directly, or through
+        # Exit-RemoteOSInstaller (#57), which pauses a piped console run first
+        failure = content.index("Import check failed")
+        block = content[failure : content.index("\n}", failure)]
+        assert "exit 1" in block or "Exit-RemoteOSInstaller -Code 1" in block, (
             "install.ps1 import check must exit 1 on failure — never repair"
         )
 
