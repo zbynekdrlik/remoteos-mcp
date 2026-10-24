@@ -286,6 +286,32 @@ $i = Test-RemoteOSInteractiveSession -SshConnection {_q(ssh_connection)} -SshCli
         assert out["interactive"] is expected
 
 
+class TestPythonReachable:
+    @pytest.mark.parametrize(
+        ("python_path", "other_account", "expected"),
+        [
+            ("C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python312\\python.exe", False, True),
+            ("C:\\Users\\admin\\AppData\\Local\\Programs\\Python\\Python312\\python.exe", True, False),
+            ("c:\\users\\ADMIN\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe", True, False),
+            ("C:\\Program Files\\Python312\\python.exe", True, True),
+            ("C:\\Users\\administrator2\\python.exe", True, True),
+            ("", True, False),
+            ("", False, True),
+        ],
+        ids=["own-account", "other-account-per-user", "other-account-alias-any-case", "all-users",
+             "a-profile-sharing-the-prefix", "other-account-none-found", "own-account-none-found"],
+    )
+    def test_the_desktop_user_s_task_can_run_the_python(self, tmp_path: Path, python_path: str,
+                                                         other_account: bool, expected: bool) -> None:
+        out = _ps(tmp_path, f"""
+$r = Test-RemoteOSPythonReachable -PythonPath {_q(python_path)} -RunProfile 'C:\\Users\\admin' `
+    -OtherAccount {"$true" if other_account else "$false"}
+@{{ reachable = $r }} | ConvertTo-Json -Compress
+""")
+
+        assert out["reachable"] is expected
+
+
 class TestExitHelper:
     """Exit-RemoteOSInstaller: a piped run in a person's console waits for Enter before it exits
     (`exit` in `irm | iex` closes the console), every other run exits at once (review round 2)."""
@@ -369,6 +395,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseInput($command, [ref
 function Start-Process {{
     param($FilePath, $Verb, [switch]$PassThru, $ArgumentList)
     if ($script:refuse) {{ throw 'The operation was canceled by the user' }}
+    if ($script:noProcess) {{ return $null }}
     $script:call = @{{ file = $FilePath; verb = $Verb; args = $ArgumentList }}
     $p = [pscustomobject]@{{ ExitCode = 5; Handle = 1 }}
     $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {{ }}
@@ -381,14 +408,18 @@ $decoded = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String
 $expected = Get-RemoteOSRelaunchCommand -ScriptPath $path -InstallerUrl 'unused' -SourceRef '{self.SHA}'
 $script:refuse = $true
 $refused = Invoke-RemoteOSElevatedRelaunch -ScriptPath $path -InstallerUrl 'unused' -SourceRef '{self.SHA}'
+$script:refuse = $false
+$script:noProcess = $true
+$noProcess = Invoke-RemoteOSElevatedRelaunch -ScriptPath $path -InstallerUrl 'unused' -SourceRef '{self.SHA}'
 @{{ code = $code; verb = $script:call.verb; file = $script:call.file; same = ($decoded -ceq $expected);
-    flag = $script:call.args[-2]; refused = $refused }} | ConvertTo-Json -Compress
+    flag = $script:call.args[-2]; refused = $refused; noProcess = $noProcess }} | ConvertTo-Json -Compress
 """)
 
         assert out["code"] == 5, out
         assert out["verb"] == "RunAs" and out["file"] == "powershell.exe", out
         assert out["flag"] == "-EncodedCommand" and out["same"] is True, out
         assert out["refused"] is None, out
+        assert out["noProcess"] is None, out
 
 
 class TestListenerSession:

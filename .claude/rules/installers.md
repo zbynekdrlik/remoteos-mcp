@@ -318,7 +318,9 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   - `$startDirect` = interactive AND `$env:USERNAME -ieq $desktopUser`. Otherwise (SSH, session
     0, or elevated as ANOTHER account: a standard user typed an admin's password at UAC, so a
     direct start would run as that admin, pass the health check, and hide that the task's user
-    may not reach this run's per-user Python): never `Start-Process wscript` (it dies with the SSH
+    may not reach this run's per-user Python; `Test-RemoteOSPythonReachable` refuses such a
+    Python, or a missing one this run would install per-user, BEFORE any change): never
+    `Start-Process wscript` (it dies with the SSH
     session); `schtasks /End` + `schtasks /Run /TN RemoteOSMCP` under `$ErrorActionPreference =
     "Continue"` (5.1 turns native stderr under `2>&1` into a terminating error with `Stop`), then
     the health loop also requires `Get-RemoteOSListenerSessionId -Port` != 0 (session 0 = exit 1,

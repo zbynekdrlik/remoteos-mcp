@@ -5,6 +5,8 @@ remoteos.toml, the ACL) is tested in real PowerShell 5.1: tests_windows/test_ins
 
 from __future__ import annotations
 
+import re
+
 from installer_harness import INSTALLER_WINDOWS
 
 
@@ -197,6 +199,18 @@ def test_an_ssh_run_starts_the_server_through_the_scheduled_task() -> None:
     # Review round 2: directly only from the desktop user's own desktop run; another account (an
     # admin's password typed at the UAC prompt) goes through the task as well
     assert "$startDirect = $interactive -and ($env:USERNAME -ieq $desktopUser)" in code
+    assert "if ($healthVer -eq $PKG_VER -and -not $startDirect) {" in code, "the task's server is not proven"
+
+
+def test_another_account_s_python_is_refused_before_anything_changes() -> None:
+    """Review round 3: elevated as another account, a per-user Python of that account (found, or
+    installed now) is unreachable for the desktop user's task: stop before any change."""
+    flow = _flow_lines()
+    check = [n for n, line in flow if line.startswith("if (-not (Test-RemoteOSPythonReachable")]
+    assert len(check) == 1, check
+    assert any(line == "$otherAccount = $env:USERNAME -ine $desktopUser" for _, line in flow)
+    changes = [n for n, line in flow if any(change in line for change in _STATE_CHANGES)]
+    assert check[0] < min(changes), (check[0], min(changes))
 
 
 def test_the_probe_and_the_relaunch_marker_reach_the_gate() -> None:
@@ -219,8 +233,11 @@ def test_every_failure_after_the_gate_exits_1_through_the_helper() -> None:
     """Review rounds 1-2: a bare `return` exited 0 (the relaunch forwarded it as success), and a
     bare `exit` closes a piped run's console with the message unread."""
     after_gate = [(n, line) for n, line in _flow_lines() if n > _gate_line()]
-    bare = [(n, line) for n, line in after_gate if line == "return" or line.startswith("exit ")]
-    assert bare == [], f"failure exits that bypass Exit-RemoteOSInstaller: {bare}"
+    # strings removed first ("... exit code ..." in a message is not an exit); then a return or
+    # exit as a statement anywhere on the line, also inside `{ ... }` (review round 3)
+    unquoted = [(n, re.sub(r'"[^"]*"|\'[^\']*\'', '""', line)) for n, line in after_gate]
+    bare = [(n, line) for n, line in unquoted if re.search(r"(^|[;{]\s*)(return|exit)\b", line)]
+    assert bare == [], f"exits that bypass Exit-RemoteOSInstaller: {bare}"
     content = INSTALLER_WINDOWS.read_text()
     for message in ("[X] pip install failed", "[X] Could not install Python"):
         start = content.index(message)

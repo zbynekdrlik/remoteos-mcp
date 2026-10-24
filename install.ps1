@@ -187,7 +187,8 @@ function Set-RemoteOSOwnerOnlyAcl([string]$Path, [string]$User) {
 
 function Get-RemoteOSElevationAction([Parameter(Mandatory)][bool]$IsAdmin, [Parameter(Mandatory)][bool]$Interactive,
                                      [Parameter(Mandatory)][bool]$ExplicitKey, [Parameter(Mandatory)][bool]$Relaunched) {
-    # Every input is Mandatory: a call that drops one fails loudly instead of reading it as $false
+    # Every input is Mandatory so a dropped argument is never read as $false (an error under
+    # -NonInteractive, a prompt in a console); the static tests pin the call-site arguments
     # -> 'proceed' | 'relaunch' | 'fail' (pure: the caller probes the environment). A run that
     # is already the relaunch and still not elevated (UAC off and a standard user: RunAs starts
     # it with the same token, no prompt) fails, so relaunches never chain.
@@ -203,6 +204,16 @@ function Test-RemoteOSInteractiveSession([string]$SshConnection, [string]$SshCli
     # stdin; a program running the installer (the remoteos Shell tool: stdin NUL, an ssh pipe)
     # does not, and nobody would answer a UAC prompt on that desktop.
     return [bool]((-not $SshConnection) -and (-not $SshClient) -and $SessionId -ne 0 -and -not $InputRedirected)
+}
+
+function Test-RemoteOSPythonReachable([string]$PythonPath, [string]$RunProfile, [bool]$OtherAccount) {
+    # Can the desktop user's scheduled task run this Python? Not when this run is elevated as
+    # ANOTHER account (an admin's password at UAC) and the Python lives in that account's profile
+    # (a per-user install, the WindowsApps alias), or when there is none and this run would
+    # install one per-user for that account.
+    if (-not $OtherAccount) { return $true }
+    if (-not $PythonPath) { return $false }
+    return -not $PythonPath.StartsWith($RunProfile.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Exit-RemoteOSInstaller([int]$Code, [bool]$Pause) {
@@ -368,6 +379,19 @@ foreach ($cmd in @("python", "python3", "py")) {
             break
         }
     } catch {}
+}
+
+# Elevated as another account: the task (the desktop user) must be able to run this Python, and
+# a Python installed now would be per-user for this account. Checked before anything changes.
+$otherAccount = $env:USERNAME -ine $desktopUser
+$foundPythonPath = $null
+if ($python) { $foundPythonPath = (Get-Command $python -ErrorAction SilentlyContinue).Source }
+if (-not (Test-RemoteOSPythonReachable -PythonPath $foundPythonPath -RunProfile $env:USERPROFILE -OtherAccount $otherAccount)) {
+    Write-Host "  [X] This run is elevated as $env:USERNAME, but the server runs as $desktopUser, who cannot run" -ForegroundColor Red
+    Write-Host "      this account's Python ($foundPythonPath) -- nothing was changed on this box" -ForegroundColor Red
+    Write-Host "      Install Python 3.10+ for all users (python.org: 'Install for all users'), or run the installer" -ForegroundColor Yellow
+    Write-Host "      as $desktopUser with administrator rights." -ForegroundColor Yellow
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
 if (-not $python) {

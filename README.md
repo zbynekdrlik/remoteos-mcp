@@ -29,7 +29,8 @@ program with no console input (e.g. an agent's Shell tool), with an explicit
 elevated (UAC turned off for a standard user): open PowerShell as Administrator (or use an admin
 account) and run it again. Over SSH, or elevated as another account, it starts the server through
 the scheduled task, in the logged-in desktop user's session (a server started from the SSH
-session would die with it).
+session would die with it). Elevated as another account, Python must be installed for all users:
+a per-user Python of that account is refused before anything changes.
 
 It installs ONE commit: `REMOTEOS_MCP_REF` (a branch, tag or commit; default `main`, as on Linux)
 is resolved through the GitHub API to a commit sha, and both the code and its `constraints.txt`
