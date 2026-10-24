@@ -190,8 +190,10 @@ class TestWindowsVersionSelfCheck:
             "install.ps1 must read the installed package version (via "
             "importlib.metadata or pip show) to compare with /health"
         )
-        # Must exit on mismatch
-        assert "exit 1" in content or "exit(1)" in content, (
+        # Must exit on mismatch: the line after the mismatch message exits 1, directly or through
+        # Exit-RemoteOSInstaller (#57)
+        after_mismatch = content[content.index("but service reports"):].split("\n")[1].strip()
+        assert after_mismatch == "exit 1" or after_mismatch.startswith("Exit-RemoteOSInstaller -Code 1"), (
             "install.ps1 must exit non-zero when installed version does not "
             "match the running service version"
         )
