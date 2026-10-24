@@ -454,3 +454,23 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Tests:** `tests/test_identity.py` (OS variants, fallbacks, Shell runs what is announced),
   `test_startup_flags.py::test_initialize_and_health_name_this_machine_its_os_and_its_shell` (real
   initialize over HTTP), `tests_windows/test_identity_windows.py`. 1053 pass, ruff clean, CI all green.
+
+## #57 + #12 (rescoped) — install.ps1: an elevated run or nothing changes; one resolved commit; shell CI job (0.7.0.dev35)
+
+- **#57 design:** main's Approach 1 (pure `Get-RemoteOSElevationAction` gate before the first
+  change; relaunch elevated for a person, fail for SSH / session 0 / no console input / an explicit
+  key / a relaunch still not elevated). Session 0 starts the server only through
+  `schtasks /Run` and proves the listener is in a desktop session (amendment); so does an elevated
+  run as ANOTHER account, whose per-user Python is refused before any change.
+- **#12 design:** `REMOTEOS_MCP_REF` (default main) → ONE sha via the GitHub commits API before any
+  change; constraints, archive and the relaunch's installer all use it; `installed-ref.txt` after
+  the health check. `shell` CI job: shellcheck (clean, nothing to fix) + macOS installer tests
+  under bash:3.2.
+- **Commits:** `576603f` bump, `4ecd85e` [red] #57 → `d8fa4e6` [green], `0460569` [red] #12 →
+  `5d34a9f` [green], locator commits `62ad16d` / `e9be09c` / `5a0d456`, review rounds `0a83d30`,
+  `df927d1`, `9a48f99` (relaunch loop guard, console-input probe, Exit-RemoteOSInstaller pause for
+  piped console runs, pip/Python failures exit 1, another-account task start + Python check).
+- **Tests:** `tests/test_installer_windows_key.py` (gate order, exits through the helper, pinned
+  call-site args, one sha for both URLs) and `tests_windows/test_install_ps1_key.py` (decision
+  table, probe, relaunch command run for real, exit helper, listener session, ref names, Python
+  reachability). Local: 1063 pass, ruff clean, shellcheck clean, bash:3.2 53 pass.
