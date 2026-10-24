@@ -6,7 +6,7 @@
     remoteos-call linux-stream-snv get /var/log/syslog ./syslog
     remoteos-call win-resolume-pp GetSystemInfo --json '{}'
 
-The machine's ``url`` and ``headers.Authorization`` come from an MCP config: ``--config PATH``,
+The machine's ``url`` and ``Authorization`` header come from an MCP config: ``--config PATH``,
 else ``--project NAME`` (``~/.claude/mcp-configs/NAME.mcp.json``, what ``remoteos-gateway
 sync-configs`` writes), else ``./.mcp.json``. The token is read from that file only. It never
 goes into an argv, an output line or a log record.
@@ -17,10 +17,16 @@ Exit codes:
   A code outside 0..255 is reported as 255 (a negative POSIX signal code ``-S`` as 128+S),
   with one ``remoteos-call:`` line on stderr that names the real code.
 - 0: put/get/any other tool succeeded.
-- 125: the tool itself failed (the MCP result has ``isError``), or a put/get size check failed.
-- 126: no call was possible: a missing/broken config, an unknown machine, a transport or auth
-  failure (connection refused, 401/403/404/413, a timeout).
+- 125: the tool itself failed (the MCP result has ``isError``, or the server answered the call
+  with a JSON-RPC error), or a put/get size check failed.
+- 126: the CLI got no result: a missing/broken config, an unknown machine, a refused connection,
+  401/403/404/413, no reply in time, a dropped connection, a local file it cannot read/write.
+  After a timeout or a dropped connection the remote command MAY have run (or still run).
+- 141: stdout was closed (a broken pipe, e.g. ``| head``).
 - 2: a usage error (click).
+
+The CLI's own failures are always ONE stderr line starting with ``remoteos-call:``; a remote
+command that itself exits 125 or 126 prints no such line.
 """
 
 from __future__ import annotations
@@ -40,15 +46,19 @@ from pathlib import Path
 import click
 
 from remoteos import __version__
+from remoteos.gateway.registry import MachineSourceError, authorization_header, is_http_url, read_json_file
+from remoteos.taskmanager import declared_runtime
 
 log = logging.getLogger("remoteos.cli_call")
 
 EXIT_TOOL_ERROR = 125
 EXIT_NO_CALL = 126
+EXIT_BROKEN_PIPE = 141  # 128 + SIGPIPE, what a shell reports for a writer whose reader went away
 
 # The fleet's MCP names: ``win-…``, ``linux-…``, ``mac-…`` (an http entry with another name, e.g.
 # a project's own n8n server, is not a machine this CLI talks to).
 _FLEET_NAME_RE = re.compile(r"(?:win|linux|mac)-[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")  # as gateway/manifest.py
 # Every wrapped tool's reply starts with the task id (taskmanager.wrap_sync_tool).
 _TASK_PREFIX_RE = re.compile(r"\A\[task:[^\]\s]+\] ?")
 _EXIT_CODE_RE = re.compile(r"(?:\A|\n)\[Exit code: (-?\d+)\]\Z")
@@ -57,11 +67,16 @@ _NO_OUTPUT = "(no output)"  # ChildOutput.reply() when there is nothing at all
 _DOWNLOAD_RE = re.compile(r"\Abase64:(\d+)bytes:", re.ASCII)
 _UPLOAD_RE = re.compile(r"\AWritten (\d+) bytes to ", re.ASCII)
 
-# A Shell call may run up to its own timeout; the client waits that long plus this margin (the
-# server's own stale-task sweep allows the declared runtime + 60 s, taskmanager._RUNTIME_ARGS).
-SHELL_WAIT_MARGIN_S = 60
-DEFAULT_WAIT_S = 300.0  # put/get/other tools: a 12 MB transfer over a slow tailnet link fits
+SHELL_DEFAULT_TIMEOUT_S = 30  # Shell's own default
+DEFAULT_WAIT_S = 300.0  # put/get/--json: how long the client waits for the reply
 CONNECT_TIMEOUT_S = 30.0
+# One reply is ONE server-sent event. httpx2's EventSource refuses an event over 1 MiB by default,
+# which a FileDownload of ~780 KB or a Shell printing 1 MB already exceeds. The largest legitimate
+# reply is a FileDownload of a big file (its base64), so the CLI allows this much.
+MAX_REPLY_EVENT_BYTES = 256 * 1024 * 1024
+# Libraries whose loggers the CLI silences: their DEBUG lines carry tool arguments and replies,
+# and any line they print would land in the remote command's stderr stream.
+_LIBRARY_LOGGERS = ("fastmcp", "mcp", "httpx2", "httpcore2")
 
 
 class CallFailed(Exception):
@@ -88,37 +103,31 @@ def config_path(config: Path | None, project: str | None, cwd: Path | None = Non
     if config is not None:
         return config.expanduser()
     if project is not None:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", project):
-            raise CallFailed(EXIT_NO_CALL, f"invalid project name {project!r}")
         return Path.home() / ".claude" / "mcp-configs" / f"{project}.mcp.json"
     return (cwd or Path.cwd()) / ".mcp.json"
 
 
 def load_servers(path: Path) -> dict:
-    """The ``mcpServers`` object of the config at *path*."""
+    """The ``mcpServers`` object of the config at *path* (the gateway's reader: never echoes content)."""
+    if not path.exists():
+        raise CallFailed(EXIT_NO_CALL, f"no MCP config at {path} (use --config PATH or --project NAME)")
     try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        raise CallFailed(EXIT_NO_CALL, f"no MCP config at {path} (use --config PATH or --project NAME)") from None
-    except OSError as exc:
-        raise CallFailed(EXIT_NO_CALL, f"cannot read the MCP config {path}: {exc.strerror}") from None
-    try:
-        data = json.loads(text)
-    except ValueError as exc:  # the message names a position only, never the content
-        raise CallFailed(EXIT_NO_CALL, f"the MCP config {path} is not valid JSON (line {exc.lineno})") from None
+        data = read_json_file(path, "the MCP config")
+    except MachineSourceError as exc:
+        raise CallFailed(EXIT_NO_CALL, str(exc)) from None
     servers = data.get("mcpServers") if isinstance(data, dict) else None
     if not isinstance(servers, dict):
         raise CallFailed(EXIT_NO_CALL, f"the MCP config {path} has no mcpServers object")
     return servers
 
 
+def _usable(entry: object) -> bool:
+    return isinstance(entry, dict) and isinstance(entry.get("url"), str) and is_http_url(entry["url"])
+
+
 def fleet_machines(servers: dict) -> list[str]:
-    """The fleet machine names in a config, sorted: ``win-``/``linux-``/``mac-`` entries with an url."""
-    return sorted(
-        name
-        for name, entry in servers.items()
-        if _FLEET_NAME_RE.fullmatch(name) and isinstance(entry, dict) and isinstance(entry.get("url"), str)
-    )
+    """The fleet machine names in a config, sorted: ``win-``/``linux-``/``mac-`` entries with an http(s) url."""
+    return sorted(name for name, entry in servers.items() if _FLEET_NAME_RE.fullmatch(name) and _usable(entry))
 
 
 def resolve_machine(servers: dict, name: str, path: Path) -> Machine:
@@ -126,14 +135,10 @@ def resolve_machine(servers: dict, name: str, path: Path) -> Machine:
         known = ", ".join(fleet_machines(servers)) or "none"
         raise CallFailed(EXIT_NO_CALL, f"unknown machine {name!r} in {path} (known: {known})")
     entry = servers[name]
-    url = entry.get("url") if isinstance(entry, dict) else None
-    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-        raise CallFailed(EXIT_NO_CALL, f"machine {name!r} in {path} has no http(s) url")
-    headers = entry.get("headers")
-    authorization = headers.get("Authorization") if isinstance(headers, dict) else None
-    if authorization is not None and not isinstance(authorization, str):
-        raise CallFailed(EXIT_NO_CALL, f"machine {name!r} in {path} has a non-string Authorization header")
-    return Machine(name=name, url=url, authorization=authorization)
+    if not _usable(entry):
+        raise CallFailed(EXIT_NO_CALL, f"machine {name!r} in {path} has no valid http(s) url")
+    # the gateway's own reading: any spelling of the header name, the last one wins
+    return Machine(name=name, url=entry["url"], authorization=authorization_header(entry))
 
 
 # -- the replies ---------------------------------------------------------------------------
@@ -154,10 +159,11 @@ def parse_shell_reply(text: str) -> ShellReply:
     """Split Shell's reply (``ChildOutput.reply()``) back into stdout, stderr and the exit code.
 
     The reply is ``stdout``, then ``\\n[STDERR] <stderr>`` (non-empty stderr), then
-    ``\\n[Exit code: N]`` (N != 0), stripped as a whole, ``(no output)`` when empty. The split is
-    at the FIRST ``[STDERR]`` marker: a stdout line that itself starts with ``[STDERR] `` cannot
-    be told apart (documented limitation). The strip also loses leading whitespace of stdout and
-    the trailing newlines of each part.
+    ``\\n[Exit code: N]`` (N != 0), stripped as a whole, ``(no output)`` when empty. Plain text
+    cannot round-trip everything (README "Scripts: remoteos-call"): the split is at the FIRST
+    ``[STDERR]`` marker, a final ``[Exit code: N]`` line the command printed itself reads as its
+    exit code, a literal ``(no output)`` reads as nothing, and the strip loses leading whitespace
+    of stdout and trailing whitespace of the last part.
     """
     text = strip_task_prefix(text)
     exit_code = 0
@@ -190,7 +196,7 @@ def result_text(result) -> str:
         if isinstance(text, str):
             parts.append(text)
         else:
-            parts.append(f"[{getattr(block, 'type', 'content')} block: {getattr(block, 'mimeType', '?')}]")
+            parts.append(f"[{getattr(block, 'type', 'content')} block: {getattr(block, 'mime_type', None) or '?'}]")
     return "\n".join(parts)
 
 
@@ -224,12 +230,14 @@ _HTTP_REASONS = {
     401: "authentication refused (401): the token in the config is not accepted",
     403: "not allowed (403): this project's token may not reach this machine",
     404: "not found (404): the gateway does not expose this machine",
-    413: "request too large (413): the gateway caps a request at 16 MiB (about 12 MB of file)",
+    # the machine's MCP transport takes 4 MiB per request (mcp DEFAULT_MAX_REQUEST_BODY_SIZE), the
+    # gateway 16 MiB (gateway/app.py MAX_BODY_BYTES): the machine's limit is the one a put meets
+    413: "request too large (413): a machine takes at most 4 MiB per request, so a put carries about 3 MB",
 }
 
 
 class _HttpErrors:
-    """An httpx response hook: the first HTTP error status of the call.
+    """An httpx response hook: the first HTTP error status of a POST (an MCP request) of the call.
 
     The MCP SDK turns a non-2xx answer to a request into a JSON-RPC error with a fixed text
     ("Server returned an error response"), so the status (401, 403, 413) is read here instead.
@@ -239,12 +247,12 @@ class _HttpErrors:
         self.status: int | None = None
 
     async def __call__(self, response) -> None:
-        if response.status_code >= 400 and self.status is None:
+        if response.status_code >= 400 and self.status is None and response.request.method == "POST":
             self.status = response.status_code
 
 
 def _transport_failure(exc: BaseException, machine: Machine, status: int | None = None) -> CallFailed:
-    """One stderr line for a call that never produced a tool result (exit 126)."""
+    """One stderr line for a call that produced no tool result (exit 126)."""
     import httpx2
     from mcp.shared.exceptions import MCPError
     from mcp.types import REQUEST_TIMEOUT
@@ -254,8 +262,10 @@ def _transport_failure(exc: BaseException, machine: Machine, status: int | None 
         status = leaf.response.status_code
     if status is not None:
         reason = _HTTP_REASONS.get(status, f"HTTP {status}")
-    elif isinstance(leaf, httpx2.TimeoutException) or (isinstance(leaf, MCPError) and leaf.code == REQUEST_TIMEOUT):
-        reason = "timed out waiting for the reply"
+    elif isinstance(leaf, (httpx2.TimeoutException, TimeoutError)) or (
+        isinstance(leaf, MCPError) and leaf.code == REQUEST_TIMEOUT
+    ):
+        reason = "timed out waiting for the reply (the command may still run)"
     elif isinstance(leaf, httpx2.ConnectError):
         reason = "cannot connect (connection refused or host unreachable)"
     else:
@@ -282,13 +292,38 @@ def _display_url(url: str) -> str:
     """The url without a query string or userinfo (neither should hold a secret, but never show one)."""
     from urllib.parse import urlsplit
 
-    parts = urlsplit(url)
-    host = parts.hostname or ""
-    try:
-        port = f":{parts.port}" if parts.port else ""
-    except ValueError:
-        port = ""
-    return f"{parts.scheme}://{host}{port}{parts.path}"
+    parts = urlsplit(url)  # resolve_machine let only is_http_url() urls through: this cannot raise
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{parts.hostname or ''}{port}{parts.path}"
+
+
+def _allow_large_replies() -> None:
+    """Lift the SDK's 1 MiB per-event limit for this process (see ``MAX_REPLY_EVENT_BYTES``).
+
+    ``mcp.client.streamable_http`` builds ``EventSource(response)`` with httpx2's default and has
+    no option for it, so the CLI swaps in a subclass with a larger default. Idempotent. An SDK that
+    no longer uses ``EventSource`` fails loudly here rather than truncating replies silently.
+    """
+    import httpx2
+    from mcp.client import streamable_http
+
+    current = getattr(streamable_http, "EventSource", None)
+    if current is None or not (isinstance(current, type) and issubclass(current, httpx2.EventSource)):
+        raise RuntimeError("mcp.client.streamable_http no longer uses httpx2.EventSource")
+    if current is not httpx2.EventSource:
+        return  # already swapped
+
+    class LargeEventSource(httpx2.EventSource):
+        def __init__(self, response, max_event_size: int | None = MAX_REPLY_EVENT_BYTES) -> None:
+            super().__init__(response, max_event_size=max_event_size)
+
+    streamable_http.EventSource = LargeEventSource
+
+
+def _quiet_library_logging() -> None:
+    """Silence the libraries' own loggers (fastmcp configures its stderr handler at import)."""
+    for name in _LIBRARY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.CRITICAL + 1)
 
 
 async def call_tool(machine: Machine, tool: str, arguments: dict, wait_s: float):
@@ -297,13 +332,19 @@ async def call_tool(machine: Machine, tool: str, arguments: dict, wait_s: float)
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
+    _quiet_library_logging()
+    _allow_large_replies()
     http_errors = _HttpErrors()
 
     def http_client(headers=None, timeout=None, auth=None, **_ignored) -> httpx2.AsyncClient:
-        # fastmcp's default client, plus the status hook. Redirects stay off (httpx's default, as
-        # in fastmcp's own default client): the SDK follows same-origin redirects itself.
+        # fastmcp's default client (redirects off: the SDK follows same-origin ones itself), plus
+        # the status hook, and trust_env off like the gateway's own clients: no HTTP(S)_PROXY may
+        # carry the bearer elsewhere, no ~/.netrc may add credentials.
         client = httpx2.AsyncClient(
-            headers=headers, auth=auth, timeout=timeout or httpx2.Timeout(CONNECT_TIMEOUT_S, read=wait_s)
+            headers=headers,
+            auth=auth,
+            timeout=timeout or httpx2.Timeout(CONNECT_TIMEOUT_S, read=wait_s),
+            trust_env=False,
         )
         client.event_hooks["response"].append(http_errors)
         return client
@@ -333,21 +374,27 @@ def _tool_failed(result) -> CallFailed:
     return CallFailed(EXIT_TOOL_ERROR, strip_task_prefix(result_text(result)))
 
 
+def _echo(text: str, err: bool = False) -> None:
+    """Print remote text unchanged: ``color=True`` keeps ANSI escapes click strips off a pipe."""
+    click.echo(text, err=err, color=True)
+
+
 def run_shell(machine: Machine, command: str, timeout: int, cwd: str | None) -> int:
     arguments: dict = {"command": command, "timeout": timeout}
     if cwd:
         arguments["cwd"] = cwd
-    result = _run(machine, "Shell", arguments, timeout + SHELL_WAIT_MARGIN_S)
+    # the client waits as long as the server's own stale-task sweep allows the call
+    result = _run(machine, "Shell", arguments, declared_runtime(arguments))
     if result.is_error:
         raise _tool_failed(result)
     reply = parse_shell_reply(result_text(result))
     if reply.stdout:
-        click.echo(reply.stdout)
+        _echo(reply.stdout)
     if reply.stderr:
-        click.echo(reply.stderr, err=True)
+        _echo(reply.stderr, err=True)
     code = process_exit_code(reply.exit_code)
     if code != reply.exit_code:
-        click.echo(f"remoteos-call: remote exit code {reply.exit_code}, reported as {code}", err=True)
+        _echo(f"remoteos-call: remote exit code {reply.exit_code}, reported as {code}", err=True)
     return code
 
 
@@ -384,13 +431,23 @@ def run_get(machine: Machine, remote: str, local: Path, wait_s: float) -> int:
         raise CallFailed(EXIT_TOOL_ERROR, f"get: the FileDownload reply is not valid base64 ({exc})") from None
     if len(data) != declared:
         raise CallFailed(EXIT_TOOL_ERROR, f"get: size mismatch, remote sent {declared} bytes, received {len(data)}")
-    _write_atomically(local, data)
+    write_atomically(local, data)
     return 0
 
 
-def _write_atomically(path: Path, data: bytes) -> None:
-    """Write *data* to *path* through a temp file in the same directory: no half-written file."""
-    directory = path.parent if str(path.parent) else Path(".")
+def _new_file_mode(path: Path) -> int:
+    """An existing file keeps its mode; a new one gets ``0o666 & ~umask``, as ``scp`` and ``cp`` do."""
+    try:
+        return path.stat().st_mode & 0o7777
+    except OSError:
+        umask = os.umask(0)  # read the umask: only setting it returns it (the CLI is single-threaded)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
+def write_atomically(path: Path, data: bytes) -> None:
+    """Write *data* to *path* through a fsynced temp file in the same directory: never a half file."""
+    directory = path.parent
     try:
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.", suffix=".part")
     except OSError as exc:
@@ -398,6 +455,9 @@ def _write_atomically(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, _new_file_mode(path))
         os.replace(tmp, path)
     except OSError as exc:
         Path(tmp).unlink(missing_ok=True)
@@ -410,7 +470,7 @@ def run_tool(machine: Machine, tool: str, arguments: dict, wait_s: float) -> int
         raise _tool_failed(result)
     text = strip_task_prefix(result_text(result))
     if text:
-        click.echo(text)
+        _echo(text)
     return 0
 
 
@@ -421,27 +481,31 @@ def _parse_json_arguments(raw: str) -> dict:
     try:
         arguments = json.loads(raw)
     except ValueError as exc:
-        raise click.UsageError(f"--json is not valid JSON ({exc.msg} at position {exc.pos})") from None
+        raise click.UsageError(f"--json is not valid JSON ({exc})") from None
     if not isinstance(arguments, dict):
         raise click.UsageError("--json must be a JSON object")
     return arguments
 
 
-def _plan(tool: str, args: tuple[str, ...], timeout, cwd, json_args) -> Callable[[Machine], int]:
+def plan(
+    tool: str, args: tuple[str, ...], timeout: int | None, cwd: str | None, json_args: str | None
+) -> Callable[[Machine], int]:
     """Check the command line's shape BEFORE the config is read; returns the call to make.
 
     A usage error is exit 2 whatever the config holds, and nothing is called.
     """
-    wait = DEFAULT_WAIT_S if timeout is None else timeout
+    wait = DEFAULT_WAIT_S if timeout is None else float(timeout)
     if json_args is not None:
         if args or cwd is not None:
             raise click.UsageError("--json carries all of the tool's arguments: no positional arguments, no --cwd")
         arguments = _parse_json_arguments(json_args)
+        if timeout is None:  # a call that declares its runtime (Shell timeout, Wait seconds) gets it
+            wait = max(wait, declared_runtime(arguments) or 0.0)
         return lambda machine: run_tool(machine, tool, arguments, wait)
     if tool == "Shell":
         if len(args) != 1:
-            raise click.UsageError("Shell takes exactly one COMMAND (quote it)")
-        shell_timeout = 30 if timeout is None else timeout
+            raise click.UsageError("Shell takes exactly one COMMAND (quote it; `--` before one starting with -)")
+        shell_timeout = SHELL_DEFAULT_TIMEOUT_S if timeout is None else timeout
         return lambda machine: run_shell(machine, args[0], shell_timeout, cwd)
     if cwd is not None:
         raise click.UsageError("--cwd applies to Shell only")
@@ -456,6 +520,16 @@ def _plan(tool: str, args: tuple[str, ...], timeout, cwd, json_args) -> Callable
     if args:
         raise click.UsageError(f"{tool}: pass its arguments with --json '{{...}}'")
     return lambda machine: run_tool(machine, tool, {}, wait)
+
+
+def _check_options(machine, tool, project, list_machines, timeout, cwd, json_args) -> None:
+    if project is not None and not _PROJECT_RE.fullmatch(project):
+        raise click.UsageError(f"invalid project name {project!r}")
+    if list_machines:
+        if machine or tool or timeout is not None or cwd is not None or json_args is not None:
+            raise click.UsageError("--list takes no MACHINE, TOOL, --timeout, --cwd or --json")
+    elif not machine or not tool:
+        raise click.UsageError("MACHINE and TOOL are required (or --list)")
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -476,26 +550,37 @@ def _plan(tool: str, args: tuple[str, ...], timeout, cwd, json_args) -> Callable
 def main(machine, tool, args, config, project, list_machines, timeout, cwd, json_args) -> None:
     """Run TOOL on MACHINE over MCP: Shell COMMAND, put LOCAL REMOTE, get REMOTE LOCAL, or TOOL --json.
 
-    Exit codes: Shell = the remote exit code; 0 = success; 125 = the tool failed; 126 = no call
-    was possible (config, unknown machine, transport, auth); 2 = usage.
+    Exit codes: Shell = the remote exit code; 0 = success; 125 = the tool failed; 126 = no result
+    (config, unknown machine, connection, auth, timeout); 141 = broken pipe; 2 = usage.
     """
     if config is not None and project is not None:
         raise click.UsageError("--config and --project are exclusive")
+    _check_options(machine, tool, project, list_machines, timeout, cwd, json_args)
+    call = None if list_machines else plan(tool, args, timeout, cwd, json_args)
     try:
         path = config_path(config, project)
-        if list_machines:
-            if machine or tool:
-                raise click.UsageError("--list takes no MACHINE or TOOL")
+        if call is None:
             for name in fleet_machines(load_servers(path)):
-                click.echo(name)
-            sys.exit(0)
-        if not machine or not tool:
-            raise click.UsageError("MACHINE and TOOL are required (or --list)")
-        call = _plan(tool, args, timeout, cwd, json_args)
-        sys.exit(call(resolve_machine(load_servers(path), machine, path)))
+                _echo(name)
+            code = 0
+        else:
+            code = call(resolve_machine(load_servers(path), machine, path))
+        sys.stdout.flush()  # a closed pipe surfaces here, inside the handler, not at exit
     except CallFailed as failure:
-        click.echo(f"remoteos-call: {failure.message}", err=True)
-        sys.exit(failure.code)
+        _echo(f"remoteos-call: {failure.message}", err=True)
+        code = failure.code
+    except BrokenPipeError:
+        # the reader went away: silence the interpreter's own flush at exit, report like a shell
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError) as exc:  # no real file descriptor behind stdout
+            log.debug("stdout not redirected after the broken pipe: %s", type(exc).__name__)
+        code = EXIT_BROKEN_PIPE
+    except Exception as exc:  # never a traceback (it could carry a request), never exit 1
+        log.debug("unexpected failure: %s", type(exc).__name__)
+        _echo(f"remoteos-call: unexpected {type(exc).__name__}", err=True)
+        code = EXIT_NO_CALL
+    sys.exit(code)
 
 
 if __name__ == "__main__":

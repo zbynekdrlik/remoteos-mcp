@@ -559,17 +559,19 @@ in the package (console script, module `remoteos.cli_call`). On dev1 it is in th
 ```bash
 remoteos-call --list                                         # the fleet machines in the config
 remoteos-call linux-stream-snv Shell 'sudo -n true; echo ok' # stdout, stderr, the remote exit code
-remoteos-call linux-stream-snv Shell 'make' --cwd /opt/app --timeout 600
-remoteos-call linux-stream-snv put ./pkg.deb /tmp/pkg.deb   # FileUpload, size-checked
+remoteos-call linux-stream-snv Shell 'make' --cwd /opt/app --timeout 500
+remoteos-call linux-stream-snv put ./small.tar /tmp/small.tar # FileUpload, size-checked (about 3 MB max)
 remoteos-call linux-stream-snv get /var/log/syslog ./syslog # FileDownload, size-checked
 remoteos-call win-resolume-pp GetSystemInfo --json '{}'      # any tool, its text on stdout
 ```
 
 **Which config.** `--config PATH`, else `--project NAME` (reads
 `~/.claude/mcp-configs/NAME.mcp.json`, the file `sync-configs` writes), else `./.mcp.json` in the
-current directory. The machine entry's `url` and `headers.Authorization` are used. Only `win-…`,
-`linux-…` and `mac-…` entries count as machines. The token is read from that file only: it is
-never in an argv, an output line or a log record.
+current directory. The machine entry's `url` and `Authorization` header are read the way the
+gateway reads them (`gateway/registry.py`: any spelling of the header name, an http(s) url with
+a host). Only `win-…`, `linux-…` and `mac-…` entries count as machines. The token is read from
+that file only: it is never in an argv, an output line or a log record. The request goes
+straight to the url: `HTTP(S)_PROXY` and `~/.netrc` are ignored.
 
 **Exit codes:**
 
@@ -577,24 +579,43 @@ never in an argv, an output line or a log record.
 |---|---|
 | Shell: N | the remote command's exit code (`[Exit code: N]`, none = 0). A code outside 0..255 is 255 (a POSIX signal `-S` is 128+S), and one stderr line names the real code. |
 | 0 | put/get/any other tool succeeded |
-| 125 | the tool failed (the MCP result is an error: `Command timed out after 30s`, `File not found: …`, `Unknown tool: …`), or a put/get size check failed |
-| 126 | no call was possible: no or broken config, an unknown machine, connection refused, 401/403/404, 413 (the gateway caps a request at 16 MiB, so a `put` carries about 12 MB through it), no reply in time |
+| 125 | the tool failed (the MCP result is an error: `Command timed out after 30s`, `File not found: …`, `Unknown tool: …`, invalid arguments), or a put/get size check failed |
+| 126 | the CLI got no result: no or broken config, an unknown machine, connection refused, 401/403/404, 413 (request too large), no reply in time, a dropped connection, a local file it cannot read or write. After a timeout or a dropped connection the remote command MAY have run, or may still run: do not blindly retry a command that is not idempotent. |
+| 141 | stdout was closed (a broken pipe, e.g. `\| head`) |
 | 2 | a usage error |
 
-**Shell.** stdout goes to stdout and the `[STDERR]` part to stderr, each with one trailing
-newline. `--timeout` (default 30 s) is Shell's own timeout; the client waits 60 s more.
-Shell's reply is plain text, so two things cannot round-trip: leading whitespace of stdout
-and blank lines at the end of either stream are lost, and a stdout line that starts with
-`[STDERR] ` is read as the start of stderr. Use `--` before a command that starts with `-`.
-`sudo` inside Shell works without a password on the Linux MCP boxes (#67).
+The CLI's own failures are always ONE stderr line that starts with `remoteos-call:`. A remote
+command that itself exits 125 or 126 prints no such line.
 
-**put / get.** `put` sends the whole file in one FileUpload call and checks the byte count the
-machine wrote. `get` checks the byte count FileDownload declared, then writes the local file
-through a temp file in the same directory (no half-written file). `--timeout` is how long the
-client waits (default 300 s).
+**Server version.** Machines must run remoteos-mcp 0.7.0.dev28 or later (#32). Before that, a
+failing tool answered with success text (`Error in Shell: …`) and the CLI would exit 0.
+
+**Shell.** stdout goes to stdout and the `[STDERR]` part to stderr, each with one trailing
+newline, unchanged otherwise (ANSI escapes included). `--timeout` (default 30 s) is Shell's own
+timeout; the client waits 60 s more. Through the gateway a call must answer within 600 s (its
+upstream read timeout), so keep `--timeout` under 540 there. Use `--` before a command that
+starts with `-`. `sudo` inside Shell works without a password on the Linux MCP boxes (#67).
+
+Shell's reply is plain text, so some output cannot round-trip:
+
+- leading whitespace of stdout and trailing whitespace of the last part are lost, and blank
+  lines at the end of either stream;
+- a stdout line that starts with `[STDERR] ` is read as the start of stderr;
+- a LAST line `[Exit code: N]` printed by the command itself is read as its exit code;
+- a command whose whole output is `(no output)` prints nothing.
+
+**put / get.** `put` sends the whole file in ONE FileUpload call and checks the byte count the
+machine wrote. A machine takes at most 4 MiB per request (the mcp transport's limit; the gateway
+allows 16 MiB), so a `put` carries about 3 MB; a larger one fails with 413 (exit 126). `get`
+checks the byte count FileDownload declared, then writes the local file through a fsynced temp
+file in the same directory (never a half-written file); an existing file keeps its mode, a new
+one gets `0666 & ~umask`. A `get` reply may be up to 256 MiB of base64 (about 190 MB of file). `--timeout` is
+how long the client waits (default 300 s).
 
 **Any tool.** `--json` passes the tool's arguments as a JSON object; the reply's text goes to
-stdout. A non-text block (a Snapshot image) is printed as `[image block: image/png]`.
+stdout. A non-text block (a Snapshot image) is printed as `[image block: image/png]`. A call
+that declares its runtime (Shell's `timeout`, Wait's `seconds`) is waited for that long plus
+60 s, unless `--timeout` says otherwise.
 
 ## Uninstall
 
