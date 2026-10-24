@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import locale
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -38,6 +39,7 @@ from PIL import ImageGrab  # noqa: E402
 from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
 from remoteos.platform.command import powershell_argv, run_command  # noqa: E402
 from remoteos.platform.win.availability import diagnose, reconnect_to_console  # noqa: E402,F401  (#32)
+from remoteos.platform.win.psquote import ps_literal  # noqa: E402
 from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
 from remoteos.text_entry import enter_text  # noqa: E402
@@ -437,10 +439,13 @@ def minimize_all() -> str:
 
 
 def launch_app(name: str, args: str = "") -> str:
-    """Launch application via PowerShell Start-Process; a non-zero exit (e.g. no such app) raises (#32)."""
-    cmd = f'Start-Process "{name}"'
+    """Launch application via PowerShell Start-Process; a non-zero exit (e.g. no such app) raises (#32).
+
+    The name and the arguments are single-quoted literals (#39): ``$(...)`` in either is text.
+    """
+    cmd = f"Start-Process {ps_literal(name)}"
     if args:
-        cmd += f' -ArgumentList "{args}"'
+        cmd += f" -ArgumentList {ps_literal(args)}"
     run_command(powershell_argv(cmd), timeout=10, check=True, label="PowerShell")
     return f"Launched {name}"
 
@@ -514,23 +519,48 @@ def lock_screen() -> str:
 # ---------------------------------------------------------------------------
 
 
-def show_notification(title: str, message: str) -> str:
-    """Show a Windows toast notification via PowerShell; a non-zero exit raises (#32)."""
-    ps = f"""
+# The toast's title and message never enter the script (#39): an expandable here-string ran any
+# ``$(...)`` in them, and Notification is a tier-1 tool while Shell is tier 3. They travel in these
+# environment variables, and the script sets them as XML text nodes, so any character (``<``, ``&``,
+# a quote, a newline) is just text. The variables are set only in the child's environment.
+TOAST_TITLE_VAR = "REMOTEOS_TOAST_TITLE"
+TOAST_MESSAGE_VAR = "REMOTEOS_TOAST_MESSAGE"
+
+# Builds ``$xml``, the toast document, from the two variables. Kept apart from the line that shows
+# it, so tests_windows can run exactly this part in real PowerShell and read the XML back.
+TOAST_XML_SCRIPT = f"""
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-$template = @"
-<toast>
-  <visual><binding template="ToastGeneric">
-    <text>{title}</text>
-    <text>{message}</text>
-  </binding></visual>
-</toast>
-"@
 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml($template)
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+$xml.LoadXml('<toast><visual><binding template="ToastGeneric"><text/><text/></binding></visual></toast>')
+$texts = $xml.GetElementsByTagName('text')
+$texts.Item(0).AppendChild($xml.CreateTextNode($env:{TOAST_TITLE_VAR})) | Out-Null
+$texts.Item(1).AppendChild($xml.CreateTextNode($env:{TOAST_MESSAGE_VAR})) | Out-Null
+"""
+
+_TOAST_SHOW_SCRIPT = """$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("remoteos-mcp").Show($toast)
 """
-    run_command(powershell_argv(ps), timeout=10, check=True, label="PowerShell")
+
+
+def toast_environment(title: str, message: str) -> dict[str, str]:
+    """The toast child's whole environment: the server's own plus the title and the message."""
+    env = os.environ.copy()
+    env[TOAST_TITLE_VAR] = title
+    env[TOAST_MESSAGE_VAR] = message
+    return env
+
+
+def show_notification(title: str, message: str) -> str:
+    """Show a Windows toast notification via PowerShell; a non-zero exit raises (#32).
+
+    The text reaches PowerShell in the environment, never in the script (#39).
+    """
+    run_command(
+        powershell_argv(TOAST_XML_SCRIPT + _TOAST_SHOW_SCRIPT),
+        timeout=10,
+        check=True,
+        label="PowerShell",
+        env=toast_environment(title, message),
+    )
     return "Notification shown"

@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 from remoteos.platform.command import powershell_argv, run_child
+from remoteos.platform.win.psquote import ps_literal
 
 try:
     from PIL import ImageGrab
@@ -78,6 +79,8 @@ def ocr_windows_builtin(
     # UTF-8 comes from powershell_argv's console trampoline, which switches the child's OWN console
     # before PowerShell starts: through the OEM page PowerShell replaced € and – with "?" (#32
     # review round 5; shared since #48, with no encoding code in the script since round 2).
+    # The path is a single-quoted literal (#39): PowerShell never expands it (and a backslash is no
+    # escape character in PowerShell, so it is not doubled).
     ps_script = f"""
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -101,7 +104,7 @@ public static class AsyncHelper {{
 }}
 '@ -ReferencedAssemblies "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\System.Runtime.WindowsRuntime.dll"
 
-$path = "{tmp_path.replace(chr(92), chr(92) + chr(92))}"
+$path = {ps_literal(tmp_path)}
 $stream = [System.IO.File]::OpenRead($path)
 $ras = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($stream)
 $decoder = [AsyncHelper]::Await([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras))

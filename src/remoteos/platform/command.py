@@ -425,7 +425,13 @@ def _never_started(stderr: str) -> bool:
     return bool(lines) and lines[0].startswith(_COULD_NOT_START)
 
 
-def run_command(cmd: list[str], timeout: int = 30, check: bool = False, label: Optional[str] = None) -> str:
+def run_command(
+    cmd: list[str],
+    timeout: int = 30,
+    check: bool = False,
+    label: Optional[str] = None,
+    env: Optional[dict[str, str]] = None,
+) -> str:
     """Run ``cmd`` and return stdout, then ``[STDERR] …`` and ``[Exit code: N]`` when there are any.
 
     ``check=True`` is for a command that CHANGES state (start, stop, create,
@@ -436,8 +442,10 @@ def run_command(cmd: list[str], timeout: int = 30, check: bool = False, label: O
     was never started raises (``run_child``).
 
     A PowerShell command is ``powershell_argv(script)``; ``run_child`` decodes the output.
+    ``env`` is the child's WHOLE environment (``None`` = the server's), as in ``run_child``: the
+    toast passes its free text that way, never inside the script (#39).
     """
-    result = run_child(cmd, timeout)
+    result = run_child(cmd, timeout, env=env)
     if check and result.returncode != 0:
         reason = result.stderr.strip() or result.stdout.strip() or "(no output)"
         raise RuntimeError(f"{label or ' '.join(_shown(cmd)[:2])} failed (exit {result.returncode}): {reason}")
