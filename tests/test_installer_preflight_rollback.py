@@ -701,7 +701,7 @@ class TestRollbackHelperOnRealMetadata:
 class TestWindowsPipErrorOutput:
     def _main_install(self) -> tuple[str, str]:
         content = INSTALLER_WINDOWS.read_text()
-        idx = _find_first_code_line(content, "pip", "install", "main.zip", exclude="uninstall")
+        idx = _find_first_code_line(content, "pip", "install", "archive/", exclude="uninstall")
         assert idx is not None, "install.ps1 must have the main pip install line"
         return content, content.split("\n")[idx].strip()
 

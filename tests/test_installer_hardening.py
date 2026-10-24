@@ -233,7 +233,7 @@ class TestWindowsStopBeforePip:
             "server before pip install"
         )
         # Find position of the MAIN pip install command (the one installing
-        # from main.zip, not the fastmcp-slim recovery line).
+        # from the GitHub source archive, not the fastmcp-slim recovery line).
         lines = content.split("\n")
         pip_line_offset = 0
         pip_found = False
@@ -242,7 +242,7 @@ class TestWindowsStopBeforePip:
             if (
                 "pip" in stripped
                 and "install" in stripped
-                and "main.zip" in stripped
+                and "archive/" in stripped
                 and not stripped.startswith("#")
                 and not stripped.startswith("REM")
                 and "Write-Host" not in stripped
@@ -302,7 +302,7 @@ class TestDeterministicPreUninstall:
         fastmcp-slim before the main pip install."""
         content = INSTALLER_WINDOWS.read_text()
         uninstall_pos = _find_first_code_line(content, "pip", "uninstall", "remoteos-mcp")
-        install_pos = _find_first_code_line(content, "pip", "install", "main.zip")
+        install_pos = _find_first_code_line(content, "pip", "install", "archive/")
         assert uninstall_pos is not None, (
             "install.ps1 must pip uninstall remoteos-mcp before install"
         )
@@ -323,7 +323,7 @@ class TestDeterministicPreUninstall:
     def test_windows_no_force_reinstall(self) -> None:
         """install.ps1 must NOT use --force-reinstall on the main install."""
         content = INSTALLER_WINDOWS.read_text()
-        assert _find_first_code_line(content, "pip", "install", "--force-reinstall", "main.zip") is None, (
+        assert _find_first_code_line(content, "pip", "install", "--force-reinstall", "archive/") is None, (
             "install.ps1 must not use --force-reinstall on the main install "
             "(cascades to deps and corrupts fastmcp/__init__.py)"
         )
