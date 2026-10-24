@@ -35,8 +35,9 @@ Handles: pip install from repo, preserves existing auth key on reinstall, VBS hi
 **Run it in an admin PowerShell (#57, since 0.7.0.dev35).** The installer checks elevation before it changes anything:
 
 - Elevated (an admin PowerShell, or SSH as an administrator account: OpenSSH gives it the full token) → it installs.
-- Not elevated, at a desktop, no `REMOTEOS_MCP_AUTH_KEY` → it relaunches itself in an elevated window (one UAC click; the same file, or the same URL for a piped run), waits, and exits with that run's exit code. A cancelled UAC prompt → exit 1, "nothing was changed".
-- Not elevated over SSH or in session 0 → `[X] ... needs an elevated (Administrator) PowerShell -- nothing was changed on this box`, exit 1. Run it as an administrator account.
+- Not elevated, at a desktop (console input, no SSH, session != 0), no `REMOTEOS_MCP_AUTH_KEY` → it relaunches itself in an elevated window (one UAC click), waits, and exits with that run's exit code. A file run runs the same file; a piped run fetches the installer of the RESOLVED commit (`REMOTEOS_MCP_REF`, default `main`), not the URL it was piped from: to test a branch's installer, set `REMOTEOS_MCP_REF=<branch>`. A cancelled UAC prompt → exit 1, "nothing was changed". A relaunched run that is still not elevated (UAC off, standard user) fails instead of relaunching again.
+- Not elevated over SSH, in session 0, or with no console input (e.g. run from the agent's own Shell tool) → `[X] ... needs an elevated (Administrator) PowerShell -- nothing was changed on this box`, exit 1. Run it as an administrator account.
+- A piped run in a person's console waits for Enter before it exits on a failure, so the message stays readable (`exit` in `irm | iex` closes the console).
 - Not elevated with an explicit `REMOTEOS_MCP_AUTH_KEY` → the same exit 1: the key never crosses the UAC elevation (only an argv or a file could carry it). Open PowerShell as Administrator, set it there, rerun.
 - After the gate, a failing scheduled task or firewall rule fails the run (exit 1) instead of warning.
 - **Over SSH (session 0) the installer does not start the server itself**: a server started there dies with the SSH session. It runs `schtasks /End` + `schtasks /Run /TN RemoteOSMCP` and proves health from the task's process (the :8092 listener must run in a session other than 0). The desktop user must be logged in. An interactive run starts the server directly, as before.
@@ -129,7 +130,7 @@ ssh user@box 'powershell -NoProfile -Command "Invoke-WebRequest -Uri https://raw
 ssh user@box 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\install-remoteos.ps1'
 ```
 
-**Gotcha — server won't start from SSH session 0** (Windows, all boxes). A server started from an SSH session (session 0) dies when SSH disconnects. Since 0.7.0.dev35 (#57) the installer handles it: in session 0 it starts the server only through `schtasks /Run /TN RemoteOSMCP` (the desktop user's interactive session) and checks the listener's session. Before dev35, trigger the task by hand after an SSH deploy, in a NEW SSH call (a `/Run` in the same call as the old installer did not take: the installer's own session-0 server held the port). All three installers have a post-install health self-check (~30s poll) that verifies the server actually started with the correct version.
+**Gotcha — server won't start from SSH session 0** (Windows, all boxes). A server started from an SSH session (session 0) dies when SSH disconnects. Since 0.7.0.dev35 (#57) the installer handles it: in session 0 it starts the server only through `schtasks /Run /TN RemoteOSMCP` (the desktop user's interactive session) and checks the listener's session. Before dev35, trigger the task by hand after an SSH deploy, in a NEW SSH call (a `/Run` in the same call as the old installer did not take, most likely because the installer's own session-0 server still held the port, so the task's start script exited as a duplicate). All three installers have a post-install health self-check (~30s poll) that verifies the server actually started with the correct version.
 
 ## Repository structure
 

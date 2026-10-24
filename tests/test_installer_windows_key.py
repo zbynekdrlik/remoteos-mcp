@@ -100,7 +100,8 @@ def test_install_ps1_uses_no_powershell_7_only_syntax() -> None:
 
 # Lines of the script's own flow that change the box: the first one must come after the gate.
 _STATE_CHANGES = ("pip uninstall", "pip install", "Remove-Item -Recurse", "Unregister-ScheduledTask",
-                  "Remove-NetFirewallRule", "schtasks /End", "Stop-Process", "Set-Content", "New-Item")
+                  "Remove-NetFirewallRule", "schtasks /End", "Stop-Process", "Set-Content", "New-Item",
+                  "winget install", "curl.exe", "& $installerPath")
 
 
 def _function_names() -> set[str]:
@@ -123,7 +124,8 @@ def _flow_lines() -> list[tuple[int, str]]:
 
 
 def test_the_elevation_gate_is_a_named_function_tests_windows_can_load() -> None:
-    assert {"Get-RemoteOSElevationAction", "Test-RemoteOSInteractiveSession"} <= _function_names()
+    assert {"Get-RemoteOSElevationAction", "Test-RemoteOSInteractiveSession", "Get-RemoteOSRelaunchCommand",
+            "Exit-RemoteOSInstaller"} <= _function_names()
 
 
 def test_the_elevation_gate_runs_before_the_first_change_to_the_box() -> None:
@@ -135,6 +137,25 @@ def test_the_elevation_gate_runs_before_the_first_change_to_the_box() -> None:
     changes = [n for n, line in flow if any(change in line for change in _STATE_CHANGES)]
     assert changes, "no state-changing line found: the check would be vacuous"
     assert gate[0] < min(changes), (gate[0], min(changes))
+
+
+def _if_block(header: str) -> list[tuple[int, str]]:
+    """The code lines of the top-level `if` block whose first line is `header`, braces included."""
+    lines = INSTALLER_WINDOWS.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip() == header)
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    return [(i + 1, lines[i].strip()) for i in range(start, end + 1)]
+
+
+def test_the_fail_and_relaunch_branches_end_the_run_before_any_change() -> None:
+    """Review round 1: without its exit, the fail branch would go on non-elevated and the
+    relaunch branch would install twice (elevated and not)."""
+    changes = [n for n, line in _flow_lines() if any(change in line for change in _STATE_CHANGES)]
+    for header in ("if ($elevation -eq 'fail') {", "if ($elevation -eq 'relaunch') {"):
+        block = _if_block(header)
+        last = block[-2][1]
+        assert last.startswith(("exit ", "Exit-RemoteOSInstaller ")), f"{header} does not end the run: {last}"
+        assert block[-1][0] < min(changes), (header, block[-1][0], min(changes))
 
 
 def test_a_non_admin_run_is_no_longer_only_a_warning() -> None:

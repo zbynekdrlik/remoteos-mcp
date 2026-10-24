@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -229,52 +230,135 @@ class TestElevationGate:
     (one UAC click), automation and an explicit key fail before anything changes."""
 
     @pytest.mark.parametrize(
-        ("is_admin", "interactive", "explicit_key", "expected"),
+        ("is_admin", "interactive", "explicit_key", "relaunched", "expected"),
         [
-            (True, True, True, "proceed"),
-            (True, True, False, "proceed"),
-            (True, False, True, "proceed"),
-            (True, False, False, "proceed"),
-            (False, True, False, "relaunch"),
-            (False, True, True, "fail"),
-            (False, False, False, "fail"),
-            (False, False, True, "fail"),
+            (True, True, True, False, "proceed"),
+            (True, True, False, False, "proceed"),
+            (True, False, True, False, "proceed"),
+            (True, False, False, False, "proceed"),
+            (False, True, False, False, "relaunch"),
+            (False, True, True, False, "fail"),
+            (False, False, False, False, "fail"),
+            (False, False, True, False, "fail"),
+            # the relaunched run: elevated proceeds, still not elevated never relaunches again
+            (True, True, False, True, "proceed"),
+            (False, True, False, True, "fail"),
         ],
     )
     def test_the_decision_table(self, tmp_path: Path, is_admin: bool, interactive: bool, explicit_key: bool,
-                                expected: str) -> None:
+                                relaunched: bool, expected: str) -> None:
         def ps_bool(value: bool) -> str:
             return "$true" if value else "$false"
 
         out = _ps(tmp_path, f"""
 $a = Get-RemoteOSElevationAction -IsAdmin {ps_bool(is_admin)} -Interactive {ps_bool(interactive)} `
-    -ExplicitKey {ps_bool(explicit_key)}
+    -ExplicitKey {ps_bool(explicit_key)} -Relaunched {ps_bool(relaunched)}
 @{{ action = $a }} | ConvertTo-Json -Compress
 """)
 
         assert out["action"] == expected
 
     @pytest.mark.parametrize(
-        ("ssh_connection", "ssh_client", "session_id", "expected"),
+        ("ssh_connection", "ssh_client", "session_id", "redirected", "expected"),
         [
-            ("", "", 1, True),
-            ("", "", 2, True),
-            ("", "", 0, False),
-            ("10.0.0.5 50000 10.0.0.9 22", "", 1, False),
-            ("", "10.0.0.5 50000 22", 1, False),
-            ("10.0.0.5 50000 10.0.0.9 22", "10.0.0.5 50000 22", 0, False),
+            ("", "", 1, False, True),
+            ("", "", 2, False, True),
+            ("", "", 0, False, False),
+            ("10.0.0.5 50000 10.0.0.9 22", "", 1, False, False),
+            ("", "10.0.0.5 50000 22", 1, False, False),
+            ("10.0.0.5 50000 10.0.0.9 22", "10.0.0.5 50000 22", 0, False, False),
+            ("", "", 1, True, False),
         ],
-        ids=["desktop", "rdp-session", "session-0", "ssh-connection", "ssh-client", "ssh-in-session-0"],
+        ids=["desktop", "rdp-session", "session-0", "ssh-connection", "ssh-client", "ssh-in-session-0",
+             "a-program-in-a-desktop-session"],
     )
-    def test_ssh_or_session_0_is_not_interactive(self, tmp_path: Path, ssh_connection: str, ssh_client: str,
-                                                  session_id: int, expected: bool) -> None:
+    def test_ssh_session_0_or_no_console_input_is_not_interactive(
+            self, tmp_path: Path, ssh_connection: str, ssh_client: str, session_id: int, redirected: bool,
+            expected: bool) -> None:
+        """Review round 1: the remoteos Shell tool (stdin NUL) runs in the desktop session with no
+        SSH variable, and nobody would answer a UAC prompt there."""
         out = _ps(tmp_path, f"""
 $i = Test-RemoteOSInteractiveSession -SshConnection {_q(ssh_connection)} -SshClient {_q(ssh_client)} `
-    -SessionId {session_id}
+    -SessionId {session_id} -InputRedirected {"$true" if redirected else "$false"}
 @{{ interactive = $i }} | ConvertTo-Json -Compress
 """)
 
         assert out["interactive"] is expected
+
+
+class TestElevatedRelaunch:
+    SHA = "0123456789abcdef0123456789abcdef01234567"
+
+    def test_the_elevated_window_runs_the_file_with_the_commit_and_returns_its_exit_code(
+            self, tmp_path: Path) -> None:
+        """The relaunch command, run for real (not elevated; Read-Host stubbed): a path with a
+        quote and a space survives, the child gets REMOTEOS_MCP_REF + REMOTEOS_MCP_RELAUNCHED,
+        and the window's exit code is the installer's."""
+        folder = tmp_path / "it's a dir"
+        folder.mkdir()
+        seen = tmp_path / "seen.txt"
+        installer = folder / "fake install.ps1"
+        installer.write_text(
+            f"Set-Content -LiteralPath {_q(seen)} -Value \"$env:REMOTEOS_MCP_REF|$env:REMOTEOS_MCP_RELAUNCHED\"\r\n"
+            "exit 7\r\n",
+            encoding="ascii",
+        )
+        runner = tmp_path / "runner.ps1"
+        out = _ps(tmp_path, f"""
+$command = Get-RemoteOSRelaunchCommand -ScriptPath {_q(installer)} -InstallerUrl 'unused' -SourceRef '{self.SHA}'
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$errors) | Out-Null
+Set-Content -LiteralPath {_q(runner)} -Value ("function Read-Host {{ 'stub' }}`n" + $command) -Encoding UTF8
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File {_q(runner)} | Out-Null
+$code = $LASTEXITCODE
+@{{ parse = @($errors).Count; code = $code; seen = (Get-Content -LiteralPath {_q(seen)} -Raw).Trim() }} |
+    ConvertTo-Json -Compress
+""")
+
+        assert out["parse"] == 0, out
+        assert out["code"] == 7, out
+        assert out["seen"] == f"{self.SHA}|1", out
+
+    def test_a_piped_run_relaunches_the_installer_of_the_commit(self, tmp_path: Path) -> None:
+        url = f"https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/{self.SHA}/install.ps1"
+        out = _ps(tmp_path, f"""
+$command = Get-RemoteOSRelaunchCommand -ScriptPath '' -InstallerUrl {_q(url)} -SourceRef '{self.SHA}'
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$errors)
+@{{ parse = @($errors).Count; text = $command }} | ConvertTo-Json -Compress
+""")
+
+        assert out["parse"] == 0, out
+        assert f"-Command 'irm ''{url}'' | iex'" in out["text"], out["text"]
+        assert f"$env:REMOTEOS_MCP_REF = '{self.SHA}'" in out["text"], out["text"]
+
+    def test_the_relaunch_asks_uac_for_that_command_and_returns_its_exit_code(self, tmp_path: Path) -> None:
+        """Start-Process is stubbed (no UAC prompt in CI): the encoded command is the relaunch
+        command, it goes through -Verb RunAs, and a refused elevation returns $null."""
+        out = _ps(tmp_path, f"""
+function Start-Process {{
+    param($FilePath, $Verb, [switch]$PassThru, $ArgumentList)
+    if ($script:refuse) {{ throw 'The operation was canceled by the user' }}
+    $script:call = @{{ file = $FilePath; verb = $Verb; args = $ArgumentList }}
+    $p = [pscustomobject]@{{ ExitCode = 5; Handle = 1 }}
+    $p | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {{ }}
+    return $p
+}}
+$script:refuse = $false
+$path = 'C:\\x\\install.ps1'
+$code = Invoke-RemoteOSElevatedRelaunch -ScriptPath $path -InstallerUrl 'unused' -SourceRef '{self.SHA}'
+$decoded = [System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($script:call.args[-1]))
+$expected = Get-RemoteOSRelaunchCommand -ScriptPath $path -InstallerUrl 'unused' -SourceRef '{self.SHA}'
+$script:refuse = $true
+$refused = Invoke-RemoteOSElevatedRelaunch -ScriptPath $path -InstallerUrl 'unused' -SourceRef '{self.SHA}'
+@{{ code = $code; verb = $script:call.verb; file = $script:call.file; same = ($decoded -ceq $expected);
+    flag = $script:call.args[-2]; refused = $refused }} | ConvertTo-Json -Compress
+""")
+
+        assert out["code"] == 5, out
+        assert out["verb"] == "RunAs" and out["file"] == "powershell.exe", out
+        assert out["flag"] == "-EncodedCommand" and out["same"] is True, out
+        assert out["refused"] is None, out
 
 
 class TestListenerSession:
@@ -285,7 +369,7 @@ class TestListenerSession:
         out = _ps(tmp_path, """
 $port = 18096
 $before = Get-RemoteOSListenerSessionId -Port $port
-$p = Start-Process -FilePath python -ArgumentList '-m', 'http.server', "$port", '--bind', '127.0.0.1' `
+$p = Start-Process -FilePath PYTHON_EXE -ArgumentList '-m', 'http.server', "$port", '--bind', '127.0.0.1' `
     -WindowStyle Hidden -PassThru
 try {
     $seen = $null
@@ -298,7 +382,7 @@ try {
     Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 }
 @{ before = $before; seen = $seen; own = $own } | ConvertTo-Json -Compress
-""")
+""".replace("PYTHON_EXE", _q(sys.executable)))  # pytest's own interpreter, never a PATH/App Paths lookup
 
         assert out["before"] is None
         assert out["seen"] is not None, out

@@ -9,6 +9,10 @@ $Port = 8092
 # "main" could pair new code with old pins.
 $Ref = $env:REMOTEOS_MCP_REF
 if (-not $Ref) { $Ref = "main" }
+# Set by the elevated relaunch (#57): a relaunched run that is still not elevated fails instead
+# of relaunching again, and does not pause at exit (its elevated window already does)
+$relaunched = [bool]$env:REMOTEOS_MCP_RELAUNCHED
+Remove-Item Env:REMOTEOS_MCP_RELAUNCHED -ErrorAction SilentlyContinue
 # The explicit key is read once and dropped from the environment BEFORE the first child process
 # (query user, python --version, winget, curl.exe): a child inherits $env: (#12 review round 9).
 $explicitKey = $env:REMOTEOS_MCP_AUTH_KEY
@@ -181,16 +185,29 @@ function Set-RemoteOSOwnerOnlyAcl([string]$Path, [string]$User) {
 # never crosses the elevation (only an argv or a file could carry it), so that run fails too and
 # the person is told to open an admin PowerShell.
 
-function Get-RemoteOSElevationAction([bool]$IsAdmin, [bool]$Interactive, [bool]$ExplicitKey) {
-    # -> 'proceed' | 'relaunch' | 'fail' (pure: the caller probes the environment)
+function Get-RemoteOSElevationAction([bool]$IsAdmin, [bool]$Interactive, [bool]$ExplicitKey, [bool]$Relaunched) {
+    # -> 'proceed' | 'relaunch' | 'fail' (pure: the caller probes the environment). A run that
+    # is already the relaunch and still not elevated (UAC off and a standard user: RunAs starts
+    # it with the same token, no prompt) fails, so relaunches never chain.
     if ($IsAdmin) { return 'proceed' }
-    if ($Interactive -and -not $ExplicitKey) { return 'relaunch' }
+    if ($Interactive -and -not $ExplicitKey -and -not $Relaunched) { return 'relaunch' }
     return 'fail'
 }
 
-function Test-RemoteOSInteractiveSession([string]$SshConnection, [string]$SshClient, [int]$SessionId) {
-    # A desktop session a person sits at: not over SSH, and not session 0 (services, OpenSSH)
-    return [bool]((-not $SshConnection) -and (-not $SshClient) -and $SessionId -ne 0)
+function Test-RemoteOSInteractiveSession([string]$SshConnection, [string]$SshClient, [int]$SessionId,
+                                         [bool]$InputRedirected) {
+    # A desktop session a person sits at: not over SSH, not session 0 (services, OpenSSH), and
+    # stdin is the console. A pasted one-liner or a -File run in a console has the console as
+    # stdin; a program running the installer (the remoteos Shell tool: stdin NUL, an ssh pipe)
+    # does not, and nobody would answer a UAC prompt on that desktop.
+    return [bool]((-not $SshConnection) -and (-not $SshClient) -and $SessionId -ne 0 -and -not $InputRedirected)
+}
+
+function Exit-RemoteOSInstaller([int]$Code, [bool]$Pause) {
+    # exit $Code. A piped run (irm | iex) in a person's console would close that console with the
+    # message unread: with $Pause it waits for Enter first.
+    if ($Pause) { Read-Host "  Press Enter to close" | Out-Null }
+    exit $Code
 }
 
 function Get-RemoteOSListenerSessionId([int]$Port) {
@@ -208,35 +225,48 @@ function Test-RemoteOSRefName([string]$Ref) {
         $Ref -notmatch '\.\.')
 }
 
-function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef) {
-    # The same installer in an elevated window (UAC) -> the elevated run's exit code. A file run
-    # runs that file again, a piped run fetches the same URL; both install $SourceRef (the
-    # resolved commit), handed over in REMOTEOS_MCP_REF because the elevated process does not get
-    # this one's environment. The installer runs as a child of
-    # the elevated window's PowerShell, which waits for Enter at the end so the person can read
-    # the result (an `exit` in the installer would otherwise close the window at once). The
-    # command goes over as -EncodedCommand: no quoting of the path or URL can break it.
+function Get-RemoteOSRelaunchCommand([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef) {
+    # The script the elevated window runs. A file run runs that file again, a piped run fetches
+    # the installer of the resolved commit; both install $SourceRef, handed over in
+    # REMOTEOS_MCP_REF because the elevated process does not get this one's environment. The
+    # installer runs as a CHILD powershell, and the window then waits for Enter so the person can
+    # read the result (an `exit` in the installer would otherwise close the window at once).
     if ($ScriptPath) {
         $run = "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '" + $ScriptPath.Replace("'", "''") + "'"
     } else {
         $inner = "irm '" + $InstallerUrl.Replace("'", "''") + "' | iex"
         $run = "& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '" + $inner.Replace("'", "''") + "'"
     }
-    $outer = @(
+    return @(
         ("`$env:REMOTEOS_MCP_REF = '" + $SourceRef.Replace("'", "''") + "'"),
+        '$env:REMOTEOS_MCP_RELAUNCHED = "1"',
         $run,
         '$code = $LASTEXITCODE',
         'Write-Host ""',
         'Read-Host "RemoteOS MCP installer finished (exit code $code) - press Enter to close this window" | Out-Null',
         'exit $code'
     ) -join "`n"
-    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($outer))
+}
+
+function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef) {
+    # The installer again in an elevated window (UAC) -> the elevated run's exit code, or $null
+    # when the elevation was cancelled or refused (nothing ran). The command goes over as
+    # -EncodedCommand: no quoting of the path or URL can break it.
+    $command = Get-RemoteOSRelaunchCommand -ScriptPath $ScriptPath -InstallerUrl $InstallerUrl -SourceRef $SourceRef
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($command))
     # -PassThru + WaitForExit, not -Wait: Windows PowerShell's -Wait also waits for every
     # descendant, and the elevated run leaves the server running.
-    $process = Start-Process -FilePath "powershell.exe" -Verb RunAs -PassThru `
-        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
+    try {
+        $process = Start-Process -FilePath "powershell.exe" -Verb RunAs -PassThru `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
+    } catch {
+        Write-Host "  [X] The elevation was cancelled or failed ($_) -- nothing was changed on this box" -ForegroundColor Red
+        return $null
+    }
+    $null = $process.Handle  # keep the process handle: ExitCode needs it after the exit
     $process.WaitForExit()
-    return $process.ExitCode
+    if ($null -eq $process.ExitCode) { return 1 }
+    return [int]$process.ExitCode
 }
 
 Write-Host ""
@@ -247,24 +277,32 @@ Write-Host ""
 # --- The elevation gate (#57): before anything on the box changes ---
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $interactive = Test-RemoteOSInteractiveSession -SshConnection $env:SSH_CONNECTION -SshClient $env:SSH_CLIENT `
-    -SessionId (Get-Process -Id $PID).SessionId
-$elevation = Get-RemoteOSElevationAction -IsAdmin $isAdmin -Interactive $interactive -ExplicitKey ([bool]$explicitKey)
+    -SessionId (Get-Process -Id $PID).SessionId -InputRedirected ([Console]::IsInputRedirected)
+# A piped run in a person's console pauses before it exits. $PSCommandPath is empty for
+# `irm | iex` typed at a prompt (inside a wrapper .ps1 it would name the wrapper, which then
+# runs again, elevated, and fetches the installer again: harmless).
+$pauseOnExit = $interactive -and -not $PSCommandPath -and -not $relaunched
+$elevation = Get-RemoteOSElevationAction -IsAdmin $isAdmin -Interactive $interactive -ExplicitKey ([bool]$explicitKey) `
+    -Relaunched $relaunched
 if ($elevation -eq 'fail') {
     Write-Host "  [X] The RemoteOS MCP installer needs an elevated (Administrator) PowerShell -- nothing was changed on this box" -ForegroundColor Red
-    if ($interactive) {
+    if ($relaunched) {
+        Write-Host "      The elevated relaunch is still not elevated (is UAC turned off for a standard user?):" -ForegroundColor Yellow
+        Write-Host "      run the installer from an administrator account." -ForegroundColor Yellow
+    } elseif ($interactive) {
         Write-Host "      REMOTEOS_MCP_AUTH_KEY cannot cross the UAC elevation: open PowerShell as Administrator" -ForegroundColor Yellow
         Write-Host "      (right-click > Run as Administrator), set REMOTEOS_MCP_AUTH_KEY there and run the installer again." -ForegroundColor Yellow
     } else {
-        Write-Host "      This run is not at a desktop (SSH or session 0), so it cannot answer a UAC prompt:" -ForegroundColor Yellow
-        Write-Host "      run it as an account with administrator rights." -ForegroundColor Yellow
+        Write-Host "      This run is not at a desktop (SSH, session 0, or no console input), so it cannot answer" -ForegroundColor Yellow
+        Write-Host "      a UAC prompt: run it as an account with administrator rights." -ForegroundColor Yellow
     }
-    exit 1
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
 # --- The source commit (#12): resolved once, before anything changes ---
 if (-not (Test-RemoteOSRefName $Ref)) {
     Write-Host "  [X] REMOTEOS_MCP_REF is not a plain branch, tag or commit name -- nothing was changed on this box" -ForegroundColor Red
-    exit 1
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 # Windows PowerShell 5.1 on an older .NET may not offer TLS 1.2, which GitHub requires
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -277,7 +315,7 @@ try {
 }
 if ($sourceSha -cnotmatch '^[0-9a-f]{40}\z') {
     Write-Host "  [X] Could not resolve '$Ref' to a commit of zbynekdrlik/remoteos-mcp ($resolveError) -- nothing was changed on this box" -ForegroundColor Red
-    exit 1
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 Write-Host "  Source: $Ref = commit $sourceSha" -ForegroundColor Gray
 # This installer at that commit: the elevated relaunch of a piped run fetches it (#57)
@@ -285,12 +323,8 @@ $InstallerUrl = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$sou
 
 if ($elevation -eq 'relaunch') {
     Write-Host "  Not elevated: the install continues in an elevated PowerShell window - confirm the UAC prompt." -ForegroundColor Yellow
-    try {
-        $elevatedExit = Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl -SourceRef $sourceSha
-    } catch {
-        Write-Host "  [X] The elevation was cancelled or failed ($_) -- nothing was changed on this box" -ForegroundColor Red
-        exit 1
-    }
+    $elevatedExit = Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl -SourceRef $sourceSha
+    if ($null -eq $elevatedExit) { Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit }
     Write-Host "  The elevated install finished with exit code $elevatedExit." -ForegroundColor Gray
     exit $elevatedExit
 }
@@ -383,7 +417,7 @@ if (-not $python) {
 
     if (-not $python) {
         Write-Host "        [X] Could not install Python. Install manually from python.org" -ForegroundColor Red
-        return
+        Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
     }
 }
 
@@ -396,7 +430,7 @@ try {
     $resolvedKey = Resolve-RemoteOSAuthKey -Explicit $explicitKey -Found $foundKeys
 } catch {
     Write-Host "  [X] $_ - nothing was changed on this PC" -ForegroundColor Red
-    exit 1
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 $AuthKey = $resolvedKey.Key
 
@@ -471,14 +505,14 @@ if ($pipInstallExit -eq 0 -and $pipShow -match "Version: (.+)") {
     Write-Host "        [X] pip install failed. Full pip output:" -ForegroundColor Red
     Write-Host $pipInstallOut
     Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/$sourceSha.zip" -ForegroundColor Yellow
-    return
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 # Sanity check: verify remoteos and fastmcp can be imported (fail hard, never repair)
 $importCheck = & $python -c "import remoteos, fastmcp; from fastmcp import FastMCP" 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Host "        [X] Import check failed - remoteos or fastmcp broken after install" -ForegroundColor Red
     Write-Host "        $importCheck" -ForegroundColor Red
-    exit 1
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
 # --- The auth key (resolved before the install, above) ---
@@ -509,9 +543,6 @@ if (-not $pythonPath) { $pythonPath = $python }
     auth_key = $AuthKey
     host     = "0.0.0.0"
 } | ConvertTo-Json | Set-Content "$ConfigDir\config.json"
-
-# The commit this box installed (#12; #60's updater reads it). No secret, so no ACL.
-$sourceSha | Set-Content "$ConfigDir\installed-ref.txt"
 
 # Start batch script (auto-restart loop and crash guard; the key in its environment)
 New-RemoteOSStartScript -PythonPath $pythonPath -Port $Port -AuthKey $AuthKey | Set-Content "$ConfigDir\start-remoteos.bat"
@@ -548,7 +579,7 @@ try {
 } catch {
     # The run is elevated here (the gate above), so this is a real failure, not a missing right
     Write-Host "        [X] Could not register the scheduled task 'RemoteOSMCP': $_" -ForegroundColor Red
-    exit 1
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
 # --- Firewall + Network profile ---
@@ -566,7 +597,7 @@ try {
 } catch {
     # Elevated here too: a failure is real
     Write-Host "        [X] Could not add the firewall rule for TCP port ${Port}: $_" -ForegroundColor Red
-    exit 1
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
 # --- Get LAN IP ---
@@ -602,7 +633,7 @@ if ($interactive) {
     $ErrorActionPreference = $prevEAP
     if ($taskRunExit -ne 0) {
         Write-Host "  [X] schtasks /Run /TN RemoteOSMCP failed (exit $taskRunExit): $($taskRunOut.Trim())" -ForegroundColor Red
-        exit 1
+        Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
     }
 }
 Start-Sleep -Seconds 5
@@ -612,16 +643,18 @@ Write-Host "  Verifying installed version matches running service..." -Foregroun
 $PKG_VER = & $python -c "import importlib.metadata as m; print(m.version('remoteos-mcp'))" 2>&1 | Out-String
 $PKG_VER = $PKG_VER.Trim()
 $healthOk = $false
+$healthAnswered = $false
 for ($attempt = 1; $attempt -le 6; $attempt++) {
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5 -ErrorAction Stop
         $healthVer = $health.version
         if ($healthVer -eq $PKG_VER -and -not $interactive) {
+            $healthAnswered = $true
             # The server must be the task's, in a desktop session: one in session 0 dies with SSH
             $serverSession = Get-RemoteOSListenerSessionId -Port $Port
             if ($serverSession -eq 0) {
                 Write-Host "  [X] The server on port $Port runs in session 0: it would die with this SSH session" -ForegroundColor Red
-                exit 1
+                Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
             }
             if ($null -ne $serverSession) {
                 $healthOk = $true
@@ -634,18 +667,26 @@ for ($attempt = 1; $attempt -le 6; $attempt++) {
             break
         } elseif ($healthVer) {
             Write-Host "  [X] Installed ${PKG_VER} but service reports ${healthVer}" -ForegroundColor Red
-            exit 1
+            Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
         }
     } catch {}
     Start-Sleep -Seconds 5
+}
+if (-not $healthOk -and $healthAnswered) {
+    Write-Host "  [X] The server answers v${PKG_VER}, but the session of the process on port $Port could not be read" -ForegroundColor Red
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 if (-not $healthOk) {
     Write-Host "  [X] Health endpoint (http://127.0.0.1:${Port}/health) did not respond within 30s" -ForegroundColor Red
     if (-not $interactive) {
         Write-Host "      The task runs the server in ${desktopUser}'s desktop session: that user must be logged in." -ForegroundColor Yellow
     }
-    exit 1
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
+
+# The commit this box runs, recorded once it proved itself (#12; #60's updater reads it). No
+# secret, so no ACL.
+$sourceSha | Set-Content "$ConfigDir\installed-ref.txt"
 
 # --- Summary ---
 Write-Host ""

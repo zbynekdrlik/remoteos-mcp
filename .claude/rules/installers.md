@@ -276,32 +276,46 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   (must be 40 hex chars), right after the gate's fail branch and before the relaunch and any
   change. `PIP_CONSTRAINT` = `raw/.../$sourceSha/constraints.txt`, pip installs
   `archive/$sourceSha.zip`, `$InstallerUrl` = `raw/.../$sourceSha/install.ps1`, and
-  `installed-ref.txt` (next to `config.json`, no secret) holds the sha for #60's updater. Never
+  `installed-ref.txt` (next to `config.json`, no secret) holds the sha for #60's updater, written
+  only after the health check passed. Never
   reintroduce a literal `/main/` or `main.zip` there (a static test). The static tests find the
   main pip line by `archive/`.
 - **The `shell` CI job** runs `shellcheck install-linux.sh install.sh uninstall*.sh` and the
   macOS installer tests under the `bash:3.2` container (the command above). Keep all bash
   installers shellcheck-clean (ubuntu-latest's shellcheck).
 - **The elevation gate (#57) is the first thing after the banner, before any change**:
-  `Get-RemoteOSElevationAction -IsAdmin -Interactive -ExplicitKey` (pure) → proceed | relaunch |
-  fail; `Test-RemoteOSInteractiveSession` (no `SSH_CONNECTION`/`SSH_CLIENT`, session != 0) feeds
-  it. A static test pins the call before the first state-changing line of the script's flow.
-  - relaunch = `Invoke-RemoteOSElevatedRelaunch`: `Start-Process powershell -Verb RunAs
-    -PassThru` + `WaitForExit()`, never `-Wait` (5.1's `-Wait` also waits for every descendant,
-    and the elevated run leaves the server running). The elevated window runs the installer as a
-    CHILD powershell and then `Read-Host`s, because an `exit` inside the installer would close the
-    window before the person reads it. The command goes over as `-EncodedCommand` (no quoting).
-    An explicit key is never relaunched: the elevated process gets a fresh environment, and an
-    argv or a file would expose the key.
-  - Elevation does NOT pass the caller's environment: anything the elevated run needs (e.g. the
-    resolved ref) must be set inside the encoded command.
-  - After the gate, the scheduled-task and firewall `catch` blocks `exit 1`: the run is
+  `Get-RemoteOSElevationAction -IsAdmin -Interactive -ExplicitKey -Relaunched` (pure) → proceed |
+  relaunch | fail; `Test-RemoteOSInteractiveSession` (no `SSH_CONNECTION`/`SSH_CLIENT`, session
+  != 0, and `[Console]::IsInputRedirected` false: the agent's own Shell tool runs in the desktop
+  session with stdin NUL, and nobody would click its UAC prompt) feeds it. Static tests pin the
+  call, and the exit at the end of the fail and relaunch branches, before the first
+  state-changing line of the script's flow (winget / curl.exe / the Python installer count).
+  - relaunch = `Invoke-RemoteOSElevatedRelaunch` (the command itself is the pure
+    `Get-RemoteOSRelaunchCommand`, run for real in tests_windows): `Start-Process powershell
+    -Verb RunAs -PassThru` + `WaitForExit()`, never `-Wait` (5.1's `-Wait` also waits for every
+    descendant, and the elevated run leaves the server running). Only `Start-Process` is in the
+    try (a refused UAC → `$null` → "nothing was changed"); a `$null` ExitCode counts as 1. The
+    elevated window runs the installer as a CHILD powershell and then `Read-Host`s, because an
+    `exit` inside the installer would close the window before the person reads it. The command
+    goes over as `-EncodedCommand` (no quoting). An explicit key is never relaunched: the
+    elevated process gets a fresh environment, and an argv or a file would expose the key.
+  - Elevation does NOT pass the caller's environment: anything the elevated run needs (the
+    resolved ref, `REMOTEOS_MCP_RELAUNCHED=1`) is set inside the encoded command. A relaunched
+    run that is still not elevated (UAC off for a standard user: RunAs gives the same token, no
+    prompt) fails instead of relaunching again; it also does not pause at exit.
+  - **Every failure exit after the gate is `Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit`**
+    (never a bare `return`: it exits 0, and the relaunch forwarded that as success).
+    `$pauseOnExit` = interactive, no `$PSCommandPath` (piped), not relaunched: `exit` inside
+    `irm | iex` closes the person's console, so it waits for Enter first. Tests that bound a
+    failure block read it up to its closing brace.
+  - After the gate, the scheduled-task and firewall `catch` blocks exit 1: the run is
     elevated, so a failure is real.
   - Non-interactive (SSH, session 0): never `Start-Process wscript` (it dies with the SSH
     session); `schtasks /End` + `schtasks /Run /TN RemoteOSMCP` under `$ErrorActionPreference =
     "Continue"` (5.1 turns native stderr under `2>&1` into a terminating error with `Stop`), then
     the health loop also requires `Get-RemoteOSListenerSessionId -Port` != 0 (session 0 = exit 1,
-    `$null` = keep polling).
+    `$null` = keep polling; still `$null` at the end = "the session could not be read", not "did
+    not respond").
 
 ## Tests
 
