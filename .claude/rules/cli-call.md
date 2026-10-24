@@ -33,9 +33,14 @@ paths:
   both, with the pure parser tests.
 - **One reply = ONE server-sent event, and httpx2's `EventSource` refuses an event over 1 MiB
   by default** (`SSEError`, surfacing as "SSE stream ended without a response"): a FileDownload of
-  ~780 KB or 1 MB of Shell output failed. `mcp.client.streamable_http` builds `EventSource(response)`
-  with no option, so `_allow_large_replies()` swaps that module's `EventSource` name for a subclass
-  defaulting to `MAX_REPLY_EVENT_BYTES` (256 MiB) — a process-local patch, idempotent, and an SDK
+  ~780 KB or 1 MB of Shell output failed. `mcp.client.streamable_http` reads a POST reply through
+  its module-level `EventSource` name: mcp 2.2 (constraints.txt, what the installers ship) as
+  `EventSource(response)`, mcp 2.3 (what CI's unconstrained `pip install -e .[test]` resolves) with
+  `max_event_size=self.max_sse_event_size`, which fastmcp 4.1.2 leaves at 1 MiB. So
+  `_allow_large_replies()` swaps that name for a subclass that IGNORES the passed value and always
+  uses `MAX_REPLY_EVENT_BYTES` (256 MiB) — a first version that only changed the DEFAULT passed
+  locally (2.2) and failed in CI (2.3). Run `test_cli_call` against both before touching it. A
+  process-local patch, idempotent, and an SDK
   that stops using `httpx2.EventSource` is a named `CallFailed` ("this mcp SDK is incompatible"),
   never a silent fallback to 1 MiB (tested). The 2.5 MB Shell and 5 MB get tests fail without it.
   This swap and the logger silencing are `prepare_process()`, called by `main` only (never by

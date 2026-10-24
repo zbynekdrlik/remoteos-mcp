@@ -316,9 +316,13 @@ def _display_url(url: str) -> str:
 def _allow_large_replies() -> None:
     """Lift the SDK's 1 MiB per-event limit for this process (see ``MAX_REPLY_EVENT_BYTES``).
 
-    ``mcp.client.streamable_http`` builds ``EventSource(response)`` with httpx2's default and has
-    no option for it, so the CLI swaps in a subclass with a larger default. Idempotent. An SDK that
-    no longer uses ``EventSource`` fails loudly here rather than truncating replies silently.
+    ``mcp.client.streamable_http`` reads a POST reply with its module-level name ``EventSource``:
+    mcp 2.2 as ``EventSource(response)`` (httpx2's 1 MiB default, no option), mcp 2.3 as
+    ``EventSource(response, max_event_size=self.max_sse_event_size)`` (1 MiB again: fastmcp 4.1.2
+    never passes ``max_sse_event_size`` to ``streamable_http_client``). The CLI swaps that name for
+    a subclass that always uses ``MAX_REPLY_EVENT_BYTES``, which covers both. Idempotent. An SDK
+    without that name fails loudly here; one that stops using it fails a big reply with the SDK's
+    own "exceeded the 1048576 byte limit" line (and ``test_cli_call``'s large-reply tests).
     """
     import httpx2
     from mcp.client import streamable_http
@@ -334,8 +338,8 @@ def _allow_large_replies() -> None:
         return  # already swapped
 
     class LargeEventSource(httpx2.EventSource):
-        def __init__(self, response, max_event_size: int | None = MAX_REPLY_EVENT_BYTES) -> None:
-            super().__init__(response, max_event_size=max_event_size)
+        def __init__(self, response, max_event_size: int | None = None) -> None:  # the SDK's value is ignored
+            super().__init__(response, max_event_size=MAX_REPLY_EVENT_BYTES)
 
     streamable_http.EventSource = LargeEventSource
 
