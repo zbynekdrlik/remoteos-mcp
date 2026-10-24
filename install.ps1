@@ -99,8 +99,7 @@ function Resolve-RemoteOSAuthKey([string]$Explicit, $Found) {
 }
 
 function New-RemoteOSStartScript([string]$PythonPath, [int]$Port, [string]$AuthKey) {
-    # An auto-restart loop with a crash guard. The key is set only around the server line (never on its
-    # command line): every other program cmd.exe starts (netstat, findstr, timeout) would inherit it.
+    # An auto-restart loop with a crash guard; the key is set only around the server line (#12 round 10)
     if (-not (Test-RemoteOSKey $AuthKey)) { throw "refusing to write an invalid auth key into the start script" }
     return @"
 @echo off
@@ -182,8 +181,7 @@ function Get-RemoteOSElevationAction([Parameter(Mandatory)][bool]$IsAdmin, [Para
 
 function Test-RemoteOSInteractiveSession([string]$SshConnection, [string]$SshClient, [Parameter(Mandatory)][int]$SessionId,
                                          [Parameter(Mandatory)][bool]$InputRedirected) {
-    # A desktop session a person sits at: not SSH, not session 0, stdin is the console (the remoteos Shell
-    # tool and an ssh pipe redirect stdin, and nobody would answer a UAC prompt for them).
+    # A person at the desktop: not SSH, not session 0, stdin the console (else nobody answers UAC)
     return [bool]((-not $SshConnection) -and (-not $SshClient) -and $SessionId -ne 0 -and -not $InputRedirected)
 }
 
@@ -196,8 +194,7 @@ function Test-RemoteOSPythonReachable([string]$PythonPath, [string]$RunProfile, 
 }
 
 function Exit-RemoteOSInstaller([int]$Code, [bool]$Pause) {
-    # exit $Code; with $Pause first wait for Enter (irm | iex would close the console unread). A Read-Host
-    # that cannot read (-NonInteractive) must not keep the run alive.
+    # exit $Code; with $Pause wait for Enter first (a Read-Host that cannot read must not keep the run alive)
     if ($Pause) { try { Read-Host "  Press Enter to close" | Out-Null } catch {} }
     exit $Code
 }
@@ -325,9 +322,15 @@ function Test-RemoteOSLink([string]$Path) {
 }
 
 function Remove-RemoteOSTree([string]$Path) {
-    # Never through a planted link (5.1's Remove-Item -Recurse enters a junction; .NET does not)
-    if (Test-RemoteOSLink $Path) { [System.IO.Directory]::Delete($Path) }
-    elseif (Test-Path -LiteralPath $Path) { [System.IO.Directory]::Delete($Path, $true) }
+    # Never through a planted link (5.1's Remove-Item -Recurse enters a junction): a link goes alone, a
+    # directory entry by entry (.NET Framework's recursive Delete throws on a junction inside)
+    if (Test-RemoteOSLink $Path) { [System.IO.Directory]::Delete($Path); return }
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    foreach ($entry in ([System.IO.DirectoryInfo]$Path).GetFileSystemInfos()) {
+        if ($entry -is [System.IO.DirectoryInfo]) { Remove-RemoteOSTree $entry.FullName }
+        else { $entry.Attributes = 'Normal'; $entry.Delete() }
+    }
+    [System.IO.Directory]::Delete($Path)
 }
 
 function Protect-RemoteOSWheelhouseRoot([string]$Root, [string]$User) {
@@ -464,8 +467,7 @@ function Install-RemoteOSWheelhouse([string]$Python, [string]$Wheelhouse, [strin
 }
 
 function Remove-RemoteOSStaleWheelhouses([string]$Root, [string[]]$Keep) {
-    # After a proven install: keep the current + previous wheelhouse, remove other wheelhouse names only;
-    # nothing when the root or its folder became a link since (a swap during the run) -> the removed names
+    # Keep current + previous, remove other <sha> names only; nothing if the root became a link -> removed names
     $removed = @()
     if ((Test-RemoteOSLink $Root) -or (Test-RemoteOSLink (Split-Path -Parent $Root))) { return $removed }
     foreach ($dir in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
@@ -511,8 +513,7 @@ function Stop-RemoteOSServer([int]$Port) {
 }
 
 function Start-RemoteOSServer([string]$ConfigDir, [bool]$StartDirect) {
-    # Directly only from the desktop user's own desktop run (#57): from SSH / session 0 it would die with
-    # the session, as another account it would hide the task's reach. Else the task. -> $null or an error
+    # Directly only from the desktop user's own desktop run (#57), else through the task -> $null or an error
     if ($StartDirect) {
         Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-remoteos.vbs`""
         return $null

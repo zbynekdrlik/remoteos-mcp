@@ -317,8 +317,9 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     elevated delete goes through `Remove-RemoteOSTree`** (review round 2): 5.1's `Remove-Item
     -Recurse` enters a junction and deletes the TARGET's contents, and Get-Acl/Set-Acl follow one,
     so a link as the root is removed alone, a link as the config folder is refused, and a
-    directory is deleted by `[System.IO.Directory]::Delete($p, $true)` (never enters a link; it
-    throws on a read-only file, which then stops the run: remove the folder by hand). The old
+    directory is walked entry by entry (a link inside removed alone, read-only files cleared):
+    .NET Framework's recursive `Directory.Delete($p, $true)` throws "The parameter is incorrect"
+    on a junction inside (it calls DeleteVolumeMountPoint; CI on 12e8902). The old
     `.winremote-mcp` and other-account config cleanups use it too (a static test: no
     `Remove-Item -Recurse` anywhere in install.ps1). `Test-RemoteOSLink` fails closed (a path
     that exists but cannot be read counts as a link). The prune does nothing when the root or its
