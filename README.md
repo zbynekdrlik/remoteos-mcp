@@ -40,7 +40,8 @@ come from that sha. The sha is printed and written to
 **Download first, install offline, roll back (#64).** Before anything on the PC changes, the
 installer downloads every wheel the install needs (and builds one for every source archive, the
 remoteos archive itself included) into `C:\Users\<user>\.remoteos-mcp\wheelhouse\<sha>`
-(about 60 MB). A failed download prints `[X] could not download ... -- nothing was changed on
+(about 60 MB; the folder is owned by Administrators, the desktop user may only read it, because an
+elevated pip installs from it). A failed download prints `[X] could not download ... -- nothing was changed on
 this box` and the running server is untouched. Only then is the server stopped, and the install
 runs with `--no-index` from that folder. A failure after the stop (pip, the import check, the
 task, the firewall, the start, the health check) reinstalls the previous commit's wheelhouse
@@ -61,7 +62,7 @@ That's it. The script will:
 8. Print the `claude mcp add` command to run on your Linux machine
 
 On **macOS**: `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.sh | bash`.
-Pin a source with `| REMOTEOS_MCP_REF=<commit sha | tag | branch> bash` (default `main`).
+Pin a source with `| REMOTEOS_MCP_REF=<full 40-hex commit sha | tag | branch> bash` (default `main`).
 
 On **Linux** (systemd): `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash`.
 Pin a source with `| sudo REMOTEOS_MCP_REF=<commit sha | tag | branch> bash` (default `main`).

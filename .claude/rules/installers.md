@@ -302,7 +302,31 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     never name a parameter of `Exit-RemoteOSAfterFailure` / `Invoke-RemoteOSRollback` like
     those, and never `.GetNewClosure()` them (a closure's module scope cannot see the script's
     functions).
-  - No `$env:PIP_CONSTRAINT` URL: pip would fetch it even with `--no-index`.
+  - No `$env:PIP_CONSTRAINT` URL: pip would fetch it even with `--no-index`. An inherited one
+    (an older installer, same console) is removed at the top; `PIP_NO_INDEX`/`PIP_FIND_LINKS` (the
+    hand restore) are honoured by the preflight.
+  - **Both wheelhouses are proven installable before the stop** (review round 1):
+    `Test-RemoteOSWheelhouseInstallable` = `pip install --dry-run --ignore-installed --no-index`.
+    Wheels are per interpreter: a box whose Python changed since would fail only after the stop,
+    and the rollback the same way. A kept wheelhouse that fails is rebuilt; a rollback point that
+    fails is dropped (with a `[!]` line).
+  - **The wheelhouse root feeds an elevated pip from the desktop user's profile** (review round
+    1): `Protect-RemoteOSWheelhouseRoot` before the download: owner Administrators, protected
+    ACL, SYSTEM + Administrators full, the desktop user read; a root that is not like that
+    (`Test-RemoteOSWheelhouseRootTrusted`, by SID) is deleted with everything in it. Residual: the
+    user owns the PROFILE, so during a run they could still rename the root and race a new one in;
+    `%ProgramData%` would close that (follow-up candidate, the design names the profile path).
+  - The installed version is read from a `REMOTEOS_VER=` line (a stderr warning on the merged
+    output must not read as the version and roll back a good install).
+  - The firewall rule: the new one is created BEFORE the old ones are removed, so a failure that
+    rolls back keeps the LAN reachable.
+  - The pre-uninstall's exit code is fatal now (it was ignored); the rollback runs the same
+    uninstall. A re-run of the same commit keeps only that wheelhouse (`@($sha, $sha)`): the
+    proven commit is the current one. A run killed between the stop and the install (an SSH drop)
+    still leaves no server, as before: no armed trap on Windows (follow-up candidate).
+  - **Size:** install.ps1 is ~990 lines, at the ~1000 budget (#65 adds the updater): trim
+    comments into this rule first, then split the source into parts a generator concatenates (as
+    for install-linux.sh). `irm | iex` delivers ONE file.
   - A native child's output goes through `Invoke-RemoteOSNative` (`2>&1`, each record as text,
     under `Continue`). In argument mode a bare `[pscustomobject]@{...}` is a STRING: wrap it in
     parentheses (bit the tests).

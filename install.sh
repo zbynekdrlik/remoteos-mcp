@@ -71,10 +71,15 @@ if [[ -z "$PYTHON" ]]; then
     echo "        Python 3.11+ not found. Trying Homebrew..."
     if command -v brew &>/dev/null; then
         brew install python@3.12
-        if command -v python3 &>/dev/null; then
-            PYTHON="python3"
-            echo "        Python installed via Homebrew"
-        fi
+        # The one brew installed, never an older python3 first on PATH (#64)
+        for cmd in /opt/homebrew/bin/python3.12 /usr/local/bin/python3.12 python3; do
+            ver=$("$cmd" --version 2>&1 || true)
+            if python_ok "$ver"; then
+                PYTHON="$cmd"
+                echo "        Python installed via Homebrew: $ver ($cmd)"
+                break
+            fi
+        done
     fi
 fi
 
