@@ -30,7 +30,7 @@ def machine(monkeypatch):
         monkeypatch.setattr(identity, "is_macos", lambda: os_kind == "macos")
         monkeypatch.setattr(identity.socket, "gethostname", lambda: facts.get("hostname", "box"))
         monkeypatch.setattr(identity.platform, "machine", lambda: facts.get("arch", "x86_64"))
-        for name in ("release", "version", "system"):
+        for name in ("release", "version", "system", "win32_edition"):
             if name in facts:
                 monkeypatch.setattr(identity.platform, name, lambda value=facts[name]: value)
         if "mac_ver" in facts:
@@ -65,13 +65,26 @@ def test_linux_announces_its_distribution_hostname_and_bash(machine):
 
 
 def test_windows_announces_release_build_and_powershell(machine):
-    machine("windows", hostname="RESOLUME-PP", arch="AMD64", release="11", version="10.0.26100")
+    machine("windows", hostname="RESOLUME-PP", arch="AMD64", release="11", version="10.0.26100", win32_edition="Core")
     facts = identity.machine_identity()
     assert facts["os_name"] == "Windows 11 (build 10.0.26100)"
     assert identity.server_instructions(**facts) == (
         "Remote OS MCP Server on RESOLUME-PP — Windows 11 (build 10.0.26100), AMD64. The Shell tool runs "
         "PowerShell (powershell -NoProfile -Command, through the UTF-8 console trampoline). " + CAPABILITIES
     )
+
+
+@pytest.mark.parametrize("edition", ["ServerDatacenter", "ServerStandard"])
+def test_a_windows_server_is_named_by_its_build_never_by_the_release_guess(machine, edition):
+    # CPython 3.12 says "2022Server" for every Server build from 20348 up, a Server 2025 included
+    machine("windows", release="2022Server", version="10.0.26100", win32_edition=edition)
+    assert identity.machine_identity()["os_name"] == "Windows Server (build 10.0.26100)"
+
+
+@pytest.mark.parametrize("edition", [None, "Professional"], ids=["unreadable-edition", "professional"])
+def test_a_windows_client_or_an_unreadable_edition_keeps_the_release(machine, edition):
+    machine("windows", release="10", version="10.0.19045", win32_edition=edition)
+    assert identity.machine_identity()["os_name"] == "Windows 10 (build 10.0.19045)"
 
 
 def test_macos_announces_its_version_and_zsh(machine):
@@ -90,8 +103,13 @@ def test_macos_without_a_product_version_names_the_darwin_release(machine):
 
 @pytest.mark.parametrize(
     "os_release",
-    [OSError(2, "Unable to read files /etc/os-release, /usr/lib/os-release"), {"NAME": "Linux"}, {"PRETTY_NAME": ""}],
-    ids=["no-os-release-file", "no-pretty-name", "empty-pretty-name"],
+    [
+        OSError(2, "Unable to read files /etc/os-release, /usr/lib/os-release"),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        {"NAME": "Linux"},
+        {"PRETTY_NAME": ""},
+    ],
+    ids=["no-os-release-file", "os-release-not-utf8", "no-pretty-name", "empty-pretty-name"],
 )
 def test_linux_without_a_pretty_name_falls_back_to_kernel_system_and_release(machine, os_release):
     machine("linux", system="Linux", release="6.8.0-45-generic", os_release=os_release)

@@ -35,9 +35,16 @@ from remoteos import __version__
 
 _START_TIMEOUT = 60.0  # a cold interpreter imports fastmcp + uvicorn + PIL before it binds
 _SRC = str(Path(remoteos.__file__).resolve().parents[1])  # this checkout's src/, not whatever is installed
-# What the server must name on this Linux runner (#59), read here straight from the OS, never via identity.
-_RUNNER_OS = platform.freedesktop_os_release()["PRETTY_NAME"]
-_HEALTH = {"status": "ok", "version": __version__, "os": _RUNNER_OS, "hostname": socket.gethostname()}
+
+
+def _runner_os() -> str:
+    """The OS name the server must announce on this Linux runner (#59), read from the OS, never via identity."""
+    return platform.freedesktop_os_release()["PRETTY_NAME"]
+
+
+def _health() -> dict:
+    """``/health`` on this runner: status + version (the installers' contract) and #59's os + hostname."""
+    return {"status": "ok", "version": __version__, "os": _runner_os(), "hostname": socket.gethostname()}
 
 
 def _free_port() -> int:
@@ -189,13 +196,13 @@ def test_ssl_flags_start_the_server_on_https(tmp_path, start_server):
     certfile, keyfile = _self_signed_cert(tmp_path)
     srv = start_server("--ssl-certfile", str(certfile), "--ssl-keyfile", str(keyfile))
     trust_our_cert = ssl.create_default_context(cafile=str(certfile))
-    assert srv.health("https", trust_our_cert) == _HEALTH
+    assert srv.health("https", trust_our_cert) == _health()
     assert "TypeError" not in srv.output()
 
 
 def test_debug_flag_starts_the_server_with_debug_logging(start_server):
     srv = start_server("--debug")
-    assert srv.health() == _HEALTH
+    assert srv.health() == _health()
     out = srv.output()
     assert "DEBUG remoteos.mcp: debug logging on" in out
     assert "TypeError" not in out
@@ -234,10 +241,10 @@ def test_initialize_and_health_name_this_machine_its_os_and_its_shell(start_serv
     # PowerShell. The real server tells every client at initialize, before any tool call.
     srv = start_server()
     health = srv.health()
-    assert health == _HEALTH  # status + version unchanged: the installers and the gateway read them
+    assert health == _health()  # status + version unchanged: the installers read version
     instructions = srv.initialize()["instructions"]
     assert instructions.startswith(
-        f"Remote OS MCP Server on {socket.gethostname()} — {_RUNNER_OS}, {platform.machine()}. "
+        f"Remote OS MCP Server on {socket.gethostname()} — {_runner_os()}, {platform.machine()}. "
         "The Shell tool runs /bin/bash -c. "
     ), instructions
     assert "for Windows, macOS, and Linux machines" not in instructions
@@ -245,7 +252,7 @@ def test_initialize_and_health_name_this_machine_its_os_and_its_shell(start_serv
 
 def test_reload_flag_warns_instead_of_crashing(start_server):
     srv = start_server("--reload")
-    assert srv.health() == _HEALTH
+    assert srv.health() == _health()
     out = srv.output()
     assert "--reload has no effect" in out
     assert "TypeError" not in out

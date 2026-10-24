@@ -88,9 +88,11 @@ The key itself is not printed. Read it on the machine: `Get-Content $HOME\.remot
 label and can go stale (a box reinstalled from Windows to Ubuntu keeps it). The MCP
 `initialize` result's `instructions` say which machine it really is and what Shell runs, e.g.
 `Remote OS MCP Server on stream-snv — Ubuntu 24.04.3 LTS, x86_64. The Shell tool runs /bin/bash -c.`
-(Windows: `Windows 11 (build 10.0.26100)` and `PowerShell (powershell -NoProfile -Command, …)`;
-macOS: `macOS 15.1` and `/bin/zsh -c`). `/health` carries the same `os` and `hostname` next to
-`status` and `version`: `{"status":"ok","version":"…","os":"Ubuntu 24.04.3 LTS","hostname":"stream-snv"}`.
+(Windows: `Windows 11 (build 10.0.26100)`, a Server `Windows Server (build …)`, and
+`PowerShell (powershell -NoProfile -Command, …)`; macOS: `macOS 15.1` and `/bin/zsh -c`).
+`/health` carries the same `os` and `hostname` next to `status` and `version`:
+`{"status":"ok","version":"…","os":"Ubuntu 24.04.3 LTS","hostname":"stream-snv"}`. `/health`
+needs no key, so whoever can reach the port sees the hostname and OS.
 
 ## Restrict access per project
 

@@ -43,13 +43,17 @@ def shell_text() -> str:
 
 def _os_name() -> str:
     if is_windows():
+        # A Server's release() is a guess: CPython 3.12 names every build from 20348 up
+        # "2022Server" (a Server 2025 too), so a Server is named by its build alone.
+        if "Server" in (platform.win32_edition() or ""):
+            return f"Windows Server (build {platform.version()})"
         return f"Windows {platform.release()} (build {platform.version()})"
     if is_macos():
         version = platform.mac_ver()[0]
         return f"macOS {version}" if version else f"macOS (Darwin {platform.release()})"
     try:
         pretty = platform.freedesktop_os_release().get("PRETTY_NAME", "")
-    except OSError:  # no /etc/os-release nor /usr/lib/os-release
+    except (OSError, ValueError):  # no os-release file, or one that is not UTF-8: never stop the server
         pretty = ""
     return pretty or f"{platform.system()} {platform.release()}"
 

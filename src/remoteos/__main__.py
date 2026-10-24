@@ -83,7 +83,8 @@ mcp = FastMCP("remoteos-mcp", instructions=server_instructions(**_IDENTITY))
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
-    # status + version are what the installers and the gateway check; os + hostname are #59's
+    # status + version: the installers' self-check reads version; os + hostname are #59's. No key
+    # is needed here (auth._PUBLIC_PATHS), so nothing secret ever goes into this reply.
     return JSONResponse(
         {"status": "ok", "version": __version__, "os": _IDENTITY["os_name"], "hostname": _IDENTITY["hostname"]}
     )
