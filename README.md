@@ -550,6 +550,52 @@ version rejects the registry's `managed_by` field (an unknown key) and refuses t
 the field from `~/.config/remoteos-gateway/registry.json` first, and point `--machines` back
 at `~/.claude/mcp-configs/remoteos-mcp.mcp.json` (the old default).
 
+## Scripts: `remoteos-call` (#70)
+
+A script reaches a machine through MCP with `remoteos-call`, never `sshpass ssh`/`scp`. It ships
+in the package (console script, module `remoteos.cli_call`). On dev1 it is in the gateway venv:
+`~/.local/share/remoteos-gateway/venv/bin/remoteos-call`.
+
+```bash
+remoteos-call --list                                         # the fleet machines in the config
+remoteos-call linux-stream-snv Shell 'sudo -n true; echo ok' # stdout, stderr, the remote exit code
+remoteos-call linux-stream-snv Shell 'make' --cwd /opt/app --timeout 600
+remoteos-call linux-stream-snv put ./pkg.deb /tmp/pkg.deb   # FileUpload, size-checked
+remoteos-call linux-stream-snv get /var/log/syslog ./syslog # FileDownload, size-checked
+remoteos-call win-resolume-pp GetSystemInfo --json '{}'      # any tool, its text on stdout
+```
+
+**Which config.** `--config PATH`, else `--project NAME` (reads
+`~/.claude/mcp-configs/NAME.mcp.json`, the file `sync-configs` writes), else `./.mcp.json` in the
+current directory. The machine entry's `url` and `headers.Authorization` are used. Only `win-…`,
+`linux-…` and `mac-…` entries count as machines. The token is read from that file only: it is
+never in an argv, an output line or a log record.
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| Shell: N | the remote command's exit code (`[Exit code: N]`, none = 0). A code outside 0..255 is 255 (a POSIX signal `-S` is 128+S), and one stderr line names the real code. |
+| 0 | put/get/any other tool succeeded |
+| 125 | the tool failed (the MCP result is an error: `Command timed out after 30s`, `File not found: …`, `Unknown tool: …`), or a put/get size check failed |
+| 126 | no call was possible: no or broken config, an unknown machine, connection refused, 401/403/404, 413 (the gateway caps a request at 16 MiB, so a `put` carries about 12 MB through it), no reply in time |
+| 2 | a usage error |
+
+**Shell.** stdout goes to stdout and the `[STDERR]` part to stderr, each with one trailing
+newline. `--timeout` (default 30 s) is Shell's own timeout; the client waits 60 s more.
+Shell's reply is plain text, so two things cannot round-trip: leading whitespace of stdout
+and blank lines at the end of either stream are lost, and a stdout line that starts with
+`[STDERR] ` is read as the start of stderr. Use `--` before a command that starts with `-`.
+`sudo` inside Shell works without a password on the Linux MCP boxes (#67).
+
+**put / get.** `put` sends the whole file in one FileUpload call and checks the byte count the
+machine wrote. `get` checks the byte count FileDownload declared, then writes the local file
+through a temp file in the same directory (no half-written file). `--timeout` is how long the
+client waits (default 300 s).
+
+**Any tool.** `--json` passes the tool's arguments as a JSON object; the reply's text goes to
+stdout. A non-text block (a Snapshot image) is printed as `[image block: image/png]`.
+
 ## Uninstall
 
 ```powershell

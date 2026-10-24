@@ -42,6 +42,7 @@ dependencies = [
 [project.scripts]
 remoteos-mcp = "remoteos.__main__:cli"
 remoteos-gateway = "remoteos.gateway.cli:main"
+remoteos-call = "remoteos.cli_call:main"
 
 [project.optional-dependencies]
 ocr = ["pytesseract>=0.3.10"]
