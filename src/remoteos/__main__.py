@@ -45,6 +45,7 @@ from remoteos import __version__, desktop, network, ocr, process_mgr, recording
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
+from remoteos.identity import LINUX_SHELL, MACOS_SHELL, machine_identity, server_instructions
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.platform.command import powershell_argv, run_child
 from remoteos.platform.linux.shell_env import shell_env
@@ -68,14 +69,11 @@ load_dotenv()
 log = logging.getLogger("remoteos.mcp")
 redact_fastmcp_argument_logs()  # FastMCP's "Invalid arguments" warning would log the argument values (#32)
 
-mcp = FastMCP(
-    "remoteos-mcp",
-    instructions=(
-        "Remote OS MCP Server. Provides desktop control, window management, "
-        "shell execution, file operations, network tools, registry, services, "
-        "and system management tools for Windows, macOS, and Linux machines."
-    ),
-)
+# The real hostname / OS / shell, read once (#59): a stale win-/linux- MCP name cannot mislead a
+# client, which gets these facts at initialize, before its first Shell call, and in /health.
+_IDENTITY = machine_identity()
+
+mcp = FastMCP("remoteos-mcp", instructions=server_instructions(**_IDENTITY))
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +83,10 @@ mcp = FastMCP(
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
-    return JSONResponse({"status": "ok", "version": __version__})
+    # status + version are what the installers and the gateway check; os + hostname are #59's
+    return JSONResponse(
+        {"status": "ok", "version": __version__, "os": _IDENTITY["os_name"], "hostname": _IDENTITY["hostname"]}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -620,10 +621,10 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
         # The cwd goes to PowerShell through the trampoline, which itself runs in the server's
         # directory, where "powershell" is looked up (review round 1)
         shell_cmd, workdir = powershell_argv(command, cwd=workdir), None
-    elif is_macos():
-        shell_cmd = ["/bin/zsh", "-c", command]
+    elif is_macos():  # the shells identity announces at initialize (#59)
+        shell_cmd = [MACOS_SHELL, "-c", command]
     else:
-        shell_cmd = ["/bin/bash", "-c", command]
+        shell_cmd = [LINUX_SHELL, "-c", command]
         # a system unit has no login-session environment: add the server user's own (#52)
         env = shell_env()
 

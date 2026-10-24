@@ -17,6 +17,7 @@ import datetime
 import ipaddress
 import json
 import os
+import platform
 import secrets
 import socket
 import ssl
@@ -34,6 +35,9 @@ from remoteos import __version__
 
 _START_TIMEOUT = 60.0  # a cold interpreter imports fastmcp + uvicorn + PIL before it binds
 _SRC = str(Path(remoteos.__file__).resolve().parents[1])  # this checkout's src/, not whatever is installed
+# What the server must name on this Linux runner (#59), read here straight from the OS, never via identity.
+_RUNNER_OS = platform.freedesktop_os_release()["PRETTY_NAME"]
+_HEALTH = {"status": "ok", "version": __version__, "os": _RUNNER_OS, "hostname": socket.gethostname()}
 
 
 def _free_port() -> int:
@@ -134,6 +138,28 @@ class _Server:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.read().decode("utf-8", "replace")
 
+    def initialize(self) -> dict:
+        """One MCP ``initialize`` over streamable HTTP; returns its JSON-RPC ``result``."""
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "0"},
+                },
+            }
+        ).encode()
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/mcp", data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            reply = resp.read().decode("utf-8", "replace")
+        # an SSE stream ("event: message\ndata: {...}") or a plain JSON body
+        payloads = [line[len("data:") :].strip() for line in reply.splitlines() if line.startswith("data:")]
+        return json.loads(payloads[-1] if payloads else reply)["result"]
+
     def stop(self) -> None:
         if self.proc.poll() is None:
             self.proc.terminate()
@@ -163,13 +189,13 @@ def test_ssl_flags_start_the_server_on_https(tmp_path, start_server):
     certfile, keyfile = _self_signed_cert(tmp_path)
     srv = start_server("--ssl-certfile", str(certfile), "--ssl-keyfile", str(keyfile))
     trust_our_cert = ssl.create_default_context(cafile=str(certfile))
-    assert srv.health("https", trust_our_cert) == {"status": "ok", "version": __version__}
+    assert srv.health("https", trust_our_cert) == _HEALTH
     assert "TypeError" not in srv.output()
 
 
 def test_debug_flag_starts_the_server_with_debug_logging(start_server):
     srv = start_server("--debug")
-    assert srv.health() == {"status": "ok", "version": __version__}
+    assert srv.health() == _HEALTH
     out = srv.output()
     assert "DEBUG remoteos.mcp: debug logging on" in out
     assert "TypeError" not in out
@@ -203,9 +229,23 @@ def test_the_auth_key_from_the_environment_never_reaches_a_tool_s_child(start_se
     assert refused.value.code == 401  # the key is still enforced
 
 
+def test_initialize_and_health_name_this_machine_its_os_and_its_shell(start_server):
+    # #59: a box's MCP name went stale (win-stream-snv runs Ubuntu now) and clients sent it
+    # PowerShell. The real server tells every client at initialize, before any tool call.
+    srv = start_server()
+    health = srv.health()
+    assert health == _HEALTH  # status + version unchanged: the installers and the gateway read them
+    instructions = srv.initialize()["instructions"]
+    assert instructions.startswith(
+        f"Remote OS MCP Server on {socket.gethostname()} — {_RUNNER_OS}, {platform.machine()}. "
+        "The Shell tool runs /bin/bash -c. "
+    ), instructions
+    assert "for Windows, macOS, and Linux machines" not in instructions
+
+
 def test_reload_flag_warns_instead_of_crashing(start_server):
     srv = start_server("--reload")
-    assert srv.health() == {"status": "ok", "version": __version__}
+    assert srv.health() == _HEALTH
     out = srv.output()
     assert "--reload has no effect" in out
     assert "TypeError" not in out

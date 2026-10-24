@@ -84,6 +84,14 @@ The key itself is not printed. Read it on the machine: `Get-Content $HOME\.remot
 (Windows), `cat ~/.remoteos-mcp/config.json` (macOS), `sudo cat /etc/remoteos-mcp/config.json`
 (Linux). Run the command with it on your Linux machine, restart Claude Code, and you're connected.
 
+**The server names its machine at connect (#59).** The name you give it (`win-mypc`) is only a
+label and can go stale (a box reinstalled from Windows to Ubuntu keeps it). The MCP
+`initialize` result's `instructions` say which machine it really is and what Shell runs, e.g.
+`Remote OS MCP Server on stream-snv — Ubuntu 24.04.3 LTS, x86_64. The Shell tool runs /bin/bash -c.`
+(Windows: `Windows 11 (build 10.0.26100)` and `PowerShell (powershell -NoProfile -Command, …)`;
+macOS: `macOS 15.1` and `/bin/zsh -c`). `/health` carries the same `os` and `hostname` next to
+`status` and `version`: `{"status":"ok","version":"…","os":"Ubuntu 24.04.3 LTS","hostname":"stream-snv"}`.
+
 ## Restrict access per project
 
 To limit which Claude session controls which Windows machine, use project-scoped config.
