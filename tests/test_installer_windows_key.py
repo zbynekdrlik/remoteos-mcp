@@ -172,3 +172,47 @@ def test_an_ssh_run_starts_the_server_through_the_scheduled_task() -> None:
     assert len(direct) == 1, direct
     branch = [line for n, line in flow if n < direct[0] and line.startswith("if (")][-1]
     assert branch.startswith("if ($interactive)"), f"the direct start is not inside the interactive branch: {branch}"
+
+
+# --- #12: the code and its constraints come from ONE commit ------------------------------------
+
+def test_the_constraints_and_the_source_archive_come_from_one_resolved_commit() -> None:
+    """install.ps1 fetched constraints.txt from raw .../main/ and installed archive/main.zip: two
+    requests for "main", and raw caches /main/ for minutes, so a merge that changes the pins could
+    pair new code with old constraints (#12). Now $Ref resolves to ONE sha that both URLs use."""
+    flow = _flow_lines()
+    constraint = [line for _, line in flow if line.startswith("$env:PIP_CONSTRAINT")]
+    archive = [line for _, line in flow
+               if "pip install" in line and "archive/" in line and not line.startswith("Write-Host")]
+    assert len(constraint) == 1 and len(archive) == 1, (constraint, archive)
+    assert "/$sourceSha/constraints.txt" in constraint[0], constraint
+    assert "archive/$sourceSha.zip" in archive[0], archive
+    code = "\n".join(line for _, line in flow)
+    assert "main.zip" not in code and "/main/constraints.txt" not in code
+
+
+def test_the_ref_is_resolved_through_the_github_api_before_anything_changes() -> None:
+    flow = _flow_lines()
+    resolve = [n for n, line in flow if "api.github.com/repos/zbynekdrlik/remoteos-mcp/commits/" in line]
+    assert len(resolve) == 1, resolve
+    changes = [n for n, line in flow if any(change in line for change in _STATE_CHANGES)]
+    assert resolve[0] < min(changes), (resolve[0], min(changes))
+    code = "\n".join(line for _, line in _code_lines())
+    assert "$env:REMOTEOS_MCP_REF" in code, "the ref is not an input (REMOTEOS_MCP_REF, as on Linux)"
+    assert "{40}" in code, "the resolved ref is not checked to be a full commit sha"
+
+
+def test_the_installed_commit_is_recorded_next_to_config_json() -> None:
+    """#60's updater reads which commit a box runs from installed-ref.txt (no secret in it)."""
+    writes = [line for _, line in _flow_lines() if "installed-ref.txt" in line]
+    assert any("$sourceSha" in line and "Set-Content" in line for line in writes), writes
+    assert not any("$AuthKey" in line for line in writes), writes
+
+
+def test_the_elevated_relaunch_runs_the_same_commit() -> None:
+    """The elevated process does not inherit the caller's environment: the relaunch fetches the
+    installer of the resolved commit and hands that commit over inside its own command."""
+    code = "\n".join(line for _, line in _code_lines())
+    assert '$InstallerUrl = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$sourceSha/install.ps1"' in code
+    assert ("Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl"
+            " -SourceRef $sourceSha") in code

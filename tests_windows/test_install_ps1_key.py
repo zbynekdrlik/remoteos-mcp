@@ -303,3 +303,30 @@ try {
         assert out["before"] is None
         assert out["seen"] is not None, out
         assert out["seen"] == out["own"], out
+
+
+class TestSourceRef:
+    @pytest.mark.parametrize(
+        ("ref", "valid"),
+        [
+            ("main", True),
+            ("dev", True),
+            ("v0.7.0", True),
+            ("feature/x-1_2", True),
+            ("0123456789abcdef0123456789abcdef01234567", True),
+            ("", False),
+            ("main'; Remove-Item x", False),
+            ("main ref", False),
+            ("../main", False),
+            ("main\n", False),
+        ],
+    )
+    def test_only_a_plain_ref_name_is_used_in_a_url_or_the_relaunch(self, tmp_path: Path, ref: str,
+                                                                    valid: bool) -> None:
+        """#12: $Ref (REMOTEOS_MCP_REF) goes into the GitHub API URL; anything but a plain ref name
+        is refused before anything changes."""
+        out = _ps(tmp_path, f"""
+@{{ valid = (Test-RemoteOSRefName {_q(ref)}) }} | ConvertTo-Json -Compress
+""")
+
+        assert out["valid"] is valid
