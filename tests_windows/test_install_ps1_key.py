@@ -221,3 +221,85 @@ $rules = @($acl.Access | ForEach-Object {{ @{{ sid = $_.IdentityReference.Transl
         sids = {rule["sid"] for rule in out["rules"]}
         assert sids == {out["user"], "S-1-5-18", "S-1-5-32-544"}, out["rules"]
         assert all(rule["type"] == "Allow" and "FullControl" in rule["rights"] for rule in out["rules"]), out["rules"]
+
+
+class TestElevationGate:
+    """#57: a non-admin run printed two warnings and carried on (no task, no firewall rule, a
+    server without admin). Now: admin proceeds, a person at the desktop is relaunched elevated
+    (one UAC click), automation and an explicit key fail before anything changes."""
+
+    @pytest.mark.parametrize(
+        ("is_admin", "interactive", "explicit_key", "expected"),
+        [
+            (True, True, True, "proceed"),
+            (True, True, False, "proceed"),
+            (True, False, True, "proceed"),
+            (True, False, False, "proceed"),
+            (False, True, False, "relaunch"),
+            (False, True, True, "fail"),
+            (False, False, False, "fail"),
+            (False, False, True, "fail"),
+        ],
+    )
+    def test_the_decision_table(self, tmp_path: Path, is_admin: bool, interactive: bool, explicit_key: bool,
+                                expected: str) -> None:
+        def ps_bool(value: bool) -> str:
+            return "$true" if value else "$false"
+
+        out = _ps(tmp_path, f"""
+$a = Get-RemoteOSElevationAction -IsAdmin {ps_bool(is_admin)} -Interactive {ps_bool(interactive)} `
+    -ExplicitKey {ps_bool(explicit_key)}
+@{{ action = $a }} | ConvertTo-Json -Compress
+""")
+
+        assert out["action"] == expected
+
+    @pytest.mark.parametrize(
+        ("ssh_connection", "ssh_client", "session_id", "expected"),
+        [
+            ("", "", 1, True),
+            ("", "", 2, True),
+            ("", "", 0, False),
+            ("10.0.0.5 50000 10.0.0.9 22", "", 1, False),
+            ("", "10.0.0.5 50000 22", 1, False),
+            ("10.0.0.5 50000 10.0.0.9 22", "10.0.0.5 50000 22", 0, False),
+        ],
+        ids=["desktop", "rdp-session", "session-0", "ssh-connection", "ssh-client", "ssh-in-session-0"],
+    )
+    def test_ssh_or_session_0_is_not_interactive(self, tmp_path: Path, ssh_connection: str, ssh_client: str,
+                                                  session_id: int, expected: bool) -> None:
+        out = _ps(tmp_path, f"""
+$i = Test-RemoteOSInteractiveSession -SshConnection {_q(ssh_connection)} -SshClient {_q(ssh_client)} `
+    -SessionId {session_id}
+@{{ interactive = $i }} | ConvertTo-Json -Compress
+""")
+
+        assert out["interactive"] is expected
+
+
+class TestListenerSession:
+    def test_the_listener_s_session_is_its_owning_process_s(self, tmp_path: Path) -> None:
+        """The SSH install proves the server it started through the task: the :port listener's
+        owning process must run in a session other than 0. A real listener here, and no listener
+        reads as $null."""
+        out = _ps(tmp_path, """
+$port = 18096
+$before = Get-RemoteOSListenerSessionId -Port $port
+$p = Start-Process -FilePath python -ArgumentList '-m', 'http.server', "$port", '--bind', '127.0.0.1' `
+    -WindowStyle Hidden -PassThru
+try {
+    $seen = $null
+    for ($i = 0; $i -lt 40 -and $null -eq $seen; $i++) {
+        Start-Sleep -Milliseconds 500
+        $seen = Get-RemoteOSListenerSessionId -Port $port
+    }
+    $own = (Get-Process -Id $p.Id).SessionId
+} finally {
+    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+}
+@{ before = $before; seen = $seen; own = $own } | ConvertTo-Json -Compress
+""")
+
+        assert out["before"] is None
+        assert out["seen"] is not None, out
+        assert out["seen"] == out["own"], out

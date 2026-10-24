@@ -94,3 +94,81 @@ def test_install_ps1_uses_no_powershell_7_only_syntax() -> None:
     offenders = [(n, line) for n, line in _code_lines()
                  if any(token in line for token in ("??", "?.", "?[", "&&", "||", " ? "))]
     assert offenders == [], f"PowerShell 7-only syntax in install.ps1: {offenders}"
+
+
+# --- #57: a non-admin run never leaves a half install ------------------------------------------
+
+# Lines of the script's own flow that change the box: the first one must come after the gate.
+_STATE_CHANGES = ("pip uninstall", "pip install", "Remove-Item -Recurse", "Unregister-ScheduledTask",
+                  "Remove-NetFirewallRule", "schtasks /End", "Stop-Process", "Set-Content", "New-Item")
+
+
+def _function_names() -> set[str]:
+    return {line.split()[1].split("(")[0] for _, line in _code_lines() if line.startswith("function ")}
+
+
+def _flow_lines() -> list[tuple[int, str]]:
+    """The script's own flow: the code lines after its first top-level statement that is not a
+    function definition (every function is defined above it)."""
+    lines = INSTALLER_WINDOWS.read_text().splitlines()
+    depth, flow_start = 0, None
+    for number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if depth == 0 and stripped.startswith("Write-Host") and flow_start is None:
+            flow_start = number
+        if not stripped.startswith("#"):
+            depth += stripped.count("{") - stripped.count("}")
+    assert flow_start, "no top-level Write-Host: the script's flow was not found"
+    return [(n, line) for n, line in _code_lines() if n >= flow_start]
+
+
+def test_the_elevation_gate_is_a_named_function_tests_windows_can_load() -> None:
+    assert {"Get-RemoteOSElevationAction", "Test-RemoteOSInteractiveSession"} <= _function_names()
+
+
+def test_the_elevation_gate_runs_before_the_first_change_to_the_box() -> None:
+    """install.ps1 used to print two yellow [!] lines for a non-admin run and carry on: a server
+    without admin rights, no scheduled task, no firewall rule (alex-nb, #57)."""
+    flow = _flow_lines()
+    gate = [n for n, line in flow if "Get-RemoteOSElevationAction -IsAdmin" in line]
+    assert len(gate) == 1, f"the elevation gate must be called exactly once: {gate}"
+    changes = [n for n, line in flow if any(change in line for change in _STATE_CHANGES)]
+    assert changes, "no state-changing line found: the check would be vacuous"
+    assert gate[0] < min(changes), (gate[0], min(changes))
+
+
+def test_a_non_admin_run_is_no_longer_only_a_warning() -> None:
+    code = "\n".join(line for _, line in _code_lines())
+    assert "Not running as admin" not in code, "the old warn-and-continue admin check is still there"
+
+
+def _catch_block_after(marker: str) -> list[str]:
+    """The lines of the catch block that follows the try holding `marker`."""
+    lines = INSTALLER_WINDOWS.read_text().splitlines()
+    at = next(i for i, line in enumerate(lines) if marker in line and not line.strip().startswith("#"))
+    catch = next(i for i in range(at, len(lines)) if lines[i].strip().startswith("} catch"))
+    indent = len(lines[catch]) - len(lines[catch].lstrip())
+    end = next(i for i in range(catch + 1, len(lines))
+               if lines[i].strip() == "}" and len(lines[i]) - len(lines[i].lstrip()) == indent)
+    return [line.strip() for line in lines[catch + 1:end]]
+
+
+def test_a_failing_scheduled_task_or_firewall_rule_fails_the_run() -> None:
+    """After the gate the run is elevated, so a failure there is real: exit 1, never a warning."""
+    for marker in ("Register-ScheduledTask -TaskName", "New-NetFirewallRule -DisplayName"):
+        block = _catch_block_after(marker)
+        assert "exit 1" in block, f"the catch after {marker} only warns: {block}"
+
+
+def test_an_ssh_run_starts_the_server_through_the_scheduled_task() -> None:
+    """A server started from session 0 (SSH) dies with the SSH session (resolume-pp, #57
+    amendment). Off the desktop the installer runs the task instead and proves the listener is
+    the task's process; only an interactive run starts the server itself."""
+    flow = _flow_lines()
+    code = "\n".join(line for _, line in flow)
+    assert 'schtasks /Run /TN "RemoteOSMCP"' in code
+    assert "Get-RemoteOSListenerSessionId" in _function_names()
+    direct = [n for n, line in flow if line.startswith("Start-Process") and "wscript.exe" in line]
+    assert len(direct) == 1, direct
+    branch = [line for n, line in flow if n < direct[0] and line.startswith("if (")][-1]
+    assert branch.startswith("if ($interactive)"), f"the direct start is not inside the interactive branch: {branch}"
