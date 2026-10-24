@@ -511,3 +511,25 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Follow-up candidates (listed on the ticket):** wheelhouse in %ProgramData% (profile swap
   residual), a Windows trap for a run killed between stop and install, uninstall.ps1 elevation +
   desktop profile, generator split of install.ps1 (999 lines) before the updater ticket.
+
+## #70 — `remoteos-call`: scripts reach a machine over MCP, not SSH (part b of #67, 0.7.0.dev38)
+
+- **What:** console script `remoteos-call` (`src/remoteos/cli_call.py`): `MACHINE Shell CMD`
+  (stdout/stderr split, remote exit code), `put`/`get` (FileUpload/FileDownload, size-checked),
+  `TOOL --json`, `--list`; config from `--config` / `--project` / `./.mcp.json`; exits 125 tool
+  error, 126 no result, 130, 141, 2. Design by the main session on #70 (Approach 1).
+- **Decisions:** fastmcp `Client` with `mode="legacy"`; an httpx response hook recovers the HTTP
+  status the SDK hides; `trust_env=False`; the SDK's 1 MiB SSE event limit lifted by a
+  process-local `EventSource` swap (loud if the SDK changes); config read with
+  `gateway/registry.py`'s helpers (`is_http_url` and `taskmanager.declared_runtime` made public).
+- **Commits:** bump 021e4d3 → feature 4375cfd → review rounds 69f9458, dbe5071, 4cdacb2 (three
+  fresh-context reviews: 2🔴8🟡7🔵 → 0🔴2🟡8🔵 → 0🔴1🟡6🔵, all fixed or dispositioned).
+- **Tests:** `tests/test_cli_call.py` against a REAL server + REAL gateway (subprocesses on
+  loopback): exit-code mapping, stderr split, put/get sha256 round trips (5 MB get), 2.5 MB Shell
+  output, 125/126 paths, the token never in output/logs/access log/argv; console script run as a
+  process (closed pipe → 141, `FASTMCP_LOG_LEVEL=DEBUG` silent). Local 1334 pass.
+- **Follow-up candidates (for the supervisor):** `put` is capped at about 3 MB by the machine's
+  4 MiB mcp request limit (raise it server-side or add chunked/append FileUpload) — restreamer's
+  `.deb` installs will hit it; structured Shell output (exit code / stderr as fields) to remove
+  the plain-text round-trip limits; the gateway's 600 s upstream read timeout cuts Shell calls
+  over ~540 s (SSE keep-alive pings).
