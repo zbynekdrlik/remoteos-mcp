@@ -449,8 +449,11 @@ def test_the_installed_version_is_read_from_a_marked_line() -> None:
 
 
 def test_an_elevated_delete_never_follows_a_link() -> None:
-    """Review round 2: Windows PowerShell 5.1's Remove-Item -Recurse enters a junction. Every
-    recursive delete in the wheelhouse code goes through Remove-RemoteOSTree (.NET, link-safe)."""
+    """Review rounds 2-3: Windows PowerShell 5.1's Remove-Item -Recurse enters a junction, and the
+    run is elevated. Every recursive delete in install.ps1 goes through Remove-RemoteOSTree (.NET,
+    link-safe): the wheelhouse code AND the old .winremote-mcp / other-account config cleanups."""
+    recursive = [(n, line) for n, line in _code_lines() if "Remove-Item" in line and "-Recurse" in line]
+    assert recursive == [], f"an elevated Remove-Item -Recurse is left: {recursive}"
     for name in ("Protect-RemoteOSWheelhouseRoot", "New-RemoteOSWheelhouse", "Remove-RemoteOSStaleWheelhouses"):
         body = _function_code(name)
         assert not any("Remove-Item" in line and "-Recurse" in line for line in body), name

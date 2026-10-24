@@ -508,9 +508,9 @@ $err = Protect-RemoteOSWheelhouseRoot -Root $root -User $env:USERNAME
         "$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("
         "(New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'Write', 'Allow')))",
         "$acl.SetOwner((New-Object System.Security.Principal.NTAccount($env:USERNAME)))",
-        "$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule("
-        "(New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')), "
-        "[System.Security.AccessControl.FileSystemRights]0x40000000, 'Allow')))",
+        # GENERIC_WRITE: FileSystemAccessRule refuses a mask above FullControl, so through SDDL (GW)
+        "$acl.SetSecurityDescriptorSddlForm($acl.GetSecurityDescriptorSddlForm('Access') + '(A;OICI;GW;;;BU)', "
+        "'Access')",
     ], ids=["users-write", "user-owned", "generic-write"])
     def test_a_protected_root_with_a_foreign_writer_or_owner_is_not_trusted(self, tmp_path: Path,
                                                                             change: str) -> None:
@@ -555,6 +555,26 @@ $err = Protect-RemoteOSWheelhouseRoot -Root $root -User $env:USERNAME
         acl = _ps(tmp_path, f"@{{ p = (Get-Acl -LiteralPath {_q(outside)}).AreAccessRulesProtected }} | "
                             "ConvertTo-Json -Compress")
         assert acl["p"] is False, "the link target's ACL was rewritten"
+
+    def test_an_untrusted_root_holding_a_link_is_deleted_without_entering_it(self, tmp_path: Path) -> None:
+        """Review round 3: the recursive branch ([System.IO.Directory]::Delete($p, $true)) must
+        delete a junction inside the root without entering it."""
+        root = tmp_path / "wheelhouse"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("precious")
+
+        out = _ps(tmp_path, _LINK + f"""
+New-Item -ItemType $linkType -Path {_q(root / SHA_NEW)} -Target {_q(outside)} | Out-Null
+$root = {_q(root)}
+$before = Test-RemoteOSWheelhouseRootTrusted $root
+$err = Protect-RemoteOSWheelhouseRoot -Root $root -User $env:USERNAME
+""" + self._STATE)
+
+        assert out["before"] is False and out["err"] is None and out["trusted"] is True, out
+        assert (outside / "keep.txt").read_text() == "precious", "the recursive delete entered the link"
+        assert not (root / SHA_NEW).exists()
 
     def test_a_config_folder_that_is_a_link_is_refused(self, tmp_path: Path) -> None:
         outside = tmp_path / "outside"
@@ -608,6 +628,39 @@ $removed = Remove-RemoteOSStaleWheelhouses -Root {_q(root)} -Keep @('{SHA_NEW}')
         assert out["removed"] == ["3" * 40]
         assert (outside / "keep.txt").read_text() == "precious", "the prune followed the link"
         assert sorted(p.name for p in root.iterdir()) == [SHA_NEW]
+
+    def test_pruning_a_root_swapped_for_a_link_deletes_nothing(self, tmp_path: Path) -> None:
+        """Review round 3: the root was checked once, minutes before the prune. Swapped for a
+        junction to a system folder meanwhile, its real subfolders would be deleted as admin."""
+        system = tmp_path / "system"
+        (system / "Vendor").mkdir(parents=True)
+        (system / "Vendor" / "keep.txt").write_text("precious")
+        (system / ("4" * 40)).mkdir()
+        root = tmp_path / "cfg" / "wheelhouse"
+        root.parent.mkdir()
+
+        out = _ps(tmp_path, _LINK + f"""
+New-Item -ItemType $linkType -Path {_q(root)} -Target {_q(system)} | Out-Null
+$removed = Remove-RemoteOSStaleWheelhouses -Root {_q(root)} -Keep @('{SHA_NEW}')
+@{{ removed = @($removed) }} | ConvertTo-Json -Compress
+""")
+
+        assert out["removed"] == []
+        assert (system / "Vendor" / "keep.txt").read_text() == "precious"
+        assert (system / ("4" * 40)).is_dir()
+
+    def test_pruning_deletes_only_wheelhouse_names(self, tmp_path: Path) -> None:
+        root = tmp_path / "wheelhouse"
+        for name in (SHA_NEW, "5" * 40 + ".partial", "Vendor", "ABCDEF" + "0" * 34):
+            (root / name).mkdir(parents=True)
+
+        out = _ps(tmp_path, f"""
+$removed = Remove-RemoteOSStaleWheelhouses -Root {_q(root)} -Keep @('{SHA_NEW}')
+@{{ removed = @($removed) }} | ConvertTo-Json -Compress
+""")
+
+        assert out["removed"] == ["5" * 40 + ".partial"]
+        assert sorted(p.name for p in root.iterdir()) == sorted([SHA_NEW, "Vendor", "ABCDEF" + "0" * 34])
 
 
 class TestInstalledVersion:
