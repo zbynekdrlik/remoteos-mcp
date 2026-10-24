@@ -474,3 +474,20 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   call-site args, one sha for both URLs) and `tests_windows/test_install_ps1_key.py` (decision
   table, probe, relaunch command run for real, exit helper, listener session, ref names, Python
   reachability). Local: 1063 pass, ruff clean, shellcheck clean, bash:3.2 53 pass.
+
+## #39 — upstream security sync: PowerShell/AppleScript quoting, OAuth, Scrape cap, bind guard, TOML booleans, pip-audit (PR #68, merge `2053ff4`, 0.7.0.dev36)
+
+- **Design:** main's Approach 1. `ps_literal` (typographic quotes doubled too) at every PowerShell
+  splice site, toast text via `REMOTEOS_TOAST_*` env, `applescript_literal`; OAuth S256 + https/
+  loopback redirects + required configured secret (never returned by register); `scrape.py` 5 MiB
+  cap, http(s) only, opt-in private block, redirect bodies never read; `check_bind_exposure`;
+  `config._boolean`; pip-audit matrix (py3.12 Linux/Windows/macOS + py3.11 Linux), pins upgraded
+  (fastmcp 4.1.2, PyJWT 2.15.1, opentelemetry-api 1.45.1, Pillow 13.0.0 on py3.11+).
+- **Commits:** RED 2b081ea → GREEN 0fc2693 (PowerShell), 1ca1dae (AppleScript), 862b3c2 (OAuth),
+  ccd237e (Scrape/bind/TOML), 60037c4 (pip-audit + pins); review RED b48df8d → GREEN 2779320,
+  RED 7f30e6c → GREEN fd6f7a0.
+- **Tests:** `tests/test_injection_quoting.py`, `tests/test_server_hardening.py`, bind guard + Scrape
+  policy in `tests/test_startup_flags.py`, real PS 5.1 `tests_windows/test_injection_powershell.py`
+  (toast `Show()` works on windows-latest). Local 1188 pass; CI all green on PR and main.
+- **Open for the owner:** Python 3.10 keeps Pillow 12.3.0 (CVEs; Pillow 13 needs 3.11) — drop 3.10,
+  ignore entry, or accept. Follow-up candidate: OAuth without a secret (authorize approves all).
