@@ -553,6 +553,24 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps
   drift); the server binds 0.0.0.0, so keep the machines on a trusted network
 - On LAN this is fine over HTTP
 - For internet exposure, use TLS reverse proxy or SSH tunnel
+- **Bind guard (#39):** a non-loopback bind (`0.0.0.0`, a LAN or tailnet address) with no auth
+  key refuses to start (exit 2) while any Tier 3 tool (Shell, files, services) is enabled. With
+  Tier 1/2 only it starts with a warning. `--enable-all` with a key, the way every installer
+  starts, is unaffected
+- **Caller values never become code (#39):** a value put into a PowerShell script (service and
+  task names, EventLog's log name, App's path and arguments) is a single-quoted literal; the
+  toast title and message reach PowerShell in environment variables. macOS AppleScript strings
+  escape `\` before `"`
+- **Scrape (#39):** http(s) only, at most 5 MiB read (a larger body is an error). LAN and private
+  addresses are allowed; `--scrape-block-private` (or `scrape_block_private = true` under
+  `[security]` in `remoteos.toml`) refuses them, every resolved address and redirect checked
+- **OAuth (optional, off unless `--oauth-client-id`/`--oauth-client-secret`, #39):** PKCE S256
+  only; redirect URIs must be `https://` or loopback `http://`; a configured client secret is
+  required at the token endpoint and never returned by registration
+- **`remoteos.toml` booleans** are real TOML booleans or the strings `true`/`false`/`1`/`0`/
+  `yes`/`no`; anything else stops the server with an error naming the key (#39)
+- **Dependency audit (#39):** CI runs `pip-audit -r constraints.txt` with no ignore list; a
+  finding is fixed by upgrading the pin
 
 ## Powered by
 
