@@ -25,6 +25,7 @@ class SecurityConfig:
     ip_allowlist: list[str] = field(default_factory=list)
     enable_tier3: bool = False
     disable_tier2: bool = False
+    scrape_block_private: bool = False
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
 
@@ -67,6 +68,28 @@ def _list_of_strings(raw: object, key: str) -> list[str]:
     return raw
 
 
+_TRUE_STRINGS = ("true", "1", "yes")
+_FALSE_STRINGS = ("false", "0", "no")
+
+
+def _boolean(raw: object, key: str) -> bool:
+    """A strict boolean (#39): ``bool("false")`` is True, which turned ``enable_tier3 = "false"`` ON.
+
+    A real TOML boolean, or one of the strings true/false/1/0/yes/no (any case, outer spaces
+    ignored). Anything else is an error that names the key and never echoes the value (a
+    misplaced secret must not land in a log).
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        word = raw.strip().lower()
+        if word in _TRUE_STRINGS:
+            return True
+        if word in _FALSE_STRINGS:
+            return False
+    raise ValueError(f"{key} must be a boolean: true or false, or one of the strings true, false, 1, 0, yes, no")
+
+
 def load_config(path: Path | None) -> RemoteOSConfig:
     """Load and validate TOML config file. Returns defaults when path is None."""
     cfg = RemoteOSConfig()
@@ -96,9 +119,13 @@ def load_config(path: Path | None) -> RemoteOSConfig:
     if "ip_allowlist" in security:
         cfg.security.ip_allowlist = _list_of_strings(security["ip_allowlist"], "security.ip_allowlist")
     if "enable_tier3" in security:
-        cfg.security.enable_tier3 = bool(security["enable_tier3"])
+        cfg.security.enable_tier3 = _boolean(security["enable_tier3"], "security.enable_tier3")
     if "disable_tier2" in security:
-        cfg.security.disable_tier2 = bool(security["disable_tier2"])
+        cfg.security.disable_tier2 = _boolean(security["disable_tier2"], "security.disable_tier2")
+    if "scrape_block_private" in security:
+        cfg.security.scrape_block_private = _boolean(
+            security["scrape_block_private"], "security.scrape_block_private"
+        )
     if "oauth_client_id" in security:
         cfg.security.oauth_client_id = str(security["oauth_client_id"]) or None
     if "oauth_client_secret" in security:
