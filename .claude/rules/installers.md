@@ -423,6 +423,11 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   land in the script scope) into powershell.exe 5.1, plus one real cmd.exe run of the generated
   `.bat`. Probe them locally with pwsh 7 (`.claude/rules/child-output.md` describes the
   tarball) through a python driver; ACL and cmd stay Windows-only.
+- **Windows ACL tests (#64):** `FileSystemAccessRule` refuses a mask above FullControl (a
+  GENERIC_WRITE ACE cannot be built through it, and PowerShell refuses the enum cast): build such
+  an ACL through SDDL (`SetSecurityDescriptorSddlForm(... + '(A;OICI;GW;;;BU)', 'Access')`).
+  Junctions: `New-Item -ItemType Junction` (5.1, no admin); the same tests use `SymbolicLink`
+  under pwsh on Linux (`$IsLinux`), so the link cases also run in the local pwsh probe.
 - **Static checks find the first code line** (`_find_first_code_line`). It skips `#` and
   `Write-Host` lines, but NOT bash `echo` lines. Keep `pip install … remoteos-mcp` and
   `pip uninstall … remoteos-mcp` out of `echo` text.

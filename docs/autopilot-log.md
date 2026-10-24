@@ -491,3 +491,23 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   (toast `Show()` works on windows-latest). Local 1188 pass; CI all green on PR and main.
 - **Open for the owner:** Python 3.10 keeps Pillow 12.3.0 (CVEs; Pillow 13 needs 3.11) — drop 3.10,
   ignore entry, or accept. Follow-up candidate: OAuth without a secret (authorize approves all).
+
+## #64 — Windows installer: download first, install offline, roll back; macOS ref input; Python 3.11 (PR #69, merge `173cfe1`, 0.7.0.dev37)
+
+- **Design:** main's Approach 1. install.ps1: preflight into `<config>\wheelhouse\<sha>` (constraints
+  via urllib, `pip download --timeout 60 --retries 10`, `pip wheel --no-deps` over every sdist,
+  `<sha>.partial` renamed when whole, reused when this Python installs it), dry-run of the new and
+  the rollback wheelhouse before the stop, offline install, every failure after the stop rolls back
+  (`Exit-RemoteOSAfterFailure @rollback`), prune to current+previous after the proven install.
+  The wheelhouse root is Administrators-owned (elevated pip); no elevated `Remove-Item -Recurse`
+  (junctions). install.sh: `REMOTEOS_MCP_REF`. Python >= 3.11 everywhere, constraints for 3.11.
+- **Commits:** bump 9900d68; RED 2610972 → GREEN ed8bbea (+ 8496ff4 older static checks moved);
+  review RED eba93dd → GREEN 197b38b, RED 7a6d5ed → GREEN eef4936, RED cd0bc79 → GREEN 12e8902,
+  bf5e4d8 → 09a3df6 (tree walk: .NET Framework's recursive delete throws on a junction).
+- **Tests:** `tests_windows/test_install_ps1_wheelhouse.py` (real pip in a venv, a local index with
+  in-tree-backend sdists, no network; ACL/junction cases Windows-only), static checks in
+  `tests/test_installer_windows_key.py`, `tests/test_installer_python_gate.py` (also bash 3.2),
+  `TestMacosSourceRef`. CI all green on PR and main; local 1225 pass.
+- **Follow-up candidates (listed on the ticket):** wheelhouse in %ProgramData% (profile swap
+  residual), a Windows trap for a run killed between stop and install, uninstall.ps1 elevation +
+  desktop profile, generator split of install.ps1 (999 lines) before the updater ticket.
