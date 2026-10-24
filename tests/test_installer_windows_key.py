@@ -458,5 +458,8 @@ def test_an_elevated_delete_never_follows_a_link() -> None:
         body = _function_code(name)
         assert not any("Remove-Item" in line and "-Recurse" in line for line in body), name
         assert any("Remove-RemoteOSTree" in line for line in body), name
+    # .NET Framework's recursive Directory.Delete fails on a junction inside ("The parameter is
+    # incorrect", CI on 12e8902): the tree is walked entry by entry, a link removed alone
     tree = "\n".join(_function_code("Remove-RemoteOSTree"))
-    assert "[System.IO.Directory]::Delete($Path)" in tree and "[System.IO.Directory]::Delete($Path, $true)" in tree
+    assert "[System.IO.Directory]::Delete($Path)" in tree and "Delete($Path, $true)" not in tree
+    assert "Remove-RemoteOSTree $entry.FullName" in tree
