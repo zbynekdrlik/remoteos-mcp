@@ -317,7 +317,13 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     elevated delete goes through `Remove-RemoteOSTree`** (review round 2): 5.1's `Remove-Item
     -Recurse` enters a junction and deletes the TARGET's contents, and Get-Acl/Set-Acl follow one,
     so a link as the root is removed alone, a link as the config folder is refused, and a
-    directory is deleted by `[System.IO.Directory]::Delete($p, $true)` (never enters a link).
+    directory is deleted by `[System.IO.Directory]::Delete($p, $true)` (never enters a link; it
+    throws on a read-only file, which then stops the run: remove the folder by hand). The old
+    `.winremote-mcp` and other-account config cleanups use it too (a static test: no
+    `Remove-Item -Recurse` anywhere in install.ps1). `Test-RemoteOSLink` fails closed (a path
+    that exists but cannot be read counts as a link). The prune does nothing when the root or its
+    folder became a link since the check, and deletes only `<sha>` / `<sha>.partial` names: a
+    root swapped for a junction to a system folder mid-run cannot make it delete that folder.
     **Partial protection only:** the desktop user owns the PROFILE, so they can rename the root and
     put their own in during the whole download (the run checks it once). This stops a wheel planted
     BEFORE the run; `%ProgramData%\remoteos-mcp\wheelhouse` would close the rest (not ticketed yet:
@@ -331,7 +337,9 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     uninstall. A re-run of the same commit keeps only that wheelhouse (`@($sha, $sha)`): the
     proven commit is the current one. A run killed between the stop and the install (an SSH drop)
     still leaves no server, as before: no armed trap on Windows (a follow-up candidate on #64, not
-    ticketed yet). uninstall.ps1 says so when a non-elevated run cannot remove the wheelhouse.
+    ticketed yet). uninstall.ps1 says so when a non-elevated run cannot remove the wheelhouse; it
+    still uses `$env:USERPROFILE` (an administrator of another account removes the wrong profile)
+    and has no elevation gate (a follow-up candidate on #64).
   - **Size:** install.ps1 is ~1000 lines, AT the budget (comments were condensed into this rule
     twice). The next feature (#65's updater) must first split the source into parts that a
     generator concatenates into the committed install.ps1, with a test that they match (as for

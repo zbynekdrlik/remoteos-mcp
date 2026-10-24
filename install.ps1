@@ -317,8 +317,11 @@ function Test-RemoteOSWheelhouseRootTrusted([string]$Root) {
 }
 
 function Test-RemoteOSLink([string]$Path) {
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    return [bool]($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+    # Fail closed: a path that exists but cannot be read counts as a link
+    try { $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop }
+    catch [System.Management.Automation.ItemNotFoundException] { return $false }
+    catch { return $true }
+    return [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
 }
 
 function Remove-RemoteOSTree([string]$Path) {
@@ -355,7 +358,7 @@ function Protect-RemoteOSWheelhouseRoot([string]$Root, [string]$User) {
         if (-not (Test-RemoteOSWheelhouseRootTrusted $Root)) { return "$Root is still writable for another account after its ACL was set" }
         return $null
     } catch {
-        return "could not protect ${Root}: $_"
+        return "could not protect ${Root} (remove it by hand if this repeats): $_"
     }
 }
 
@@ -442,8 +445,7 @@ function Get-RemoteOSRollbackPoint([string]$ConfigDir, [string]$Python) {
 }
 
 function Install-RemoteOSWheelhouse([string]$Python, [string]$Wheelhouse, [string]$Version) {
-    # Offline, never the network; the pre-uninstall stays (#12 RECORD clash), never --force-reinstall;
-    # then the version and the import check. -> @{Ok; Error; Output}
+    # Offline; the pre-uninstall stays (#12), never --force-reinstall; version + import check -> @{Ok; Error; Output}
     $uninstall = Invoke-RemoteOSPip $Python @('uninstall', '-y', 'remoteos-mcp', 'fastmcp', 'fastmcp-slim')
     if ($uninstall.Exit -ne 0) {
         return [pscustomobject]@{ Ok = $false; Error = "the pre-uninstall failed (exit $($uninstall.Exit))"; Output = $uninstall.Output }
@@ -462,10 +464,12 @@ function Install-RemoteOSWheelhouse([string]$Python, [string]$Wheelhouse, [strin
 }
 
 function Remove-RemoteOSStaleWheelhouses([string]$Root, [string[]]$Keep) {
-    # After a proven install: keep the current + previous wheelhouse, remove the rest -> the removed names
+    # After a proven install: keep the current + previous wheelhouse, remove other wheelhouse names only;
+    # nothing when the root or its folder became a link since (a swap during the run) -> the removed names
     $removed = @()
+    if ((Test-RemoteOSLink $Root) -or (Test-RemoteOSLink (Split-Path -Parent $Root))) { return $removed }
     foreach ($dir in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
-        if ($Keep -contains $dir.Name) { continue }
+        if ($Keep -contains $dir.Name -or $dir.Name -cnotmatch '^[0-9a-f]{40}(\.partial)?\z') { continue }
         try {
             Remove-RemoteOSTree $dir.FullName
             $removed += $dir.Name
@@ -683,8 +687,7 @@ foreach ($cmd in @("python", "python3", "py")) {
     } catch {}
 }
 
-# Elevated as another account: the task (the desktop user) must be able to run this Python, and
-# a Python installed now would be per-user for this account. Checked before anything changes.
+# Elevated as another account: the desktop user's task must reach this Python (checked before any change)
 $otherAccount = $env:USERNAME -ine $desktopUser
 $foundPythonPath = $null
 if ($python) { $foundPythonPath = (Get-Command $python -ErrorAction SilentlyContinue).Source }
@@ -760,8 +763,7 @@ if (-not (Test-RemoteOSPythonVersion "$installedVersion")) {
     Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
-# --- The auth key: resolved before anything changes (the old winremote config is deleted
-# below, and an invalid explicit key must be refused first) ---
+# --- The auth key: resolved before anything changes (an invalid explicit key is refused first) ---
 $tomlPath = "$desktopProfile\.config\remoteos\remoteos.toml"
 $oldConfigDir = "$desktopProfile\.winremote-mcp"
 $foundKeys = Get-RemoteOSExistingKeys -ConfigDir $ConfigDir -TomlPath $tomlPath -OldConfigDir $oldConfigDir
@@ -825,7 +827,7 @@ if ($oldPkg -match "Version:") {
 }
 # Clean up old config and scheduled task
 if (Test-Path $oldConfigDir) {
-    Remove-Item -Recurse -Force $oldConfigDir -ErrorAction SilentlyContinue
+    try { Remove-RemoteOSTree $oldConfigDir } catch { Write-Host "        [!] Could not remove ${oldConfigDir}: $_" -ForegroundColor Yellow }
     Write-Host "        Cleaned up old .winremote-mcp config" -ForegroundColor Gray
 }
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
@@ -908,13 +910,11 @@ try {
 # --- Firewall + Network profile ---
 Write-Host "  [7/7] Configuring firewall..." -ForegroundColor White
 try {
-    # Set the network to Private (the rule below allows every profile, but a Public network may
-    # carry other blocking rules)
+    # Set the network to Private (a Public network may carry other blocking rules)
     Get-NetConnectionProfile -ErrorAction SilentlyContinue | Where-Object {
         $_.NetworkCategory -eq "Public"
     } | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
-    # The new rule first, then the old ones: a failure leaves the old rule in place (a rollback
-    # would otherwise bring back a server the LAN cannot reach)
+    # The new rule first, then the old ones: a failure (and its rollback) keeps the LAN reachable
     $oldRules = @(Get-NetFirewallRule -DisplayName "RemoteOS MCP" -ErrorAction SilentlyContinue)
     New-NetFirewallRule -DisplayName "RemoteOS MCP" -Direction Inbound -LocalPort $Port -Protocol TCP -Action Allow -Profile Any | Out-Null
     if ($oldRules.Count -gt 0) { $oldRules | Remove-NetFirewallRule -ErrorAction SilentlyContinue }
@@ -936,7 +936,7 @@ $hostName = $env:COMPUTERNAME.ToLower()
 # --- Clean up old config from other users (if installer was run under wrong user before) ---
 $currentUserConfig = "$env:USERPROFILE\.remoteos-mcp"
 if ($currentUserConfig -ne $ConfigDir -and (Test-Path $currentUserConfig)) {
-    Remove-Item -Recurse -Force $currentUserConfig -ErrorAction SilentlyContinue
+    try { Remove-RemoteOSTree $currentUserConfig } catch { Write-Host "  [!] Could not remove ${currentUserConfig}: $_" -ForegroundColor Yellow }
     Write-Host "  Cleaned up old config from $env:USERNAME" -ForegroundColor Gray
 }
 
@@ -963,8 +963,7 @@ if (-not $health.Ok) {
 }
 Write-Host "        Health check OK: $($health.Message)" -ForegroundColor Green
 
-# The commit this box runs, recorded once it proved itself (#12; #60's updater and the next run's
-# rollback read it). No secret, so no ACL.
+# The commit this box runs, once proven (#12; the updater and the next rollback read it). No secret.
 $sourceSha | Set-Content "$ConfigDir\installed-ref.txt"
 # Only now: the current and the previous wheelhouse stay, older ones go (#64)
 $pruned = @(Remove-RemoteOSStaleWheelhouses -Root $wheelhouseRoot -Keep @($sourceSha, $rollbackPoint.Ref))
