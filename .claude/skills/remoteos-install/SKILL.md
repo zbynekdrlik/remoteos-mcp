@@ -30,6 +30,15 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 
 
 Handles: pip install from repo, preserves existing auth key on reinstall, VBS hidden launcher (no CMD window), scheduled task with auto-restart, firewall rule.
 
+**Run it in an admin PowerShell (#57, since 0.7.0.dev35).** The installer checks elevation before it changes anything:
+
+- Elevated (an admin PowerShell, or SSH as an administrator account: OpenSSH gives it the full token) → it installs.
+- Not elevated, at a desktop, no `REMOTEOS_MCP_AUTH_KEY` → it relaunches itself in an elevated window (one UAC click; the same file, or the same URL for a piped run), waits, and exits with that run's exit code. A cancelled UAC prompt → exit 1, "nothing was changed".
+- Not elevated over SSH or in session 0 → `[X] ... needs an elevated (Administrator) PowerShell -- nothing was changed on this box`, exit 1. Run it as an administrator account.
+- Not elevated with an explicit `REMOTEOS_MCP_AUTH_KEY` → the same exit 1: the key never crosses the UAC elevation (only an argv or a file could carry it). Open PowerShell as Administrator, set it there, rerun.
+- After the gate, a failing scheduled task or firewall rule fails the run (exit 1) instead of warning.
+- **Over SSH (session 0) the installer does not start the server itself**: a server started there dies with the SSH session. It runs `schtasks /End` + `schtasks /Run /TN RemoteOSMCP` and proves health from the task's process (the :8092 listener must run in a session other than 0). The desktop user must be logged in. An interactive run starts the server directly, as before.
+
 **The key (since 0.7.0.dev32, #12):** `start-remoteos.bat` sets `REMOTEOS_AUTH_KEY` in its own environment; the server's command line has no `--auth-key`. The `.bat` and `config.json` (in `C:\Users\<desktop user>\.remoteos-mcp\`) get an owner-only ACL (the user, SYSTEM, Administrators). A reinstall keeps the key: the running `.bat`'s, else `config.json`'s, else `remoteos.toml`'s `[server] auth_key` (`%USERPROFILE%\.config\remoteos\remoteos.toml`), else the old winremote one. It never mints a new key while any of them exists. To install a given key, hand it over in `$env:REMOTEOS_MCP_AUTH_KEY` without putting it on any command line (`powershell -Command "$env:…='K'; …"` puts it in powershell's), e.g. on stdin over SSH: `printf '%s\n' "$k" | ssh user@box 'powershell -NoProfile -Command "$env:REMOTEOS_MCP_AUTH_KEY=[Console]::In.ReadLine(); irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 | iex"'`. The installer drops it from its environment before starting any program, and the `.bat` sets it only for the server itself. The installer never prints the key: read it from `config.json` on the box.
 
 Verify after a (re)install: the key is unchanged (the client config still gets 200), and the server's command line has no key: `Get-CimInstance Win32_Process | ? CommandLine -match '-m remoteos' | % CommandLine`.
@@ -118,7 +127,7 @@ ssh user@box 'powershell -NoProfile -Command "Invoke-WebRequest -Uri https://raw
 ssh user@box 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\install-remoteos.ps1'
 ```
 
-**Gotcha — server won't start from SSH session 0** (Windows, all boxes). The VBS hidden launcher uses `WScript.Shell.Run` which needs a desktop session. After deploying over SSH, trigger the scheduled task: `schtasks /Run /TN RemoteOSMCP` (it runs in the desktop user's interactive session). All three installers now have a post-install health self-check (~30s poll) that verifies the server actually started with the correct version.
+**Gotcha — server won't start from SSH session 0** (Windows, all boxes). A server started from an SSH session (session 0) dies when SSH disconnects. Since 0.7.0.dev35 (#57) the installer handles it: in session 0 it starts the server only through `schtasks /Run /TN RemoteOSMCP` (the desktop user's interactive session) and checks the listener's session. Before dev35, trigger the task by hand after an SSH deploy, in a NEW SSH call (a `/Run` in the same call as the old installer did not take: the installer's own session-0 server held the port). All three installers have a post-install health self-check (~30s poll) that verifies the server actually started with the correct version.
 
 ## Repository structure
 

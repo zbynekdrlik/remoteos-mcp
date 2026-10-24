@@ -21,6 +21,13 @@ On the Windows machine, open PowerShell **as Administrator** and run:
 irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 | iex
 ```
 
+The installer needs an admin PowerShell and checks it before it changes anything. From a normal
+window it relaunches itself elevated (one UAC prompt). Over SSH as a non-admin account, or with an
+explicit `REMOTEOS_MCP_AUTH_KEY` (it never crosses the elevation), it stops with
+`nothing was changed on this box`: open PowerShell as Administrator (or use an admin account) and
+run it again. Over SSH it starts the server through the scheduled task, in the logged-in desktop
+user's session (a server started from the SSH session would die with it).
+
 That's it. The script will:
 
 1. Check/install Python 3.10+

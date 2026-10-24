@@ -3,6 +3,8 @@
 
 $ErrorActionPreference = "Stop"
 $Port = 8092
+# This installer's own URL: the elevated relaunch of a piped run fetches it again (#57)
+$InstallerUrl = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1"
 # The explicit key is read once and dropped from the environment BEFORE the first child process
 # (query user, python --version, winget, curl.exe): a child inherits $env: (#12 review round 9).
 $explicitKey = $env:REMOTEOS_MCP_AUTH_KEY
@@ -168,17 +170,93 @@ function Set-RemoteOSOwnerOnlyAcl([string]$Path, [string]$User) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+# --- The elevation gate (#57): an elevated run, or nothing changes -----------------------------
+# A non-admin run used to warn and carry on: a server without admin rights, no scheduled task,
+# no firewall rule. A person at the desktop is relaunched elevated (one UAC click). Automation
+# (SSH, session 0) cannot click a UAC prompt, so it fails. An explicit REMOTEOS_MCP_AUTH_KEY
+# never crosses the elevation (only an argv or a file could carry it), so that run fails too and
+# the person is told to open an admin PowerShell.
+
+function Get-RemoteOSElevationAction([bool]$IsAdmin, [bool]$Interactive, [bool]$ExplicitKey) {
+    # -> 'proceed' | 'relaunch' | 'fail' (pure: the caller probes the environment)
+    if ($IsAdmin) { return 'proceed' }
+    if ($Interactive -and -not $ExplicitKey) { return 'relaunch' }
+    return 'fail'
+}
+
+function Test-RemoteOSInteractiveSession([string]$SshConnection, [string]$SshClient, [int]$SessionId) {
+    # A desktop session a person sits at: not over SSH, and not session 0 (services, OpenSSH)
+    return [bool]((-not $SshConnection) -and (-not $SshClient) -and $SessionId -ne 0)
+}
+
+function Get-RemoteOSListenerSessionId([int]$Port) {
+    # The Windows session of the process listening on $Port, $null when nothing listens
+    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $listener) { return $null }
+    $process = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+    if (-not $process) { return $null }
+    return [int]$process.SessionId
+}
+
+function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$InstallerUrl) {
+    # The same installer in an elevated window (UAC) -> the elevated run's exit code. A file run
+    # runs that file again, a piped run fetches the same URL. The installer runs as a child of
+    # the elevated window's PowerShell, which waits for Enter at the end so the person can read
+    # the result (an `exit` in the installer would otherwise close the window at once). The
+    # command goes over as -EncodedCommand: no quoting of the path or URL can break it.
+    if ($ScriptPath) {
+        $run = "& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '" + $ScriptPath.Replace("'", "''") + "'"
+    } else {
+        $inner = "irm '" + $InstallerUrl.Replace("'", "''") + "' | iex"
+        $run = "& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '" + $inner.Replace("'", "''") + "'"
+    }
+    $outer = @(
+        $run,
+        '$code = $LASTEXITCODE',
+        'Write-Host ""',
+        'Read-Host "RemoteOS MCP installer finished (exit code $code) - press Enter to close this window" | Out-Null',
+        'exit $code'
+    ) -join "`n"
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($outer))
+    # -PassThru + WaitForExit, not -Wait: Windows PowerShell's -Wait also waits for every
+    # descendant, and the elevated run leaves the server running.
+    $process = Start-Process -FilePath "powershell.exe" -Verb RunAs -PassThru `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
+    $process.WaitForExit()
+    return $process.ExitCode
+}
+
 Write-Host ""
 Write-Host "  RemoteOS MCP Installer" -ForegroundColor Cyan
 Write-Host "  Remote Windows control for Claude Code" -ForegroundColor Gray
 Write-Host ""
 
-# --- Check admin ---
+# --- The elevation gate (#57): before anything on the box changes ---
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Write-Host "  [!] Not running as admin - firewall rule and auto-start may fail" -ForegroundColor Yellow
-    Write-Host "  [!] Recommend: Right-click PowerShell > Run as Administrator" -ForegroundColor Yellow
-    Write-Host ""
+$interactive = Test-RemoteOSInteractiveSession -SshConnection $env:SSH_CONNECTION -SshClient $env:SSH_CLIENT `
+    -SessionId (Get-Process -Id $PID).SessionId
+$elevation = Get-RemoteOSElevationAction -IsAdmin $isAdmin -Interactive $interactive -ExplicitKey ([bool]$explicitKey)
+if ($elevation -eq 'fail') {
+    Write-Host "  [X] The RemoteOS MCP installer needs an elevated (Administrator) PowerShell -- nothing was changed on this box" -ForegroundColor Red
+    if ($interactive) {
+        Write-Host "      REMOTEOS_MCP_AUTH_KEY cannot cross the UAC elevation: open PowerShell as Administrator" -ForegroundColor Yellow
+        Write-Host "      (right-click > Run as Administrator), set REMOTEOS_MCP_AUTH_KEY there and run the installer again." -ForegroundColor Yellow
+    } else {
+        Write-Host "      This run is not at a desktop (SSH or session 0), so it cannot answer a UAC prompt:" -ForegroundColor Yellow
+        Write-Host "      run it as an account with administrator rights." -ForegroundColor Yellow
+    }
+    exit 1
+}
+if ($elevation -eq 'relaunch') {
+    Write-Host "  Not elevated: the install continues in an elevated PowerShell window - confirm the UAC prompt." -ForegroundColor Yellow
+    try {
+        $elevatedExit = Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl
+    } catch {
+        Write-Host "  [X] The elevation was cancelled or failed ($_) -- nothing was changed on this box" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  The elevated install finished with exit code $elevatedExit." -ForegroundColor Gray
+    exit $elevatedExit
 }
 
 # --- Detect logged-in desktop user (may differ from SSH user) ---
@@ -429,8 +507,9 @@ try {
     Register-ScheduledTask -TaskName "RemoteOSMCP" -Action $taskAction -Trigger @($triggerLogon, $triggerRepeat) -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
     Write-Host "        Task 'RemoteOSMCP' registered for $desktopUser (at logon + every 5 min)" -ForegroundColor Green
 } catch {
-    Write-Host "        [!] Could not create scheduled task (need admin)" -ForegroundColor Yellow
-    Write-Host "        You can start manually: $ConfigDir\start-remoteos.vbs" -ForegroundColor Yellow
+    # The run is elevated here (the gate above), so this is a real failure, not a missing right
+    Write-Host "        [X] Could not register the scheduled task 'RemoteOSMCP': $_" -ForegroundColor Red
+    exit 1
 }
 
 # --- Firewall + Network profile ---
@@ -446,8 +525,9 @@ try {
     New-NetFirewallRule -DisplayName "RemoteOS MCP" -Direction Inbound -LocalPort $Port -Protocol TCP -Action Allow -Profile Any | Out-Null
     Write-Host "        Firewall rule added (port $Port, all profiles - reliable across network drift)" -ForegroundColor Green
 } catch {
-    Write-Host "        [!] Could not add firewall rule (need admin)" -ForegroundColor Yellow
-    Write-Host "        Manually allow TCP port $Port inbound" -ForegroundColor Yellow
+    # Elevated here too: a failure is real
+    Write-Host "        [X] Could not add the firewall rule for TCP port ${Port}: $_" -ForegroundColor Red
+    exit 1
 }
 
 # --- Get LAN IP ---
@@ -467,8 +547,25 @@ if ($currentUserConfig -ne $ConfigDir -and (Test-Path $currentUserConfig)) {
 }
 
 # --- Start server now (hidden) ---
-Write-Host "  Starting server..." -ForegroundColor Cyan
-Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-remoteos.vbs`""
+if ($interactive) {
+    # A person's desktop session: start it here (the task starts it at every logon)
+    Write-Host "  Starting server..." -ForegroundColor Cyan
+    Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-remoteos.vbs`""
+} else {
+    # SSH / session 0: a server started from here dies with the SSH session (#57 amendment,
+    # resolume-pp). The task runs it in the desktop user's session instead.
+    Write-Host "  Starting server through the scheduled task (this run is not at a desktop)..." -ForegroundColor Cyan
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
+    $taskRunOut = schtasks /Run /TN "RemoteOSMCP" 2>&1 | Out-String
+    $taskRunExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    if ($taskRunExit -ne 0) {
+        Write-Host "  [X] schtasks /Run /TN RemoteOSMCP failed (exit $taskRunExit): $($taskRunOut.Trim())" -ForegroundColor Red
+        exit 1
+    }
+}
 Start-Sleep -Seconds 5
 
 # --- Post-install: verify service reports the correct version ---
@@ -480,7 +577,19 @@ for ($attempt = 1; $attempt -le 6; $attempt++) {
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5 -ErrorAction Stop
         $healthVer = $health.version
-        if ($healthVer -eq $PKG_VER) {
+        if ($healthVer -eq $PKG_VER -and -not $interactive) {
+            # The server must be the task's, in a desktop session: one in session 0 dies with SSH
+            $serverSession = Get-RemoteOSListenerSessionId -Port $Port
+            if ($serverSession -eq 0) {
+                Write-Host "  [X] The server on port $Port runs in session 0: it would die with this SSH session" -ForegroundColor Red
+                exit 1
+            }
+            if ($null -ne $serverSession) {
+                $healthOk = $true
+                Write-Host "        Health check OK: v${healthVer} (the task's server, session $serverSession)" -ForegroundColor Green
+                break
+            }
+        } elseif ($healthVer -eq $PKG_VER) {
             $healthOk = $true
             Write-Host "        Health check OK: v${healthVer}" -ForegroundColor Green
             break
@@ -493,6 +602,9 @@ for ($attempt = 1; $attempt -le 6; $attempt++) {
 }
 if (-not $healthOk) {
     Write-Host "  [X] Health endpoint (http://127.0.0.1:${Port}/health) did not respond within 30s" -ForegroundColor Red
+    if (-not $interactive) {
+        Write-Host "      The task runs the server in ${desktopUser}'s desktop session: that user must be logged in." -ForegroundColor Yellow
+    }
     exit 1
 }
 

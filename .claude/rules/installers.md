@@ -271,6 +271,26 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   the whole output on failure.
 - The key is resolved BEFORE step 2: step 2 deletes the old winremote config, and an invalid
   explicit key must be refused first.
+- **The elevation gate (#57) is the first thing after the banner, before any change**:
+  `Get-RemoteOSElevationAction -IsAdmin -Interactive -ExplicitKey` (pure) → proceed | relaunch |
+  fail; `Test-RemoteOSInteractiveSession` (no `SSH_CONNECTION`/`SSH_CLIENT`, session != 0) feeds
+  it. A static test pins the call before the first state-changing line of the script's flow.
+  - relaunch = `Invoke-RemoteOSElevatedRelaunch`: `Start-Process powershell -Verb RunAs
+    -PassThru` + `WaitForExit()`, never `-Wait` (5.1's `-Wait` also waits for every descendant,
+    and the elevated run leaves the server running). The elevated window runs the installer as a
+    CHILD powershell and then `Read-Host`s, because an `exit` inside the installer would close the
+    window before the person reads it. The command goes over as `-EncodedCommand` (no quoting).
+    An explicit key is never relaunched: the elevated process gets a fresh environment, and an
+    argv or a file would expose the key.
+  - Elevation does NOT pass the caller's environment: anything the elevated run needs (e.g. the
+    resolved ref) must be set inside the encoded command.
+  - After the gate, the scheduled-task and firewall `catch` blocks `exit 1`: the run is
+    elevated, so a failure is real.
+  - Non-interactive (SSH, session 0): never `Start-Process wscript` (it dies with the SSH
+    session); `schtasks /End` + `schtasks /Run /TN RemoteOSMCP` under `$ErrorActionPreference =
+    "Continue"` (5.1 turns native stderr under `2>&1` into a terminating error with `Stop`), then
+    the health loop also requires `Get-RemoteOSListenerSessionId -Port` != 0 (session 0 = exit 1,
+    `$null` = keep polling).
 
 ## Tests
 
