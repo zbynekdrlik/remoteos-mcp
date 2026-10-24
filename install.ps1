@@ -3,8 +3,12 @@
 
 $ErrorActionPreference = "Stop"
 $Port = 8092
-# This installer's own URL: the elevated relaunch of a piped run fetches it again (#57)
-$InstallerUrl = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1"
+# The source (#12): REMOTEOS_MCP_REF (a branch, tag or commit; default main, as on Linux) is
+# resolved below to ONE commit, which the constraints, the source archive and an elevated
+# relaunch all use. raw.githubusercontent.com caches /main/ for minutes, so two requests for
+# "main" could pair new code with old pins.
+$Ref = $env:REMOTEOS_MCP_REF
+if (-not $Ref) { $Ref = "main" }
 # The explicit key is read once and dropped from the environment BEFORE the first child process
 # (query user, python --version, winget, curl.exe): a child inherits $env: (#12 review round 9).
 $explicitKey = $env:REMOTEOS_MCP_AUTH_KEY
@@ -198,9 +202,17 @@ function Get-RemoteOSListenerSessionId([int]$Port) {
     return [int]$process.SessionId
 }
 
-function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$InstallerUrl) {
+function Test-RemoteOSRefName([string]$Ref) {
+    # A plain git ref name (#12): it goes into a URL and into the relaunch's command
+    return [bool]($Ref -and $Ref.Length -le 200 -and $Ref -cmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*\z' -and
+        $Ref -notmatch '\.\.')
+}
+
+function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef) {
     # The same installer in an elevated window (UAC) -> the elevated run's exit code. A file run
-    # runs that file again, a piped run fetches the same URL. The installer runs as a child of
+    # runs that file again, a piped run fetches the same URL; both install $SourceRef (the
+    # resolved commit), handed over in REMOTEOS_MCP_REF because the elevated process does not get
+    # this one's environment. The installer runs as a child of
     # the elevated window's PowerShell, which waits for Enter at the end so the person can read
     # the result (an `exit` in the installer would otherwise close the window at once). The
     # command goes over as -EncodedCommand: no quoting of the path or URL can break it.
@@ -211,6 +223,7 @@ function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$Installer
         $run = "& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '" + $inner.Replace("'", "''") + "'"
     }
     $outer = @(
+        ("`$env:REMOTEOS_MCP_REF = '" + $SourceRef.Replace("'", "''") + "'"),
         $run,
         '$code = $LASTEXITCODE',
         'Write-Host ""',
@@ -247,10 +260,33 @@ if ($elevation -eq 'fail') {
     }
     exit 1
 }
+
+# --- The source commit (#12): resolved once, before anything changes ---
+if (-not (Test-RemoteOSRefName $Ref)) {
+    Write-Host "  [X] REMOTEOS_MCP_REF is not a plain branch, tag or commit name -- nothing was changed on this box" -ForegroundColor Red
+    exit 1
+}
+# Windows PowerShell 5.1 on an older .NET may not offer TLS 1.2, which GitHub requires
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$sourceSha = $null
+$resolveError = "no commit sha in the answer"
+try {
+    $sourceSha = [string](Invoke-RestMethod -Uri "https://api.github.com/repos/zbynekdrlik/remoteos-mcp/commits/$Ref" -TimeoutSec 30 -ErrorAction Stop).sha
+} catch {
+    $resolveError = "$_"
+}
+if ($sourceSha -cnotmatch '^[0-9a-f]{40}\z') {
+    Write-Host "  [X] Could not resolve '$Ref' to a commit of zbynekdrlik/remoteos-mcp ($resolveError) -- nothing was changed on this box" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  Source: $Ref = commit $sourceSha" -ForegroundColor Gray
+# This installer at that commit: the elevated relaunch of a piped run fetches it (#57)
+$InstallerUrl = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$sourceSha/install.ps1"
+
 if ($elevation -eq 'relaunch') {
     Write-Host "  Not elevated: the install continues in an elevated PowerShell window - confirm the UAC prompt." -ForegroundColor Yellow
     try {
-        $elevatedExit = Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl
+        $elevatedExit = Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl -SourceRef $sourceSha
     } catch {
         Write-Host "  [X] The elevation was cancelled or failed ($_) -- nothing was changed on this box" -ForegroundColor Red
         exit 1
@@ -414,7 +450,7 @@ if ($portPid) {
     Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
 }
 Start-Sleep -Seconds 3
-$env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/constraints.txt"
+$env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$sourceSha/constraints.txt"
 # Pre-uninstall all three packages so no stale RECORD can delete files the new
 # install writes.  Root cause (#12 wheel evidence): monolithic fastmcp 2.x
 # RECORD claims fastmcp/__init__.py - same file fastmcp-slim 4.x writes.
@@ -423,7 +459,7 @@ $env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mc
 & $python -m pip uninstall -y remoteos-mcp fastmcp fastmcp-slim 2>&1 | Out-Null
 # Keep the full pip output: on failure it is printed whole (#12 - a discarded
 # or truncated pip error hides the real cause).
-$pipInstallOut = & $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" 2>&1 | Out-String
+$pipInstallOut = & $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/$sourceSha.zip" 2>&1 | Out-String
 $pipInstallExit = $LASTEXITCODE
 $pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
@@ -434,7 +470,7 @@ if ($pipInstallExit -eq 0 -and $pipShow -match "Version: (.+)") {
 } else {
     Write-Host "        [X] pip install failed. Full pip output:" -ForegroundColor Red
     Write-Host $pipInstallOut
-    Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/main.zip" -ForegroundColor Yellow
+    Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/$sourceSha.zip" -ForegroundColor Yellow
     return
 }
 # Sanity check: verify remoteos and fastmcp can be imported (fail hard, never repair)
@@ -473,6 +509,9 @@ if (-not $pythonPath) { $pythonPath = $python }
     auth_key = $AuthKey
     host     = "0.0.0.0"
 } | ConvertTo-Json | Set-Content "$ConfigDir\config.json"
+
+# The commit this box installed (#12; #60's updater reads it). No secret, so no ACL.
+$sourceSha | Set-Content "$ConfigDir\installed-ref.txt"
 
 # Start batch script (auto-restart loop and crash guard; the key in its environment)
 New-RemoteOSStartScript -PythonPath $pythonPath -Port $Port -AuthKey $AuthKey | Set-Content "$ConfigDir\start-remoteos.bat"
@@ -617,6 +656,7 @@ Write-Host ""
 Write-Host "  Computer:  $hostName ($localIP)" -ForegroundColor White
 Write-Host "  User:      $desktopUser" -ForegroundColor White
 Write-Host "  Port:      $Port" -ForegroundColor White
+Write-Host "  Commit:    $sourceSha ($Ref; in $ConfigDir\installed-ref.txt)" -ForegroundColor White
 Write-Host "  Auth key:  in $ConfigDir\config.json and start-remoteos.bat (owner-only) - never printed." -ForegroundColor White
 Write-Host "             Read it on this PC: Get-Content $ConfigDir\config.json" -ForegroundColor White
 if (-not $resolvedKey.Source) {

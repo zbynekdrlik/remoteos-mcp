@@ -28,6 +28,11 @@ explicit `REMOTEOS_MCP_AUTH_KEY` (it never crosses the elevation), it stops with
 run it again. Over SSH it starts the server through the scheduled task, in the logged-in desktop
 user's session (a server started from the SSH session would die with it).
 
+It installs ONE commit: `REMOTEOS_MCP_REF` (a branch, tag or commit; default `main`, as on Linux)
+is resolved through the GitHub API to a commit sha, and both the code and its `constraints.txt`
+come from that sha. The sha is printed and written to
+`C:\Users\<user>\.remoteos-mcp\installed-ref.txt`.
+
 That's it. The script will:
 
 1. Check/install Python 3.10+

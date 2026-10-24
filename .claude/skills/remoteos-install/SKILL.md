@@ -30,6 +30,8 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.ps1 
 
 Handles: pip install from repo, preserves existing auth key on reinstall, VBS hidden launcher (no CMD window), scheduled task with auto-restart, firewall rule.
 
+**One commit per run (#12, since 0.7.0.dev35):** `REMOTEOS_MCP_REF` (default `main`) is resolved through `api.github.com/repos/zbynekdrlik/remoteos-mcp/commits/<ref>` to ONE sha before anything changes; `constraints.txt` (raw) and the pip archive both use that sha (raw caches `/main/` for minutes, so two `main` requests could pair new code with old pins). The sha is printed (`Source: main = commit <sha>`, and `Commit:` in the summary) and written to `installed-ref.txt` next to `config.json`. If GitHub's API cannot answer (rate limit: 60 unauthenticated requests/hour per IP), the run stops with "nothing was changed".
+
 **Run it in an admin PowerShell (#57, since 0.7.0.dev35).** The installer checks elevation before it changes anything:
 
 - Elevated (an admin PowerShell, or SSH as an administrator account: OpenSSH gives it the full token) → it installs.

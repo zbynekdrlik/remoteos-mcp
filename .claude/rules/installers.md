@@ -271,6 +271,17 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   the whole output on failure.
 - The key is resolved BEFORE step 2: step 2 deletes the old winremote config, and an invalid
   explicit key must be refused first.
+- **One commit per run (#12):** `$Ref` (`REMOTEOS_MCP_REF`, default `main`, checked by
+  `Test-RemoteOSRefName`) → `Invoke-RestMethod api.github.com/.../commits/$Ref` → `$sourceSha`
+  (must be 40 hex chars), right after the gate's fail branch and before the relaunch and any
+  change. `PIP_CONSTRAINT` = `raw/.../$sourceSha/constraints.txt`, pip installs
+  `archive/$sourceSha.zip`, `$InstallerUrl` = `raw/.../$sourceSha/install.ps1`, and
+  `installed-ref.txt` (next to `config.json`, no secret) holds the sha for #60's updater. Never
+  reintroduce a literal `/main/` or `main.zip` there (a static test). The static tests find the
+  main pip line by `archive/`.
+- **The `shell` CI job** runs `shellcheck install-linux.sh install.sh uninstall*.sh` and the
+  macOS installer tests under the `bash:3.2` container (the command above). Keep all bash
+  installers shellcheck-clean (ubuntu-latest's shellcheck).
 - **The elevation gate (#57) is the first thing after the banner, before any change**:
   `Get-RemoteOSElevationAction -IsAdmin -Interactive -ExplicitKey` (pure) → proceed | relaunch |
   fail; `Test-RemoteOSInteractiveSession` (no `SSH_CONNECTION`/`SSH_CLIENT`, session != 0) feeds
