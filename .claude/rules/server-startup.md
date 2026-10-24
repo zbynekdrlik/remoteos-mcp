@@ -3,6 +3,8 @@ paths:
   - "src/remoteos/__main__.py"
   - "src/remoteos/taskmanager.py"
   - "src/remoteos/platform/linux/shell_env.py"
+  - "src/remoteos/identity.py"
+  - "tests/test_identity.py"
   - "tests/test_startup_flags.py"
   - "tests/test_taskmanager.py"
   - "tests/test_shell_env.py"
@@ -25,6 +27,29 @@ paths:
   import-string app via `uvicorn.run`. The flag only prints a warning.
 - **stdio: stdout IS the JSON-RPC stream.** Every CLI status line goes to stderr
   (`click.echo(..., err=True)`). `test_stdio_stdout_carries_only_json_rpc` locks this.
+- **The server names its machine: `remoteos/identity.py` (#59).** `__main__` reads
+  `machine_identity()` ONCE at import (`_IDENTITY`) and passes `server_instructions(**_IDENTITY)`
+  to `FastMCP(instructions=)`, which goes out in every `initialize` result; `/health` adds `os` +
+  `hostname`. Why: a box's MCP name is only a label (stream-snv kept `win-stream-snv` after its
+  Ubuntu reinstall, and clients sent it PowerShell).
+  - `/health`'s `status` and `version` are a contract: the installers' self-check reads
+    `.version` (install-linux.sh, install.sh, install.ps1). Only ADD keys there.
+  - `/health` needs no key (`auth._PUBLIC_PATHS`): every key added there is public on the port.
+    Hostname and OS are accepted (#59); nothing secret or per-user goes there.
+  - Windows OS name = `Windows <release> (build <version>)`, but a Server edition
+    (`platform.win32_edition()` contains "Server") is `Windows Server (build <version>)`: CPython
+    3.12's `release()` says "2022Server" for every Server build from 20348 up (windows-latest,
+    Server 2025, included).
+  - The POSIX shells are `identity.MACOS_SHELL` / `LINUX_SHELL`, and `Shell` builds its argv from
+    them; the Windows text describes `powershell_argv`. Changing what Shell runs means changing
+    `identity` too — `test_shell_runs_exactly_the_shell_identity_announces` fails otherwise.
+  - `identity` imports `is_windows`/`is_macos` by name: a test that fakes the OS patches BOTH
+    `server` and `identity`.
+  - Linux OS name = os-release `PRETTY_NAME`, else `platform.system() release()`. CPython caches
+    os-release and defaults `PRETTY_NAME` to "Linux", so the fallback fires only without a file,
+    with a file that is not UTF-8 (`UnicodeDecodeError`, caught as `ValueError`: `identity` runs
+    at import and must never stop the server), or with an empty value. Real-OS checks: `test_startup_flags` (initialize over HTTP on the
+    Linux runner) and `tests_windows/test_identity_windows.py`.
 - **Startup tests start the real server in a subprocess.** The env must be hermetic (see
   `_child_env`):
   - `FASTMCP_CHECK_FOR_UPDATES=off`; otherwise the banner calls pypi.org and writes
