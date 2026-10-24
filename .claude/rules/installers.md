@@ -313,9 +313,16 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   - **The wheelhouse root feeds an elevated pip from the desktop user's profile** (review round
     1): `Protect-RemoteOSWheelhouseRoot` before the download: owner Administrators, protected
     ACL, SYSTEM + Administrators full, the desktop user read; a root that is not like that
-    (`Test-RemoteOSWheelhouseRootTrusted`, by SID) is deleted with everything in it. Residual: the
-    user owns the PROFILE, so during a run they could still rename the root and race a new one in;
-    `%ProgramData%` would close that (follow-up candidate, the design names the profile path).
+    (`Test-RemoteOSWheelhouseRootTrusted`, by SID) is deleted with everything in it. **Every
+    elevated delete goes through `Remove-RemoteOSTree`** (review round 2): 5.1's `Remove-Item
+    -Recurse` enters a junction and deletes the TARGET's contents, and Get-Acl/Set-Acl follow one,
+    so a link as the root is removed alone, a link as the config folder is refused, and a
+    directory is deleted by `[System.IO.Directory]::Delete($p, $true)` (never enters a link).
+    **Partial protection only:** the desktop user owns the PROFILE, so they can rename the root and
+    put their own in during the whole download (the run checks it once). This stops a wheel planted
+    BEFORE the run; `%ProgramData%\remoteos-mcp\wheelhouse` would close the rest (not ticketed yet:
+    a follow-up candidate on #64, it changes the design's location). It matters only where the
+    desktop user is NOT an administrator and an administrator runs the installer.
   - The installed version is read from a `REMOTEOS_VER=` line (a stderr warning on the merged
     output must not read as the version and roll back a good install).
   - The firewall rule: the new one is created BEFORE the old ones are removed, so a failure that
@@ -323,10 +330,12 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   - The pre-uninstall's exit code is fatal now (it was ignored); the rollback runs the same
     uninstall. A re-run of the same commit keeps only that wheelhouse (`@($sha, $sha)`): the
     proven commit is the current one. A run killed between the stop and the install (an SSH drop)
-    still leaves no server, as before: no armed trap on Windows (follow-up candidate).
-  - **Size:** install.ps1 is ~990 lines, at the ~1000 budget (#65 adds the updater): trim
-    comments into this rule first, then split the source into parts a generator concatenates (as
-    for install-linux.sh). `irm | iex` delivers ONE file.
+    still leaves no server, as before: no armed trap on Windows (a follow-up candidate on #64, not
+    ticketed yet). uninstall.ps1 says so when a non-elevated run cannot remove the wheelhouse.
+  - **Size:** install.ps1 is ~1000 lines, AT the budget (comments were condensed into this rule
+    twice). The next feature (#65's updater) must first split the source into parts that a
+    generator concatenates into the committed install.ps1, with a test that they match (as for
+    install-linux.sh): `irm | iex` delivers ONE file.
   - A native child's output goes through `Invoke-RemoteOSNative` (`2>&1`, each record as text,
     under `Continue`). In argument mode a bare `[pscustomobject]@{...}` is a STRING: wrap it in
     parentheses (bit the tests).

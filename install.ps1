@@ -25,8 +25,7 @@ function Test-RemoteOSKey([string]$Key) {
 }
 
 function New-RemoteOSKey {
-    # 32 characters drawn uniformly from [A-Za-z0-9] with a CSPRNG (bytes >= 248 are dropped:
-    # 248 = 4 * 62, so no character is more likely than another)
+    # 32 characters uniformly from [A-Za-z0-9] by a CSPRNG (bytes >= 248 = 4 * 62 are dropped: no bias)
     $alphabet = [char[]]((48..57) + (65..90) + (97..122))
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $byte = New-Object byte[] 1
@@ -43,8 +42,7 @@ function New-RemoteOSKey {
 }
 
 function Get-RemoteOSKeyFromStartScript([string]$Path) {
-    # start-remoteos.bat: `set "REMOTEOS_AUTH_KEY=<key>"` (this installer), or the legacy
-    # `... -m remoteos ... --auth-key "<key>"`
+    # start-remoteos.bat: `set "REMOTEOS_AUTH_KEY=<key>"`, or the legacy `-m remoteos ... --auth-key "<key>"`
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     foreach ($line in Get-Content -LiteralPath $Path) {
         if ($line -match '^\s*set\s+"REMOTEOS_AUTH_KEY=([^"]+)"') { return $Matches[1] }  # not the clearing line
@@ -88,8 +86,7 @@ function Resolve-RemoteOSAuthKey([string]$Explicit, $Found) {
         }
         return [pscustomobject]@{ Key = $Explicit; Source = 'REMOTEOS_MCP_AUTH_KEY' }
     }
-    # The first key the PC has decides; one this installer cannot carry is refused, never
-    # replaced by a new key (that would silently cut the clients off).
+    # The first key decides; one this installer cannot carry is refused, never replaced (clients would break)
     foreach ($source in $Found.Keys) {
         $key = $Found[$source]
         if (-not $key) { continue }
@@ -102,9 +99,8 @@ function Resolve-RemoteOSAuthKey([string]$Explicit, $Found) {
 }
 
 function New-RemoteOSStartScript([string]$PythonPath, [int]$Port, [string]$AuthKey) {
-    # The start script: an auto-restart loop with a crash guard. The key is in the server's
-    # environment (`set "REMOTEOS_AUTH_KEY=..."`), never on its command line, and set only around
-    # the server line: every other program cmd.exe starts (netstat, findstr, timeout) inherits it.
+    # An auto-restart loop with a crash guard. The key is set only around the server line (never on its
+    # command line): every other program cmd.exe starts (netstat, findstr, timeout) would inherit it.
     if (-not (Test-RemoteOSKey $AuthKey)) { throw "refusing to write an invalid auth key into the start script" }
     return @"
 @echo off
@@ -157,8 +153,7 @@ goto :eof
 }
 
 function Set-RemoteOSOwnerOnlyAcl([string]$Path, [string]$User) {
-    # A protected ACL (nothing inherited) for a file holding the key: the desktop user the
-    # server runs as, SYSTEM and Administrators, nobody else.
+    # A protected ACL for a file holding the key: the desktop user, SYSTEM and Administrators only
     $acl = New-Object System.Security.AccessControl.FileSecurity
     $acl.SetAccessRuleProtection($true, $false)
     $identities = @(
@@ -313,7 +308,6 @@ function Test-RemoteOSWheelhouseRootTrusted([string]$Root) {
     $admins = @('S-1-5-18', 'S-1-5-32-544')
     $acl = Get-Acl -LiteralPath $Root
     if ($admins -notcontains $acl.GetOwner($sid).Value -or -not $acl.AreAccessRulesProtected) { return $false }
-    # Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership, GENERIC_ALL, GENERIC_WRITE
     $writeMask = [int64](0x116 + 0x10000 + 0x40 + 0x40000 + 0x80000) -bor 0x10000000 -bor 0x40000000
     foreach ($rule in $acl.GetAccessRules($true, $true, $sid)) {
         if ($rule.AccessControlType -ne 'Allow' -or $admins -contains $rule.IdentityReference.Value) { continue }
@@ -322,12 +316,26 @@ function Test-RemoteOSWheelhouseRootTrusted([string]$Root) {
     return $true
 }
 
+function Test-RemoteOSLink([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    return [bool]($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+}
+
+function Remove-RemoteOSTree([string]$Path) {
+    # Never through a planted link (5.1's Remove-Item -Recurse enters a junction; .NET does not)
+    if (Test-RemoteOSLink $Path) { [System.IO.Directory]::Delete($Path) }
+    elseif (Test-Path -LiteralPath $Path) { [System.IO.Directory]::Delete($Path, $true) }
+}
+
 function Protect-RemoteOSWheelhouseRoot([string]$Root, [string]$User) {
     # The wheelhouses feed an ELEVATED pip: owned by Administrators, SYSTEM + Administrators full, the user
-    # read. A root made by someone else is deleted first, with everything in it. -> $null or an error
+    # read. A link, or a root made by someone else, is removed first. -> $null or an error
     try {
-        if ((Test-Path -LiteralPath $Root) -and -not (Test-RemoteOSWheelhouseRootTrusted $Root)) {
-            Remove-Item -LiteralPath $Root -Recurse -Force
+        $parent = Split-Path -Parent $Root
+        if (Test-RemoteOSLink $parent) { return "$parent is a link: refusing to write through it" }
+        if ((Test-RemoteOSLink $Root) -or ((Test-Path -LiteralPath $Root) -and -not (Test-RemoteOSWheelhouseRootTrusted $Root))) {
+            Write-Host "        [!] $Root was a link or writable for another account: replaced (old wheelhouses removed)" -ForegroundColor Yellow
+            Remove-RemoteOSTree $Root
         }
         if (-not (Test-Path -LiteralPath $Root)) { New-Item -ItemType Directory -Path $Root -Force | Out-Null }
         $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
@@ -372,10 +380,10 @@ function New-RemoteOSWheelhouse([string]$Python, [string]$Root, [string]$Sha, [s
     }
     $result.Version = $null
     try {
-        if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Recurse -Force }
+        Remove-RemoteOSTree $partial
         New-Item -ItemType Directory -Path $partial -Force | Out-Null
         $constraints = Join-Path $partial 'constraints.txt'
-        # Through Python's urllib (its proxy and certificate handling, as pip's), 3 tries
+        # Through Python's urllib (proxy and certificates as pip), 3 tries
         $fetch = "import sys, urllib.request; d = urllib.request.urlopen(sys.argv[1], timeout=60).read(); open(sys.argv[2], 'wb').write(d)"
         for ($try = 1; $try -le 3; $try++) {
             $get = Invoke-RemoteOSNative $Python @('-c', $fetch, $ConstraintsUrl, $constraints)
@@ -400,7 +408,7 @@ function New-RemoteOSWheelhouse([string]$Python, [string]$Root, [string]$Sha, [s
         if (-not $version) { $result.Error = "the download holds no single remoteos-mcp wheel"; return $result }
         $check = Test-RemoteOSWheelhouseInstallable $Python $partial $version
         if (-not $check.Ok) { $result.Error = "the download does not install offline on this Python"; $result.Output = $check.Output; return $result }
-        if (Test-Path -LiteralPath $final) { Remove-Item -LiteralPath $final -Recurse -Force }
+        Remove-RemoteOSTree $final
         Move-Item -LiteralPath $partial -Destination $final
         $result.Version = $version
         $result.Ok = $true
@@ -410,14 +418,13 @@ function New-RemoteOSWheelhouse([string]$Python, [string]$Root, [string]$Sha, [s
         return $result
     } finally {
         if (-not $result.Ok -and (Test-Path -LiteralPath $partial)) {
-            Remove-Item -LiteralPath $partial -Recurse -Force -ErrorAction SilentlyContinue
+            try { Remove-RemoteOSTree $partial } catch { Write-Host "        [!] Could not remove ${partial}: $_" -ForegroundColor Yellow }
         }
     }
 }
 
 function Get-RemoteOSRollbackPoint([string]$ConfigDir, [string]$Python) {
-    # The rollback point: installed-ref.txt's commit (written after a passed health check) and its kept
-    # wheelhouse, which this Python must install offline -> @{Ref; Path; Version} or $null
+    # installed-ref.txt's commit (proven) + its kept wheelhouse, installable here -> @{Ref; Path; Version} or $null
     $refFile = Join-Path $ConfigDir 'installed-ref.txt'
     if (-not (Test-Path -LiteralPath $refFile)) { return $null }
     $ref = ([string](Get-Content -LiteralPath $refFile -Raw)).Trim()
@@ -425,8 +432,10 @@ function Get-RemoteOSRollbackPoint([string]$ConfigDir, [string]$Python) {
     $path = Join-Path (Join-Path $ConfigDir 'wheelhouse') $ref
     $version = Get-RemoteOSWheelhouseVersion $path
     if (-not $version) { return $null }
-    if (-not (Test-RemoteOSWheelhouseInstallable $Python $path $version).Ok) {
-        Write-Host "        [!] The kept wheelhouse of v$version ($path) does not install on this Python" -ForegroundColor Yellow
+    $check = Test-RemoteOSWheelhouseInstallable $Python $path $version
+    if (-not $check.Ok) {
+        Write-Host "        [!] The kept wheelhouse of v$version ($path) does not install on this Python:" -ForegroundColor Yellow
+        Write-Host $check.Output
         return $null
     }
     return [pscustomobject]@{ Ref = $ref; Path = $path; Version = $version }
@@ -458,7 +467,7 @@ function Remove-RemoteOSStaleWheelhouses([string]$Root, [string[]]$Keep) {
     foreach ($dir in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
         if ($Keep -contains $dir.Name) { continue }
         try {
-            Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+            Remove-RemoteOSTree $dir.FullName
             $removed += $dir.Name
         } catch {
             Write-Host "        [!] Could not remove the old wheelhouse $($dir.FullName): $_" -ForegroundColor Yellow
@@ -473,7 +482,6 @@ function Stop-RemoteOSServer([int]$Port) {
     $ErrorActionPreference = 'Continue'
     try {
         schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
-        # By window title (python/cmd with the batch title)
         Get-Process -ErrorAction SilentlyContinue | Where-Object {
             $_.MainWindowTitle -match "RemoteOS|WinRemote"
         } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -488,7 +496,6 @@ function Stop-RemoteOSServer([int]$Port) {
         } | ForEach-Object {
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
-        # Whatever still listens on our port
         $portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
             ($_.ToString().Trim() -split "\s+")[-1]
         }) | Select-Object -First 1
@@ -771,7 +778,7 @@ Write-Host "  [2/7] Downloading remoteos-mcp and its dependencies (the running s
 $wheelhouseRoot = Join-Path $ConfigDir 'wheelhouse'
 $protectError = Protect-RemoteOSWheelhouseRoot -Root $wheelhouseRoot -User $desktopUser
 if ($protectError) {
-    Write-Host "  [X] $protectError -- nothing was changed on this box" -ForegroundColor Red
+    Write-Host "  [X] $protectError -- the running server and package were not touched" -ForegroundColor Red
     Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 $preflight = New-RemoteOSWheelhouse -Python $python -Root $wheelhouseRoot -Sha $sourceSha `
