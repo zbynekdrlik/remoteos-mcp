@@ -297,3 +297,83 @@ def test_stdio_stdout_carries_only_json_rpc(tmp_path):
         except ValueError:
             pytest.fail(f"non-JSON line on the stdio stdout: {line!r}")
     assert json.loads(lines[-1])["id"] == 1
+
+
+def _exits_without_serving(srv) -> None:
+    """The server process ends before ``/health`` ever answers (a refused start, never a served one)."""
+    deadline = time.monotonic() + _START_TIMEOUT
+    while srv.proc.poll() is None and time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{srv.port}/health", timeout=2):
+                pytest.fail(f"the server started:\n{srv.output()[-2000:]}")
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            time.sleep(0.2)
+
+
+@pytest.mark.parametrize("tier3", [["--enable-all"], ["--enable-tier3"], ["--tools", "Shell"]])
+def test_an_unauthenticated_lan_bind_with_tier3_refuses_to_start(start_server, tier3):
+    # #39 (upstream PR #76's rule): an open full shell on the LAN is never started
+    srv = start_server("--host", "0.0.0.0", *tier3)
+    _exits_without_serving(srv)
+    assert srv.proc.returncode == 2, srv.output()[-2000:]
+    assert "refusing to bind 0.0.0.0 without an auth key while Tier 3" in srv.output()
+
+
+def test_a_keyed_lan_bind_with_tier3_starts(start_server):
+    # every installer starts `--enable-all` with a key on a LAN address
+    key = secrets.token_hex(16)
+    srv = start_server("--host", "0.0.0.0", "--enable-all", env={"REMOTEOS_AUTH_KEY": key})
+    assert srv.health() == _health()
+
+
+# Runs the real CLI start-up and, in place of serving (FastMCP's mcp.run, the transport), prints the
+# Scrape policy the start-up configured. Scrape itself is excluded on Linux (tiers), so the policy
+# is read where the tool reads it.
+_SCRAPE_POLICY_PROBE = """
+import sys
+import remoteos.__main__ as server
+from remoteos import scrape
+scrape.BLOCK_PRIVATE = True  # not the default: the False cases then prove the start-up configured it
+server.mcp.run = lambda **kw: print("BLOCK_PRIVATE=" + str(scrape.BLOCK_PRIVATE), flush=True)
+sys.argv = ["remoteos", *sys.argv[1:]]
+server.cli()
+"""
+
+
+@pytest.mark.parametrize(
+    ("how", "expected"), [("default", "False"), ("flag", "True"), ("toml", "True"), ("toml-false", "False")]
+)
+def test_scrape_block_private_is_configured_at_start_up(tmp_path, how, expected):
+    # review (#39): the flag and the remoteos.toml key reach the Scrape policy; the default allows the LAN
+    config = tmp_path / "remoteos.toml"
+    config.write_text({"toml": "[security]\nscrape_block_private = true\n",
+                       "toml-false": "[security]\nscrape_block_private = \"no\"\n"}.get(how, ""))
+    args = ["--config", str(config), *(["--scrape-block-private"] if how == "flag" else [])]
+    done = subprocess.run(
+        [sys.executable, "-c", _SCRAPE_POLICY_PROBE, *args],
+        cwd=tmp_path,
+        env=_child_env(tmp_path),
+        capture_output=True,
+        timeout=_START_TIMEOUT,
+    )
+    out = done.stdout.decode("utf-8", "replace")
+    assert f"BLOCK_PRIVATE={expected}" in out, (out + done.stderr.decode("utf-8", "replace"))[-2000:]
+
+
+def test_oauth_without_a_secret_warns_at_start_up(start_server):
+    # review round 2 (#39): authorize approves every client, so a token is free for anyone
+    srv = start_server("--oauth-client-id", "c1")
+    srv.health()
+    assert "WARNING: OAuth is on without --oauth-client-secret" in srv.output()
+
+
+def test_oauth_with_a_secret_starts_without_that_warning(start_server):
+    srv = start_server("--oauth-client-id", "c1", env={"REMOTEOS_OAUTH_CLIENT_SECRET": "s-" + secrets.token_hex(8)})
+    srv.health()
+    assert "OAuth is on without" not in srv.output()
+
+
+def test_an_unauthenticated_lan_bind_with_tier_1_2_only_starts_with_the_warning(start_server):
+    srv = start_server("--host", "0.0.0.0")
+    assert srv.health() == _health()
+    assert "open to the network without auth" in srv.output()

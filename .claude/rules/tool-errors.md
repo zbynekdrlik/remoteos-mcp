@@ -19,7 +19,7 @@ paths:
 
 # Tool errors as MCP errors, and the desktop diagnoses (#32) — gotchas
 
-- **A failing tool RAISES. It never returns error text.** FastMCP 4.0.3 turns a raised
+- **A failing tool RAISES. It never returns error text.** FastMCP 4.x (4.1.2 since #39) turns a raised
   `fastmcp.exceptions.ToolError` into `CallToolResult(isError=True)` whose only text block is
   `str(e)`.
   - `server.py` `call_tool` re-raises a `FastMCPError` BEFORE the generic `except Exception`.

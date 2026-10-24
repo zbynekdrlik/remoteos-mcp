@@ -1,4 +1,4 @@
-"""Security helpers: IP allowlist parsing + middleware."""
+"""Security helpers: the bind guard, IP allowlist parsing + middleware."""
 
 from __future__ import annotations
 
@@ -6,6 +6,41 @@ import ipaddress
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+
+
+def is_loopback_host(host: str) -> bool:
+    """``host`` binds only the loopback interface: ``localhost``, ``127.0.0.0/8`` or ``::1``.
+
+    Anything else counts as reachable from the network: ``0.0.0.0``/``::``/"" (every interface),
+    a LAN or tailnet address, or a host NAME (it is not resolved here).
+    """
+    name = host.strip().strip("[]")
+    if name.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def check_bind_exposure(host: str, auth_key: str | None, tier3_enabled: bool) -> str | None:
+    """The bind guard (#39, upstream PR #76's rule).
+
+    - A non-loopback bind with NO auth key while Tier 3 is enabled raises ``ValueError``: that is
+      an open full shell (Shell, files, services) on the network. (OAuth is no substitute: its
+      authorize endpoint approves every client.)
+    - The same bind with Tier 1/2 only returns a warning line, as before.
+    - Otherwise ``None``. ``--enable-all`` WITH a key, the way every installer starts, is fine.
+    """
+    if auth_key or is_loopback_host(host):
+        return None
+    if tier3_enabled:
+        raise ValueError(
+            f"refusing to bind {host or '(all interfaces)'} without an auth key while Tier 3 tools "
+            "(Shell, files, services) are enabled: set --auth-key / REMOTEOS_AUTH_KEY, bind 127.0.0.1, "
+            "or drop Tier 3"
+        )
+    return f"open to the network without auth on {host or '(all interfaces)'}! Use --auth-key for security."
 
 
 def parse_ip_allowlist(raw_entries: list[str]) -> list[ipaddress._BaseNetwork]:

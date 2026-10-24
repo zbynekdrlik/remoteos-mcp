@@ -553,6 +553,31 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps
   drift); the server binds 0.0.0.0, so keep the machines on a trusted network
 - On LAN this is fine over HTTP
 - For internet exposure, use TLS reverse proxy or SSH tunnel
+- **Bind guard (#39):** a non-loopback bind (`0.0.0.0`, a LAN or tailnet address) with no auth
+  key refuses to start (exit 2) while any Tier 3 tool (Shell, files, services) is enabled. With
+  Tier 1/2 only it starts with a warning. `--enable-all` with a key, the way every installer
+  starts, is unaffected
+- **Caller values never become code (#39):** a value put into a PowerShell script (service and
+  task names, EventLog's log name, App's path and arguments) is a single-quoted literal; the
+  toast title and message reach PowerShell in environment variables. macOS AppleScript strings
+  escape `\` before `"`
+- **Scrape (#39):** http(s) only, at most 5 MiB read (a larger body is an error; a redirect's own
+  body is never read). LAN and private
+  addresses are allowed; `--scrape-block-private` (or `scrape_block_private = true` under
+  `[security]` in `remoteos.toml`) refuses them, every resolved address and redirect checked
+- **OAuth (optional, off unless `--oauth-client-id`/`--oauth-client-secret`, #39):** PKCE S256
+  only; redirect URIs must be `https://` or loopback `http://`; a configured client secret is
+  required at the token endpoint and never returned by registration. The authorize endpoint
+  approves every client, so OAuth WITHOUT `--oauth-client-secret` lets anyone obtain a token
+  (accepted next to the auth key): never turn it on without a secret (the server warns at start)
+- **App (Windows):** the name and the arguments are taken literally since #39: `$env:VAR` or
+  `$(...)` in them is no longer expanded by PowerShell
+- **`remoteos.toml` booleans** are real TOML booleans or the strings `true`/`false`/`1`/`0`/
+  `yes`/`no`; anything else stops the server with an error naming the key (#39)
+- **Dependency audit (#39):** CI runs `pip-audit -r constraints.txt` (Python 3.12 on Linux,
+  Windows and macOS, and 3.11 on Linux) with no ignore list; a finding is fixed by upgrading the
+  pin. The Python 3.10 pin set is not audited: on 3.10 the server keeps Pillow 12.3.0 (Pillow 13
+  needs 3.11), which carries known CVEs
 
 ## Powered by
 

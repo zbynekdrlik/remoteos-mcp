@@ -50,7 +50,7 @@ from remoteos.platform import get_desktop, get_services, get_system, is_linux, i
 from remoteos.platform.command import powershell_argv, run_child
 from remoteos.platform.linux.shell_env import shell_env
 from remoteos.scroll import normalize_request
-from remoteos.security import IPAllowlistMiddleware, parse_ip_allowlist
+from remoteos.security import IPAllowlistMiddleware, check_bind_exposure, parse_ip_allowlist
 from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, window_lines
 from remoteos.taskmanager import manager as task_manager
 from remoteos.tiers import (
@@ -803,23 +803,14 @@ def LockScreen() -> str:
 )
 @reports_errors
 def Scrape(url: str) -> str:
-    """Fetch URL content and return as markdown.
+    """Fetch an http(s) URL and return its content as markdown (at most 5 MiB read).
 
     Args:
         url: URL to fetch.
     """
-    import urllib.request
+    from remoteos.scrape import fetch_markdown
 
-    from markdownify import markdownify
-
-    req = urllib.request.Request(url, headers={"User-Agent": "remoteos-mcp/0.3"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        html = resp.read().decode("utf-8", errors="replace")
-    md = markdownify(html, heading_style="ATX", strip=["script", "style"])
-    # Truncate
-    if len(md) > 50000:
-        md = md[:50000] + "\n\n[... truncated]"
-    return md
+    return fetch_markdown(url)
 
 
 # ============================== FILE OPERATIONS ============================
@@ -1618,6 +1609,12 @@ def _enable_debug_logging() -> None:
 @click.option("--ssl-keyfile", default=None, help="Path to SSL private key file for HTTPS")
 @click.option("--oauth-client-id", default=None, envvar="REMOTEOS_OAUTH_CLIENT_ID", help="OAuth client ID whitelist")
 @click.option("--oauth-client-secret", default=None, envvar="REMOTEOS_OAUTH_CLIENT_SECRET", help="OAuth client secret")
+@click.option(
+    "--scrape-block-private",
+    is_flag=True,
+    default=False,
+    help="Scrape refuses private/LAN/loopback addresses (every resolved address checked); default: allowed",
+)
 @click.pass_context
 def cli(
     ctx,
@@ -1638,6 +1635,7 @@ def cli(
     ssl_keyfile: str | None,
     oauth_client_id: str | None,
     oauth_client_secret: str | None,
+    scrape_block_private: bool,
 ):
     """Start the remoteos MCP server."""
     # The installers hand the key over in REMOTEOS_AUTH_KEY, never an argv (#12). click has read
@@ -1682,6 +1680,12 @@ def cli(
 
     enable_tier3 = bool(_choose_value(ctx, "enable_tier3", enable_tier3, cfg.security.enable_tier3, False))
     disable_tier2 = bool(_choose_value(ctx, "disable_tier2", disable_tier2, cfg.security.disable_tier2, False))
+    scrape_block_private = bool(
+        _choose_value(ctx, "scrape_block_private", scrape_block_private, cfg.security.scrape_block_private, False)
+    )
+    from remoteos import scrape as _scrape
+
+    _scrape.configure(scrape_block_private)
 
     cli_tools = parse_tool_csv(tools)
     cli_excluded = parse_tool_csv(exclude_tools)
@@ -1724,10 +1728,27 @@ def cli(
     _apply_tool_filter(enabled_tools)
     enabled_tiers = get_tier_names(enabled_tools)
 
+    # #39 (upstream PR #76): an unauthenticated non-loopback bind with Tier 3 (Shell, files,
+    # services) would be an open full shell on the network, so it is refused; Tier 1/2 warns.
+    bind_warning = None
+    if transport != "stdio":
+        try:
+            bind_warning = check_bind_exposure(host, auth_key, tier3_enabled="3" in enabled_tiers)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from None
+
     # ---- OAuth setup ----
     oauth_store = None
     oauth_validator = None
     use_oauth = bool(oauth_client_id or oauth_client_secret)
+    if use_oauth and not oauth_client_secret and transport != "stdio":
+        # #39 review: authorize approves every client, so without a secret a token is free for
+        # anyone, and AuthKeyMiddleware accepts it next to the key
+        click.echo(
+            "  WARNING: OAuth is on without --oauth-client-secret: anyone can obtain a token, "
+            "which is accepted next to the auth key. Set a client secret.",
+            err=True,
+        )
 
     if use_oauth and transport != "stdio":
         from remoteos.oauth import OAuthStore, build_oauth_routes, validate_oauth_token
@@ -1791,9 +1812,8 @@ def cli(
                     f"{pad}|  {tiers_line:<16s}{tools_line:<16s}|",
                     f"{pad}+----------------------------------+",
                 ]
-                if host == "0.0.0.0" and not auth_key:
-                    lines.append(f"{pad}  WARNING: open to network without auth!")
-                    lines.append(f"{pad}  Use --auth-key for security.")
+                if bind_warning:
+                    lines.append(f"{pad}  WARNING: {bind_warning}")
                 if enable_all:
                     lines.append(f"{pad}  INFO: High-risk Tier 3 tools enabled!")
                 print("\n" + "\n".join(lines) + "\n", flush=True)
@@ -1808,7 +1828,7 @@ def cli(
             run_kwargs["middleware"] = middleware
         if platform.system() == "Windows":
             os.environ.setdefault("NO_COLOR", "1")
-        # FastMCP 4.0.3 run_http_async takes uvicorn_config, never uvicorn_args (#31).
+        # FastMCP 4.x run_http_async takes uvicorn_config, never uvicorn_args (#31; still so in 4.1.2).
         # Debug goes to uvicorn only, not run_http_async(log_level=...): that would
         # also turn FastMCP to DEBUG, which logs every tool call's arguments.
         uvicorn_config: dict[str, object] = {}

@@ -13,7 +13,7 @@ paths:
 
 # Server start, logging, Shell/FileUpload, task states (#31) — gotchas
 
-- **FastMCP 4.0.3 `run_http_async` takes `uvicorn_config`, never `uvicorn_args`.** A wrong
+- **FastMCP 4.x (4.1.2 since #39) `run_http_async` takes `uvicorn_config`, never `uvicorn_args`.** A wrong
   keyword is a TypeError at start, before the port binds. Check the real signature in
   `fastmcp/server/mixins/transport.py` when you add a run kwarg.
 - **Never pass `log_level="debug"` to `mcp.run`.** It turns FastMCP to DEBUG, and FastMCP and

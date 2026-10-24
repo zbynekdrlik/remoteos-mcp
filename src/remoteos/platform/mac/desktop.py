@@ -49,6 +49,15 @@ def _tobool(v: bool | str) -> bool:
     return str(v).lower() in ("true", "1", "yes")
 
 
+def applescript_literal(value: str) -> str:
+    """``value`` as an AppleScript string literal: ``\\`` escaped FIRST, then ``"`` (#39).
+
+    Escaping only the quote turned ``\\"`` into ``\\\\"``: an escaped backslash, then a quote that
+    ended the string, and the rest of the value ran as AppleScript (``do shell script`` included).
+    """
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def _run_osascript(script: str) -> str:
     """Run an AppleScript via osascript and return stdout."""
     result = subprocess.run(
@@ -353,19 +362,19 @@ def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> s
     if not title:
         raise LookupError("No window found")
 
-    # Escape double quotes in title for AppleScript. "error" makes osascript exit
+    # The title is an AppleScript literal (#39). "error" makes osascript exit
     # non-zero, so a missing process raises instead of being returned as text.
-    safe_title = title.replace('"', '\\"')
+    title_literal = applescript_literal(title)
     script = f'''
 tell application "System Events"
     set allProcs to every process whose visible is true
     repeat with proc in allProcs
-        if name of proc contains "{safe_title}" then
+        if name of proc contains {title_literal} then
             set frontmost of proc to true
             return "Focused " & name of proc
         end if
     end repeat
-    error "No process matching \\"{safe_title}\\""
+    error "No process matching " & {title_literal}
 end tell
 '''
     return _run_osascript(script)
@@ -400,13 +409,13 @@ def launch_app(name: str, args: str = "") -> str:
 
 def resize_window(handle: int, width: int, height: int) -> str:
     """Resize the front window of the app owning the given window handle."""
-    safe_name = _app_of_window(handle).replace('"', '\\"')
+    name_literal = applescript_literal(_app_of_window(handle))
     # an AppleScript error makes osascript exit non-zero: _run_osascript raises it
     script = f'''
 tell application "System Events"
-    tell process "{safe_name}"
-        set size of front window to {{{width}, {height}}}
-        return "Resized {safe_name} to {width}x{height}"
+    tell process {name_literal}
+        set size of front window to {{{int(width)}, {int(height)}}}
+        return "Resized " & {name_literal} & " to {int(width)}x{int(height)}"
     end tell
 end tell
 '''
@@ -459,8 +468,6 @@ def lock_screen() -> str:
 
 def show_notification(title: str, message: str) -> str:
     """Show a macOS notification via osascript."""
-    safe_title = title.replace('"', '\\"')
-    safe_message = message.replace('"', '\\"')
-    script = f'display notification "{safe_message}" with title "{safe_title}"'
+    script = f"display notification {applescript_literal(message)} with title {applescript_literal(title)}"
     _run_osascript(script)
     return "Notification shown"

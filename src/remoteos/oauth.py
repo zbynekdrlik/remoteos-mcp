@@ -3,7 +3,7 @@
 Supports:
 - RFC 8414  /.well-known/oauth-authorization-server  metadata
 - RFC 7591  POST /oauth/register  dynamic client registration
-- RFC 7636  Authorization Code + PKCE flow
+- RFC 7636  Authorization Code + PKCE flow, S256 only (#39: ``plain`` sends the verifier itself)
 - GET  /oauth/authorize   authorization endpoint
 - POST /oauth/token        token exchange
 """
@@ -73,15 +73,41 @@ def _base64url_decode(s: str) -> bytes:
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str, method: str) -> bool:
-    if method == "S256":
-        digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-        import base64
+    """S256 only (#39): ``plain`` is refused, it puts the verifier itself in the authorize URL."""
+    if method != "S256" or not isinstance(code_verifier, str) or not isinstance(code_challenge, str):
+        return False
+    import base64
 
-        expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-        return secrets.compare_digest(expected, code_challenge)
-    if method == "plain":
-        return secrets.compare_digest(code_verifier, code_challenge)
-    return False
+    try:
+        digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    except UnicodeEncodeError:
+        return False
+    expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return secrets.compare_digest(expected.encode(), code_challenge.encode())
+
+
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def allowed_redirect_uri(uri: object) -> bool:
+    """A redirect URI is ``https://<host>…`` or loopback ``http://127.0.0.1|localhost|[::1]`` (#39).
+
+    Any port, no fragment (RFC 6749 3.1.2). ``urlsplit``'s ``hostname`` drops a userinfo part, so
+    ``http://127.0.0.1@evil.example`` is ``evil.example``: refused.
+    """
+    if not isinstance(uri, str):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(uri)
+        host = parts.hostname
+        parts.port  # noqa: B018 - raises ValueError on a malformed port
+    except ValueError:
+        return False
+    if not host or parts.fragment:
+        return False
+    if parts.scheme == "https":
+        return True
+    return parts.scheme == "http" and host in _LOOPBACK_HOSTS
 
 
 TOKEN_LIFETIME = 3600  # 1 hour
@@ -113,8 +139,11 @@ def build_oauth_routes(
                 "registration_endpoint": f"{issuer}/oauth/register",
                 "response_types_supported": ["code"],
                 "grant_types_supported": ["authorization_code"],
-                "code_challenge_methods_supported": ["S256", "plain"],
-                "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+                "code_challenge_methods_supported": ["S256"],
+                # a configured secret is required at the token endpoint (#39)
+                "token_endpoint_auth_methods_supported": (
+                    ["client_secret_post"] if configured_client_secret else ["none", "client_secret_post"]
+                ),
             }
         )
 
@@ -127,22 +156,34 @@ def build_oauth_routes(
         except Exception:
             return JSONResponse({"error": "invalid_request"}, status_code=400)
 
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
         redirect_uris = body.get("redirect_uris", [])
         if not redirect_uris or not isinstance(redirect_uris, list):
             return JSONResponse(
                 {"error": "invalid_request", "error_description": "redirect_uris required"},
                 status_code=400,
             )
+        if not all(allowed_redirect_uri(uri) for uri in redirect_uris):
+            return JSONResponse(
+                {
+                    "error": "invalid_redirect_uri",
+                    "error_description": "redirect URIs must be https:// or http://127.0.0.1|localhost|[::1]",
+                },
+                status_code=400,
+            )
 
         client_name = body.get("client_name", "")
 
-        # If a specific client_id is configured, only allow that one
+        # If a specific client_id is configured, only allow that one. A configured secret is never
+        # handed out here (#39): registration needs no credentials, so returning it gave it to anyone.
+        # The operator gives it to the client; the token endpoint requires it.
         if configured_client_id:
             client_id = configured_client_id
-            client_secret = configured_client_secret
+            client_secret = None
         else:
             client_id = f"client_{secrets.token_hex(16)}"
-            client_secret = secrets.token_hex(32)
+            client_secret = None if configured_client_secret else secrets.token_hex(32)
 
         client = RegisteredClient(
             client_id=client_id,
@@ -182,6 +223,22 @@ def build_oauth_routes(
         if not code_challenge:
             return JSONResponse(
                 {"error": "invalid_request", "error_description": "code_challenge required (PKCE)"},
+                status_code=400,
+            )
+
+        if code_challenge_method != "S256":
+            return JSONResponse(
+                {"error": "invalid_request", "error_description": "code_challenge_method must be S256"},
+                status_code=400,
+            )
+
+        # the same rule as registration (#39): this endpoint also registers clients and URIs
+        if not allowed_redirect_uri(redirect_uri):
+            return JSONResponse(
+                {
+                    "error": "invalid_request",
+                    "error_description": "redirect_uri must be https:// or http://127.0.0.1|localhost|[::1]",
+                },
                 status_code=400,
             )
 
@@ -226,7 +283,10 @@ def build_oauth_routes(
             form = await request.form()
             body = dict(form)
         elif "application/json" in content_type:
-            body = await request.json()
+            try:
+                body = await request.json()
+            except ValueError:  # invalid JSON is the caller's error, never a 500
+                return JSONResponse({"error": "invalid_request"}, status_code=400)
         else:
             try:
                 form = await request.form()
@@ -234,6 +294,8 @@ def build_oauth_routes(
             except Exception:
                 return JSONResponse({"error": "invalid_request"}, status_code=400)
 
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
         grant_type = body.get("grant_type", "")
         if grant_type != "authorization_code":
             return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
@@ -243,6 +305,8 @@ def build_oauth_routes(
         client_id = body.get("client_id", "")
         redirect_uri = body.get("redirect_uri", "")
 
+        if not all(isinstance(v, str) for v in (code_value, code_verifier, client_id, redirect_uri)):
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
         auth_code = store.codes.get(code_value)
         if not auth_code:
             return JSONResponse({"error": "invalid_grant", "error_description": "unknown code"}, status_code=400)
@@ -268,11 +332,18 @@ def build_oauth_routes(
         # Consume code (one-time use)
         del store.codes[code_value]
 
-        # Validate client_secret if configured
+        # A configured secret is REQUIRED (#39); a dynamic client's own secret is checked when sent.
         client = store.clients.get(client_id)
-        if client and client.client_secret:
-            provided_secret = body.get("client_secret", "")
-            if provided_secret and not secrets.compare_digest(provided_secret, client.client_secret):
+        provided_secret = body.get("client_secret", "")
+        if not isinstance(provided_secret, str):
+            return JSONResponse({"error": "invalid_client"}, status_code=401)
+        if configured_client_secret:
+            if not provided_secret or not secrets.compare_digest(
+                provided_secret.encode(), configured_client_secret.encode()
+            ):
+                return JSONResponse({"error": "invalid_client"}, status_code=401)
+        elif client and client.client_secret and provided_secret:
+            if not secrets.compare_digest(provided_secret.encode(), client.client_secret.encode()):
                 return JSONResponse({"error": "invalid_client"}, status_code=401)
 
         # Issue access token

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remoteos-mcp"
-version = "0.7.0.dev35"
+version = "0.7.0.dev36"
 description = "Remote OS MCP Server - control Windows, macOS, and Linux machines via MCP protocol"
 readme = "README.md"
 license = "MIT"
@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: Desktop Environment",
 ]
 dependencies = [
-    "fastmcp==4.0.3",
+    "fastmcp==4.1.2",
     # remoteos-gateway (#25): imported directly, so pinned directly — same versions
     # fastmcp already resolves (httpx2 is fastmcp/mcp's own runtime HTTP client).
     "httpx2==2.12.0",
@@ -30,7 +30,9 @@ dependencies = [
     "psutil==7.2.2",
     "pywin32==312; sys_platform == 'win32'",
     "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
-    "Pillow==12.3.0",
+    # Pillow 13 (the fixed release of its 2026 CVEs, #39) needs Python 3.11+; 3.10 boxes keep 12.3.0.
+    "Pillow==12.3.0; python_version < '3.11'",
+    "Pillow==13.0.0; python_version >= '3.11'",
     "click==8.5.0",
     "python-dotenv==1.2.3",
     "thefuzz[speedup]==0.22.1",
