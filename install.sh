@@ -21,11 +21,36 @@ unset AUTH_KEY EXPLICIT_KEY CFG_KEY PLIST_KEY KEY_SOURCE k key
 # (`python3 --version`, a brew fallback): every child inherits it (review round 9).
 EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
 unset REMOTEOS_MCP_AUTH_KEY
+# The source (#64): a commit sha, a tag or a branch (default main, empty = main), resolved below to
+# ONE commit that the install and its constraints both use, like install-linux.sh.
+REF="${REMOTEOS_MCP_REF:-main}"
 
 echo ""
 echo "  RemoteOS MCP Installer (macOS)"
 echo "  Remote desktop control for Claude Code"
 echo ""
+
+# A git ref name: no option, no `..`, letters/digits/._/- only (the ASCII range under LC_ALL=C).
+ref_ok() {
+    (
+        LC_ALL=C
+        r="${1-}"
+        [[ -n "$r" && ${#r} -le 200 ]] || exit 1
+        case "$r" in
+            -* | .* | */ | *..* | *//* | */.*) exit 1 ;;
+            *[!A-Za-z0-9._/-]*) exit 1 ;;
+        esac
+    )
+}
+if ! ref_ok "$REF"; then
+    echo "        [X] REMOTEOS_MCP_REF must be a commit sha, a tag or a branch name — nothing was changed on this box"
+    exit 1
+fi
+
+# python_ok "<python --version output>": 3.11+ (Pillow 13, the fix of its CVEs, needs 3.11; #64)
+python_ok() {
+    [[ "${1-}" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 11 ))
+}
 
 # --- [1/5] Check Python ---
 echo "  [1/5] Checking Python..."
@@ -34,7 +59,7 @@ PYTHON=""
 for cmd in python3 python /usr/local/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3.13 /usr/local/bin/python3.12 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12; do
     if command -v "$cmd" &>/dev/null || [[ -x "$cmd" ]]; then
         ver=$("$cmd" --version 2>&1 || true)
-        if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 10 )); then
+        if python_ok "$ver"; then
             PYTHON="$cmd"
             echo "        Found $ver ($cmd)"
             break
@@ -43,7 +68,7 @@ for cmd in python3 python /usr/local/bin/python3 /opt/homebrew/bin/python3 /usr/
 done
 
 if [[ -z "$PYTHON" ]]; then
-    echo "        Python 3.10+ not found. Trying Homebrew..."
+    echo "        Python 3.11+ not found. Trying Homebrew..."
     if command -v brew &>/dev/null; then
         brew install python@3.12
         if command -v python3 &>/dev/null; then
@@ -54,7 +79,7 @@ if [[ -z "$PYTHON" ]]; then
 fi
 
 if [[ -z "$PYTHON" ]]; then
-    echo "        [X] Python 3.10+ required but not found."
+    echo "        [X] Python 3.11+ required but not found."
     echo "        Install Homebrew (https://brew.sh) then run:"
     echo "          brew install python@3.12"
     echo "        Or install Python from https://python.org"
@@ -202,7 +227,7 @@ uninstall_overlapping() {
 # The pinned install; extra pip args (--dry-run ...) go first.  The preflight
 # and the real install both run through here, so their flags are identical.
 pip_install_remoteos() {
-    local pip_cmd=("$PYTHON" -m pip install "${PIP_FLAGS[@]}" "$@" "git+https://github.com/zbynekdrlik/remoteos-mcp.git@${MAIN_SHA}")
+    local pip_cmd=("$PYTHON" -m pip install "${PIP_FLAGS[@]}" "$@" "git+https://github.com/zbynekdrlik/remoteos-mcp.git@${SOURCE_SHA}")
     if [[ -n "$ROLLBACK_ARMED" ]]; then
         TMPDIR="$WORK_DIR/pip-tmp" shield "${pip_cmd[@]}"
     else
@@ -451,18 +476,28 @@ else:
     sys.exit("unknown mode " + mode)
 PY
 
-# Pin the whole run to ONE commit of main: preflight, install and constraints
+# Pin the whole run to ONE commit of $REF: preflight, install and constraints
 # all see the same tree (a merge between two fetches of @main would mix trees,
-# and raw.githubusercontent.com caches .../main/ for minutes).
-MAIN_SHA=$(git ls-remote https://github.com/zbynekdrlik/remoteos-mcp.git refs/heads/main 2>"$WORK_DIR/ls-remote.log" \
-    | awk '{print $1}' || true)
-if [[ ! "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "        [X] Could not resolve main on GitHub — nothing was changed on this box:"
+# and raw.githubusercontent.com caches .../main/ for minutes). A full sha is
+# taken as it is; else an annotated tag's commit (`^{}`), a tag, then a branch,
+# in git's own order.
+if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+    SOURCE_SHA="$REF"
+else
+    SOURCE_SHA=$(git ls-remote https://github.com/zbynekdrlik/remoteos-mcp.git "refs/tags/${REF}^{}" \
+        "refs/tags/${REF}" "refs/heads/${REF}" 2>"$WORK_DIR/ls-remote.log" | awk -v r="$REF" '
+            ($2 == ("refs/tags/" r "^{}")) { peeled = $1 }
+            ($2 == ("refs/tags/" r)) { tag = $1 }
+            ($2 == ("refs/heads/" r)) { head = $1 }
+            END { if (peeled != "") print peeled; else if (tag != "") print tag; else print head }' || true)
+fi
+if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "        [X] Could not resolve '$REF' on GitHub — nothing was changed on this box:"
     cat "$WORK_DIR/ls-remote.log"
     exit 1
 fi
-export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/${MAIN_SHA}/constraints.txt"
-echo "        Source: main @ ${MAIN_SHA:0:12}"
+export PIP_CONSTRAINT="https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/${SOURCE_SHA}/constraints.txt"
+echo "        Source: $REF @ ${SOURCE_SHA:0:12}"
 
 OLD_VER=$(installed_version)
 if [[ -n "$OLD_VER" ]]; then

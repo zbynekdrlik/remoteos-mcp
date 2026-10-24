@@ -37,17 +37,31 @@ is resolved through the GitHub API to a commit sha, and both the code and its `c
 come from that sha. The sha is printed and written to
 `C:\Users\<user>\.remoteos-mcp\installed-ref.txt`.
 
+**Download first, install offline, roll back (#64).** Before anything on the PC changes, the
+installer downloads every wheel the install needs (and builds one for every source archive, the
+remoteos archive itself included) into `C:\Users\<user>\.remoteos-mcp\wheelhouse\<sha>`
+(about 60 MB). A failed download prints `[X] could not download ... -- nothing was changed on
+this box` and the running server is untouched. Only then is the server stopped, and the install
+runs with `--no-index` from that folder. A failure after the stop (pip, the import check, the
+task, the firewall, the start, the health check) reinstalls the previous commit's wheelhouse
+(the one `installed-ref.txt` names), restarts the server, proves its health and prints
+`[X] ... -- rolled back to <old version>`; the first install with wheelhouses has nothing to go
+back to and says so. After a proven install the current and the previous wheelhouse are kept and
+older ones deleted. A re-run of the same commit reuses its wheelhouse (no download).
+
 That's it. The script will:
 
-1. Check/install Python 3.10+
-2. Install remoteos-mcp via pip
-3. Keep the PC's auth key, or generate a random one
-4. Create a start script and auto-start scheduled task
-5. Open the firewall port
-6. Start the server immediately
-7. Print the `claude mcp add` command to run on your Linux machine
+1. Check/install Python 3.11+
+2. Download remoteos-mcp and its dependencies into the commit's wheelhouse
+3. Install remoteos-mcp offline from it
+4. Keep the PC's auth key, or generate a random one
+5. Create a start script and auto-start scheduled task
+6. Open the firewall port
+7. Start the server immediately, and roll back if it does not prove itself
+8. Print the `claude mcp add` command to run on your Linux machine
 
 On **macOS**: `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.sh | bash`.
+Pin a source with `| REMOTEOS_MCP_REF=<commit sha | tag | branch> bash` (default `main`).
 
 On **Linux** (systemd): `curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash`.
 Pin a source with `| sudo REMOTEOS_MCP_REF=<commit sha | tag | branch> bash` (default `main`).
@@ -576,8 +590,8 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps
   `yes`/`no`; anything else stops the server with an error naming the key (#39)
 - **Dependency audit (#39):** CI runs `pip-audit -r constraints.txt` (Python 3.12 on Linux,
   Windows and macOS, and 3.11 on Linux) with no ignore list; a finding is fixed by upgrading the
-  pin. The Python 3.10 pin set is not audited: on 3.10 the server keeps Pillow 12.3.0 (Pillow 13
-  needs 3.11), which carries known CVEs
+  pin. Python 3.11 is the floor since #64 (Pillow 13, the fix of its CVEs, needs it), so every
+  supported pin set is audited
 
 ## Powered by
 

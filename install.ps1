@@ -287,6 +287,281 @@ function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$Installer
     return [int]$process.ExitCode
 }
 
+# --- Download first, install offline, roll back (#64) ------------------------------------------
+# The install used to stop the server, pre-uninstall, and only THEN download: on a slow site link
+# pip read-timed-out on PyPI and left the box with no package and no server (resolume-pp, twice).
+# Every wheel now goes into a per-commit wheelhouse (<config>\wheelhouse\<sha>) while the old
+# server still runs, the install is offline from it, and the previous commit's wheelhouse is kept
+# so a failure after the stop can reinstall it offline.
+
+function Test-RemoteOSPythonVersion([string]$VersionText) {
+    # "Python 3.<minor>" with minor >= 11: Pillow 13, the fixed release of its CVEs, needs 3.11 (#39)
+    if ($VersionText -match 'Python 3\.(\d+)') { return [int]$Matches[1] -ge 11 }
+    return $false
+}
+
+function Invoke-RemoteOSNative([string]$Python, [string[]]$Arguments) {
+    # -> @{Exit; Output}: the child's whole output, never discarded (#12). Windows PowerShell 5.1
+    # turns native stderr under 2>&1 into a terminating error with ErrorActionPreference Stop.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $Python @Arguments 2>&1 | ForEach-Object { "$_" } | Out-String
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    return [pscustomobject]@{ Exit = $code; Output = $output }
+}
+
+function Invoke-RemoteOSPip([string]$Python, [string[]]$Arguments) {
+    return Invoke-RemoteOSNative $Python (@('-m', 'pip', '--disable-pip-version-check') + $Arguments)
+}
+
+function Get-RemoteOSInstalledVersion([string]$Python) {
+    # The installed remoteos-mcp version, $null when there is none
+    $r = Invoke-RemoteOSNative $Python @('-c', "import importlib.metadata as m; print(m.version('remoteos-mcp'))")
+    if ($r.Exit -ne 0 -or -not $r.Output.Trim()) { return $null }
+    return (($r.Output.Trim() -split "`r?`n")[-1]).Trim()
+}
+
+function Get-RemoteOSWheelhouseVersion([string]$Path) {
+    # A complete wheelhouse holds the commit's constraints.txt and ONE remoteos_mcp wheel -> its version
+    if (-not (Test-Path -LiteralPath (Join-Path $Path 'constraints.txt'))) { return $null }
+    $wheels = @(Get-ChildItem -LiteralPath $Path -Filter 'remoteos_mcp-*.whl' -File -ErrorAction SilentlyContinue)
+    if ($wheels.Count -eq 1 -and $wheels[0].Name -match '^remoteos_mcp-([^-]+)-') { return $Matches[1] }
+    return $null
+}
+
+function New-RemoteOSWheelhouse([string]$Python, [string]$Root, [string]$Sha, [string]$SourceUrl, [string]$ConstraintsUrl) {
+    # The preflight, before anything on the box changes: the commit's constraints.txt, every wheel
+    # its install resolves (pip download), and a wheel for every source archive among them (the
+    # remoteos archive, sdist-only deps such as pyautogui): offline, pip could not build those.
+    # Built in <sha>.partial and renamed when complete: a wheelhouse is whole or absent. A complete
+    # one is reused (no download). -> @{Ok; Path; Version; Reused; Error; Output}
+    $final = Join-Path $Root $Sha
+    $partial = Join-Path $Root "$Sha.partial"
+    $result = [pscustomobject]@{ Ok = $false; Path = $final; Version = (Get-RemoteOSWheelhouseVersion $final)
+                                 Reused = $false; Error = $null; Output = '' }
+    if ($result.Version) { $result.Ok = $true; $result.Reused = $true; return $result }
+    try {
+        if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Recurse -Force }
+        New-Item -ItemType Directory -Path $partial -Force | Out-Null
+        $constraints = Join-Path $partial 'constraints.txt'
+        # Through Python's urllib (its proxy and certificate handling, as pip's), 3 tries
+        $fetch = "import sys, urllib.request; d = urllib.request.urlopen(sys.argv[1], timeout=60).read(); open(sys.argv[2], 'wb').write(d)"
+        for ($try = 1; $try -le 3; $try++) {
+            $get = Invoke-RemoteOSNative $Python @('-c', $fetch, $ConstraintsUrl, $constraints)
+            if ($get.Exit -eq 0) { break }
+            if ($try -lt 3) { Start-Sleep -Seconds (5 * $try) }
+        }
+        if ($get.Exit -ne 0) { $result.Error = "could not fetch $ConstraintsUrl"; $result.Output = $get.Output; return $result }
+        $download = Invoke-RemoteOSPip $Python @('download', '--timeout', '60', '--retries', '10', '-c', $constraints, '-d', $partial, $SourceUrl)
+        if ($download.Exit -ne 0) {
+            $result.Error = "pip download failed (exit $($download.Exit))"; $result.Output = $download.Output; return $result
+        }
+        $sources = @(Get-ChildItem -LiteralPath $partial -File | Where-Object { $_.Name -notlike '*.whl' -and $_.Name -ne 'constraints.txt' })
+        if ($sources.Count -gt 0) {
+            $build = Invoke-RemoteOSPip $Python (@('wheel', '--no-deps', '--timeout', '60', '--retries', '10', '-c', $constraints, '-w', $partial) +
+                @($sources | ForEach-Object { $_.FullName }))
+            if ($build.Exit -ne 0) {
+                $result.Error = "pip wheel failed (exit $($build.Exit))"; $result.Output = $build.Output; return $result
+            }
+            foreach ($source in $sources) { Remove-Item -LiteralPath $source.FullName -Force }
+        }
+        $version = Get-RemoteOSWheelhouseVersion $partial
+        if (-not $version) { $result.Error = "the download holds no single remoteos-mcp wheel"; return $result }
+        if (Test-Path -LiteralPath $final) { Remove-Item -LiteralPath $final -Recurse -Force }
+        Move-Item -LiteralPath $partial -Destination $final
+        $result.Version = $version
+        $result.Ok = $true
+        return $result
+    } catch {
+        $result.Error = "$_"
+        return $result
+    } finally {
+        if (-not $result.Ok -and (Test-Path -LiteralPath $partial)) {
+            Remove-Item -LiteralPath $partial -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-RemoteOSRollbackPoint([string]$ConfigDir) {
+    # What a failure after the stop goes back to: the last proven commit (installed-ref.txt, written
+    # only after a passed health check) and its kept wheelhouse -> @{Ref; Path; Version} or $null
+    $refFile = Join-Path $ConfigDir 'installed-ref.txt'
+    if (-not (Test-Path -LiteralPath $refFile)) { return $null }
+    $ref = ([string](Get-Content -LiteralPath $refFile -Raw)).Trim()
+    if ($ref -cnotmatch '^[0-9a-f]{40}\z') { return $null }
+    $path = Join-Path (Join-Path $ConfigDir 'wheelhouse') $ref
+    $version = Get-RemoteOSWheelhouseVersion $path
+    if (-not $version) { return $null }
+    return [pscustomobject]@{ Ref = $ref; Path = $path; Version = $version }
+}
+
+function Install-RemoteOSWheelhouse([string]$Python, [string]$Wheelhouse, [string]$Version) {
+    # Offline from a wheelhouse, never the network. The pre-uninstall stays (#12: a stale fastmcp
+    # 2.x RECORD claims fastmcp/__init__.py, which fastmcp-slim 4.x writes); never
+    # --force-reinstall. Then the version and the import check. -> @{Ok; Error; Output}
+    $uninstall = Invoke-RemoteOSPip $Python @('uninstall', '-y', 'remoteos-mcp', 'fastmcp', 'fastmcp-slim')
+    if ($uninstall.Exit -ne 0) {
+        return [pscustomobject]@{ Ok = $false; Error = "the pre-uninstall failed (exit $($uninstall.Exit))"; Output = $uninstall.Output }
+    }
+    $install = Invoke-RemoteOSPip $Python @('install', '--no-index', '--find-links', $Wheelhouse, '-c', (Join-Path $Wheelhouse 'constraints.txt'), "remoteos-mcp==$Version")
+    $installed = Get-RemoteOSInstalledVersion $Python
+    if ($install.Exit -ne 0 -or $installed -ne $Version) {
+        return [pscustomobject]@{ Ok = $false; Output = $install.Output
+                                  Error = "pip install of v$Version from $Wheelhouse failed (exit $($install.Exit), installed: $installed)" }
+    }
+    $import = Invoke-RemoteOSNative $Python @('-c', 'import remoteos, fastmcp; from fastmcp import FastMCP')
+    if ($import.Exit -ne 0) {
+        return [pscustomobject]@{ Ok = $false; Error = "Import check failed - remoteos or fastmcp broken after install"; Output = $import.Output }
+    }
+    return [pscustomobject]@{ Ok = $true; Error = $null; Output = $install.Output }
+}
+
+function Remove-RemoteOSStaleWheelhouses([string]$Root, [string[]]$Keep) {
+    # After a proven install: the current and the previous wheelhouse stay (the next rollback
+    # point), every other one goes, a <sha>.partial a killed run left too. -> the removed names
+    $removed = @()
+    foreach ($dir in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
+        if ($Keep -contains $dir.Name) { continue }
+        try {
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+            $removed += $dir.Name
+        } catch {
+            Write-Host "        [!] Could not remove the old wheelhouse $($dir.FullName): $_" -ForegroundColor Yellow
+        }
+    }
+    return $removed
+}
+
+function Stop-RemoteOSServer([int]$Port) {
+    # Stop the running server BEFORE pip touches its files: pip on Windows cannot delete files
+    # held open by the running python, which corrupts packages (fastmcp's __init__.py deleted).
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
+        # By window title (python/cmd with the batch title)
+        Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.MainWindowTitle -match "RemoteOS|WinRemote"
+        } | Stop-Process -Force -ErrorAction SilentlyContinue
+        # Every process of the running server: python, the CMD restart loop (it re-launches python
+        # within 10s if only python is killed) and the wscript launcher. Not this process or its
+        # parent: the installer's source (and the SSH cmd.exe wrapper carrying it) holds these
+        # patterns as string literals.
+        $myPid = $PID
+        $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId = $myPid" -ErrorAction SilentlyContinue).ParentProcessId
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.ProcessId -ne $myPid -and $_.ProcessId -ne $parentPid -and
+            ($_.CommandLine -match "-m remoteos" -or $_.CommandLine -match "start-remoteos" -or
+             $_.CommandLine -match "-m winremote" -or $_.CommandLine -match "start-winremote")
+        } | ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        # Whatever still listens on our port
+        $portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
+            ($_.ToString().Trim() -split "\s+")[-1]
+        }) | Select-Object -First 1
+        if ($portPid) { Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue }
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    Start-Sleep -Seconds 3
+}
+
+function Start-RemoteOSServer([string]$ConfigDir, [bool]$StartDirect) {
+    # Directly only from the desktop user's own desktop run. SSH / session 0: a server started from
+    # here dies with the SSH session (#57 amendment, resolume-pp). Another account (a standard user
+    # who typed an admin's password at UAC): it would run as that admin and pass the health check,
+    # while the task (the desktop user) may not reach this run's Python. In both cases the task
+    # starts it, and the health check proves the task's own server. -> $null, or an error text
+    if ($StartDirect) {
+        Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-remoteos.vbs`""
+        return $null
+    }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
+        $taskRunOut = schtasks /Run /TN "RemoteOSMCP" 2>&1 | Out-String
+        $taskRunExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($taskRunExit -ne 0) { return "schtasks /Run /TN RemoteOSMCP failed (exit $taskRunExit): $($taskRunOut.Trim())" }
+    return $null
+}
+
+function Test-RemoteOSServerHealth([int]$Port, [string]$Version, [bool]$StartDirect, [int]$Attempts = 6, [int]$DelaySeconds = 5) {
+    # /health must report $Version. Started through the task, the listener must also be in a
+    # desktop session: one in session 0 dies with the SSH session (#57). -> @{Ok; Message}
+    $answered = $false
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        Start-Sleep -Seconds $DelaySeconds
+        try {
+            $healthVer = [string](Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5 -ErrorAction Stop).version
+        } catch {
+            continue
+        }
+        if ($healthVer -and $healthVer -ne $Version) {
+            return [pscustomobject]@{ Ok = $false; Message = "Installed $Version but service reports $healthVer" }
+        }
+        if ($healthVer -ne $Version) { continue }
+        if ($StartDirect) { return [pscustomobject]@{ Ok = $true; Message = "v$healthVer" } }
+        $answered = $true
+        $serverSession = Get-RemoteOSListenerSessionId -Port $Port
+        if ($serverSession -eq 0) {
+            return [pscustomobject]@{ Ok = $false; Message = "The server on port $Port runs in session 0 (no desktop): it would die with this session" }
+        }
+        if ($null -ne $serverSession) {
+            return [pscustomobject]@{ Ok = $true; Message = "v$healthVer (the task's server, session $serverSession)" }
+        }
+    }
+    if ($answered) {
+        return [pscustomobject]@{ Ok = $false; Message = "The server answers v$Version, but the session of the process on port $Port could not be read" }
+    }
+    return [pscustomobject]@{ Ok = $false; Message = "Health endpoint (http://127.0.0.1:$Port/health) did not respond within $($Attempts * $DelaySeconds)s" }
+}
+
+function Invoke-RemoteOSRollback($Point, [string]$Python, [scriptblock]$StopServer, [scriptblock]$StartServer,
+                                 [scriptblock]$ProveHealth) {
+    # Back to the previous proven install, offline: stop whatever runs, reinstall the old
+    # wheelhouse, start it and prove the OLD version's health. -> @{Ok; Error; Output}
+    $null = & $StopServer
+    $reinstall = Install-RemoteOSWheelhouse -Python $Python -Wheelhouse $Point.Path -Version $Point.Version
+    if (-not $reinstall.Ok) { return $reinstall }
+    $startError = & $StartServer
+    if ($startError) { return [pscustomobject]@{ Ok = $false; Error = "$startError"; Output = '' } }
+    $proof = & $ProveHealth $Point.Version
+    if (-not $proof.Ok) { return [pscustomobject]@{ Ok = $false; Error = $proof.Message; Output = '' } }
+    return [pscustomobject]@{ Ok = $true; Error = $null; Output = '' }
+}
+
+function Exit-RemoteOSAfterFailure([string]$Reason, [string]$Output, $Point, [string]$Python, [scriptblock]$StopServer,
+                                   [scriptblock]$StartServer, [scriptblock]$ProveHealth, [bool]$Pause) {
+    # Every failure after the server was stopped: roll back to the previous proven install when its
+    # wheelhouse is kept, then exit 1. None kept (the first install of this scheme): the box stays
+    # as the failure left it, as before #64, and the message says so.
+    Write-Host "  [X] $Reason" -ForegroundColor Red
+    if ($Output) { Write-Host $Output }
+    if (-not $Point) {
+        Write-Host "  [X] $Reason -- no previous wheelhouse to roll back to (the first install with wheelhouses): nothing was rolled back" -ForegroundColor Red
+        Exit-RemoteOSInstaller -Code 1 -Pause $Pause
+    }
+    Write-Host "      Rolling back to v$($Point.Version) (commit $($Point.Ref)), offline from its wheelhouse..." -ForegroundColor Yellow
+    $rollback = Invoke-RemoteOSRollback -Point $Point -Python $Python -StopServer $StopServer -StartServer $StartServer `
+        -ProveHealth $ProveHealth
+    if ($rollback.Ok) {
+        Write-Host "  [X] $Reason -- rolled back to $($Point.Version) (its health check passed)" -ForegroundColor Red
+    } else {
+        Write-Host "  [X] $Reason -- and the rollback to $($Point.Version) failed too: $($rollback.Error)" -ForegroundColor Red
+        if ($rollback.Output) { Write-Host $rollback.Output }
+    }
+    Exit-RemoteOSInstaller -Code 1 -Pause $Pause
+}
+
 Write-Host ""
 Write-Host "  RemoteOS MCP Installer" -ForegroundColor Cyan
 Write-Host "  Remote Windows control for Claude Code" -ForegroundColor Gray
@@ -368,12 +643,12 @@ Write-Host "  Target user: $desktopUser ($desktopProfile)" -ForegroundColor Gray
 Write-Host ""
 
 # --- Find or install Python ---
-Write-Host "  [1/6] Checking Python..." -ForegroundColor White
+Write-Host "  [1/7] Checking Python..." -ForegroundColor White
 $python = $null
 foreach ($cmd in @("python", "python3", "py")) {
     try {
         $ver = & $cmd --version 2>&1
-        if ($ver -match "Python 3\.(\d+)" -and [int]$Matches[1] -ge 10) {
+        if (Test-RemoteOSPythonVersion "$ver") {
             $python = $cmd
             Write-Host "        Found $ver" -ForegroundColor Green
             break
@@ -389,13 +664,13 @@ if ($python) { $foundPythonPath = (Get-Command $python -ErrorAction SilentlyCont
 if (-not (Test-RemoteOSPythonReachable -PythonPath $foundPythonPath -RunProfile $env:USERPROFILE -OtherAccount $otherAccount)) {
     Write-Host "  [X] This run is elevated as $env:USERNAME, but the server runs as $desktopUser, who cannot run" -ForegroundColor Red
     Write-Host "      this account's Python ($foundPythonPath) -- nothing was changed on this box" -ForegroundColor Red
-    Write-Host "      Install Python 3.10+ for all users (python.org: 'Install for all users'), or run the installer" -ForegroundColor Yellow
+    Write-Host "      Install Python 3.11+ for all users (python.org: 'Install for all users'), or run the installer" -ForegroundColor Yellow
     Write-Host "      as $desktopUser with administrator rights." -ForegroundColor Yellow
     Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
 if (-not $python) {
-    Write-Host "        Python 3.10+ not found. Installing..." -ForegroundColor Yellow
+    Write-Host "        Python 3.11+ not found. Installing..." -ForegroundColor Yellow
 
     # Try winget first
     $installed = $false
@@ -465,8 +740,42 @@ try {
 }
 $AuthKey = $resolvedKey.Key
 
-# --- Install remoteos-mcp ---
-Write-Host "  [2/6] Installing remoteos-mcp..." -ForegroundColor White
+# --- The download (#64): every wheel the install needs, while the old server still runs ---
+Write-Host "  [2/7] Downloading remoteos-mcp and its dependencies (the running server is not touched)..." -ForegroundColor White
+$wheelhouseRoot = Join-Path $ConfigDir 'wheelhouse'
+$preflight = New-RemoteOSWheelhouse -Python $python -Root $wheelhouseRoot -Sha $sourceSha `
+    -SourceUrl "https://github.com/zbynekdrlik/remoteos-mcp/archive/$sourceSha.zip" `
+    -ConstraintsUrl "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$sourceSha/constraints.txt"
+if (-not $preflight.Ok) {
+    Write-Host "  [X] could not download remoteos-mcp $sourceSha and its dependencies ($($preflight.Error)) -- nothing was changed on this box" -ForegroundColor Red
+    if ($preflight.Output) { Write-Host $preflight.Output }
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+}
+if ($preflight.Reused) {
+    Write-Host "        v$($preflight.Version): wheelhouse kept from an earlier run ($($preflight.Path))" -ForegroundColor Green
+} else {
+    Write-Host "        v$($preflight.Version): downloaded into $($preflight.Path)" -ForegroundColor Green
+}
+# What a failure after the stop goes back to, read before anything changes
+$rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir
+if ($rollbackPoint) {
+    Write-Host "        Rollback: v$($rollbackPoint.Version) (commit $($rollbackPoint.Ref)), from its kept wheelhouse" -ForegroundColor Gray
+} else {
+    Write-Host "        [!] No previous wheelhouse (the first install with wheelhouses): a failure after the stop cannot roll back" -ForegroundColor Yellow
+}
+$startDirect = $interactive -and ($env:USERNAME -ieq $desktopUser)
+# Every failure after the stop goes through Exit-RemoteOSAfterFailure @rollback
+$rollback = @{
+    Point       = $rollbackPoint
+    Python      = $python
+    Pause       = $pauseOnExit
+    StopServer  = { Stop-RemoteOSServer -Port $Port }
+    StartServer = { Start-RemoteOSServer -ConfigDir $ConfigDir -StartDirect $startDirect }
+    ProveHealth = { param($Version) Test-RemoteOSServerHealth -Port $Port -Version $Version -StartDirect $startDirect }
+}
+
+# --- Install remoteos-mcp, offline from the wheelhouse ---
+Write-Host "  [3/7] Installing remoteos-mcp v$($preflight.Version) (offline)..." -ForegroundColor White
 # pip warnings on stderr must not abort the script
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
@@ -483,71 +792,17 @@ if (Test-Path $oldConfigDir) {
 }
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
-# Stop running server BEFORE pip install - pip --force-reinstall on Windows
-# cannot delete files held open by the running python process, which corrupts
-# packages (e.g. fastmcp's __init__.py gets deleted, leaving a namespace package).
-Write-Host "        Stopping running server..." -ForegroundColor Gray
-schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
-# Kill by window title (catches python/cmd with the batch title)
-Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.MainWindowTitle -match "RemoteOS|WinRemote"
-} | Stop-Process -Force -ErrorAction SilentlyContinue
-# Kill ALL processes related to the running server: the python server process,
-# the CMD batch restart loop (start-remoteos.bat), and the wscript VBS launcher.
-# The CMD batch has a restart loop that will re-launch python within 10s if
-# only python is killed.  Exclude the current process AND its parent - the
-# installer's own source code (and the SSH cmd.exe wrapper carrying it) contain
-# these patterns as string literals and would match themselves.
-$myPid = $PID
-$parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId = $myPid" -ErrorAction SilentlyContinue).ParentProcessId
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.ProcessId -ne $myPid -and $_.ProcessId -ne $parentPid -and
-    ($_.CommandLine -match "-m remoteos" -or $_.CommandLine -match "start-remoteos" -or
-     $_.CommandLine -match "-m winremote" -or $_.CommandLine -match "start-winremote")
-} | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-}
-# Kill server by port (fallback - catches anything on our port)
-$portPid = (netstat -ano | Select-String "0.0.0.0:$Port.*LISTENING" | ForEach-Object {
-    ($_.ToString().Trim() -split "\s+")[-1]
-}) | Select-Object -First 1
-if ($portPid) {
-    Stop-Process -Id $portPid -Force -ErrorAction SilentlyContinue
-}
-Start-Sleep -Seconds 3
-$env:PIP_CONSTRAINT = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$sourceSha/constraints.txt"
-# Pre-uninstall all three packages so no stale RECORD can delete files the new
-# install writes.  Root cause (#12 wheel evidence): monolithic fastmcp 2.x
-# RECORD claims fastmcp/__init__.py - same file fastmcp-slim 4.x writes.
-# pip --force-reinstall can install slim (writes it) then uninstall old 2.x
-# (deletes it).  Explicit pre-uninstall + clean install avoids this entirely.
-& $python -m pip uninstall -y remoteos-mcp fastmcp fastmcp-slim 2>&1 | Out-Null
-# Keep the full pip output: on failure it is printed whole (#12 - a discarded
-# or truncated pip error hides the real cause).
-$pipInstallOut = & $python -m pip install --no-cache-dir "https://github.com/zbynekdrlik/remoteos-mcp/archive/$sourceSha.zip" 2>&1 | Out-String
-$pipInstallExit = $LASTEXITCODE
-$pipShow = & $python -m pip show remoteos-mcp 2>&1 | Out-String
 $ErrorActionPreference = $prevEAP
-# Success = pip exited 0 AND the package is there (an old dist left behind by a
-# failed install must not read as "Installed v<old>").
-if ($pipInstallExit -eq 0 -and $pipShow -match "Version: (.+)") {
-    Write-Host "        Installed v$($Matches[1].Trim())" -ForegroundColor Green
-} else {
-    Write-Host "        [X] pip install failed. Full pip output:" -ForegroundColor Red
-    Write-Host $pipInstallOut
-    Write-Host "        Try manually: $python -m pip install https://github.com/zbynekdrlik/remoteos-mcp/archive/$sourceSha.zip" -ForegroundColor Yellow
-    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+Write-Host "        Stopping running server..." -ForegroundColor Gray
+Stop-RemoteOSServer -Port $Port
+$install = Install-RemoteOSWheelhouse -Python $python -Wheelhouse $preflight.Path -Version $preflight.Version
+if (-not $install.Ok) {
+    Exit-RemoteOSAfterFailure -Reason $install.Error -Output $install.Output @rollback
 }
-# Sanity check: verify remoteos and fastmcp can be imported (fail hard, never repair)
-$importCheck = & $python -c "import remoteos, fastmcp; from fastmcp import FastMCP" 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "        [X] Import check failed - remoteos or fastmcp broken after install" -ForegroundColor Red
-    Write-Host "        $importCheck" -ForegroundColor Red
-    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
-}
+Write-Host "        Installed v$($preflight.Version)" -ForegroundColor Green
 
 # --- The auth key (resolved before the install, above) ---
-Write-Host "  [3/6] Configuring auth key..." -ForegroundColor White
+Write-Host "  [4/7] Configuring auth key..." -ForegroundColor White
 if ($resolvedKey.Source) {
     Write-Host "        Auth key: kept, from $($resolvedKey.Source)" -ForegroundColor Green
 } else {
@@ -559,7 +814,7 @@ if ((Test-RemoteOSKey $tomlKey) -and $tomlKey -cne $AuthKey) {
 }
 
 # --- Create config and start scripts ---
-Write-Host "  [4/6] Creating config..." -ForegroundColor White
+Write-Host "  [5/7] Creating config..." -ForegroundColor White
 if (-not (Test-Path $ConfigDir)) {
     New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 }
@@ -597,7 +852,7 @@ Write-Host "        Config: $ConfigDir\config.json" -ForegroundColor Gray
 Write-Host "        Start:  $ConfigDir\start-remoteos.vbs (hidden)" -ForegroundColor Gray
 
 # --- Auto-start scheduled task ---
-Write-Host "  [5/6] Setting up auto-start..." -ForegroundColor White
+Write-Host "  [6/7] Setting up auto-start..." -ForegroundColor White
 try {
     $taskAction = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$ConfigDir\start-remoteos.vbs`""
     # Trigger at logon + every 5 minutes (task won't start a second instance if already running)
@@ -609,12 +864,11 @@ try {
     Write-Host "        Task 'RemoteOSMCP' registered for $desktopUser (at logon + every 5 min)" -ForegroundColor Green
 } catch {
     # The run is elevated here (the gate above), so this is a real failure, not a missing right
-    Write-Host "        [X] Could not register the scheduled task 'RemoteOSMCP': $_" -ForegroundColor Red
-    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+    Exit-RemoteOSAfterFailure -Reason "Could not register the scheduled task 'RemoteOSMCP': $_" -Output '' @rollback
 }
 
 # --- Firewall + Network profile ---
-Write-Host "  [6/6] Configuring firewall..." -ForegroundColor White
+Write-Host "  [7/7] Configuring firewall..." -ForegroundColor White
 try {
     # Set the network to Private (the rule below allows every profile, but a Public network may
     # carry other blocking rules)
@@ -627,8 +881,7 @@ try {
     Write-Host "        Firewall rule added (port $Port, all profiles - reliable across network drift)" -ForegroundColor Green
 } catch {
     # Elevated here too: a failure is real
-    Write-Host "        [X] Could not add the firewall rule for TCP port ${Port}: $_" -ForegroundColor Red
-    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+    Exit-RemoteOSAfterFailure -Reason "Could not add the firewall rule for TCP port ${Port}: $_" -Output '' @rollback
 }
 
 # --- Get LAN IP ---
@@ -647,83 +900,35 @@ if ($currentUserConfig -ne $ConfigDir -and (Test-Path $currentUserConfig)) {
     Write-Host "  Cleaned up old config from $env:USERNAME" -ForegroundColor Gray
 }
 
-# --- Start server now (hidden) ---
-# Directly only from the desktop user's own desktop run. SSH / session 0: a server started from
-# here dies with the SSH session (#57 amendment, resolume-pp). Another account (a standard user
-# who typed an admin's password at the UAC prompt): a server started from here would run as that
-# admin and pass the health check, while the task, which runs as the desktop user, may not even
-# reach this run's Python. In both cases the task starts it, and the health check proves the
-# task's own server.
-$startDirect = $interactive -and ($env:USERNAME -ieq $desktopUser)
+# --- Start server now (hidden): directly or through the task (Start-RemoteOSServer) ---
 if ($startDirect) {
-    # The desktop user's own session: start it here (the task starts it at every logon)
     Write-Host "  Starting server..." -ForegroundColor Cyan
-    Start-Process -FilePath "wscript.exe" -ArgumentList "`"$ConfigDir\start-remoteos.vbs`""
 } else {
     Write-Host "  Starting server through the scheduled task, as $desktopUser in the desktop session..." -ForegroundColor Cyan
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
-    $taskRunOut = schtasks /Run /TN "RemoteOSMCP" 2>&1 | Out-String
-    $taskRunExit = $LASTEXITCODE
-    $ErrorActionPreference = $prevEAP
-    if ($taskRunExit -ne 0) {
-        Write-Host "  [X] schtasks /Run /TN RemoteOSMCP failed (exit $taskRunExit): $($taskRunOut.Trim())" -ForegroundColor Red
-        Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
-    }
 }
-Start-Sleep -Seconds 5
+$startError = Start-RemoteOSServer -ConfigDir $ConfigDir -StartDirect $startDirect
+if ($startError) {
+    Exit-RemoteOSAfterFailure -Reason $startError -Output '' @rollback
+}
 
 # --- Post-install: verify service reports the correct version ---
 Write-Host "  Verifying installed version matches running service..." -ForegroundColor Cyan
-$PKG_VER = & $python -c "import importlib.metadata as m; print(m.version('remoteos-mcp'))" 2>&1 | Out-String
-$PKG_VER = $PKG_VER.Trim()
-$healthOk = $false
-$healthAnswered = $false
-for ($attempt = 1; $attempt -le 6; $attempt++) {
-    try {
-        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5 -ErrorAction Stop
-        $healthVer = $health.version
-        if ($healthVer -eq $PKG_VER -and -not $startDirect) {
-            $healthAnswered = $true
-            # The server must be the task's, in a desktop session: one in session 0 dies with SSH
-            $serverSession = Get-RemoteOSListenerSessionId -Port $Port
-            if ($serverSession -eq 0) {
-                Write-Host "  [X] The server on port $Port runs in session 0 (no desktop): it would die with this session" -ForegroundColor Red
-                Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
-            }
-            if ($null -ne $serverSession) {
-                $healthOk = $true
-                Write-Host "        Health check OK: v${healthVer} (the task's server, session $serverSession)" -ForegroundColor Green
-                break
-            }
-        } elseif ($healthVer -eq $PKG_VER) {
-            $healthOk = $true
-            Write-Host "        Health check OK: v${healthVer}" -ForegroundColor Green
-            break
-        } elseif ($healthVer) {
-            Write-Host "  [X] Installed ${PKG_VER} but service reports ${healthVer}" -ForegroundColor Red
-            Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
-        }
-    } catch {}
-    Start-Sleep -Seconds 5
-}
-if (-not $healthOk -and $healthAnswered) {
-    Write-Host "  [X] The server answers v${PKG_VER}, but the session of the process on port $Port could not be read" -ForegroundColor Red
-    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
-}
-if (-not $healthOk) {
-    Write-Host "  [X] Health endpoint (http://127.0.0.1:${Port}/health) did not respond within 30s" -ForegroundColor Red
+$health = Test-RemoteOSServerHealth -Port $Port -Version $preflight.Version -StartDirect $startDirect
+if (-not $health.Ok) {
     if (-not $startDirect) {
         Write-Host "      The task runs the server in ${desktopUser}'s desktop session: that user must be logged in," -ForegroundColor Yellow
         Write-Host "      and must be able to run $pythonPath (a per-user Python of another account cannot be)." -ForegroundColor Yellow
     }
-    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+    Exit-RemoteOSAfterFailure -Reason $health.Message -Output '' @rollback
 }
+Write-Host "        Health check OK: $($health.Message)" -ForegroundColor Green
 
-# The commit this box runs, recorded once it proved itself (#12; #60's updater reads it). No
-# secret, so no ACL.
+# The commit this box runs, recorded once it proved itself (#12; #60's updater and the next run's
+# rollback read it). No secret, so no ACL.
 $sourceSha | Set-Content "$ConfigDir\installed-ref.txt"
+# Only now: the current and the previous wheelhouse stay, older ones go (#64)
+$pruned = @(Remove-RemoteOSStaleWheelhouses -Root $wheelhouseRoot -Keep @($sourceSha, $rollbackPoint.Ref))
+if ($pruned.Count -gt 0) { Write-Host "        Removed old wheelhouses: $($pruned -join ', ')" -ForegroundColor Gray }
 
 # --- Summary ---
 Write-Host ""

@@ -28,13 +28,9 @@ from __future__ import annotations
 
 import posixpath
 import re
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
 
 from remoteos.gateway.registry import RegistryError, is_valid_machine_name, validate_consumer_name
 

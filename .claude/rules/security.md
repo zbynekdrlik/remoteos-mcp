@@ -46,8 +46,8 @@ paths:
   and never echoes the value.
 - **pip-audit evaluates markers for its own interpreter.** `pip-audit -r constraints.txt` on one
   Python/OS audits one slice; the CI matrix is py3.12 on Linux/Windows/macOS + py3.11 on Linux.
-  The py3.10 slice (Pillow 12.3.0, CVEs fixed only in Pillow 13 = py3.11+) is unaudited pending the
-  owner's decision. No ignore list without the owner. Regenerate pins with the uv command at the
+  Python 3.11 is the floor since #64 (decided on #39: drops the unaudited Pillow 12.3.0 3.10
+  set). No ignore list without the owner. Regenerate pins with the uv command at the
   top of `constraints.txt`, after editing `pyproject.toml`; `--upgrade-package <name>` per pin.
 - **FastMCP 4.1 logs an input-free `{error_count, error_types}` for invalid arguments**;
   `errors.RedactInvalidArguments` keeps those two keys (4.0.3 logged pydantic errors WITH inputs).
