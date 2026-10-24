@@ -57,3 +57,11 @@ def test_constraints_have_no_python_3_10_branch() -> None:
     text = (ROOT / "constraints.txt").read_text()
     assert "--python-version 3.11" in text.splitlines()[1], "constraints.txt was not compiled for 3.11"
     assert "< '3.11'" not in text, "constraints.txt still carries a Python 3.10 branch"
+
+
+def test_the_macos_brew_fallback_checks_the_python_it_installed() -> None:
+    """Review round 1: the brew branch took `python3` blind, so an older python3 first on PATH
+    went on and failed later with a misleading error."""
+    text = (ROOT / "install.sh").read_text()
+    brew = text[text.index("brew install python@3.12"):]
+    assert 'if python_ok "$ver"; then' in brew[: brew.index('if [[ -z "$PYTHON" ]]; then')]

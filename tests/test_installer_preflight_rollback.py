@@ -704,7 +704,7 @@ class TestWindowsPipErrorOutput:
 
     def _main_install(self) -> tuple[str, str]:
         content = INSTALLER_WINDOWS.read_text()
-        idx = _find_first_code_line(content, "Invoke-RemoteOSPip", "'install'", "'--no-index'")
+        idx = _find_first_code_line(content, "Invoke-RemoteOSPip", "'install'", "'--no-index'", exclude="'--dry-run'")
         assert idx is not None, "install.ps1 must have the main pip install line"
         return content, content.split("\n")[idx].strip()
 

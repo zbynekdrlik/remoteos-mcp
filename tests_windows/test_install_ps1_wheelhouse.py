@@ -109,6 +109,14 @@ def venv(tmp_path: Path) -> Path:
     return python
 
 
+@pytest.fixture(scope="module")
+def shared_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A venv for tests that only read it (an offline dry run installs nothing)."""
+    target = tmp_path_factory.mktemp("shared") / "venv"
+    subprocess.run([sys.executable, "-m", "venv", str(target)], check=True, timeout=300)
+    return target / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+
 def _run(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
     script = tmp_path / "probe.ps1"
     script.write_text(_PRELUDE.format(installer=str(INSTALLER).replace("'", "''")) + body, encoding="utf-8-sig")
@@ -185,6 +193,21 @@ $r = New-RemoteOSWheelhouse -Python {_q(python)} -Root {_q(root)} -Sha '{SHA_NEW
         out = self._preflight(tmp_path, venv, empty, root, tmp_path / "missing.tar.gz", tmp_path / "missing.txt")
 
         assert out["ok"] is True and out["reused"] is True and out["version"] == "2.0", out
+
+    def test_a_kept_wheelhouse_that_does_not_install_on_this_python_is_rebuilt(self, tmp_path: Path,
+                                                                                venv: Path) -> None:
+        """Review round 1: a wheelhouse built for another interpreter (the box's Python changed
+        since) failed only AFTER the stop. Its offline dry run fails now, before any change, and
+        the preflight builds it again."""
+        index, constraints, root = self._index(tmp_path)
+        _wheelhouse(root / SHA_NEW, "2.0", requires=("fastmcp", "missingdep"))
+        source = _sdist(tmp_path / "archive", "remoteos-mcp", "2.0", _REMOTEOS, ("fastmcp",))
+
+        out = self._preflight(tmp_path, venv, index, root, source, constraints)
+
+        assert out["ok"] is True and out["reused"] is False and out["version"] == "2.0", out
+        assert sorted(p.name for p in (root / SHA_NEW).iterdir()) == [
+            "constraints.txt", "fastmcp-9.0-py3-none-any.whl", "remoteos_mcp-2.0-py3-none-any.whl"]
 
     def test_a_failed_download_changes_nothing(self, tmp_path: Path, venv: Path) -> None:
         index, constraints, root = self._index(tmp_path)
@@ -276,23 +299,28 @@ Exit-RemoteOSAfterFailure -Reason 'pip install failed' -Output '' -Point $null -
 
 
 class TestRollbackPoint:
-    def _read(self, tmp_path: Path, config: Path) -> dict | None:
-        return _ps(tmp_path, f"""
-$p = Get-RemoteOSRollbackPoint -ConfigDir {_q(config)}
+    def _read(self, tmp_path: Path, config: Path, python: Path) -> dict | None:
+        return _ps(tmp_path, _NO_NETWORK + f"""
+$p = Get-RemoteOSRollbackPoint -ConfigDir {_q(config)} -Python {_q(python)}
 if ($p) {{ @{{ ref = $p.Ref; path = $p.Path; version = $p.Version }} | ConvertTo-Json -Compress }}
 else {{ @{{ none = $true }} | ConvertTo-Json -Compress }}
 """)
 
-    def test_the_installed_commit_s_kept_wheelhouse_is_the_rollback_point(self, tmp_path: Path) -> None:
+    def test_the_installed_commit_s_kept_wheelhouse_is_the_rollback_point(self, tmp_path: Path,
+                                                                          shared_venv: Path) -> None:
         config = tmp_path / "cfg"
         _wheelhouse(config / "wheelhouse" / SHA_OLD, "0.7.0.dev36")
         (config / "installed-ref.txt").write_text(SHA_OLD + "\n")
 
-        assert self._read(tmp_path, config) == {
+        assert self._read(tmp_path, config, shared_venv) == {
             "ref": SHA_OLD, "path": str(config / "wheelhouse" / SHA_OLD), "version": "0.7.0.dev36"}
 
-    @pytest.mark.parametrize("case", ["no-ref-file", "not-a-sha", "no-wheelhouse", "no-constraints", "two-wheels"])
-    def test_without_a_complete_wheelhouse_there_is_none(self, tmp_path: Path, case: str) -> None:
+    @pytest.mark.parametrize("case", ["no-ref-file", "not-a-sha", "no-wheelhouse", "no-constraints", "two-wheels",
+                                      "not-installable"])
+    def test_without_a_complete_installable_wheelhouse_there_is_none(self, tmp_path: Path, case: str,
+                                                                     shared_venv: Path) -> None:
+        """not-installable (review round 1): a wheelhouse this Python cannot install offline (built
+        for another interpreter) would fail the rollback the same way, after the stop."""
         config = tmp_path / "cfg"
         folder = _wheelhouse(config / "wheelhouse" / SHA_OLD, "1.0")
         (config / "installed-ref.txt").write_text(SHA_OLD + "\n")
@@ -306,10 +334,12 @@ else {{ @{{ none = $true }} | ConvertTo-Json -Compress }}
             folder.rmdir()
         elif case == "no-constraints":
             (folder / "constraints.txt").unlink()
-        else:
+        elif case == "two-wheels":
             _wheel(folder, "remoteos-mcp", "1.1", _REMOTEOS)
+        else:
+            _wheelhouse(folder, "1.0", requires=("fastmcp", "missingdep"))
 
-        assert self._read(tmp_path, config) == {"none": True}
+        assert self._read(tmp_path, config, shared_venv) == {"none": True}
 
 
 class TestPruning:
@@ -397,3 +427,90 @@ $h = Test-RemoteOSServerHealth -Port {port} -Version '{version}' -StartDirect $t
         out = self._prove(tmp_path, port, "1.0")
 
         assert out["ok"] is False and "did not respond" in out["message"], out
+
+
+class TestRollbackSplat:
+    """Review round 1: the flow's own `$rollback` splat (scriptblocks that read the script's
+    $Port, $ConfigDir and $startDirect by dynamic scope) was never run by a test. Here it is the
+    real statement out of install.ps1, run with the server functions replaced by recorders."""
+
+    def test_the_flow_s_rollback_reaches_the_server_functions_with_the_script_s_values(self, tmp_path: Path) -> None:
+        result = _run(tmp_path, f"""
+$isRollback = {{ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left.Extent.Text -eq '$rollback' }}
+$assignments = @($ast.FindAll($isRollback, $true))
+if ($assignments.Count -ne 1) {{ throw "install.ps1 has $($assignments.Count) `$rollback assignments, not 1" }}
+function Stop-RemoteOSServer([int]$Port) {{ Write-Host "STOP port=$Port" }}
+function Install-RemoteOSWheelhouse([string]$Python, [string]$Wheelhouse, [string]$Version) {{
+    Write-Host "INSTALL $Python $Wheelhouse $Version"
+    [pscustomobject]@{{ Ok = $true; Error = $null; Output = '' }}
+}}
+function Start-RemoteOSServer([string]$ConfigDir, [bool]$StartDirect) {{ Write-Host "START $ConfigDir $StartDirect" }}
+function Test-RemoteOSServerHealth([int]$Port, [string]$Version, [bool]$StartDirect) {{
+    Write-Host "HEALTH port=$Port $Version $StartDirect"
+    [pscustomobject]@{{ Ok = $true; Message = "v$Version" }}
+}}
+$Port = 8092
+$ConfigDir = 'C:\\Users\\box\\.remoteos-mcp'
+$startDirect = $true
+$python = 'the-python'
+$pauseOnExit = $false
+$rollbackPoint = [pscustomobject]@{{ Ref = '{SHA_OLD}'; Path = 'C:\\wh\\old'; Version = '1.0' }}
+. ([ScriptBlock]::Create($assignments[0].Extent.Text))
+Exit-RemoteOSAfterFailure -Reason 'pip install failed' -Output '' @rollback
+""")
+
+        assert result.returncode == 1, result.stdout + result.stderr
+        calls = [line for line in result.stdout.splitlines() if line.startswith(("STOP", "INSTALL", "START", "HEALTH"))]
+        assert calls == [
+            "STOP port=8092",
+            "INSTALL the-python C:\\wh\\old 1.0",
+            "START C:\\Users\\box\\.remoteos-mcp True",
+            "HEALTH port=8092 1.0 True",
+        ], result.stdout
+        assert "[X] pip install failed -- rolled back to 1.0" in result.stdout
+
+
+class TestWheelhouseAcl:
+    """Review round 1: the wheelhouses feed an ELEVATED pip, and they live in the desktop user's
+    profile. A desktop user who is not an administrator must not be able to plant a wheel there."""
+
+    _STATE = """
+$sid = [System.Security.Principal.SecurityIdentifier]
+$acl = Get-Acl -LiteralPath $root
+$user = ([System.Security.Principal.NTAccount]$env:USERNAME).Translate($sid).Value
+$rules = @($acl.Access | ForEach-Object { @{ sid = $_.IdentityReference.Translate($sid).Value;
+    rights = $_.FileSystemRights.ToString() } })
+@{ err = $err; before = $before; trusted = (Test-RemoteOSWheelhouseRootTrusted $root);
+    owner = $acl.GetOwner($sid).Value; protected = $acl.AreAccessRulesProtected; user = $user; rules = $rules } |
+    ConvertTo-Json -Compress -Depth 4
+"""
+
+    def _protect(self, tmp_path: Path, root: Path) -> dict:
+        return _ps(tmp_path, f"""
+$root = {_q(root)}
+$before = $false
+if (Test-Path -LiteralPath $root) {{ $before = Test-RemoteOSWheelhouseRootTrusted $root }}
+$err = Protect-RemoteOSWheelhouseRoot -Root $root -User $env:USERNAME
+""" + self._STATE)
+
+    def test_the_root_is_owned_by_administrators_and_read_only_for_the_desktop_user(self, tmp_path: Path) -> None:
+        out = self._protect(tmp_path, tmp_path / "wheelhouse")
+
+        assert out["err"] is None and out["trusted"] is True and out["protected"] is True, out
+        assert out["owner"] == "S-1-5-32-544", out
+        rights = {rule["sid"]: rule["rights"] for rule in out["rules"]}
+        assert "FullControl" in rights["S-1-5-18"] and "FullControl" in rights["S-1-5-32-544"], rights
+        assert "ReadAndExecute" in rights[out["user"]], rights
+        assert not any(word in rights[out["user"]] for word in ("Write", "Modify", "FullControl", "Delete")), rights
+
+    def test_a_root_someone_else_made_is_replaced_with_everything_in_it(self, tmp_path: Path) -> None:
+        planted = tmp_path / "wheelhouse" / SHA_NEW / "remoteos_mcp-6.6.6-py3-none-any.whl"
+        planted.parent.mkdir(parents=True)
+        planted.write_bytes(b"not a wheel")
+
+        out = self._protect(tmp_path, tmp_path / "wheelhouse")
+
+        assert out["before"] is False, "a root with the profile's inherited ACL was trusted"
+        assert out["err"] is None and out["trusted"] is True, out
+        assert not planted.exists(), "a wheel planted in an untrusted root survived"

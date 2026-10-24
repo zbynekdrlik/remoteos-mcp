@@ -288,7 +288,7 @@ class TestDeterministicPreUninstall:
         content = INSTALLER_WINDOWS.read_text()
         # Since #64: Install-RemoteOSWheelhouse, offline from the commit's wheelhouse
         uninstall_pos = _find_first_code_line(content, "Pip", "'uninstall'", "'remoteos-mcp'")
-        install_pos = _find_first_code_line(content, "Pip", "'install'", "'--no-index'")
+        install_pos = _find_first_code_line(content, "Pip", "'install'", "'--no-index'", exclude="'--dry-run'")
         assert uninstall_pos is not None, (
             "install.ps1 must pip uninstall remoteos-mcp before install"
         )

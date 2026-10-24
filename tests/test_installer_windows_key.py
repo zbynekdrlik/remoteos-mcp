@@ -342,7 +342,8 @@ def test_the_download_comes_before_the_stop_and_the_uninstall() -> None:
     block = _if_block("if (-not $preflight.Ok) {")
     assert any("-- nothing was changed on this box" in line for _, line in block), block
     assert block[-2][1] == "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit", block
-    point = [n for n, line in flow if line == "$rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir"]
+    point = [n for n, line in flow
+             if line == "$rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Python $python"]
     assert len(point) == 1 and preflight[0] < point[0] < _stop_line(), (point, _stop_line())
 
 
@@ -383,3 +384,64 @@ def test_python_3_11_or_newer_is_required() -> None:
     assert 'if (Test-RemoteOSPythonVersion "$ver") {' in code
     assert "-ge 10" not in code and "3.10+" not in code
     assert "-ge 11" in "\n".join(_function_code("Test-RemoteOSPythonVersion"))
+
+
+# --- #64 review round 1 -----------------------------------------------------------------------
+
+def test_the_wheelhouse_root_is_protected_before_the_download() -> None:
+    """The wheelhouses feed an elevated pip from the desktop user's profile: the root gets a
+    protected ACL (SYSTEM + Administrators, the user read-only) before anything is downloaded,
+    and a root that cannot be protected stops the run with nothing changed."""
+    flow = _flow_lines()
+    protect = [n for n, line in flow
+               if line == "$protectError = Protect-RemoteOSWheelhouseRoot -Root $wheelhouseRoot -User $desktopUser"]
+    preflight = next(n for n, line in flow if line.startswith("$preflight = New-RemoteOSWheelhouse"))
+    assert len(protect) == 1 and protect[0] < preflight, (protect, preflight)
+    block = _if_block("if ($protectError) {")
+    assert any("-- nothing was changed on this box" in line for _, line in block), block
+    assert block[-2][1] == "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit", block
+
+
+def test_an_inherited_url_constraint_never_reaches_the_offline_install() -> None:
+    """A PIP_CONSTRAINT URL the old installer left in the same console would make pip reach the
+    network even with --no-index."""
+    lines = _code_lines()
+    removed = [n for n, line in lines if line.startswith("Remove-Item Env:PIP_CONSTRAINT")]
+    preflight = next(n for n, line in _flow_lines() if line.startswith("$preflight = New-RemoteOSWheelhouse"))
+    assert len(removed) == 1 and removed[0] < preflight, (removed, preflight)
+
+
+def test_both_wheelhouses_are_proven_installable_before_the_stop() -> None:
+    """A wheelhouse built for another interpreter failed only AFTER the stop, and so did a
+    rollback from it: both get an offline dry run first."""
+    check = _function_code("Test-RemoteOSWheelhouseInstallable")
+    assert any("'--dry-run', '--ignore-installed', '--no-index', '--find-links', $Wheelhouse" in line for line in check)
+    for name in ("New-RemoteOSWheelhouse", "Get-RemoteOSRollbackPoint"):
+        assert any("Test-RemoteOSWheelhouseInstallable" in line for line in _function_code(name)), name
+
+
+def test_an_installed_python_is_checked_for_3_11_too() -> None:
+    """winget / the python.org installer could leave an older Python first on PATH."""
+    flow = _flow_lines()
+    install = next(n for n, line in flow if line.startswith("winget install Python.Python"))
+    check = [n for n, line in flow if line == 'if (-not (Test-RemoteOSPythonVersion "$installedVersion")) {']
+    assert len(check) == 1 and check[0] > install, (install, check)
+    block = _if_block('if (-not (Test-RemoteOSPythonVersion "$installedVersion")) {')
+    assert block[-2][1] == "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit", block
+
+
+def test_a_failing_firewall_rule_leaves_the_old_rule_in_place() -> None:
+    """The old rule went first: a failing New-NetFirewallRule then rolled back to a server the
+    LAN could no longer reach."""
+    lines = INSTALLER_WINDOWS.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if "[7/7] Configuring firewall" in line)
+    block = [line.strip() for line in lines[start:start + 25]]
+    new = next(i for i, line in enumerate(block) if line.startswith('New-NetFirewallRule -DisplayName "RemoteOS MCP"'))
+    removes = [i for i, line in enumerate(block) if "Remove-NetFirewallRule" in line]
+    assert removes and min(removes) > new, block
+
+
+def test_the_installed_version_is_read_from_a_marked_line() -> None:
+    """A late warning on the merged output must not read as the version (a needless rollback)."""
+    body = "\n".join(_function_code("Get-RemoteOSInstalledVersion"))
+    assert "REMOTEOS_VER=" in body
