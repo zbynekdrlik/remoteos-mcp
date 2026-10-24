@@ -31,6 +31,20 @@ jobs:
       - run: pip install -e '.[test]'
       - run: pytest
 
+  # Known vulnerabilities in the pinned dependency set (#39), audited for the Python every installer
+  # installs (3.12). There is no ignore list: a finding is fixed by upgrading the pin (pyproject.toml,
+  # then the uv command at the top of constraints.txt). An advisory with no fixed release needs the
+  # owner's decision before anything is ignored.
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit==2.10.1
+      - run: pip-audit -r constraints.txt
+
   # The bash installers (#12): shellcheck, and the macOS installer tests under bash 3.2 (macOS's
   # /bin/bash, which `curl | bash` runs there: no heredoc in $(...), no mapfile, no
   # globasciiranges). RealMetadata needs a pip-installed pytest (apk's has no INSTALLER file).

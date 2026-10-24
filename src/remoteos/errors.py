@@ -1,7 +1,7 @@
 """Tool failures as real MCP errors (#32): the error type and the tool decorator.
 
 A failing tool RAISES and never returns error text as a successful result.
-FastMCP 4.0.3 turns a raised ``ToolError`` into ``CallToolResult(isError=True)``
+FastMCP 4.x (4.0.3, and 4.1.2 since #39) turns a raised ``ToolError`` into ``CallToolResult(isError=True)``
 whose only text block is the error message. ``mask_error_details`` never hides
 a ``ToolError``: it masks only other exceptions (``fastmcp/server/server.py``
 ``call_tool``). So the message is what the model reads, and it has to say what
@@ -138,11 +138,13 @@ def stack_frames(exc: BaseException) -> str:
 class RedactInvalidArguments(logging.Filter):
     """Strip the argument VALUES from FastMCP's "Invalid arguments for tool …" warning (#32 review round 2).
 
-    FastMCP 4.0.3 (``server.py`` ``call_tool``) logs a bad call's pydantic errors,
+    FastMCP 4.0.3 (``server.py`` ``call_tool``) logged a bad call's pydantic errors,
     each with the ``input`` it got, at WARNING, and FastMCP's loggers write to
     stderr whatever ``--debug`` says. Logs never carry tool arguments (#31). This
     filter keeps where and what was wrong (``loc``, ``type``, ``msg``) and drops
-    the rest. The client still gets the full validation error.
+    the rest. FastMCP 4.1 (#39) logs its own input-free summary instead
+    (``{"error_count": N, "error_types": [...]}``, built-in codes only): those two keys are
+    kept, anything else in a dict is withheld. The client still gets the full validation error.
     """
 
     _PREFIX = "Invalid arguments for tool"
@@ -156,6 +158,8 @@ class RedactInvalidArguments(logging.Filter):
 
 
 def _without_values(detail):
+    if isinstance(detail, dict):  # FastMCP 4.1+: its own summary of counts and built-in codes
+        return {key: detail[key] for key in ("error_count", "error_types") if key in detail}
     if isinstance(detail, list):
         return [
             {key: entry.get(key) for key in ("loc", "type", "msg")} if isinstance(entry, dict) else "<withheld>"

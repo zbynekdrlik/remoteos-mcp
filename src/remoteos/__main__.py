@@ -1820,7 +1820,7 @@ def cli(
             run_kwargs["middleware"] = middleware
         if platform.system() == "Windows":
             os.environ.setdefault("NO_COLOR", "1")
-        # FastMCP 4.0.3 run_http_async takes uvicorn_config, never uvicorn_args (#31).
+        # FastMCP 4.x run_http_async takes uvicorn_config, never uvicorn_args (#31; still so in 4.1.2).
         # Debug goes to uvicorn only, not run_http_async(log_level=...): that would
         # also turn FastMCP to DEBUG, which logs every tool call's arguments.
         uvicorn_config: dict[str, object] = {}
