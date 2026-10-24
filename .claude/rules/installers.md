@@ -10,6 +10,7 @@ paths:
   - "tests/fake_linux_tools.py"
   - "tests/fake_pip.py"
   - "tests_windows/test_install_ps1_key.py"
+  - "tests_windows/test_install_ps1_wheelhouse.py"
 ---
 
 # One-liner installers (install-linux.sh / install.sh / install.ps1) — gotchas
@@ -235,7 +236,9 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 ## macOS: the system-python install block
 
 - `install.sh` keeps the dev24 `# >>> shared install block` (the name stayed; Linux carried a
-  twin until dev32). Order: pin ONE commit of main (`git ls-remote`) → record the installed
+  twin until dev32). Order: pin ONE commit of `REMOTEOS_MCP_REF` (#64: validated by `ref_ok`
+  before the first child; a 40-hex sha as it is, else `git ls-remote` of `refs/tags/<r>^{}`,
+  `refs/tags/<r>`, `refs/heads/<r>`, picked in that order) → record the installed
   version → `pip install --dry-run --report` preflight → plan + snapshot → ARM → pre-uninstall →
   install → verify version AND import → DISARM. While armed, any exit rolls the snapshot back
   (`rollback_install`). Details that still hold:
@@ -246,6 +249,8 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   - plan refuses a dep owned by another installer whose pin changes; the rollback fails loudly
     on `leftovers`.
   - Never let pip write to the console; never `--force-reinstall`; never drop the pre-uninstall.
+- **Python 3.11+ (#64):** one `python_ok` per bash installer (`tests/test_installer_python_gate.py`
+  runs each exactly as written, under bash 3.2 too), `Test-RemoteOSPythonVersion` in install.ps1.
 - **macOS runs under bash 3.2** (`curl | bash` uses `/bin/bash`): no heredoc inside `$(…)` (the
   helper is written with a plain heredoc), `${arr[@]+"${arr[@]}"}` for a maybe-empty array,
   no `mapfile`, no `shopt -s globasciiranges`. Check with the `bash:3.2` container
@@ -274,12 +279,78 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 - **One commit per run (#12):** `$Ref` (`REMOTEOS_MCP_REF`, default `main`, checked by
   `Test-RemoteOSRefName`) → `Invoke-RestMethod api.github.com/.../commits/$Ref` → `$sourceSha`
   (must be 40 hex chars), right after the gate's fail branch and before the relaunch and any
-  change. `PIP_CONSTRAINT` = `raw/.../$sourceSha/constraints.txt`, pip installs
-  `archive/$sourceSha.zip`, `$InstallerUrl` = `raw/.../$sourceSha/install.ps1`, and
-  `installed-ref.txt` (next to `config.json`, no secret) holds the sha for #60's updater, written
-  only after the health check passed. Never
-  reintroduce a literal `/main/` or `main.zip` there (a static test). The static tests find the
-  main pip line by `archive/`.
+  change. The preflight gets `-ConstraintsUrl raw/.../$sourceSha/constraints.txt` and
+  `-SourceUrl archive/$sourceSha.zip`, `$InstallerUrl` = `raw/.../$sourceSha/install.ps1`, and
+  `installed-ref.txt` (next to `config.json`, no secret) holds the sha for #60's updater and the
+  next run's rollback, written only after the health check passed. Never reintroduce a literal
+  `/main/` or `main.zip` there (a static test).
+- **Download first, install offline, roll back (#64).** Order: key resolved -> [2/7]
+  `New-RemoteOSWheelhouse` (the preflight, before any change but a Python install: the commit's
+  `constraints.txt` fetched through Python's urllib into the wheelhouse, `pip download --timeout
+  60 --retries 10 -c <it>` of `archive/$sourceSha.zip`, then `pip wheel --no-deps` over EVERY
+  non-wheel file it left: the archive and sdist-only deps such as pyautogui cannot be built
+  offline; built in `<sha>.partial`, renamed when complete, so a wheelhouse is whole or absent;
+  a complete one is reused) -> `Get-RemoteOSRollbackPoint` (installed-ref.txt's sha + its
+  complete wheelhouse) -> `Stop-RemoteOSServer` -> `Install-RemoteOSWheelhouse` (pre-uninstall,
+  `--no-index --find-links <wh> -c <wh>\constraints.txt remoteos-mcp==<ver>`, version + import
+  check) -> config, task, firewall -> `Start-RemoteOSServer` + `Test-RemoteOSServerHealth` ->
+  installed-ref.txt -> `Remove-RemoteOSStaleWheelhouses` (keep current + previous).
+  - **Every failure after the stop is `Exit-RemoteOSAfterFailure -Reason ... @rollback`**, never
+    `Exit-RemoteOSInstaller` (a static test): stop, reinstall the old wheelhouse, start, prove the
+    OLD version, `[X] <reason> -- rolled back to <ver>`, exit 1. The `$rollback` splat holds
+    scriptblocks resolved by dynamic scope (`$Port`, `$ConfigDir`, `$startDirect` of the script):
+    never name a parameter of `Exit-RemoteOSAfterFailure` / `Invoke-RemoteOSRollback` like
+    those, and never `.GetNewClosure()` them (a closure's module scope cannot see the script's
+    functions).
+  - No `$env:PIP_CONSTRAINT` URL: pip would fetch it even with `--no-index`. An inherited one
+    (an older installer, same console) is removed at the top; `PIP_NO_INDEX`/`PIP_FIND_LINKS` (the
+    hand restore) are honoured by the preflight.
+  - **Both wheelhouses are proven installable before the stop** (review round 1):
+    `Test-RemoteOSWheelhouseInstallable` = `pip install --dry-run --ignore-installed --no-index`.
+    Wheels are per interpreter: a box whose Python changed since would fail only after the stop,
+    and the rollback the same way. A kept wheelhouse that fails is rebuilt; a rollback point that
+    fails is dropped (with a `[!]` line).
+  - **The wheelhouse root feeds an elevated pip from the desktop user's profile** (review round
+    1): `Protect-RemoteOSWheelhouseRoot` before the download: owner Administrators, protected
+    ACL, SYSTEM + Administrators full, the desktop user read; a root that is not like that
+    (`Test-RemoteOSWheelhouseRootTrusted`, by SID) is deleted with everything in it. **Every
+    elevated delete goes through `Remove-RemoteOSTree`** (review round 2): 5.1's `Remove-Item
+    -Recurse` enters a junction and deletes the TARGET's contents, and Get-Acl/Set-Acl follow one,
+    so a link as the root is removed alone, a link as the config folder is refused, and a
+    directory is walked entry by entry (a link inside removed alone, read-only files cleared):
+    .NET Framework's recursive `Directory.Delete($p, $true)` throws "The parameter is incorrect"
+    on a junction inside (it calls DeleteVolumeMountPoint; CI on 12e8902). The old
+    `.winremote-mcp` and other-account config cleanups use it too (a static test: no
+    `Remove-Item -Recurse` anywhere in install.ps1). `Test-RemoteOSLink` fails closed (a path
+    that exists but cannot be read counts as a link). The prune does nothing when the root or its
+    folder became a link since the check, and deletes only `<sha>` / `<sha>.partial` names: a
+    root swapped for a junction to a system folder mid-run cannot make it delete that folder.
+    **Partial protection only:** the desktop user owns the PROFILE, so they can rename the root and
+    put their own in during the whole download (the run checks it once). This stops a wheel planted
+    BEFORE the run; `%ProgramData%\remoteos-mcp\wheelhouse` would close the rest (not ticketed yet:
+    a follow-up candidate on #64, it changes the design's location). It matters only where the
+    desktop user is NOT an administrator and an administrator runs the installer.
+  - The installed version is read from a `REMOTEOS_VER=` line (a stderr warning on the merged
+    output must not read as the version and roll back a good install).
+  - The firewall rule: the new one is created BEFORE the old ones are removed, so a failure that
+    rolls back keeps the LAN reachable.
+  - The pre-uninstall's exit code is fatal now (it was ignored); the rollback runs the same
+    uninstall. A re-run of the same commit keeps only that wheelhouse (`@($sha, $sha)`): the
+    proven commit is the current one. A run killed between the stop and the install (an SSH drop)
+    still leaves no server, as before: no armed trap on Windows (a follow-up candidate on #64, not
+    ticketed yet). uninstall.ps1 says so when a non-elevated run cannot remove the wheelhouse; it
+    still uses `$env:USERPROFILE` (an administrator of another account removes the wrong profile)
+    and has no elevation gate (a follow-up candidate on #64).
+  - **Size:** install.ps1 is ~1000 lines, AT the budget (comments were condensed into this rule
+    twice). The next feature (#65's updater) must first split the source into parts that a
+    generator concatenates into the committed install.ps1, with a test that they match (as for
+    install-linux.sh): `irm | iex` delivers ONE file.
+  - A native child's output goes through `Invoke-RemoteOSNative` (`2>&1`, each record as text,
+    under `Continue`). In argument mode a bare `[pscustomobject]@{...}` is a STRING: wrap it in
+    parentheses (bit the tests).
+  - Probe locally: tests_windows' wheelhouse tests run under pwsh 7 on Linux with a `powershell`
+    symlink to pwsh first in PATH and `--noconftest` (a venv's `bin/python`); the real-pip
+    preflight against GitHub/PyPI works the same way.
 - **The `shell` CI job** runs `shellcheck install-linux.sh install.sh uninstall*.sh` and the
   macOS installer tests under the `bash:3.2` container (the command above). Keep all bash
   installers shellcheck-clean (ubuntu-latest's shellcheck).

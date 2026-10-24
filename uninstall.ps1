@@ -34,7 +34,12 @@ Write-Host "  [4/4] Removing config..." -ForegroundColor White
 if (Test-Path $ConfigDir) {
     Remove-Item -Recurse -Force $ConfigDir
 }
-Write-Host "        Done" -ForegroundColor Green
+if (Test-Path $ConfigDir) {
+    # The wheelhouse (#64) is Administrators-only: a non-elevated run cannot remove it
+    Write-Host "        [!] $ConfigDir is still there (the wheelhouse needs an administrator): run the uninstaller elevated" -ForegroundColor Yellow
+} else {
+    Write-Host "        Done" -ForegroundColor Green
+}
 
 # Also clean up legacy winremote-mcp if present
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue

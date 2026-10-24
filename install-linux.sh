@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
 # RemoteOS MCP - One-line installer for Linux (systemd)
 # Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install-linux.sh | sudo bash
-#
 # Optional settings, read from the environment (`... | sudo REMOTEOS_MCP_REF=<sha> bash`):
 #   REMOTEOS_MCP_REF       the source to install: a commit sha, a tag or a branch (default: main)
 #   REMOTEOS_MCP_AUTH_KEY  the auth key to install (1-128 letters/digits). Default: keep the key
 #                          the box has (the running unit's, else config.json's), else a new one.
 #   GH_TOKEN               sent as the download's Authorization header on curl's stdin (a fork)
 #   REMOTEOS_MCP_MODE      desktop | headless (default: the existing unit's, else the session check)
-#   REMOTEOS_MCP_USER      the account the service runs as (default: the existing unit's User=,
-#                          else SUDO_USER, else root)
+#   REMOTEOS_MCP_USER      the service account (default: the existing unit's User=, else SUDO_USER, else root)
 #   REMOTEOS_MCP_POLICY    restart (default: restart and prove the new install) | enable-only
 #                          (install + enable for the next boot, never start: camera-box's cams)
 # A secret never goes on a command line, sudo's included: `sudo REMOTEOS_MCP_AUTH_KEY=… bash`
 # shows it in `ps`. Hand it to sudo's environment only (no export: curl never gets it):
 #   read -rs k
 #   curl -fsSL …/install-linux.sh | REMOTEOS_MCP_AUTH_KEY="$k" sudo --preserve-env=REMOTEOS_MCP_AUTH_KEY bash
-#
-# camera-box's venv layout; the key only in 0600 files under /etc/remoteos-mcp, never in the unit,
-# an argv or this output. Layout, order and rollback: README "Install", .claude/rules/installers.md.
+# Layout (camera-box's venv; the key only in 0600 files), order, rollback: .claude/rules/installers.md.
 set -euo pipefail
 
 say() { echo "        $*"; }
@@ -146,13 +142,17 @@ resolve_key() {
 
 # --- the box: python, the unit's mode and user ------------------------------------------------
 
-# Sets PYTHON to the first system python 3.10+.
+# python_ok "<python --version output>": 3.11+ (Pillow 13, the fix of its CVEs, needs 3.11; #64)
+python_ok() {
+    [[ "${1-}" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 11 ))
+}
+
 pick_python() {
     local cmd ver
     for cmd in python3 python /usr/bin/python3 /usr/local/bin/python3; do
         if command -v "$cmd" &>/dev/null || [[ -x "$cmd" ]]; then
             ver=$("$cmd" --version 2>&1 || true)
-            if [[ "$ver" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 10 )); then
+            if python_ok "$ver"; then
                 PYTHON="$cmd"
                 say "Found $ver ($cmd)"
                 return 0
@@ -164,7 +164,7 @@ pick_python() {
 
 find_python() {
     pick_python && return 0
-    say "Python 3.10+ not found. Trying the package manager..."
+    say "Python 3.11+ not found. Trying the package manager..."
     if command -v apt-get &>/dev/null; then
         apt-get install -y python3 python3-venv || true
     elif command -v dnf &>/dev/null; then
@@ -173,7 +173,7 @@ find_python() {
         yum install -y python3 || true
     fi
     pick_python \
-        || fail "Python 3.10+ required but not found. Install it (apt-get install python3 python3-venv, or dnf/yum) and rerun."
+        || fail "Python 3.11+ required but not found. Install it (apt-get install python3 python3-venv, or dnf/yum) and rerun."
 }
 
 # The first graphical user session: sets SESSION_TYPE (x11 / wayland, or nothing) and

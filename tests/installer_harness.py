@@ -21,11 +21,26 @@ from fake_pip import dist_field, dist_files, find_dists, write_dist
 
 ROOT = Path(__file__).resolve().parent.parent
 FAKE_SHA = "0123456789abcdef0123456789abcdef01234567"
-# git shim: `ls-remote` answers like GitHub does for refs/heads/main; anything
-# else prints a version line.
+DEV_SHA = "dddddddddddddddddddddddddddddddddddddddd"
+TAG_OBJECT_SHA = "7777777777777777777777777777777777777777"  # an annotated tag's own object
+TAG_SHA = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"  # the commit it points at (refs/tags/v1.0^{})
+# git shim: `ls-remote <url> [<ref>...]` answers like GitHub: the refs whose full name is one of
+# the patterns (an annotated tag's commit only for an explicit `refs/tags/<tag>^{}`), every ref
+# with no pattern; anything else prints a version line.
 _FAKE_GIT = f"""\
 if [[ "$1" == "ls-remote" ]]; then
-    printf '%s\\trefs/heads/main\\n' "{FAKE_SHA}"
+    shift 2
+    while read -r sha ref; do
+        if [[ $# -eq 0 ]]; then printf '%s\\t%s\\n' "$sha" "$ref"; continue; fi
+        for want in "$@"; do
+            if [[ "$ref" == "$want" ]]; then printf '%s\\t%s\\n' "$sha" "$ref"; fi
+        done
+    done <<'REFS'
+{FAKE_SHA} refs/heads/main
+{DEV_SHA} refs/heads/dev
+{TAG_OBJECT_SHA} refs/tags/v1.0
+{TAG_SHA} refs/tags/v1.0^{{}}
+REFS
     exit 0
 fi
 echo "git version 2.43.0"
