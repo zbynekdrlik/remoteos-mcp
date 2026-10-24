@@ -283,7 +283,10 @@ def build_oauth_routes(
             form = await request.form()
             body = dict(form)
         elif "application/json" in content_type:
-            body = await request.json()
+            try:
+                body = await request.json()
+            except ValueError:  # invalid JSON is the caller's error, never a 500
+                return JSONResponse({"error": "invalid_request"}, status_code=400)
         else:
             try:
                 form = await request.form()

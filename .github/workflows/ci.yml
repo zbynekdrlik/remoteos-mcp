@@ -31,24 +31,29 @@ jobs:
       - run: pip install -e '.[test]'
       - run: pytest
 
-  # Known vulnerabilities in the pinned dependency set (#39), on Python 3.12 (what install.ps1 and
-  # the macOS installer install) for each OS, so the Windows- and macOS-only pins are audited too.
-  # pip-audit evaluates the markers for its own interpreter: the Python 3.10-only pin
-  # (Pillow 12.3.0, whose CVEs are fixed only in Pillow 13, which needs 3.11) is NOT audited here;
-  # see #39. There is no ignore list: a finding is fixed by upgrading the pin (pyproject.toml, then
-  # the uv command at the top of constraints.txt); an advisory with no fixed release needs the
-  # owner's decision before anything is ignored.
+  # Known vulnerabilities in the pinned dependency set (#39). pip-audit evaluates the markers for
+  # its own interpreter, so each leg audits one slice: Python 3.12 on Linux, Windows and macOS
+  # (the platform-only pins; install.ps1 and the macOS installer install 3.12), and Python 3.11 on
+  # Linux (the pins marked < '3.12'; install-linux.sh takes any system Python 3.10+). The Python
+  # 3.10 slice is NOT audited: its Pillow 12.3.0 carries CVEs fixed only in Pillow 13, which needs
+  # 3.11, and dropping 3.10 or ignoring them is the owner's decision (#39). There is no ignore list:
+  # a finding is fixed by upgrading the pin (pyproject.toml, then the uv command at the top of
+  # constraints.txt).
   pip-audit:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.11" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - run: pip install pip-audit==2.10.1
       - run: pip-audit -r constraints.txt
 

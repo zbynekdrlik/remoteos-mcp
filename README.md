@@ -569,14 +569,15 @@ irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps
   only; redirect URIs must be `https://` or loopback `http://`; a configured client secret is
   required at the token endpoint and never returned by registration. The authorize endpoint
   approves every client, so OAuth WITHOUT `--oauth-client-secret` lets anyone obtain a token
-  (accepted next to the auth key): never turn it on without a secret
+  (accepted next to the auth key): never turn it on without a secret (the server warns at start)
 - **App (Windows):** the name and the arguments are taken literally since #39: `$env:VAR` or
   `$(...)` in them is no longer expanded by PowerShell
 - **`remoteos.toml` booleans** are real TOML booleans or the strings `true`/`false`/`1`/`0`/
   `yes`/`no`; anything else stops the server with an error naming the key (#39)
 - **Dependency audit (#39):** CI runs `pip-audit -r constraints.txt` (Python 3.12 on Linux,
-  Windows and macOS) with no ignore list; a finding is fixed by upgrading the pin. On Python 3.10
-  the server keeps Pillow 12.3.0 (Pillow 13 needs 3.11), which carries known CVEs
+  Windows and macOS, and 3.11 on Linux) with no ignore list; a finding is fixed by upgrading the
+  pin. The Python 3.10 pin set is not audited: on 3.10 the server keeps Pillow 12.3.0 (Pillow 13
+  needs 3.11), which carries known CVEs
 
 ## Powered by
 

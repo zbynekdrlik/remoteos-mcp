@@ -1741,6 +1741,14 @@ def cli(
     oauth_store = None
     oauth_validator = None
     use_oauth = bool(oauth_client_id or oauth_client_secret)
+    if use_oauth and not oauth_client_secret and transport != "stdio":
+        # #39 review: authorize approves every client, so without a secret a token is free for
+        # anyone, and AuthKeyMiddleware accepts it next to the key
+        click.echo(
+            "  WARNING: OAuth is on without --oauth-client-secret: anyone can obtain a token, "
+            "which is accepted next to the auth key. Set a client secret.",
+            err=True,
+        )
 
     if use_oauth and transport != "stdio":
         from remoteos.oauth import OAuthStore, build_oauth_routes, validate_oauth_token
