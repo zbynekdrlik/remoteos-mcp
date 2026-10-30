@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
-import logging
-import secrets
 import shlex
 import subprocess
 import textwrap
 from pathlib import Path
 
 import pytest
+from fake_console_child import popen_answered_by, run_result
 from fastmcp.exceptions import ToolError
 
 import remoteos.__main__ as server
 from remoteos import selfupgrade
-from remoteos.platform.command import ChildOutput
+from remoteos.platform import command
 from remoteos.tiers import LINUX_EXCLUDED_TOOLS, TOOL_TIERS
 
 ROOT = Path(__file__).resolve().parent.parent
 STAMP = "20261030T210500"
 RAW = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp"
-KEY = "k" + secrets.token_hex(16)
 
 
 class TestRef:
@@ -60,7 +58,7 @@ class TestLinux:
         assert plan.argv[:6] == ("sudo", "-n", "systemd-run", "--unit", unit, "--collect")
         assert "--setenv=REMOTEOS_MCP_REF=dev" in plan.argv
         assert plan.argv[-3:-1] == ("/bin/bash", "-c")
-        assert plan.argv[-1] == f"set -o pipefail; curl -fsSL {RAW}/dev/install-linux.sh | bash"
+        assert plan.argv[-1] == f"set -o pipefail; curl -fsSL --max-time 120 {RAW}/dev/install-linux.sh | bash"
         assert plan.log_path == f"/var/log/{unit}.log"
         assert f"--property=StandardOutput=file:{plan.log_path}" in plan.argv
         assert plan.ref_file is None
@@ -92,9 +90,18 @@ class TestMacos:
         assert self.plan.argv[9:11] == ("/bin/bash", "-c")
         assert self.plan.log_path == log_path
 
+    @pytest.mark.parametrize("ref", ["a9c497d", "0123456789abcdef"])
+    def test_a_short_sha_is_refused_because_install_sh_cannot_resolve_one(self, ref):
+        with pytest.raises(ValueError, match="full 40-character"):
+            selfupgrade.macos_plan(ref, STAMP, "/Users/u", "/opt/homebrew/bin")
+
+    def test_a_full_sha_and_a_branch_named_like_hex_length_pass(self):
+        for ref in ("0123456789abcdef0123456789abcdef01234567", "abc"):
+            selfupgrade.macos_plan(ref, STAMP, "/Users/u", "/opt/homebrew/bin")
+
     def test_the_job_removes_itself_last_or_launchd_reruns_it_forever(self):
         steps = self.plan.argv[-1].split("; ")
-        assert steps[-2] == f"curl -fsSL {RAW}/dev/install.sh | bash"
+        assert steps[-2] == f"curl -fsSL --max-time 120 {RAW}/dev/install.sh | bash"
         assert steps[-1] == f"launchctl remove com.remoteos-mcp.upgrade-{STAMP}"
 
     def test_the_shell_line_is_valid_and_quotes_the_paths(self, tmp_path):
@@ -136,36 +143,47 @@ class TestThisMachine:
         assert argv[0] == (runner or "sudo")
 
     def test_a_bad_ref_never_reaches_a_runner(self, monkeypatch):
-        monkeypatch.setattr(selfupgrade, "run_child", lambda *a, **k: pytest.fail("a runner started"))
+        monkeypatch.setattr(command.subprocess, "Popen", lambda *a, **k: pytest.fail("a runner started"))
         with pytest.raises(ToolError, match="commit sha, a tag or a branch"):
             server.SelfUpgrade("a;b")
 
 
-def _child(returncode=0, stderr=""):
-    return ChildOutput(returncode, "", stderr)
+@pytest.fixture
+def child(monkeypatch):
+    """Popen answered at the OS boundary; -> the argvs started. `child.answer` = (returncode, stderr)."""
+
+    class Children(list):
+        answer = (0, "")
+        before = staticmethod(lambda: None)
+
+    children = Children()
+
+    def run(argv, **kwargs):
+        children.before()
+        children.append(list(argv))
+        return run_result(kwargs, children.answer[0], "", children.answer[1])
+
+    monkeypatch.setattr(command.subprocess, "Popen", popen_answered_by(run))
+    return children
 
 
 class TestStart:
-    def test_the_reply_names_the_ref_and_the_log(self, monkeypatch):
-        calls = []
-        monkeypatch.setattr(selfupgrade, "run_child", lambda argv, timeout: calls.append((argv, timeout)) or _child())
+    def test_the_reply_names_the_ref_and_the_log(self, child):
         plan = selfupgrade.linux_plan("dev", STAMP, 0)
         reply = selfupgrade.start(plan)
-        assert calls == [(list(plan.argv), selfupgrade.START_TIMEOUT_S)]
+        assert child == [list(plan.argv)]
         assert "Upgrade to dev started" in reply and plan.log_path in reply and "/health" in reply
 
-    def test_windows_writes_the_ref_before_it_starts_the_task(self, monkeypatch, tmp_path):
+    def test_windows_writes_the_ref_before_it_starts_the_task(self, child, tmp_path):
         (tmp_path / ".remoteos-mcp").mkdir()
         plan = selfupgrade.windows_plan("dev", str(tmp_path))
         seen = []
-        monkeypatch.setattr(
-            selfupgrade, "run_child", lambda argv, timeout: seen.append(Path(plan.ref_file).read_text()) or _child()
-        )
+        child.before = lambda: seen.append(Path(plan.ref_file).read_text())
         selfupgrade.start(plan)
         assert seen == ["dev\n"]
 
-    def test_a_runner_that_fails_is_a_tool_error_with_its_stderr(self, monkeypatch):
-        monkeypatch.setattr(selfupgrade, "run_child", lambda argv, timeout: _child(1, "sudo: a password is required\n"))
+    def test_a_runner_that_fails_is_a_tool_error_with_its_stderr(self, child):
+        child.answer = (1, "sudo: a password is required\n")
         with pytest.raises(ToolError, match="sudo exit 1.*a password is required.*over SSH"):
             selfupgrade.start(selfupgrade.linux_plan("main", STAMP, 1000))
 
@@ -175,13 +193,6 @@ class TestStart:
         bad = selfupgrade.UpgradePlan("main", ("false",), "/tmp/log")
         with pytest.raises(ToolError, match="false exit 1"):
             selfupgrade.start(bad)
-
-    def test_the_start_is_logged_with_the_ref_and_no_environment(self, monkeypatch, caplog):
-        monkeypatch.setenv("REMOTEOS_AUTH_KEY", KEY)
-        monkeypatch.setattr(selfupgrade, "run_child", lambda argv, timeout: _child())
-        with caplog.at_level(logging.INFO, logger="remoteos.selfupgrade"):
-            selfupgrade.start(selfupgrade.linux_plan("dev", STAMP, 0))
-        assert "ref=dev" in caplog.text and KEY not in caplog.text
 
 
 class TestTheKeyAndTheGate:

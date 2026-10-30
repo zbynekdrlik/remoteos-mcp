@@ -839,6 +839,7 @@ install_sudoers() {
         say "sudoers drop-in: unchanged (${SUDOERS_FILE})"
         return 0
     fi
+    [[ ! -e "$SUDOERS_FILE" ]] || say "sudoers drop-in: replacing what ${SUDOERS_FILE} held (another text, mode or owner)"
     mkdir -p "${SUDOERS_FILE%/*}"
     WRITE_TMP="${SUDOERS_FILE}.new"  # on_exit removes it
     install -m 0440 "$SUDOERS_TMP" "$WRITE_TMP"

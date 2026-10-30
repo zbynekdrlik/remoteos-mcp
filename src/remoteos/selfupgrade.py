@@ -41,6 +41,9 @@ WINDOWS_TASK = "RemoteOSMCP-Upgrade"
 WINDOWS_REF_FILE = "upgrade-ref.txt"
 WINDOWS_LOG_FILE = "upgrade.log"
 START_TIMEOUT_S = 30
+# The unattended runners have no runtime limit: a stalled download must end (as the installers' own).
+_CURL = "curl -fsSL --max-time 120"
+_SHORT_SHA = re.compile(r"[0-9a-f]{7,39}")
 _REF = re.compile(r"[A-Za-z0-9._/-]{1,100}")
 
 
@@ -76,7 +79,7 @@ def linux_plan(ref: str, stamp: str, euid: int) -> UpgradePlan:
     unit = f"remoteos-mcp-upgrade-{stamp}"
     log_path = f"/var/log/{unit}.log"
     # No `$` or `%` in the line: systemd expands them in a command. The ref was checked.
-    script = f"set -o pipefail; curl -fsSL {_installer_url(ref, 'install-linux.sh')} | bash"
+    script = f"set -o pipefail; {_CURL} {_installer_url(ref, 'install-linux.sh')} | bash"
     argv = (
         *(() if euid == 0 else ("sudo", "-n")),
         "systemd-run",
@@ -94,6 +97,8 @@ def linux_plan(ref: str, stamp: str, euid: int) -> UpgradePlan:
 
 
 def macos_plan(ref: str, stamp: str, home: str, python_dir: str) -> UpgradePlan:
+    if _SHORT_SHA.fullmatch(ref):  # install.sh takes a full sha, a tag or a branch; a detached run reads no error
+        raise ValueError(f"macOS needs the full 40-character commit sha, not {ref}")
     label = f"com.remoteos-mcp.upgrade-{stamp}"
     log_path = f"{home}/.remoteos-mcp/upgrade-{stamp}.log"
     # launchd's PATH has no Homebrew: this interpreter's directory first, so the installer finds
@@ -104,7 +109,7 @@ def macos_plan(ref: str, stamp: str, home: str, python_dir: str) -> UpgradePlan:
             f"export HOME={shlex.quote(home)}",
             f"export PATH={shlex.quote(python_dir)}:/opt/homebrew/bin:/usr/local/bin:$PATH",
             "set -o pipefail",
-            f"curl -fsSL {_installer_url(ref, 'install.sh')} | bash",
+            f"{_CURL} {_installer_url(ref, 'install.sh')} | bash",
             f"launchctl remove {label}",
         )
     )
@@ -149,5 +154,5 @@ def start(plan: UpgradePlan) -> str:
     log.info("SelfUpgrade: started ref=%s log=%s", plan.ref, plan.log_path)
     return (
         f"Upgrade to {plan.ref} started. Log: {plan.log_path}. The server restarts when the installer "
-        "switches: poll /health for the new version."
+        "switches: /health decides, not this reply (a run already in progress wins, a failed one rolls back)."
     )

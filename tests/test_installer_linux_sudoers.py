@@ -96,7 +96,9 @@ def test_a_hand_made_identical_file_is_adopted_untouched(tmp_path):
 def test_another_text_is_replaced(tmp_path):
     box = linux_box(tmp_path)
     file = hand_made(box, "someoneelse ALL=(ALL) ALL\n")
-    installed(box)
+    result = box.run()
+    assert result.returncode == 0, output(result)
+    assert "replacing what" in output(result)
     assert file.read_text() == LINE and mode_of(file) == 0o440
 
 
@@ -143,7 +145,9 @@ def test_a_signal_during_the_write_leaves_no_temp_name(tmp_path):
 def test_the_uninstaller_removes_the_drop_in(tmp_path):
     box = linux_box(tmp_path)
     installed(box)
+    log = box.root / "remoteos-mcp-upgrade-20261030T210500.log"
+    log.write_text("a SelfUpgrade run\n")
     result = box.run(script=box.uninstaller())
     assert result.returncode == 0, output(result)
-    assert not box.sudoers_file.exists()
+    assert not box.sudoers_file.exists() and not log.exists()
     assert "Removed" in output(result)

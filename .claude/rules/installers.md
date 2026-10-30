@@ -28,7 +28,7 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   `installers/install-ps1/*.ps1`, run `python3 scripts/build_installers.py`, commit both.** The
   parts are concatenated byte for byte in file-name order; `tests/test_installer_generated.py`
   fails when a committed file differs. Line numbers in old tickets refer to the file before the
-  split. The one-file budget applies per part now. `install.sh` (720 lines) is not split.
+  split. The one-file budget applies per part now. `install.sh` is not split.
 - A part holds whole functions, or the flow (`90-*`): the last part's `main "$@"` keeps a truncated
   download from half-running. shellcheck and the static tests read the generated files.
 
@@ -66,6 +66,11 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   run must not relaunch for UAC or wait for Enter. `Register-RemoteOSUpgradeTask` leaves an unchanged
   task alone, because a SelfUpgrade run is inside it. `Stop-RemoteOSServer` skips `$PID` for the same reason.
 - A box needs one installer run at 0.7.0.dev39+ before SelfUpgrade works (the drop-in, the task).
+- `install.sh` resolves no short sha, so `macos_plan` refuses one. raw caches `main` for minutes: an
+  upgrade right after a merge may run the previous installer against the new source; pass a sha.
+- The runners' `curl` has `--max-time 120`: a transient unit or a launchd job has no runtime limit.
+- `systemd-run` answers 0 once the unit is queued, so a read-only `/var/log` or a held install lock
+  still replies "started": `/health` decides, as the reply says.
 
 ## The key, on every OS (#12, since 0.7.0.dev32)
 

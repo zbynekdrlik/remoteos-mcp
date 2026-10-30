@@ -13,6 +13,7 @@ CONFIG_DIR="/etc/remoteos-mcp"
 VENV_LINK="/opt/remoteos-mcp-venv"
 VENV_STORE="/opt/remoteos-mcp-venvs"
 SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"
+UPGRADE_LOGS="/var/log/remoteos-mcp-upgrade"
 
 echo ""
 echo "  RemoteOS MCP Uninstaller (Linux)"
@@ -75,6 +76,7 @@ if [[ -e "$SUDOERS_FILE" ]]; then
 else
     echo "        $SUDOERS_FILE not found, skipping"
 fi
+rm -f "$UPGRADE_LOGS"-*.log  # SelfUpgrade's
 
 # --- [6/7] Remove the venv (a link into the build store, or a real directory) ---
 echo "  [6/7] Removing the venv..."

@@ -6,8 +6,8 @@ Runs under bash 3.2 too (the `shell` CI job: macOS's /bin/bash).
 
 from __future__ import annotations
 
-import getpass
 import os
+import pwd
 import stat
 import subprocess
 from pathlib import Path
@@ -47,8 +47,7 @@ class Mac:
         log_every_command(self.shims, self.records)
 
     def run(self):
-        result = _run_installer(self.script, self.shims, self.tmp)
-        return result
+        return _run_installer(self.script, self.shims, self.tmp)
 
     def commands(self, tool: str) -> list[list[str]]:
         return [r[1:] for r in records(self.records) if r and r[0] == tool]
@@ -60,7 +59,7 @@ def mac(tmp_path: Path) -> Mac:
 
 
 def line() -> str:
-    return f"{getpass.getuser()} ALL=(ALL) NOPASSWD:ALL\n"
+    return f"{pwd.getpwuid(os.getuid()).pw_name} ALL=(ALL) NOPASSWD:ALL\n"
 
 
 def test_the_account_gets_the_drop_in_through_sudo(mac):
