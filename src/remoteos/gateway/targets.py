@@ -111,17 +111,26 @@ class Target:
         except ValueError as exc:
             raise TargetError(f"{self.label}: the write helper gave no result") from exc
 
+    def run_helper(self, source: str, args: list[str]) -> bytes:
+        """Run a stdlib-only Python *source* as this target's account; its stdout. Raises
+        ``TargetError``. Unlike ``read``/``write`` this leaves this process for ``local`` too."""
+        proc = self._run(args, b"", source=source)
+        self._check(proc, "scan")
+        return proc.stdout
+
     # -- plumbing --------------------------------------------------------------------------
 
-    def _argv(self, op_args: list[str]) -> list[str]:
-        helper = ["python3", "-c", _helper_source(), *op_args]
+    def _argv(self, op_args: list[str], source: str | None = None) -> list[str]:
+        helper = ["python3", "-c", source or _helper_source(), *op_args]
+        if self.kind == "local":
+            return helper
         if self.kind == "sudo":
             return [self.sudo_bin, "-n", "-u", self.account, "--", *helper]
         # ssh hands the rest of its argv to the remote shell as ONE command line: quote it
         return [self.ssh_bin, *SSH_OPTIONS, f"{self.account}@{self.host}", shlex.join(helper)]
 
-    def _run(self, op_args: list[str], stdin: bytes) -> subprocess.CompletedProcess:
-        argv = self._argv(op_args)
+    def _run(self, op_args: list[str], stdin: bytes, source: str | None = None) -> subprocess.CompletedProcess:
+        argv = self._argv(op_args, source)
         logger.debug("config %s via %s", op_args[0], self.label)
         try:
             return subprocess.run(

@@ -191,6 +191,16 @@ paths:
   - `probe_version` reads the public `/health` without a key. A version that is not plain
     `[0-9A-Za-z.+_-]` is dropped: it would reach the status file and Discord.
   - `check` tests never reach GitHub: `Check.releases_url` defaults to a closed port.
+- **Restart notice (`live_sessions.py` + `session_scan.py`, #66):**
+  - `session_scan.py` is like `fileops.py`: stdlib only, py3.8+, no package imports, its SOURCE runs
+    through `Target.run_helper` as the project's account. Only that account can read
+    `/proc/<pid>/cwd` and `environ`. Of `environ` it takes `TMUX` + `TMUX_PANE` only.
+  - A session = comm `claude` + a `.mcp.json` in its cwd or a parent resolving to the config.
+  - It runs AFTER the registry lock is released: notify can take a minute.
+  - It runs only for a file really written (a dry run: would be), never for a registry-only change.
+  - A failed scan or notify is echoed and never counts as a failed project.
+  - Real-process test: a shebang script named `claude` has comm `claude`
+    (`tests/test_gateway_live_sessions.py`).
 - **Dry run = one choke point:** `sync._Saver(dry_run=True).commit()` never writes. Registry
   edits of a dry run (narrowing, withdrawing, `--prune`) happen in memory only. Never add a
   second save path around it.

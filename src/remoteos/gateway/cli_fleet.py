@@ -24,6 +24,7 @@ from pathlib import Path
 import click
 
 from remoteos.gateway.check import (
+    CHUNK_LIMIT,
     DEFAULT_AIRULESET_PATH,
     DEFAULT_STATUS_PATH,
     CheckError,
@@ -61,6 +62,21 @@ from remoteos.release_channel import RELEASES_URL, fetch_releases, soak_days
 
 _LOCAL_HOST_HELP = "This host's name as the manifest's `host` spells it (dev1); other hosts are reached over ssh."
 _GATEWAY_URL_HELP = f"The gateway (default: the manifest's [gateway] url, else {DEFAULT_GATEWAY_URL})."
+
+
+def _notify_options(function):
+    function = click.option(
+        "--notify-owner", envvar="REMOTEOS_GATEWAY_NOTIFY_OWNER", default=None, help="notify --owner-name."
+    )(function)
+    return click.option(
+        "--airuleset",
+        "airuleset_path",
+        type=click.Path(dir_okay=False, path_type=Path),
+        envvar="REMOTEOS_GATEWAY_AIRULESET",
+        default=DEFAULT_AIRULESET_PATH,
+        show_default=True,
+        help="airuleset.py whose `notify --body` tells the owner; missing = printed or logged instead.",
+    )(function)
 
 
 def _status_file_option(function):
@@ -343,10 +359,14 @@ def _describe_recipe(recipe: RepairRecipe) -> str:
     is_flag=True,
     help="Remove the consumers of projects that left the manifest (by default they only lose their machines).",
 )
+@_notify_options
 @click.pass_obj
-def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> None:
+def sync_configs_command(
+    paths, dry_run: bool, local_host: str, prune: bool, airuleset_path: Path, notify_owner: str | None
+) -> None:
     """Generate every project's MCP config from the manifest: fleet entries through the gateway
-    (one token per project, allow-list = the manifest); every other entry is left byte-equal."""
+    (one token per project, allow-list = the manifest); every other entry is left byte-equal.
+    The owner is told which live Claude sessions of the written configs need a restart."""
     try:
         manifest = load_manifest(paths.manifest)
         keystore = load_keystore(paths.machines)
@@ -359,6 +379,8 @@ def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> 
             today=_dt.date.today().isoformat(),
             echo=click.echo,
             prune=prune,
+            notifier=airuleset_notifier(airuleset_path.expanduser(), notify_owner),
+            message_limit=CHUNK_LIMIT,
         )
     except (ManifestError, MachineSourceError, RegistryError, SyncError) as exc:
         raise _fail(exc) from exc
@@ -373,16 +395,7 @@ def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> 
 @click.command("check")
 @_status_file_option
 @click.option("--gateway-url", default=None, help=_GATEWAY_URL_HELP + " Its /healthz is probed too.")
-@click.option(
-    "--airuleset",
-    "airuleset_path",
-    type=click.Path(dir_okay=False, path_type=Path),
-    envvar="REMOTEOS_GATEWAY_AIRULESET",
-    default=DEFAULT_AIRULESET_PATH,
-    show_default=True,
-    help="airuleset.py whose `notify --body` announces a state change; missing = a log line instead.",
-)
-@click.option("--notify-owner", envvar="REMOTEOS_GATEWAY_NOTIFY_OWNER", default=None, help="notify --owner-name.")
+@_notify_options
 @click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
 @click.option(
     "--releases-url",

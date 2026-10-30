@@ -527,6 +527,13 @@ after all test jobs passed (`scripts/create-release.sh`, a no-op when it exists)
 - **Hold a bad release:** mark it "pre-release" in the GitHub UI. Everything ignores it from then on.
 - `remoteos.release_channel` is the resolver; `check` uses it, the per-box updater (#65) will too.
 
+**Restart notice:** after a real `sync-configs`, every project whose config was written is scanned
+where it lives (local, `sudo -n`, ssh) for live Claude sessions: `claude` processes whose cwd's
+`.mcp.json` resolves to that config, with their tmux pane. ONE owner message names them with
+"spusti `/exit` a `claude -c`". No live session, no message. `--dry-run` prints what it would send.
+The text is always printed, because the owner's airuleset policy may post nothing. A failed scan
+or notify is reported in the output and never fails the sync.
+
 **`check` (the watchdog):**
 
 - **What it probes.** Every key-store machine directly with its stored key (`initialize`),

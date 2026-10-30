@@ -18,7 +18,8 @@ keeps its ORIGINAL member text (key as written, the colon's spacing, value) byte
 so does everything outside ``mcpServers``; only the
 whitespace BETWEEN entries is rendered on a rewrite (a file with no ``mcpServers`` at all is
 re-serialised as JSON). A config whose entries do not change is not written at all.
-Writes are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``).
+Writes are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``). The owner is then
+told which live Claude sessions of the written configs need a restart (``live_sessions``).
 
 A managed consumer whose project left the manifest keeps its token hash with an EMPTY
 allow-list (``--prune`` removes it), so undoing a mistaken manifest edit needs no new token.
@@ -42,6 +43,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from remoteos.gateway.keystore import bearer_value, mask_secret
+from remoteos.gateway.live_sessions import notify_restarts
 from remoteos.gateway.manifest import MODE_DIRECT, MODE_GATEWAY, Manifest, Project
 from remoteos.gateway.registry import (
     SYNC_MANAGER,
@@ -420,15 +422,19 @@ def sync_configs(
     echo: Callable[[str], None],
     prune: bool = False,
     mint: Callable[[], str] = mint_token,
+    notifier: Callable[[str], bool] | None = None,
+    message_limit: int = 1700,
 ) -> int:
     """Run the sync; returns the number of FAILED projects (0 = everything is in place).
 
     *prune* removes managed consumers whose project left the manifest; without it they keep
-    their token hash with an empty allow-list.
+    their token hash with an empty allow-list. *notifier* tells the owner which live sessions
+    need a restart; a failure of that never counts as a failed project.
     """
     validate_run(manifest, keystore, local_host=local_host)
     failures = 0
     changed_projects: list[str] = []
+    to_restart: list[tuple[Project, Target]] = []  # the configs written (a dry run: would be)
     with registry_transaction(registry_path) as transaction:
         saver = _Saver(transaction, dry_run=dry_run)
         registry = transaction.registry
@@ -465,6 +471,8 @@ def sync_configs(
                 echo(consumer_line)
             if dry_run:
                 echo("  (dry run — nothing written)")
+                if plan.file_changes:
+                    to_restart.append((project, target))
                 continue
             try:
                 written = _apply(plan, registry, saver, today)
@@ -475,6 +483,7 @@ def sync_configs(
                 continue
             if written is not None:
                 changed_projects.append(project.name)
+                to_restart.append((project, target))
                 echo(f"  written (backup: {written.get('backup') or 'none — new file'})")
             logger.info("sync-configs: project %s in place (%s)", project.name, target.label)
 
@@ -502,6 +511,7 @@ def sync_configs(
             "Running Claude Code sessions of " + ", ".join(changed_projects) + " read their .mcp.json only at start:"
             " each needs ONE restart (or /mcp Reconnect). After that, a key change never reaches a session."
         )
+    notify_restarts(to_restart, notifier=notifier, echo=echo, dry_run=dry_run, limit=message_limit)
     return failures
 
 
