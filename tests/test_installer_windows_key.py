@@ -463,3 +463,12 @@ def test_an_elevated_delete_never_follows_a_link() -> None:
     tree = "\n".join(_function_code("Remove-RemoteOSTree"))
     assert "[System.IO.Directory]::Delete($Path)" in tree and "Delete($Path, $true)" not in tree
     assert "Remove-RemoteOSTree $entry.FullName" in tree
+
+
+def test_account_names_are_qualified_where_computer_and_user_share_a_name():
+    # On ABLETON-FOH the account Ableton-FOH does not translate by its bare name (#57).
+    code = "\n".join(line for _, line in _code_lines())
+    assert "function Get-RemoteOSAccount" in code
+    assert "NTAccount($User)" not in code
+    assert "-UserId $User" not in code
+    assert "-UserId $desktopUser" not in code

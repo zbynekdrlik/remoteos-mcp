@@ -40,7 +40,7 @@ function Register-RemoteOSUpgradeTask([string]$ConfigDir, [string]$User) {
     $existing = Get-ScheduledTask -TaskName "RemoteOSMCP-Upgrade" -ErrorAction SilentlyContinue
     if ($existing -and @($existing.Actions)[0].Arguments -ceq $arguments) { return $false }
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
-    $principal = New-ScheduledTaskPrincipal -UserId $User -RunLevel Highest -LogonType Interactive
+    $principal = New-ScheduledTaskPrincipal -UserId (Get-RemoteOSAccountName $User) -RunLevel Highest -LogonType Interactive
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
     $task = @{ TaskName = "RemoteOSMCP-Upgrade"; Action = $action; Principal = $principal; Settings = $settings; Force = $true }
     Register-ScheduledTask @task | Out-Null

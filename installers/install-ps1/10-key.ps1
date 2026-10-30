@@ -2,6 +2,21 @@
 # Precedence: an explicit REMOTEOS_MCP_AUTH_KEY, the running start script's, config.json, remoteos.toml's
 # [server] auth_key, the old winremote config, else new. The server reads REMOTEOS_AUTH_KEY, never --auth-key.
 
+function Get-RemoteOSAccount([string]$User) {
+    # The account as a SID. The computer name comes first: where computer and user share a name
+    # (ABLETON-FOH), the bare name does not translate. A domain user only resolves bare.
+    foreach ($name in @("$env:COMPUTERNAME\$User", $User)) {
+        try {
+            return (New-Object System.Security.Principal.NTAccount($name)).Translate([System.Security.Principal.SecurityIdentifier])
+        } catch { continue }
+    }
+    throw "the account $User does not exist on this box"
+}
+
+function Get-RemoteOSAccountName([string]$User) {
+    return (Get-RemoteOSAccount $User).Translate([System.Security.Principal.NTAccount]).Value
+}
+
 function Test-RemoteOSKey([string]$Key) {
     # 1-128 ASCII letters/digits; \z, not $: $ also matches before a trailing newline
     return [bool]($Key -and $Key.Length -le 128 -and $Key -cmatch '^[A-Za-z0-9]+\z')
@@ -139,7 +154,7 @@ function Set-RemoteOSOwnerOnlyAcl([string]$Path, [string]$User) {
     $acl = New-Object System.Security.AccessControl.FileSecurity
     $acl.SetAccessRuleProtection($true, $false)
     $identities = @(
-        (New-Object System.Security.Principal.NTAccount($User)),
+        (Get-RemoteOSAccount $User),
         (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')),
         (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544'))
     )

@@ -95,7 +95,7 @@ function Protect-RemoteOSWheelhouseRoot([string]$Root, [string]$User) {
         $grants = @(
             @((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')), 'FullControl'),
             @((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')), 'FullControl'),
-            @((New-Object System.Security.Principal.NTAccount($User)), 'ReadAndExecute')
+            @((Get-RemoteOSAccount $User), 'ReadAndExecute')
         )
         foreach ($grant in $grants) {
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($grant[0], $grant[1], $inherit, $none, 'Allow')))
