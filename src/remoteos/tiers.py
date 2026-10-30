@@ -52,6 +52,7 @@ TOOL_TIERS = {
         "TaskDelete",
         "SetClipboard",
         "LockScreen",
+        "SelfUpgrade",
     },
 }
 

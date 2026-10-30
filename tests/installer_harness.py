@@ -45,6 +45,16 @@ REFS
 fi
 echo "git version 2.43.0"
 """
+FAKE_SUDO = """\
+[[ "$1" != "-n" ]] || shift
+if [[ "$1" == "install" ]]; then
+    shift
+    while [[ "$1" == -* ]]; do shift 2; done
+    cp "$1" "$2"
+    exec chmod 440 "$2"
+fi
+exec "$@"
+"""
 INSTALLER_LINUX = ROOT / "install-linux.sh"
 INSTALLER_MACOS = ROOT / "install.sh"
 INSTALLER_WINDOWS = ROOT / "install.ps1"
@@ -90,6 +100,11 @@ def _prepare_macos_installer(tmp_path: Path) -> Path:
     content = content.replace(
         'mkdir -p "$HOME/Library/LaunchAgents"',
         f'mkdir -p "{launch_dir}"',
+    )
+
+    content = content.replace(
+        'SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"',
+        f'SUDOERS_FILE="{tmp_path / "sudoers.d" / "90-remoteos-mcp"}"',
     )
 
     script = tmp_path / "install-macos.sh"
@@ -205,6 +220,11 @@ fi
 
     # git — never the real one (it would ls-remote GitHub)
     _make_shim(shim_dir / "git", _FAKE_GIT)
+
+    # visudo, sudo — macOS's. This sudo runs the command as the test user, and its `install` drops
+    # the root owner, which the test user cannot set.
+    _make_shim(shim_dir / "visudo", "exit 0")
+    _make_shim(shim_dir / "sudo", FAKE_SUDO)
 
 
 def _run_installer(
