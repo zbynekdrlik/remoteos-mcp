@@ -34,6 +34,7 @@ class Check:
         self.tmp = tmp_path
         self.keystore = tmp_path / "cfg" / "machines.json"
         self.status = tmp_path / "state" / "machines-status.json"
+        self.releases_url = closed_port_url()  # never the real GitHub; a drift test sets a fake one
         self.airuleset, self.notify_log = install_fake_airuleset(tmp_path / "airuleset", monkeypatch)
 
     def store(self, entries: dict) -> None:
@@ -54,6 +55,8 @@ class Check:
                 gateway_url,
                 "--airuleset",
                 str(self.airuleset),
+                "--releases-url",
+                self.releases_url,
                 *extra,
             ],
         )

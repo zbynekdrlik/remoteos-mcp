@@ -544,3 +544,14 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - **Tests:** `tests/test_installer_generated.py`, `tests/test_installer_linux_sudoers.py`,
   `tests/test_installer_macos_sudoers.py` (bash 3.2 too), `tests/test_selfupgrade.py`,
   `tests_windows/test_install_ps1_upgrade_task.py`.
+
+## #63 + #66 — release job, stable/canary resolver, drift in check; restart notice from sync-configs, 0.7.0.dev40
+
+- #63: `scripts/create-release.sh` + CI `release` job (needs every test job, push to main only); `release_channel.py`
+  (`choose`, `behind_since`, `fetch_releases`); `gateway/drift.py`; `probe_version`; `machine list` version.
+  Tests: `tests/test_release_channel.py`, `tests/test_gateway_drift.py`.
+- #66: `gateway/session_scan.py` (stdlib, runs through `Target.run_helper`) + `gateway/live_sessions.py`.
+  Tests: `tests/test_gateway_live_sessions.py` (a real process with comm `claude`).
+- Decisions: behind-since is computed from the releases, no history; judged only on a version read this run; one
+  report per episode. `suppressed` from airuleset counts as delivered (owner policy posts nothing for zbynek, so both
+  messages stay in the journal / sync output until the owner decides otherwise).

@@ -18,7 +18,8 @@ keeps its ORIGINAL member text (key as written, the colon's spacing, value) byte
 so does everything outside ``mcpServers``; only the
 whitespace BETWEEN entries is rendered on a rewrite (a file with no ``mcpServers`` at all is
 re-serialised as JSON). A config whose entries do not change is not written at all.
-Writes are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``).
+Writes are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``). The owner is then
+told which live Claude sessions of the written configs need a restart (``live_sessions``).
 
 A managed consumer whose project left the manifest keeps its token hash with an EMPTY
 allow-list (``--prune`` removes it), so undoing a mistaken manifest edit needs no new token.
@@ -42,6 +43,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from remoteos.gateway.keystore import bearer_value, mask_secret
+from remoteos.gateway.live_sessions import notify_restarts
 from remoteos.gateway.manifest import MODE_DIRECT, MODE_GATEWAY, Manifest, Project
 from remoteos.gateway.registry import (
     SYNC_MANAGER,
@@ -420,81 +422,90 @@ def sync_configs(
     echo: Callable[[str], None],
     prune: bool = False,
     mint: Callable[[], str] = mint_token,
+    notifier: Callable[[str], bool] | None = None,
 ) -> int:
     """Run the sync; returns the number of FAILED projects (0 = everything is in place).
 
     *prune* removes managed consumers whose project left the manifest; without it they keep
-    their token hash with an empty allow-list.
+    their token hash with an empty allow-list. *notifier* tells the owner which live sessions
+    need a restart; a failure of that never counts as a failed project.
     """
     validate_run(manifest, keystore, local_host=local_host)
     failures = 0
     changed_projects: list[str] = []
-    with registry_transaction(registry_path) as transaction:
-        saver = _Saver(transaction, dry_run=dry_run)
-        registry = transaction.registry
-        for project in manifest.projects.values():
-            target = target_for(project.host, project.account, local_host=local_host)
-            head = f"{project.name} ({project.host}, {project.account}, {target.label}): {project.config}"
-            try:
-                plan = plan_project(
-                    project,
-                    target,
-                    target.read(project.config),
-                    manifest=manifest,
-                    keystore=keystore,
-                    registry=registry,
-                    mint=mint,
-                )
-            except (TargetError, SyncError) as exc:
-                failures += 1
-                echo(f"{head}\n  FAILED: {exc}")
-                _narrow_allow_list(registry, project)
-                saver.commit()
-                logger.warning("sync-configs: project %s FAILED: %s", project.name, exc)
-                continue
-            consumer_line = _consumer_change(registry, plan)
-            if not plan.file_changes and consumer_line is None:
-                echo(f"{project.name}: unchanged")
-                for note in plan.notes:
-                    echo(note)
-                continue
-            echo(head)
-            for line in plan.lines + plan.notes:
-                echo(line)
-            if consumer_line:
-                echo(consumer_line)
-            if dry_run:
-                echo("  (dry run — nothing written)")
-                continue
-            try:
-                written = _apply(plan, registry, saver, today)
-            except TargetError as exc:
-                failures += 1
-                echo(f"  FAILED: {exc}")
-                logger.warning("sync-configs: project %s write FAILED: %s", project.name, exc)
-                continue
-            if written is not None:
-                changed_projects.append(project.name)
-                echo(f"  written (backup: {written.get('backup') or 'none — new file'})")
-            logger.info("sync-configs: project %s in place (%s)", project.name, target.label)
+    to_restart: list[tuple[Project, Target]] = []  # the configs written (a dry run: would be)
+    try:
+        with registry_transaction(registry_path) as transaction:
+            saver = _Saver(transaction, dry_run=dry_run)
+            registry = transaction.registry
+            for project in manifest.projects.values():
+                target = target_for(project.host, project.account, local_host=local_host)
+                head = f"{project.name} ({project.host}, {project.account}, {target.label}): {project.config}"
+                try:
+                    plan = plan_project(
+                        project,
+                        target,
+                        target.read(project.config),
+                        manifest=manifest,
+                        keystore=keystore,
+                        registry=registry,
+                        mint=mint,
+                    )
+                except (TargetError, SyncError) as exc:
+                    failures += 1
+                    echo(f"{head}\n  FAILED: {exc}")
+                    _narrow_allow_list(registry, project)
+                    saver.commit()
+                    logger.warning("sync-configs: project %s FAILED: %s", project.name, exc)
+                    continue
+                consumer_line = _consumer_change(registry, plan)
+                if not plan.file_changes and consumer_line is None:
+                    echo(f"{project.name}: unchanged")
+                    for note in plan.notes:
+                        echo(note)
+                    continue
+                echo(head)
+                for line in plan.lines + plan.notes:
+                    echo(line)
+                if consumer_line:
+                    echo(consumer_line)
+                if dry_run:
+                    echo("  (dry run — nothing written)")
+                    if plan.file_changes:
+                        to_restart.append((project, target))
+                    continue
+                try:
+                    written = _apply(plan, registry, saver, today)
+                except TargetError as exc:
+                    failures += 1
+                    echo(f"  FAILED: {exc}")
+                    logger.warning("sync-configs: project %s write FAILED: %s", project.name, exc)
+                    continue
+                if written is not None:
+                    changed_projects.append(project.name)
+                    to_restart.append((project, target))
+                    echo(f"  written (backup: {written.get('backup') or 'none — new file'})")
+                logger.info("sync-configs: project %s in place (%s)", project.name, target.label)
 
-        gateway_consumers = {p.consumer for p in manifest.projects.values() if p.mode == MODE_GATEWAY}
-        for name, consumer in sorted(registry.consumers.items()):
-            if consumer.managed_by != SYNC_MANAGER or name in gateway_consumers:
-                continue
-            # Access goes (never broader than the manifest), the token hash stays: a mistaken
-            # manifest edit, undone, restores the project with the SAME token and no restart.
-            if prune:
-                echo(f"consumer {name}: its project left the manifest (or is direct now) — "
-                     + ("would be removed (dry run)" if dry_run else "removed (--prune)"))
-                del registry.consumers[name]
-                continue
-            withdrawn = "access withdrawn" if consumer.machines else "access stays withdrawn"
-            echo(f"consumer {name}: its project left the manifest (or is direct now) — {withdrawn} (no machines;"
-                 f" its token stays registered, so putting the project back needs no restart)."
-                 " `sync-configs --prune` removes the consumer.")
-            consumer.machines = []
-        saver.commit()  # a no-op in a dry run
+            gateway_consumers = {p.consumer for p in manifest.projects.values() if p.mode == MODE_GATEWAY}
+            for name, consumer in sorted(registry.consumers.items()):
+                if consumer.managed_by != SYNC_MANAGER or name in gateway_consumers:
+                    continue
+                # Access goes (never broader than the manifest), the token hash stays: a mistaken
+                # manifest edit, undone, restores the project with the SAME token and no restart.
+                if prune:
+                    echo(f"consumer {name}: its project left the manifest (or is direct now) — "
+                         + ("would be removed (dry run)" if dry_run else "removed (--prune)"))
+                    del registry.consumers[name]
+                    continue
+                withdrawn = "access withdrawn" if consumer.machines else "access stays withdrawn"
+                echo(f"consumer {name}: its project left the manifest (or is direct now) — {withdrawn} (no machines;"
+                     f" its token stays registered, so putting the project back needs no restart)."
+                     " `sync-configs --prune` removes the consumer.")
+                consumer.machines = []
+            saver.commit()  # a no-op in a dry run
+    finally:  # a file already written needs its notice even when the closing registry save failed
+        notify_restarts(to_restart, notifier=notifier, echo=echo, dry_run=dry_run)
     if dry_run:
         echo("dry run — nothing was written")
     elif changed_projects:

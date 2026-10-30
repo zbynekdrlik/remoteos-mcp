@@ -25,11 +25,14 @@ import click
 
 from remoteos.gateway.check import (
     DEFAULT_AIRULESET_PATH,
+    DEFAULT_NOTIFY_OWNER,
     DEFAULT_STATUS_PATH,
     CheckError,
     airuleset_notifier,
+    load_status,
     run_check,
 )
+from remoteos.gateway.drift import DriftPolicy
 from remoteos.gateway.keystore import (
     DEFAULT_IMPORT_MATCH,
     apply_import,
@@ -55,9 +58,40 @@ from remoteos.gateway.registry import (
 )
 from remoteos.gateway.sync import SyncError, sync_configs
 from remoteos.gateway.targets import TargetError, target_for
+from remoteos.release_channel import RELEASES_URL, fetch_releases, soak_days
 
 _LOCAL_HOST_HELP = "This host's name as the manifest's `host` spells it (dev1); other hosts are reached over ssh."
 _GATEWAY_URL_HELP = f"The gateway (default: the manifest's [gateway] url, else {DEFAULT_GATEWAY_URL})."
+
+
+def _notify_options(function):
+    function = click.option(
+        "--notify-owner",
+        envvar="REMOTEOS_GATEWAY_NOTIFY_OWNER",
+        default=DEFAULT_NOTIFY_OWNER,
+        show_default=True,
+        help="notify --owner-name (a run without a tmux pane cannot be routed without it).",
+    )(function)
+    return click.option(
+        "--airuleset",
+        "airuleset_path",
+        type=click.Path(dir_okay=False, path_type=Path),
+        envvar="REMOTEOS_GATEWAY_AIRULESET",
+        default=DEFAULT_AIRULESET_PATH,
+        show_default=True,
+        help="airuleset.py whose `notify --body` tells the owner; missing = printed or logged instead.",
+    )(function)
+
+
+def _status_file_option(function):
+    return click.option(
+        "--status-file",
+        type=click.Path(dir_okay=False, path_type=Path),
+        envvar="REMOTEOS_GATEWAY_STATUS_FILE",
+        default=DEFAULT_STATUS_PATH,
+        show_default=True,
+        help="Where the machine states (ok / 401 / unreachable + since) and last seen versions are kept.",
+    )(function)
 
 
 def _gateway_url(paths, explicit: str | None, *, strict: bool) -> str:
@@ -159,17 +193,23 @@ def machine_set_key(paths, name: str, url: str | None, force: bool) -> None:
 
 
 @machine.command("list")
+@_status_file_option
 @click.pass_obj
-def machine_list(paths) -> None:
-    """Show the key store: url, the key MASKED, the repair recipe."""
+def machine_list(paths, status_file: Path) -> None:
+    """Show the key store: url, the key MASKED, the repair recipe, the version `check` last saw."""
     try:
         entries = load_keystore(paths.machines, missing_ok=True)
     except MachineSourceError as exc:
         raise _fail(exc) from exc
+    records = load_status(status_file.expanduser()).get("machines")
+    records = records if isinstance(records, dict) else {}
     click.echo(f"key store: {paths.machines}  ({len(entries)} machine(s))")
     for name, entry in sorted(entries.items()):
         repair = _describe_recipe(entry.repair) if entry.repair else "-"
-        click.echo(f"  {name}  {entry.url}  key {mask_secret(entry.key)}  repair: {repair}")
+        record = records.get(name)
+        version = record.get("version") if isinstance(record, dict) else None
+        shown = version if isinstance(version, str) else "?"
+        click.echo(f"  {name}  {entry.url}  key {mask_secret(entry.key)}  version {shown}  repair: {repair}")
     if not entries:
         click.echo("  (empty — build it with `remoteos-gateway machine import`)")
 
@@ -323,10 +363,14 @@ def _describe_recipe(recipe: RepairRecipe) -> str:
     is_flag=True,
     help="Remove the consumers of projects that left the manifest (by default they only lose their machines).",
 )
+@_notify_options
 @click.pass_obj
-def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> None:
+def sync_configs_command(
+    paths, dry_run: bool, local_host: str, prune: bool, airuleset_path: Path, notify_owner: str | None
+) -> None:
     """Generate every project's MCP config from the manifest: fleet entries through the gateway
-    (one token per project, allow-list = the manifest); every other entry is left byte-equal."""
+    (one token per project, allow-list = the manifest); every other entry is left byte-equal.
+    The owner is told which live Claude sessions of the written configs need a restart."""
     try:
         manifest = load_manifest(paths.manifest)
         keystore = load_keystore(paths.machines)
@@ -339,6 +383,7 @@ def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> 
             today=_dt.date.today().isoformat(),
             echo=click.echo,
             prune=prune,
+            notifier=airuleset_notifier(airuleset_path.expanduser(), notify_owner),
         )
     except (ManifestError, MachineSourceError, RegistryError, SyncError) as exc:
         raise _fail(exc) from exc
@@ -351,32 +396,30 @@ def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> 
 
 
 @click.command("check")
-@click.option(
-    "--status-file",
-    type=click.Path(dir_okay=False, path_type=Path),
-    envvar="REMOTEOS_GATEWAY_STATUS_FILE",
-    default=DEFAULT_STATUS_PATH,
-    show_default=True,
-    help="Where the machine states (ok / 401 / unreachable + since) are kept.",
-)
+@_status_file_option
 @click.option("--gateway-url", default=None, help=_GATEWAY_URL_HELP + " Its /healthz is probed too.")
-@click.option(
-    "--airuleset",
-    "airuleset_path",
-    type=click.Path(dir_okay=False, path_type=Path),
-    envvar="REMOTEOS_GATEWAY_AIRULESET",
-    default=DEFAULT_AIRULESET_PATH,
-    show_default=True,
-    help="airuleset.py whose `notify --body` announces a state change; missing = a log line instead.",
-)
-@click.option("--notify-owner", envvar="REMOTEOS_GATEWAY_NOTIFY_OWNER", default=None, help="notify --owner-name.")
+@_notify_options
 @click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
+@click.option(
+    "--releases-url",
+    envvar="REMOTEOS_RELEASES_URL",
+    default=RELEASES_URL,
+    show_default=True,
+    help="The GitHub release list; stable is judged from it (a failed read only skips drift for that run).",
+)
 @click.pass_obj
 def check_command(
-    paths, status_file: Path, gateway_url: str | None, airuleset_path: Path, notify_owner: str | None, local_host: str
+    paths,
+    status_file: Path,
+    gateway_url: str | None,
+    airuleset_path: Path,
+    notify_owner: str | None,
+    local_host: str,
+    releases_url: str,
 ) -> None:
     """Probe every machine directly with its stored key + the gateway's /healthz; record the
-    states and announce each change ONCE. A 401 is repaired only by an explicit recipe."""
+    states and versions, announce each change ONCE, and report a box older than stable.
+    A 401 is repaired only by an explicit recipe."""
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     gateway_url = _gateway_url(paths, gateway_url, strict=False)  # the watchdog never stops on the manifest
@@ -387,6 +430,7 @@ def check_command(
             gateway_url=gateway_url,
             notifier=airuleset_notifier(airuleset_path.expanduser(), notify_owner),
             host=local_host,
+            drift=DriftPolicy(fetch=lambda: fetch_releases(releases_url), soak_days=soak_days()),
         )
     except (MachineSourceError, CheckError) as exc:
         raise _fail(exc) from exc
@@ -398,4 +442,4 @@ def check_command(
     bad = [n for n, r in status["machines"].items() if r["state"] != STATE_OK]
     click.echo(f"{len(status['machines']) - len(bad)} ok, {len(bad)} not ok" + (f": {', '.join(bad)}" if bad else ""))
     if report.sent is False:
-        click.echo("the state-change notification did NOT go out — it is retried on the next run")
+        click.echo("a notification did NOT go out — it is retried on the next run")
