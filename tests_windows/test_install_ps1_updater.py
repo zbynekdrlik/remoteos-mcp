@@ -14,7 +14,16 @@ from pathlib import Path
 
 import pytest
 from test_install_ps1_key import _ps, _q
-from test_install_ps1_wheelhouse import _PRELUDE, INSTALLER, SHA_OLD, _installed, _run, _wheelhouse, shared_venv, venv  # noqa: F401
+from test_install_ps1_wheelhouse import (  # noqa: F401
+    _PRELUDE,
+    INSTALLER,
+    SHA_OLD,
+    _installed,
+    _run,
+    _wheelhouse,
+    shared_venv,
+    venv,
+)
 
 ROOT = Path(__file__).parent.parent
 
