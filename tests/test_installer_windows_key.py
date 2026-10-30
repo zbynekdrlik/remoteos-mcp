@@ -467,7 +467,7 @@ def test_an_elevated_delete_never_follows_a_link() -> None:
 
 def test_account_names_are_qualified_where_computer_and_user_share_a_name():
     # On ABLETON-FOH the account Ableton-FOH does not translate by its bare name (#57).
-    code = "\n".join(_code_lines(INSTALLER_WINDOWS.read_text()))
+    code = "\n".join(line for _, line in _code_lines())
     assert "function Get-RemoteOSAccount" in code
     assert "NTAccount($User)" not in code
     assert "-UserId $User" not in code
