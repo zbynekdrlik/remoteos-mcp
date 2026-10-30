@@ -342,8 +342,8 @@ def test_the_download_comes_before_the_stop_and_the_uninstall() -> None:
     block = _if_block("if (-not $preflight.Ok) {")
     assert any("-- nothing was changed on this box" in line for _, line in block), block
     assert block[-2][1] == "Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit", block
-    point = [n for n, line in flow
-             if line == "$rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python"]
+    read = "$rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python"
+    point = [n for n, line in flow if line == read]
     assert point and max(point) < _stop_line() and preflight[0] < point[0], (point, _stop_line())
 
 
@@ -393,8 +393,8 @@ def test_the_wheelhouse_root_is_protected_before_the_download() -> None:
     protected ACL (SYSTEM + Administrators, the user read-only) before anything is downloaded,
     and a root that cannot be protected stops the run with nothing changed."""
     flow = _flow_lines()
-    protect = [n for n, line in flow
-               if line.endswith("$protectError = Protect-RemoteOSWheelhouseRoot -Root $wheelhouseRoot -User $desktopUser }")]
+    call = "$protectError = Protect-RemoteOSWheelhouseRoot -Root $wheelhouseRoot -User $desktopUser }"
+    protect = [n for n, line in flow if line.endswith(call)]
     preflight = next(n for n, line in flow if line.startswith("$preflight = New-RemoteOSWheelhouse"))
     assert len(protect) == 1 and protect[0] < preflight, (protect, preflight)
     block = _if_block("if ($protectError) {")

@@ -65,7 +65,8 @@ class TestRollbackTrap:
         point = self._point(tmp_path, "1.0")
         body = f"""
 function Stop-RemoteOSServer {{ }}
-$text = Get-RemoteOSRollbackTrapScript -Point ({point}) -Python {_q(python)} -ConfigDir {_q(config)} -Port 8092 -InstallerPid {installer_pid}
+$text = Get-RemoteOSRollbackTrapScript -Point ({point}) -Python {_q(python)} -ConfigDir {_q(config)} `
+    -Port 8092 -InstallerPid {installer_pid}
 @{{ text = $text }} | ConvertTo-Json -Compress
 """
         text = _ps(tmp_path, body)["text"]
@@ -158,7 +159,8 @@ def test_the_uninstaller_finds_the_console_user_s_profile_not_its_own(tmp_path, 
     listed = ", ".join(_q(line) for line in sessions)
     script.write_text(f"""
 . {_q(_uninstall_functions(tmp_path))}
-Write-Host (Get-RemoteOSDesktopProfile -Sessions @({listed}) -UserName 'runner' -FallbackProfile 'FALLBACK' -ProfilesRoot {_q(root)})
+Write-Host (Get-RemoteOSDesktopProfile -Sessions @({listed}) -UserName 'runner' -FallbackProfile 'FALLBACK' `
+    -ProfilesRoot {_q(root)})
 """, encoding="utf-8-sig")
     result = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
                             capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
@@ -169,7 +171,8 @@ def test_a_console_user_with_no_profile_falls_back(tmp_path):
     script = tmp_path / "t.ps1"
     script.write_text(f"""
 . {_q(_uninstall_functions(tmp_path))}
-Write-Host (Get-RemoteOSDesktopProfile -Sessions @('x console 1 Active') -UserName 'r' -FallbackProfile 'FALLBACK' -ProfilesRoot {_q(tmp_path)})
+Write-Host (Get-RemoteOSDesktopProfile -Sessions @('x console 1 Active') -UserName 'r' -FallbackProfile 'FALLBACK' `
+    -ProfilesRoot {_q(tmp_path)})
 """, encoding="utf-8-sig")
     result = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
                             capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
@@ -180,8 +183,9 @@ def test_registering_is_idempotent_and_leaves_a_daily_catching_up_highest_task(t
     python = Path(sys.executable)
     body = f"""
 try {{
-    $first = Register-RemoteOSUpdaterTask -ConfigDir {_q(tmp_path)} -PythonPath {_q(python)} -User $env:USERNAME
-    $second = Register-RemoteOSUpdaterTask -ConfigDir {_q(tmp_path)} -PythonPath {_q(python)} -User $env:USERNAME
+    $task = @{{ ConfigDir = {_q(tmp_path)}; PythonPath = {_q(python)}; User = $env:USERNAME }}
+    $first = Register-RemoteOSUpdaterTask @task
+    $second = Register-RemoteOSUpdaterTask @task
     $task = Get-ScheduledTask -TaskName 'RemoteOSMCP-Updater'
     @{{ first = $first; second = $second; level = [string]$task.Principal.RunLevel
         catchUp = [bool]$task.Settings.StartWhenAvailable
