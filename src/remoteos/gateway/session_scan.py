@@ -2,8 +2,8 @@
 
 STDLIB ONLY, Python 3.8+, no package imports, like ``fileops.py``: ``targets.py`` runs this
 module's SOURCE with ``python3 -c <source> <config>`` under ``sudo -n -u`` or over ssh. It prints
-``{"sessions": [{"pid": 123, "pane": "main:2"}, ...]}``; ``pane`` is ``session:window``, or null
-for a session outside tmux.
+``{"sessions": [{"pid": 123, "tmux": true, "pane": "main:2"}, ...]}``; ``pane`` is
+``session:window``, or null when unknown (``tmux`` says whether the session runs inside tmux at all).
 
 A session is a process named ``claude`` of this account (others are not readable) with a
 ``.mcp.json`` in its cwd or a parent directory that resolves to the config. Only ``TMUX`` and
@@ -100,7 +100,8 @@ def scan(config, proc_root="/proc", tmux="tmux"):
         socket, pane = tmux_of(pid_dir)
         if pane is not None and socket not in servers:
             servers[socket] = pane_names(socket, tmux)
-        sessions.append({"pid": int(entry), "pane": servers[socket].get(pane) if pane is not None else None})
+        name = servers[socket].get(pane) if pane is not None else None
+        sessions.append({"pid": int(entry), "tmux": pane is not None, "pane": name})
     return sessions
 
 

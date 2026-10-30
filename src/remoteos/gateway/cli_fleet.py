@@ -24,8 +24,8 @@ from pathlib import Path
 import click
 
 from remoteos.gateway.check import (
-    CHUNK_LIMIT,
     DEFAULT_AIRULESET_PATH,
+    DEFAULT_NOTIFY_OWNER,
     DEFAULT_STATUS_PATH,
     CheckError,
     airuleset_notifier,
@@ -66,7 +66,11 @@ _GATEWAY_URL_HELP = f"The gateway (default: the manifest's [gateway] url, else {
 
 def _notify_options(function):
     function = click.option(
-        "--notify-owner", envvar="REMOTEOS_GATEWAY_NOTIFY_OWNER", default=None, help="notify --owner-name."
+        "--notify-owner",
+        envvar="REMOTEOS_GATEWAY_NOTIFY_OWNER",
+        default=DEFAULT_NOTIFY_OWNER,
+        show_default=True,
+        help="notify --owner-name (a run without a tmux pane cannot be routed without it).",
     )(function)
     return click.option(
         "--airuleset",
@@ -380,7 +384,6 @@ def sync_configs_command(
             echo=click.echo,
             prune=prune,
             notifier=airuleset_notifier(airuleset_path.expanduser(), notify_owner),
-            message_limit=CHUNK_LIMIT,
         )
     except (ManifestError, MachineSourceError, RegistryError, SyncError) as exc:
         raise _fail(exc) from exc

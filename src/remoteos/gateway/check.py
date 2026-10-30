@@ -45,6 +45,7 @@ from remoteos.gateway import drift as drift_report
 from remoteos.gateway import fileops
 from remoteos.gateway.drift import DriftPolicy
 from remoteos.gateway.keystore import edit_keystore, load_keystore
+from remoteos.gateway.messages import split_to_fit
 from remoteos.gateway.probe import (
     STATE_OK,
     STATE_UNAUTHORIZED,
@@ -62,6 +63,7 @@ logger = logging.getLogger("remoteos.gateway.check")
 
 DEFAULT_STATUS_PATH = Path.home() / ".local" / "state" / "remoteos-gateway" / "machines-status.json"
 DEFAULT_AIRULESET_PATH = Path.home() / "devel" / "airuleset" / "airuleset.py"
+DEFAULT_NOTIFY_OWNER = "zbynek"
 REPAIR_TIMEOUT_S = 30
 NOTIFY_TIMEOUT_S = 60
 # The gateway's own record in the in-memory pending map: a key no machine name can be (names are
@@ -151,6 +153,8 @@ async def observe(
 ) -> tuple[dict[str, Observation], Observation]:
     results, versions, health = await _probe_all(entries, gateway_url)
     observations = {name: Observation(r.state, r.detail) for name, r in results.items()}
+    for name in sorted(set(results) - set(versions)):
+        logger.info("check: %s reported no version this run", name)
 
     async def guarded(name: str) -> Observation:
         try:
@@ -212,9 +216,6 @@ def _advance(previous: object, observation: Observation, now: str) -> dict:
     }
 
 
-# airuleset cuts mention + body at 1900 characters and STILL prints "sent", so one message stays
-# well under that: a fleet-wide change goes out in several, each fully delivered or retried.
-CHUNK_LIMIT = 1700
 _DETAIL_LIMIT = 200
 
 
@@ -244,19 +245,15 @@ def compose_messages(pending: dict[str, dict], host: str, *, recovered: bool = F
     ``(text, the names it announces)``, each text at most ``CHUNK_LIMIT`` characters."""
     title = f"MCP brána ({host}): " + ("kontrola strojov opäť beží" if recovered else "zmena stavu strojov")
     reserve = len(" (99/99)")
-    groups: list[list[str]] = [[]]
-    for name in pending:
-        candidate = groups[-1] + [name]
-        lines = [_change_line(n, pending[n]) for n in candidate] + _hints([pending[n] for n in candidate])
-        if groups[-1] and len("\n".join([title, *lines])) + reserve > CHUNK_LIMIT:
-            groups.append([name])
-        else:
-            groups[-1] = candidate
+
+    def lines(names: list[str]) -> list[str]:
+        return [_change_line(n, pending[n]) for n in names] + _hints([pending[n] for n in names])
+
+    groups = split_to_fit(pending, lambda names: len("\n".join([title, *lines(names)])) + reserve)
     texts = []
     for index, names in enumerate(groups, start=1):
         head = title + (f" ({index}/{len(groups)})" if len(groups) > 1 else "")
-        lines = [_change_line(n, pending[n]) for n in names] + _hints([pending[n] for n in names])
-        texts.append(("\n".join([head, *lines]), names))
+        texts.append(("\n".join([head, *lines(names)]), names))
     return texts
 
 
@@ -269,7 +266,7 @@ _DELIVERED = frozenset({"sent", "dedup", "suppressed"})
 
 def airuleset_notifier(script: Path, owner: str | None) -> Callable[[str], bool] | None:
     """``python3 <airuleset.py> notify --body <text> --dedup-key <per attempt>``; None when the
-    script is not there. Delivered = it ran AND printed ``sent`` (or ``dedup``)."""
+    script is not there. Delivered = it ran AND printed ``sent``, ``dedup`` or ``suppressed``."""
     if not script.is_file():
         return None
     python = shutil.which("python3") or sys.executable
@@ -384,15 +381,10 @@ def _check_loaded(
                     pending[name]["notified"] = True
             elif index == 0 and recovered:  # the first message carries the "running again" title
                 status["recovery_pending"] = True
-    releases = drift_report.read_releases(drift)
-    soak = drift.soak_days if drift is not None else 0
-    for name, record in status["machines"].items():
-        version = observations[name].version
-        drift_report.record_versions(record, old_machines.get(name), version, stamp)
-        drift_report.judge(record, old_machines.get(name), version, releases, moment, soak)
-    if releases is not None:
-        drift_sent = drift_report.announce(status["machines"], host, moment, notifier, limit=CHUNK_LIMIT)
-        sent = drift_sent if sent is None else (sent and drift_sent is not False)
+    versions = {name: observation.version for name, observation in observations.items()}
+    drift_sent = drift_report.update(status["machines"], old_machines, versions, drift, stamp, moment, host, notifier)
+    if drift_sent is not None:
+        sent = drift_sent if sent is None else (sent and drift_sent)
     try:
         _write_status(status_path, status)
     except OSError as exc:

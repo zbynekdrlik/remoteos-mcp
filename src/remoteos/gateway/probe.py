@@ -115,7 +115,8 @@ async def probe_healthz(client: httpx2.AsyncClient, base_url: str) -> ProbeResul
 def health_url(mcp_url: str) -> str:
     """The machine's public ``/health``, next to its ``/mcp`` endpoint."""
     parts = urlsplit(mcp_url)
-    base = parts.path[: -len("/mcp")] if parts.path.endswith("/mcp") else parts.path.rstrip("/")
+    path = parts.path.rstrip("/")
+    base = path[: -len("/mcp")] if path.endswith("/mcp") else path
     return urlunsplit((parts.scheme, parts.netloc, base + "/health", "", ""))
 
 

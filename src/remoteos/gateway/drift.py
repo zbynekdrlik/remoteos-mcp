@@ -18,6 +18,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from remoteos.gateway.messages import split_to_fit
 from remoteos.release_channel import Release, ReleaseFetchError, behind_since, choose, version_key
 
 logger = logging.getLogger("remoteos.gateway.drift")
@@ -31,15 +32,21 @@ class DriftPolicy:
     soak_days: int
 
 
-def read_releases(policy: DriftPolicy | None) -> list[Release] | None:
-    """The release list; None skips drift for this run (logged), and nothing else depends on it."""
+def read_releases(policy: DriftPolicy | None, moment: _dt.datetime) -> list[Release] | None:
+    """The release list; None skips drift for this run (logged), and nothing else depends on it.
+    A stable that cannot be compared says nothing about any box: it must not read as "caught up"."""
     if policy is None:
         return None
     try:
-        return policy.fetch()
+        releases = policy.fetch()
     except ReleaseFetchError as exc:
         logger.warning("check: the release list could not be read (%s) — no drift judged this run", exc)
         return None
+    stable = choose(releases, moment, policy.soak_days).stable
+    if stable is not None and version_key(stable.version) is None:
+        logger.warning("check: stable %s is not comparable — no drift judged this run", stable.tag)
+        return None
+    return releases
 
 
 def _known_drift(previous: object) -> dict | None:
@@ -102,27 +109,21 @@ def _line(name: str, record: dict, moment: _dt.datetime) -> str:
     return f"• {name}: verzia {record.get('version', '?')}, za stable už {_days(record, moment)} dní"
 
 
-def compose_messages(
-    pending: dict[str, dict], host: str, moment: _dt.datetime, *, limit: int
-) -> list[tuple[str, list[str]]]:
+def compose_messages(pending: dict[str, dict], host: str, moment: _dt.datetime) -> list[tuple[str, list[str]]]:
     """The owner's texts (Slovak, phone-readable), as ``(text, the names it announces)``, each at
-    most *limit* characters."""
+    most ``CHUNK_LIMIT`` characters."""
     tags = sorted({record["drift"]["stable"] for record in pending.values()})
     title = f"MCP brána ({host}): stroje pozadu za stable {', '.join(tags)}"
     reserve = len(" (99/99)")
-    groups: list[list[str]] = [[]]
-    size = len(title) + reserve
-    for name in pending:
-        cost = len(_line(name, pending[name], moment)) + 1
-        if groups[-1] and size + cost > limit:
-            groups.append([])
-            size = len(title) + reserve
-        groups[-1].append(name)
-        size += cost
+
+    def lines(names: list[str]) -> list[str]:
+        return [_line(name, pending[name], moment) for name in names]
+
+    groups = split_to_fit(pending, lambda names: len("\n".join([title, *lines(names)])) + reserve)
     texts = []
     for index, names in enumerate(groups, start=1):
         head = title + (f" ({index}/{len(groups)})" if len(groups) > 1 else "")
-        texts.append(("\n".join([head, *(_line(n, pending[n], moment) for n in names)]), names))
+        texts.append(("\n".join([head, *lines(names)]), names))
     return texts
 
 
@@ -131,15 +132,13 @@ def announce(
     host: str,
     moment: _dt.datetime,
     notifier: Callable[[str], bool] | None,
-    *,
-    limit: int,
 ) -> bool | None:
     """Send what is owed. Returns None when nothing was, else whether all of it went out."""
     pending = {n: r for n, r in machines.items() if "drift" in r and not r["drift"]["notified"]}
     if not pending:
         return None
     sent = True
-    for text, names in compose_messages(pending, host, moment, limit=limit):
+    for text, names in compose_messages(pending, host, moment):
         logger.warning("check: %s", text.replace("\n", " "))
         delivered = notifier(text) if notifier is not None else True
         sent = sent and delivered
@@ -147,3 +146,33 @@ def announce(
             for name in names:
                 pending[name]["drift"]["notified"] = True
     return sent
+
+
+def update(
+    machines: dict[str, dict],
+    previous: dict,
+    versions: dict[str, str | None],
+    policy: DriftPolicy | None,
+    stamp: str,
+    moment: _dt.datetime,
+    host: str,
+    notifier: Callable[[str], bool] | None,
+) -> bool | None:
+    """Record versions and report drift for one run. Nothing here may cost the run its status
+    write: a failure only skips drift (logged), and every record keeps the drift it had."""
+    for name, record in machines.items():
+        record_versions(record, previous.get(name), versions.get(name), stamp)
+    try:
+        releases = read_releases(policy, moment)
+        for name, record in machines.items():
+            soak = policy.soak_days if policy is not None else 0
+            judge(record, previous.get(name), versions.get(name), releases, moment, soak)
+        return announce(machines, host, moment, notifier) if releases is not None else None
+    except Exception:
+        logger.exception("check: drift failed — no drift judged this run")
+        for name, record in machines.items():
+            record.pop("drift", None)
+            known = _known_drift(previous.get(name))
+            if known is not None:
+                record["drift"] = known
+        return None

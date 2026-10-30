@@ -102,7 +102,8 @@ def test_a_held_release_never_makes_a_box_behind():
 @pytest.mark.parametrize(
     ("env", "expected"),
     [({}, 14), ({"REMOTEOS_SOAK_DAYS": "3"}, 3), ({"REMOTEOS_SOAK_DAYS": "0"}, 0),
-     ({"REMOTEOS_SOAK_DAYS": "x"}, 14), ({"REMOTEOS_SOAK_DAYS": "-1"}, 14), ({"REMOTEOS_SOAK_DAYS": ""}, 14)],
+     ({"REMOTEOS_SOAK_DAYS": "x"}, 14), ({"REMOTEOS_SOAK_DAYS": "-1"}, 14), ({"REMOTEOS_SOAK_DAYS": ""}, 14),
+     ({"REMOTEOS_SOAK_DAYS": "99999999999"}, 14)],
 )
 def test_soak_days(env, expected):
     assert soak_days(env) == expected
@@ -168,6 +169,9 @@ with open(os.environ["FAKE_GH_LOG"], "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1:3] == ["release", "view"]:
     sys.exit(0 if os.environ.get("FAKE_GH_EXISTS") else 1)
+if sys.argv[1:3] == ["release", "list"]:
+    print(os.environ.get("FAKE_GH_TAGS", ""))
+    sys.exit(int(os.environ.get("FAKE_GH_LIST_EXIT", "0")))
 sys.exit(int(os.environ.get("FAKE_GH_CREATE_EXIT", "0")))
 """
 
@@ -209,16 +213,44 @@ def test_release_is_created_on_the_merge_commit_and_never_as_a_prerelease(tmp_pa
     proc, calls = run_release_script(tmp_path)
     tag = f"v{project_version()}"
     assert proc.returncode == 0, proc.stderr
-    assert calls == [
-        ["release", "view", tag],
-        ["release", "create", tag, "--target", "abc123", "--title", tag, "--generate-notes"],
-    ]
+    assert calls[0] == ["release", "view", tag]
+    assert calls[-1] == ["release", "create", tag, "--target", "abc123", "--title", tag, "--generate-notes"]
+    assert len(calls) == 3
 
 
 def test_an_existing_release_is_left_alone(tmp_path):
     proc, calls = run_release_script(tmp_path, FAKE_GH_EXISTS="1")
     assert proc.returncode == 0, proc.stderr
     assert [call[:2] for call in calls] == [["release", "view"]]  # a held release stays held
+
+
+def test_a_late_re_run_of_an_older_merge_publishes_nothing(tmp_path):
+    proc, calls = run_release_script(tmp_path, FAKE_GH_TAGS="v0.0.1\nv99.0.0.dev1\nweird-tag")
+    assert proc.returncode == 0, proc.stderr
+    assert "create" not in [call[1] for call in calls]
+
+
+def test_a_lower_tag_does_not_stop_the_release(tmp_path):
+    _, calls = run_release_script(tmp_path, FAKE_GH_TAGS="v0.0.1\nweird-tag")
+    assert calls[-1][:2] == ["release", "create"]
+
+
+def test_a_version_that_cannot_be_compared_fails_the_job_instead_of_skipping_the_release():
+    proc = subprocess.run(
+        [sys.executable, "-I", "src/remoteos/release_channel.py", "is-newest", "0.8.0rc1"],
+        cwd=REPO,
+        input="v0.0.1\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 2
+
+
+def test_a_failed_tag_list_fails_the_job(tmp_path):
+    proc, calls = run_release_script(tmp_path, FAKE_GH_LIST_EXIT="1")
+    assert proc.returncode == 1
+    assert "create" not in [call[1] for call in calls]
 
 
 def test_a_failed_create_fails_the_job(tmp_path):
@@ -243,6 +275,10 @@ def test_the_release_job_runs_only_on_a_push_to_main_after_every_test_job():
     assert "continue-on-error" not in release
     assert not any("continue-on-error" in step for step in release["steps"])
     assert any(step.get("run") == "scripts/create-release.sh" for step in release["steps"])
+
+
+def test_a_run_on_main_is_never_cancelled_so_every_merge_reaches_the_release_job():
+    assert workflow()["concurrency"]["cancel-in-progress"] == "${{ github.ref != 'refs/heads/main' }}"
 
 
 def test_the_release_script_is_executable_in_git():

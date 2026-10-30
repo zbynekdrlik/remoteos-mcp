@@ -20,6 +20,7 @@ from fleet_harness import install_fake_airuleset, install_fake_remote_tools, not
 from test_gateway_sync import ME, Fleet
 
 from remoteos.gateway import live_sessions, session_scan
+from remoteos.gateway import sync as sync_module
 from remoteos.gateway.live_sessions import Session
 from remoteos.gateway.manifest import Project
 
@@ -88,7 +89,11 @@ def test_the_scan_finds_the_right_panes(tmp_path, fake_tmux):
 
     sessions = session_scan.scan(str(config), proc_root=str(proc.root), tmux=str(fake_tmux))
 
-    assert sessions == [{"pid": 100, "pane": "main:2"}, {"pid": 101, "pane": "main:3"}, {"pid": 102, "pane": None}]
+    assert sessions == [
+        {"pid": 100, "tmux": True, "pane": "main:2"},
+        {"pid": 101, "tmux": True, "pane": "main:3"},
+        {"pid": 102, "tmux": False, "pane": None},
+    ]
     assert "hunter2" not in json.dumps(sessions)
     [call] = [json.loads(line) for line in (tmp_path / "tmux.jsonl").read_text(encoding="utf-8").splitlines()]
     assert call[:2] == ["-S", "/tmp/tmux-1/default"]  # one query per tmux server
@@ -101,7 +106,7 @@ def test_a_dead_tmux_leaves_the_session_with_no_pane(tmp_path, fake_tmux, monkey
     proc = FakeProc(tmp_path / "proc")
     proc.add(100, "claude", project_dir(tmp_path, "x", config), {"TMUX": "/s,1,0", "TMUX_PANE": "%7"})
 
-    assert session_scan.scan(str(config), str(proc.root), str(fake_tmux)) == [{"pid": 100, "pane": None}]
+    assert session_scan.scan(str(config), str(proc.root), str(fake_tmux)) == [{"pid": 100, "tmux": True, "pane": None}]
 
 
 def test_the_scanner_is_python_3_8_with_no_package_import():
@@ -117,14 +122,19 @@ PROJECT = Project(name="camera-box", host="dev1", account="newlevel", config="/c
 
 def test_a_long_list_stays_under_the_limit():
     sessions = [Session(pid=i, pane=f"long-session-name-{i}:1") for i in range(100)]
-    texts = live_sessions.compose_messages([(PROJECT, sessions)], limit=1700)
+    texts = live_sessions.compose_messages([(PROJECT, sessions)])
     assert len(texts) > 1 and all(len(text) <= 1700 for text in texts)
     assert all(text.endswith(live_sessions.ACTION) for text in texts)
     assert sum(text.count("•") for text in texts) == 100
 
 
+def test_a_tmux_session_with_no_known_pane_is_not_called_outside_tmux():
+    [text] = live_sessions.compose_messages([(PROJECT, [Session(pid=5, pane=None, in_tmux=True)])])
+    assert "proces 5 v tmux" in text and "mimo tmux" not in text
+
+
 def test_nothing_live_composes_nothing():
-    assert live_sessions.compose_messages([], limit=1700) == []
+    assert live_sessions.compose_messages([]) == []
 
 
 # -- end to end, with a real process named claude ----------------------------------------------
@@ -196,6 +206,37 @@ def test_a_written_config_with_a_live_session_sends_one_message_with_the_pane(ru
         assert secret not in body
         assert secret not in json.dumps(notify_calls(run.log))
     assert body in result.output  # it may be suppressed by the owner's policy: the text stays visible
+
+
+def test_the_message_is_pinned_to_the_owner_and_an_explicit_one_wins(run, monkeypatch):
+    run.manifest()
+    with LiveSession(run.tmp, run.project, "%7"):
+        assert run.sync().exit_code == 0
+    [argv] = notify_calls(run.log)
+    assert argv[argv.index("--owner-name") + 1] == "zbynek"  # a run with no tmux pane cannot be routed
+
+    run.fleet.write_config("camera-box", run.fleet.camera_box_text())
+    with LiveSession(run.tmp, run.project, "%7"):
+        assert run.sync("--notify-owner", "david").exit_code == 0
+    argv = notify_calls(run.log)[-1]
+    assert argv[argv.index("--owner-name") + 1] == "david"
+
+
+def test_a_failed_closing_registry_save_still_gives_the_notice(run, monkeypatch):
+    run.manifest()
+    real_commit = sync_module._Saver.commit
+    calls = []
+
+    def fails_at_the_end(saver):
+        calls.append(1)
+        if len(calls) >= 3:  # register, prune, then the closing save of the run
+            raise OSError("disk full")
+        return real_commit(saver)
+
+    monkeypatch.setattr(sync_module._Saver, "commit", fails_at_the_end)
+    with LiveSession(run.tmp, run.project, "%7"):
+        run.sync()
+    assert any("main:2" in body for body in run.bodies())
 
 
 def test_no_live_session_sends_nothing(run):

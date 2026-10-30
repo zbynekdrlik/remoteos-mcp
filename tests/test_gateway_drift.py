@@ -14,6 +14,7 @@ from fleet_harness import FakeFleetMachine, closed_port_url, fresh_secret
 from test_gateway_check import Check
 
 from remoteos.gateway import cli as gateway_cli
+from remoteos.gateway import drift as drift_module
 
 OLD_VERSION = "0.7.0.dev20"
 STABLE_VERSION = "0.7.0.dev40"
@@ -164,6 +165,42 @@ def test_a_box_that_stops_answering_keeps_its_last_version_and_is_not_judged(tmp
         assert fleet.check.notifications() == []
 
 
+def test_an_unexpected_drift_failure_never_costs_the_status_write(tmp_path, monkeypatch):
+    with Fleet(tmp_path, monkeypatch) as fleet:
+        fleet.run()
+        reported = fleet.record["drift"]
+        fleet.box.accept_keys = []  # a state change, announced in the run that drift fails
+        monkeypatch.setattr(drift_module, "judge", lambda *a, **k: 1 / 0)
+        result = fleet.check.run(fleet.gateway.base_url)
+        assert result.exit_code == 0, result.output
+        assert fleet.record["state"] == "401" and fleet.record["notified"] is True
+        assert fleet.record["drift"] == reported
+        assert "error" not in fleet.check.state()
+
+
+def test_a_huge_soak_value_only_falls_back_to_the_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("REMOTEOS_SOAK_DAYS", "99999999999")
+    with Fleet(tmp_path, monkeypatch) as fleet:
+        fleet.run()
+        assert len(fleet.check.notifications()) == 1
+
+
+def test_a_stable_that_cannot_be_compared_keeps_a_known_drift(tmp_path, monkeypatch):
+    with Fleet(tmp_path, monkeypatch) as fleet:
+        fleet.run()
+        reported = fleet.record["drift"]
+        fleet.github.releases = [github_release("0.8.0-rc1", 20), *soaked()]
+        fleet.run()
+        assert fleet.record["drift"] == reported
+
+
+def test_a_trailing_slash_on_the_url_still_reads_the_version(tmp_path, monkeypatch):
+    with Fleet(tmp_path, monkeypatch) as fleet:
+        fleet.check.store({"linux-cam2": {"url": fleet.box.url + "/", "key": fleet.key}})
+        fleet.run()
+        assert fleet.record.get("version") == OLD_VERSION
+
+
 def test_a_junk_or_uncomparable_version_never_reaches_the_owner(tmp_path, monkeypatch):
     with Fleet(tmp_path, monkeypatch, version="evil @everyone text") as fleet:
         fleet.run()
@@ -198,7 +235,7 @@ def test_a_fleet_wide_drift_goes_out_in_chunks_and_each_is_delivered(tmp_path, m
         bodies = fleet.check.notifications()
         assert len(bodies) > 1
         assert all(len(body) <= 1700 for body in bodies)
-        assert sum(body.count("•") for body in bodies) == 60
+        assert sum(body.count("verzia") for body in bodies) == 60
         assert all(r["drift"]["notified"] for r in fleet.check.state()["machines"].values())
 
 

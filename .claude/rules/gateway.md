@@ -156,7 +156,7 @@ paths:
   - `notified: false` survives a failed notification, so the next run retries it.
   - **`airuleset.py notify --body` exits 0 even when the Discord post failed** (review round 2):
     it PRINTS `send()`'s status (`sent` / `dedup` / `dry-run` / `no-config` / `error`). Only a
-    printed `sent` / `dedup` is delivered. Every attempt passes its own `--dedup-key`, so a
+    printed `sent` / `dedup` / `suppressed` is delivered (see below). Every attempt passes its own `--dedup-key`, so a
     retry is never deduped away. The test fake prints a status and exits 0, like the real tool.
   - A check that cannot run because of an invalid key store is announced once per distinct
     failure, and its recovery is announced too. An UNWRITABLE status file is announced on every
@@ -174,7 +174,8 @@ paths:
     So on dev1 these messages do NOT reach Discord: the text is in the journal. Never borrow an
     alarm key to get around the owner's policy.
   - airuleset CUTS a body at 1900 characters (mention included) and still prints `sent`: a
-    fleet-wide change goes out as several messages of at most `CHUNK_LIMIT` (1700), and only the
+    fleet-wide change goes out as several messages of at most `CHUNK_LIMIT` (1700,
+    `messages.split_to_fit`, shared by every owner message), and only the
     machines of a DELIVERED message count as notified. While an announcement is still owed, the
     record keeps the detail of the change (`repaired: ...`), so a retry still says what happened.
 - **Version drift (`drift.py`, #63, resolver `remoteos/release_channel.py`):**
@@ -185,6 +186,12 @@ paths:
     "a dev version": every release of this repo is a `.devN`.
   - Behind since = when the OLDEST release newer than the box finished its soak (`behind_since`).
     It needs no history, and a new stable does not restart the count.
+  - A re-run of an older merge publishes nothing (`create-release.sh`, `is-newest`): the resolver
+    goes by publish date, so a late older release would become "newest". CI never cancels a run
+    on main, or a merge could get no release.
+  - Drift can never cost the run its status write (`drift.update` catches everything, logged): a
+    skipped write would re-send every state notice on every run.
+  - A stable tag `version_key` refuses skips drift for the run (it must not read as "caught up").
   - Only a version read in THIS run is judged. No answer, or no release list, keeps the record's
     `drift` as it is. Reported once per episode: the record stays until a fresh version shows the
     box is not behind.
@@ -196,7 +203,9 @@ paths:
     through `Target.run_helper` as the project's account. Only that account can read
     `/proc/<pid>/cwd` and `environ`. Of `environ` it takes `TMUX` + `TMUX_PANE` only.
   - A session = comm `claude` + a `.mcp.json` in its cwd or a parent resolving to the config.
-  - It runs AFTER the registry lock is released: notify can take a minute.
+  - It runs AFTER the registry lock is released (notify can take a minute), in a `finally`: a file
+    already written needs its notice even if the closing registry save raised.
+  - `--notify-owner` defaults to `zbynek` (`DEFAULT_NOTIFY_OWNER`): sync can run with no tmux pane.
   - It runs only for a file really written (a dry run: would be), never for a registry-only change.
   - A failed scan or notify is echoed and never counts as a failed project.
   - Real-process test: a shebang script named `claude` has comm `claude`

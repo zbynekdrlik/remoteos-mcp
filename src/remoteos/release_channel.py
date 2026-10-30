@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import sys
 import urllib.error
 import urllib.request
 from collections.abc import Iterable, Mapping
@@ -29,6 +30,7 @@ logger = logging.getLogger("remoteos.release_channel")
 
 RELEASES_URL = "https://api.github.com/repos/zbynekdrlik/remoteos-mcp/releases?per_page=100"
 DEFAULT_SOAK_DAYS = 14
+MAX_SOAK_DAYS = 3650
 FETCH_TIMEOUT_S = 10
 _MAX_BODY = 5_000_000  # 100 releases are far less; a bigger answer is not GitHub's
 
@@ -113,12 +115,21 @@ def soak_days(env: Mapping[str, str] | None = None) -> int:
         return DEFAULT_SOAK_DAYS
     try:
         days = int(raw)
-        if days < 0:
+        if not 0 <= days <= MAX_SOAK_DAYS:  # a huge value would overflow the date arithmetic
             raise ValueError
     except ValueError:
         logger.error("REMOTEOS_SOAK_DAYS is not a day count (%r) — using %d", raw, DEFAULT_SOAK_DAYS)
         return DEFAULT_SOAK_DAYS
     return days
+
+
+def is_newest(version: str, tags: Iterable[str]) -> bool:
+    """Is *version* above every comparable tag? Raises ``ValueError`` when it is not comparable."""
+    key = version_key(version)
+    if key is None:
+        raise ValueError(f"not a release version: {version!r}")
+    keys = [version_key(tag[1:] if tag.startswith("v") else tag) for tag in tags]
+    return all(other is None or other < key for other in keys)
 
 
 def parse_releases(payload: object) -> list[Release]:
@@ -160,3 +171,11 @@ def fetch_releases(url: str = RELEASES_URL, *, timeout: float = FETCH_TIMEOUT_S)
         return parse_releases(json.loads(body.decode("utf-8")))
     except (ValueError, RecursionError) as exc:  # UnicodeDecodeError and JSONDecodeError are ValueError
         raise ReleaseFetchError(f"unexpected answer ({exc.__class__.__name__})") from exc
+
+
+if __name__ == "__main__":  # scripts/create-release.sh: is-newest <version>, the tags on stdin
+    try:
+        sys.exit(0 if is_newest(sys.argv[2], sys.stdin.read().split()) else 1)
+    except ValueError as exc:  # exit 1 means "a newer release exists": this must fail the job
+        print(exc, file=sys.stderr)
+        sys.exit(2)

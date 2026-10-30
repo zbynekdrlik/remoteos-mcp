@@ -17,6 +17,7 @@ from pathlib import Path
 
 from remoteos.gateway import session_scan
 from remoteos.gateway.manifest import Project
+from remoteos.gateway.messages import split_to_fit
 from remoteos.gateway.targets import Target, TargetError
 
 logger = logging.getLogger("remoteos.gateway.live_sessions")
@@ -30,6 +31,7 @@ ACTION = "V každej spusti `/exit` a `claude -c`."
 class Session:
     pid: int
     pane: str | None
+    in_tmux: bool = False
 
 
 def _parse(output: bytes) -> list[Session]:
@@ -40,10 +42,11 @@ def _parse(output: bytes) -> list[Session]:
     sessions = []
     for item in data["sessions"]:
         pid, pane = (item.get("pid"), item.get("pane")) if isinstance(item, dict) else (None, None)
+        in_tmux = isinstance(item, dict) and item.get("tmux") is True
         if not isinstance(pid, int) or not isinstance(pane, (str, type(None))):
             raise ValueError("a session is malformed")
         shown = "".join(ch if ch.isprintable() else "?" for ch in pane)[:_PANE_LIMIT] if pane else None
-        sessions.append(Session(pid=pid, pane=shown))
+        sessions.append(Session(pid=pid, pane=shown, in_tmux=in_tmux))
     return sessions
 
 
@@ -65,24 +68,16 @@ def find_sessions(target: Target, config: str) -> list[Session]:
 
 
 def _line(project: Project, session: Session) -> str:
-    where = session.pane if session.pane else f"proces {session.pid} mimo tmux"
+    where = session.pane or f"proces {session.pid} " + ("v tmux, panel nezistený" if session.in_tmux else "mimo tmux")
     return f"• {project.name} ({project.account}@{project.host}): {where}"
 
 
-def compose_messages(found: list[tuple[Project, list[Session]]], *, limit: int) -> list[str]:
-    """ONE message; several only when it would pass *limit* (airuleset cuts a longer body)."""
+def compose_messages(found: list[tuple[Project, list[Session]]]) -> list[str]:
+    """ONE message; several only when it would pass ``CHUNK_LIMIT``."""
     lines = [_line(project, session) for project, sessions in found for session in sessions]
     if not lines:
         return []
-    fixed = len(TITLE) + len(ACTION) + 2
-    groups: list[list[str]] = [[]]
-    size = fixed
-    for line in lines:
-        if groups[-1] and size + len(line) + 1 > limit:
-            groups.append([])
-            size = fixed
-        groups[-1].append(line)
-        size += len(line) + 1
+    groups = split_to_fit(lines, lambda group: len("\n".join([TITLE, *group, ACTION])))
     return ["\n".join([TITLE, *group, ACTION]) for group in groups]
 
 
@@ -92,7 +87,6 @@ def notify_restarts(
     notifier: Callable[[str], bool] | None,
     echo: Callable[[str], None],
     dry_run: bool,
-    limit: int,
 ) -> None:
     """Scan the *written* projects and tell the owner. Never raises for a failed scan or notify."""
     found: list[tuple[Project, list[Session]]] = []
@@ -105,7 +99,7 @@ def notify_restarts(
             continue
         if sessions:
             found.append((project, sessions))
-    for text in compose_messages(found, limit=limit):
+    for text in compose_messages(found):
         if dry_run:
             echo(f"dry run — the owner would get:\n{text}")
         elif notifier is None:

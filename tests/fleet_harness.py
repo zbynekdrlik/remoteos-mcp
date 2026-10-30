@@ -142,7 +142,10 @@ class FakeFleetMachine:
                     },
                 )
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class Server(ThreadingHTTPServer):
+            request_queue_size = 256  # a whole fake fleet may probe one box at once
+
+        self._server = Server(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
