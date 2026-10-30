@@ -169,6 +169,15 @@ class TestAttempts:
         with pytest.raises(SystemExit):
             run(start=killed)
 
+    def test_a_runner_that_did_not_start_costs_no_try(self, tmp_path):
+        run = Run(tmp_path, [release("0.7.0.dev50", 20)])
+
+        def refused(tag: str) -> str:
+            raise RuntimeError("no upgrade task")
+
+        assert run(start=refused) == 1
+        assert updater.attempts_at(tmp_path / updater.STATE_NAME, "v0.7.0.dev50") == 0
+
     def test_no_record_no_upgrade(self, tmp_path, caplog):
         run = Run(tmp_path, [release("0.7.0.dev50", 20)])
         (tmp_path / updater.STATE_NAME).mkdir()  # a write fails, on any account

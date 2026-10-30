@@ -382,16 +382,22 @@ ADDED_DEPS=()
 exec 3>&1 4>&2
 trap on_exit EXIT
 # One run at a time: the updater makes a second one routine. No flock on macOS; a dead run's pid frees it.
-LOCK_DIR="$CONFIG_DIR.install-lock"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    if kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null || echo 0)" 2>/dev/null; then
-        LOCK_DIR=""
+# LOCK_DIR is set only once the lock is ours: on_exit removes it.
+lock_path="$CONFIG_DIR.install-lock"
+if ! mkdir "$lock_path" 2>/dev/null; then
+    sleep 1  # a run that just took it writes its pid next
+    holder=$(cat "$lock_path/pid" 2>/dev/null || true)
+    if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
         echo "        [X] Another install.sh run is going on — nothing was changed on this box"
         exit 1
     fi
-    rm -rf "$LOCK_DIR"
-    mkdir "$LOCK_DIR"
+    rm -rf "$lock_path"
+    if ! mkdir "$lock_path" 2>/dev/null; then
+        echo "        [X] Another install.sh run took the lock — nothing was changed on this box"
+        exit 1
+    fi
 fi
+LOCK_DIR="$lock_path"
 echo "$$" >"$LOCK_DIR/pid"
 mkdir -p "$WORK_DIR/pip-tmp"
 prepare_sudoers

@@ -98,6 +98,10 @@ def attempts_at(state_path: Path, tag: str) -> int:
     return attempts if isinstance(attempts, int) and not isinstance(attempts, bool) else 0
 
 
+def _record_attempts(state_path: Path, tag: str, attempts: int) -> None:
+    state_path.write_text(json.dumps({"tag": tag, "attempts": attempts}) + "\n", encoding="utf-8")
+
+
 def inside_server_service(cgroup_file: str = CGROUP_FILE) -> bool:
     """Is this process in the server's own unit (a Shell call)? install-linux.sh's guard, here."""
     try:
@@ -145,14 +149,18 @@ def run(
         return 0
     try:
         # Before the start: a run that kills this process counts too.
-        state_path.write_text(json.dumps({"tag": tag, "attempts": attempts + 1}) + "\n", encoding="utf-8")
+        _record_attempts(state_path, tag, attempts + 1)
     except OSError as exc:
         log.error("updater: cannot record the attempt (%s) — not starting an upgrade that could repeat daily", exc)
         return 1
     try:
         log.info("updater: %s", start(tag))
     except Exception as exc:  # an unattended run: the log is the only reader
-        log.error("updater: the upgrade to %s did not start: %s: %s", decision.target.tag, type(exc).__name__, exc)
+        log.error("updater: the upgrade to %s did not start: %s: %s", tag, type(exc).__name__, exc)
+        try:
+            _record_attempts(state_path, tag, attempts)  # nothing was stopped: not a try
+        except OSError as record_error:
+            log.warning("updater: cannot correct the attempt count (%s)", record_error)
         return 1
     return 0
 

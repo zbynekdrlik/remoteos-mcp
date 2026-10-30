@@ -153,3 +153,32 @@ def test_the_uninstaller_without_sudo_says_so(tmp_path):
     result = _uninstall(tmp_path, shims, sudoers)
     assert sudoers.exists()
     assert "remove" in result.stdout and "by hand" in result.stdout
+
+
+class TestOneRunAtATime:
+    """#65: the updater makes a second run routine. Here too: bash 3.2 and `set -e`."""
+
+    def lock(self, mac: Mac, pid: str | None) -> Path:
+        path = mac.tmp / "dot-remoteos-mcp.install-lock"
+        path.mkdir()
+        if pid is not None:
+            (path / "pid").write_text(pid + "\n")
+        return path
+
+    def test_a_live_run_refuses_this_one_and_keeps_its_lock(self, mac):
+        lock = self.lock(mac, str(os.getpid()))
+        result = mac.run()
+        assert result.returncode == 1
+        assert "Another install.sh run" in result.stdout
+        assert (lock / "pid").read_text().strip() == str(os.getpid())
+
+    @pytest.mark.parametrize("pid", [None, "999999"], ids=["no-pid", "dead-pid"])
+    def test_a_dead_run_s_lock_is_taken_over_and_released(self, mac, pid):
+        lock = self.lock(mac, pid)
+        result = mac.run()
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not lock.exists()
+
+    def test_a_finished_run_leaves_no_lock(self, mac):
+        assert mac.run().returncode == 0
+        assert not (mac.tmp / "dot-remoteos-mcp.install-lock").exists()

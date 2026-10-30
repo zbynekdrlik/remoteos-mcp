@@ -9,13 +9,19 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 from test_install_ps1_key import _ps, _q
-from test_install_ps1_wheelhouse import SHA_OLD, _installed, _run, _wheelhouse, shared_venv, venv  # noqa: F401
+from test_install_ps1_wheelhouse import _PRELUDE, INSTALLER, SHA_OLD, _installed, _run, _wheelhouse, shared_venv, venv  # noqa: F401
 
 ROOT = Path(__file__).parent.parent
+
+
+def _functions_prelude() -> str:
+    """install.ps1's own functions, as test_install_ps1_wheelhouse's probe loads them."""
+    return _PRELUDE.format(installer=str(INSTALLER).replace("'", "''"))
 
 
 @pytest.mark.parametrize(("ring", "ok"), [("", True), ("stable", True), ("canary", True), ("Canary", False),
@@ -165,6 +171,53 @@ def test_the_trap_gives_up_on_an_installer_that_never_finishes(tmp_path):
     ConvertTo-Json -Compress"""
     script = _ps(tmp_path, body)["s"]
     assert "(Get-Date) -lt $deadline" in script and "AddMinutes(30)" in script
+
+
+class TestInstallLock:
+    """Two real processes: the lock is the machine's, and it dies with its holder."""
+
+    def _holder(self, tmp_path: Path, ready: Path) -> subprocess.Popen:
+        script = tmp_path / "holder.ps1"
+        script.write_text(f"""
+{_functions_prelude()}
+$lock = Enter-RemoteOSInstallLock
+Set-Content -LiteralPath {_q(ready)} -Value 1
+Start-Sleep -Seconds 60
+""", encoding="utf-8-sig")
+        process = subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                    "-File", str(script)], stdin=subprocess.DEVNULL)
+        deadline = time.monotonic() + 60
+        while not ready.exists():
+            assert time.monotonic() < deadline and process.poll() is None
+            time.sleep(0.1)
+        return process
+
+    def _taken(self, tmp_path: Path) -> bool:
+        body = "$l = Enter-RemoteOSInstallLock; @{ got = [bool]$l } | ConvertTo-Json -Compress"
+        return _ps(tmp_path, body)["got"]
+
+    def test_a_held_lock_refuses_a_second_run_and_a_killed_holder_frees_it(self, tmp_path):
+        process = self._holder(tmp_path, tmp_path / "ready")
+        try:
+            assert self._taken(tmp_path) is False
+        finally:
+            process.kill()
+            process.wait()
+        assert self._taken(tmp_path) is True
+
+
+def test_a_new_run_holding_the_lock_keeps_the_trap_out(tmp_path):
+    """A dead installer's watcher must not roll back under the run that took over."""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "rollback-pending.txt").write_text("1")
+    trap = TestRollbackTrap()
+    script = trap._script(tmp_path, config, tmp_path / "no-python", trap._dead_pid())
+    text = script.read_text(encoding="utf-8-sig").replace("$lock = Enter-RemoteOSInstallLock", "$lock = $null")
+    script.write_text(text, encoding="utf-8-sig")
+    assert trap._run(script).returncode == 0
+    assert (config / "rollback-pending.txt").exists()
+    assert "a new run holds the lock" in (config / "rollback.log").read_text(encoding="utf-8", errors="replace")
 
 
 def test_the_failure_exit_disarms_only_after_the_rollback(tmp_path):

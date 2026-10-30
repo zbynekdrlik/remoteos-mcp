@@ -48,8 +48,13 @@ function Get-RemoteOSRollbackTrapScript($Point, [string]$Python, [string]$Config
         '$deadline = (Get-Date).AddMinutes(30)',
         'while ((Test-Path -LiteralPath $marker) -and (Get-Process -Id $installerPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }',
         'if (-not (Test-Path -LiteralPath $marker)) { exit 0 }',
-        '$lock = Enter-RemoteOSInstallLock',  # free once the installer is dead; held = a new run owns the box
-        'if (-not $lock) { exit 0 }',
+        # Free once the installer is dead, so held = a new run owns the box. An installer still alive at the
+        # deadline holds it itself (a Ctrl+C in a piped run keeps the console): its box still needs the rollback.
+        '$lock = Enter-RemoteOSInstallLock',
+        'if (-not $lock -and -not (Get-Process -Id $installerPid -ErrorAction SilentlyContinue)) {',
+        '    Add-Content -LiteralPath $log -Value "$(Get-Date -Format s) The installer (pid $installerPid) died armed, but a new run holds the lock: left to it"',
+        '    exit 0',
+        '}',
         'Add-Content -LiteralPath $log -Value "$(Get-Date -Format s) The installer (pid $installerPid) died armed: rolling back to v$($point.Version)"',
         'try {',
         '    $back = Invoke-RemoteOSRollback -Point $point -Python $python -StopServer { Stop-RemoteOSServer -Port $Port } `',

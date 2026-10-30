@@ -453,3 +453,6 @@ Write-Host ""
 Write-Host "  To uninstall later:" -ForegroundColor Gray
 Write-Host "  irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps1 | iex" -ForegroundColor Gray
 Write-Host ""
+# irm | iex ends here with the console still open: the lock must not outlive the run
+$installLock.ReleaseMutex()
+$installLock.Dispose()
