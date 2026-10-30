@@ -17,8 +17,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 
@@ -33,6 +35,9 @@ STATE_OK = "ok"
 STATE_UNAUTHORIZED = "401"
 STATE_UNREACHABLE = "unreachable"
 STATE_ERROR = "error"
+
+# What a machine's /health may report: it ends up in the status file and an owner message.
+_VERSION_TEXT = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}")
 
 
 @dataclass(frozen=True)
@@ -105,6 +110,30 @@ async def probe_healthz(client: httpx2.AsyncClient, base_url: str) -> ProbeResul
     except (ValueError, AttributeError):
         return ProbeResult(STATE_ERROR, 200, "HTTP 200 but not the gateway's /healthz JSON")
     return ProbeResult(STATE_OK, 200, f"version {version}")
+
+
+def health_url(mcp_url: str) -> str:
+    """The machine's public ``/health``, next to its ``/mcp`` endpoint."""
+    parts = urlsplit(mcp_url)
+    base = parts.path[: -len("/mcp")] if parts.path.endswith("/mcp") else parts.path.rstrip("/")
+    return urlunsplit((parts.scheme, parts.netloc, base + "/health", "", ""))
+
+
+async def probe_version(client: httpx2.AsyncClient, mcp_url: str) -> ProbeResult:
+    """GET a machine's ``/health`` (public: no key is sent); ``detail`` is its version when ``ok``."""
+    try:
+        response = await client.get(health_url(mcp_url))
+    except (httpx2.RequestError, httpx2.InvalidURL, ValueError) as exc:
+        return ProbeResult(STATE_UNREACHABLE, None, type(exc).__name__)
+    if response.status_code != 200:
+        return ProbeResult(STATE_ERROR, response.status_code, f"HTTP {response.status_code}")
+    try:
+        version = response.json().get("version")
+    except (ValueError, AttributeError):
+        version = None
+    if not isinstance(version, str) or _VERSION_TEXT.fullmatch(version) is None:
+        return ProbeResult(STATE_ERROR, 200, "no version in /health")
+    return ProbeResult(STATE_OK, 200, version)
 
 
 async def gather_probes(probes: Iterable[Awaitable[ProbeResult]]) -> list[ProbeResult]:

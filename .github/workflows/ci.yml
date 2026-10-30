@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: shellcheck --version
-      - run: shellcheck install-linux.sh install.sh uninstall*.sh
+      - run: shellcheck install-linux.sh install.sh uninstall*.sh scripts/*.sh
       - name: macOS installer tests under bash 3.2
         run: >-
           docker run --rm -v "$PWD":/w:ro bash:3.2 sh -c '
@@ -126,3 +126,17 @@ jobs:
               raise SystemExit(f'FAIL: PR version {pr} is not strictly greater than base version {base}')
           print(f'OK: {pr} > {base}')
           "
+
+  # GitHub release v<version> on every merge to main (#63): its publish date is the age the
+  # stable/canary resolver soaks, its `prerelease` mark is the hold switch. Never on a PR or dev.
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, test, pip-audit, shell, windows-powershell]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/create-release.sh
+        env:
+          GH_TOKEN: ${{ github.token }}

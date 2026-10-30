@@ -56,10 +56,21 @@ def fresh_secret(prefix: str) -> str:
 class FakeFleetMachine:
     """A remoteos machine (or, with ``healthz``, the gateway) on a real loopback port."""
 
-    def __init__(self, accept_keys: tuple[str, ...] = (), *, status: int | None = None, healthz: bool = False):
+    def __init__(
+        self,
+        accept_keys: tuple[str, ...] = (),
+        *,
+        status: int | None = None,
+        healthz: bool = False,
+        version: str | None = None,
+        releases: list | None = None,
+    ):
         self.accept_keys = list(accept_keys)
         self.status = status  # a fixed answer (e.g. 500) instead of the key check
         self.healthz = healthz
+        self.version = version  # answers GET /health like a machine; None = 404
+        self.releases = releases  # answers GET /releases like GitHub; None = 404
+        self.seen_health_authorization: list[str | None] = []
         self.seen_authorization: list[str | None] = []
         self.seen_methods: list[str | None] = []
         self._server: ThreadingHTTPServer | None = None
@@ -87,7 +98,7 @@ class FakeFleetMachine:
             def log_message(self, format, *args):  # noqa: A002 - stdlib signature
                 return  # keep the test output clean
 
-            def _answer(self, code: int, payload: dict) -> None:
+            def _answer(self, code: int, payload: dict | list) -> None:
                 body = json.dumps(payload).encode()
                 self.send_response(code)
                 self.send_header("content-type", "application/json")
@@ -98,6 +109,11 @@ class FakeFleetMachine:
             def do_GET(self):  # noqa: N802 - stdlib naming
                 if self.path == "/healthz" and machine.healthz:
                     self._answer(200, {"status": "ok", "version": "0.0.0-test"})
+                elif self.path == "/health" and machine.version is not None:
+                    machine.seen_health_authorization.append(self.headers.get("authorization"))
+                    self._answer(200, {"status": "ok", "version": machine.version})
+                elif self.path == "/releases" and machine.releases is not None:
+                    self._answer(200, machine.releases)
                 else:
                     self._answer(404, {"error": "Not Found"})
 

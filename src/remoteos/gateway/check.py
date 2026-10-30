@@ -5,7 +5,8 @@ gateway's own ``/healthz``, then writes ``~/.local/state/remoteos-gateway/machin
 
     {"checked_at": "...",
      "gateway":  {"state": "ok", "since": "...", "detail": "version 0.7.0.dev33", "notified": true},
-     "machines": {"linux-cam2": {"state": "401", "since": "...", "detail": "...", "notified": true}}}
+     "machines": {"linux-cam2": {"state": "401", "since": "...", "detail": "...", "notified": true,
+                                 "version": "0.7.0.dev33", "version_seen": "..."}}}
 
 States: ``ok`` / ``401`` / ``unreachable`` / ``error`` (``probe.py``). ``since`` is when the
 current state began. A state CHANGE is announced once — through ``airuleset.py notify --body``
@@ -18,6 +19,9 @@ A 401 is auto-repaired ONLY for a machine with an explicit ``repair`` recipe in 
 ``ssh -o BatchMode=yes <ssh> [sudo -n] cat <key_file>`` reads the installer's ``config.json``,
 the key in it is probed, and only a key the machine ACCEPTS is stored. Nothing is ever guessed.
 No key is ever logged, printed, written to the status file or put in a notification.
+
+Each machine's public ``/health`` gives its version; ``drift.py`` reports a box older than the
+stable release (#63).
 """
 
 from __future__ import annotations
@@ -37,7 +41,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from remoteos.gateway import drift as drift_report
 from remoteos.gateway import fileops
+from remoteos.gateway.drift import DriftPolicy
 from remoteos.gateway.keystore import edit_keystore, load_keystore
 from remoteos.gateway.probe import (
     STATE_OK,
@@ -47,6 +53,7 @@ from remoteos.gateway.probe import (
     new_client,
     probe_healthz,
     probe_initialize,
+    probe_version,
 )
 from remoteos.gateway.registry import MachineEntry, MachineSourceError, validate_key
 from remoteos.gateway.targets import SSH_OPTIONS, last_line
@@ -69,21 +76,27 @@ class Observation:
     state: str
     detail: str
     repaired: bool = False
+    version: str | None = None  # from /health, this run; None = no answer
 
 
 # -- probing + repair -------------------------------------------------------------------------
 
 
-async def _probe_all(entries: dict[str, MachineEntry], gateway_url: str) -> tuple[dict[str, ProbeResult], ProbeResult]:
+async def _probe_all(
+    entries: dict[str, MachineEntry], gateway_url: str
+) -> tuple[dict[str, ProbeResult], dict[str, str], ProbeResult]:
+    """Per machine the ``initialize`` result, the versions that answered, and the gateway's health."""
     async with new_client() as client:
         names = sorted(entries)
         results = await gather_probes(
             [
                 *(probe_initialize(client, entries[n].url, entries[n].authorization) for n in names),
+                *(probe_version(client, entries[n].url) for n in names),
                 probe_healthz(client, gateway_url),
             ]
         )
-    return dict(zip(names, results[:-1])), results[-1]
+    versions = {n: r.detail for n, r in zip(names, results[len(names) : -1]) if r.ok}
+    return dict(zip(names, results)), versions, results[-1]
 
 
 def read_key_by_recipe(entry: MachineEntry, *, ssh_bin: str) -> tuple[str | None, str]:
@@ -136,7 +149,7 @@ async def _repair(name: str, entry: MachineEntry, *, keystore_path: Path, ssh_bi
 async def observe(
     entries: dict[str, MachineEntry], *, gateway_url: str, keystore_path: Path, ssh_bin: str
 ) -> tuple[dict[str, Observation], Observation]:
-    results, health = await _probe_all(entries, gateway_url)
+    results, versions, health = await _probe_all(entries, gateway_url)
     observations = {name: Observation(r.state, r.detail) for name, r in results.items()}
 
     async def guarded(name: str) -> Observation:
@@ -152,6 +165,8 @@ async def observe(
     repairable = [n for n, r in results.items() if r.state == STATE_UNAUTHORIZED and entries[n].repair is not None]
     for name, observation in zip(repairable, await asyncio.gather(*(guarded(n) for n in repairable))):
         observations[name] = observation
+    for name, observation in observations.items():
+        observation.version = versions.get(name)
     return observations, Observation(health.state, health.detail)
 
 
@@ -246,8 +261,10 @@ def compose_messages(pending: dict[str, dict], host: str, *, recovered: bool = F
 
 
 # What `airuleset.py notify --body` prints (send()'s status). It EXITS 0 EVEN WHEN THE POST FAILED,
-# so only these printed statuses count as delivered ("dedup" = already delivered under that key).
-_DELIVERED = frozenset({"sent", "dedup"})
+# so only these printed statuses count as delivered ("dedup" = already delivered under that key;
+# "suppressed" = the owner's policy decided nothing is posted, which airuleset itself counts as
+# delivered: retrying it every 10 minutes could never change the answer).
+_DELIVERED = frozenset({"sent", "dedup", "suppressed"})
 
 
 def airuleset_notifier(script: Path, owner: str | None) -> Callable[[str], bool] | None:
@@ -268,7 +285,7 @@ def airuleset_notifier(script: Path, owner: str | None) -> Callable[[str], bool]
                 argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=NOTIFY_TIMEOUT_S, check=False
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            logger.error("check: notify did not run (%s) — retried on the next run", type(exc).__name__)
+            logger.error("notify did not run (%s)", type(exc).__name__)
             return False
         status = last_line(proc.stdout)
         if proc.returncode != 0 or status not in _DELIVERED:
@@ -276,8 +293,10 @@ def airuleset_notifier(script: Path, owner: str | None) -> Callable[[str], bool]
                 reason = f"printed {status!r}"
             else:
                 reason = last_line(proc.stderr) or f"exit {proc.returncode}"
-            logger.error("check: notify NOT delivered (%s) — retried on the next run", reason)
+            logger.error("notify NOT delivered (%s)", reason)
             return False
+        if status == "suppressed":
+            logger.warning("notify: the owner's policy posted nothing for this message")
         return True
 
     return send
@@ -298,8 +317,10 @@ def run_check(
     ssh_bin: str | None = None,
     host: str = "dev1",
     now: Callable[[], _dt.datetime] | None = None,
+    drift: DriftPolicy | None = None,
 ) -> CheckReport:
-    stamp = (now or (lambda: _dt.datetime.now(_dt.timezone.utc)))().isoformat(timespec="milliseconds")
+    moment = (now or (lambda: _dt.datetime.now(_dt.timezone.utc)))()
+    stamp = moment.isoformat(timespec="milliseconds")
     previous = load_status(status_path)
     try:
         entries = load_keystore(keystore_path)
@@ -307,7 +328,9 @@ def run_check(
         _report_failure(status_path, previous, str(exc), stamp, notifier, host)
         raise
     try:
-        return _check_loaded(entries, previous, stamp, keystore_path, status_path, gateway_url, notifier, ssh_bin, host)
+        return _check_loaded(
+            entries, previous, moment, keystore_path, status_path, gateway_url, notifier, ssh_bin, host, drift
+        )
     except CheckError:
         raise
     except Exception as exc:  # the watchdog never goes silent: whatever broke, it is announced
@@ -320,14 +343,16 @@ def run_check(
 def _check_loaded(
     entries: dict[str, MachineEntry],
     previous: dict,
-    stamp: str,
+    moment: _dt.datetime,
     keystore_path: Path,
     status_path: Path,
     gateway_url: str,
     notifier: Callable[[str], bool] | None,
     ssh_bin: str | None,
     host: str,
+    drift: DriftPolicy | None,
 ) -> CheckReport:
+    stamp = moment.isoformat(timespec="milliseconds")
     observations, health = asyncio.run(
         observe(
             entries,
@@ -359,6 +384,15 @@ def _check_loaded(
                     pending[name]["notified"] = True
             elif index == 0 and recovered:  # the first message carries the "running again" title
                 status["recovery_pending"] = True
+    releases = drift_report.read_releases(drift)
+    soak = drift.soak_days if drift is not None else 0
+    for name, record in status["machines"].items():
+        version = observations[name].version
+        drift_report.record_versions(record, old_machines.get(name), version, stamp)
+        drift_report.judge(record, old_machines.get(name), version, releases, moment, soak)
+    if releases is not None:
+        drift_sent = drift_report.announce(status["machines"], host, moment, notifier, limit=CHUNK_LIMIT)
+        sent = drift_sent if sent is None else (sent and drift_sent is not False)
     try:
         _write_status(status_path, status)
     except OSError as exc:

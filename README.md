@@ -519,6 +519,14 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
 - After a project's config changed, its RUNNING sessions need ONE restart (Claude Code reads
   `.mcp.json` only at start). After that, a key change never reaches a session again.
 
+**Releases (stable and canary):** CI creates GitHub release `v<version>` on every merge to `main`,
+after all test jobs passed (`scripts/create-release.sh`, a no-op when it exists).
+
+- `canary` = the newest release that is not held.
+- `stable` = the newest release that is not held and at least `REMOTEOS_SOAK_DAYS` old (default 14).
+- **Hold a bad release:** mark it "pre-release" in the GitHub UI. Everything ignores it from then on.
+- `remoteos.release_channel` is the resolver; `check` uses it, the per-box updater (#65) will too.
+
 **`check` (the watchdog):**
 
 - **What it probes.** Every key-store machine directly with its stored key (`initialize`),
@@ -528,9 +536,17 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
 - **Notifications.** It announces each state change ONCE, through
   `~/devel/airuleset/airuleset.py notify --body` (owner from
   `REMOTEOS_GATEWAY_NOTIFY_OWNER`). Without airuleset it writes a log line instead. A
-  notification that did not go out (airuleset did not print `sent`) is retried on the next
-  run. A check that cannot run at all (an invalid key store) is announced once too, exits 1,
-  and its recovery is announced.
+  notification that did not go out (airuleset printed neither `sent`, `dedup` nor `suppressed`)
+  is retried on the next run. `suppressed` means the owner's airuleset policy posts nothing for
+  this kind of message: it counts as handled, and the text stays in the journal. A check that
+  cannot run at all (an invalid key store) is announced once too, exits 1, and its recovery is
+  announced.
+- **Fleet version drift.** It records each machine's `/health` version (`machine list` shows the
+  last one seen) and compares it with the stable release:
+  - A box older than stable for more than 3 days is reported once, with its version and days,
+    until it catches up.
+  - A box that does not answer keeps its last version and is not judged.
+  - A failed read of the release list skips drift for that run (a log line), nothing else.
 - **Auto-repair of a 401** happens only for a machine with an explicit recipe:
   `remoteos-gateway machine repair-recipe linux-cam2 --ssh root@cam2.lan [--sudo]`.
   - The recipe reads the box's installer `config.json` (`/etc/remoteos-mcp/config.json`)

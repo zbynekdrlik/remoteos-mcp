@@ -5,6 +5,9 @@ paths:
   - "tests/gateway_harness.py"
   - "tests/conftest.py"
   - "tests/fleet_harness.py"
+  - "src/remoteos/release_channel.py"
+  - "tests/test_release_channel.py"
+  - "scripts/create-release.sh"
   - "deploy/remoteos-gateway*"
 ---
 
@@ -165,10 +168,29 @@ paths:
     key store, the gateway reload and import (review rounds 3-4: each crashed check silently).
     Second line of defence: `probe.gather_probes` turns any probe that still raises into an
     `error` result for that machine alone.
+  - **`suppressed` counts as delivered** (#63): airuleset's owner policy (`notify.OWNER_PING_ALLOW`)
+    posts nothing for owner zbynek unless the dedup key is one of its alarm classes, and prints
+    `suppressed`. Retrying could never change that, and airuleset itself counts it as delivered.
+    So on dev1 these messages do NOT reach Discord: the text is in the journal. Never borrow an
+    alarm key to get around the owner's policy.
   - airuleset CUTS a body at 1900 characters (mention included) and still prints `sent`: a
     fleet-wide change goes out as several messages of at most `CHUNK_LIMIT` (1700), and only the
     machines of a DELIVERED message count as notified. While an announcement is still owed, the
     record keeps the detail of the change (`repaired: ...`), so a retry still says what happened.
+- **Version drift (`drift.py`, #63, resolver `remoteos/release_channel.py`):**
+  - `release_channel.py` is stdlib only (the per-box updater uses it too), so `version_key` is a
+    small regex for `1.2.3[.devN]`, not `packaging`. Anything else is "not comparable" and is
+    never judged.
+  - "Newest" is by PUBLISH date, never by version. GitHub's `prerelease` flag means HELD, not
+    "a dev version": every release of this repo is a `.devN`.
+  - Behind since = when the OLDEST release newer than the box finished its soak (`behind_since`).
+    It needs no history, and a new stable does not restart the count.
+  - Only a version read in THIS run is judged. No answer, or no release list, keeps the record's
+    `drift` as it is. Reported once per episode: the record stays until a fresh version shows the
+    box is not behind.
+  - `probe_version` reads the public `/health` without a key. A version that is not plain
+    `[0-9A-Za-z.+_-]` is dropped: it would reach the status file and Discord.
+  - `check` tests never reach GitHub: `Check.releases_url` defaults to a closed port.
 - **Dry run = one choke point:** `sync._Saver(dry_run=True).commit()` never writes. Registry
   edits of a dry run (narrowing, withdrawing, `--prune`) happen in memory only. Never add a
   second save path around it.
