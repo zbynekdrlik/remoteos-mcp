@@ -259,6 +259,21 @@ def test_shell_failing_with_only_stderr_keeps_stdout_empty(run):
     assert (ran.code, ran.stdout, ran.stderr) == (1, "", "only-err\n")
 
 
+@pytest.mark.parametrize(
+    ("script", "stdout"),
+    [
+        ("printf 'no newline'", "no newline"),
+        ("printf '  leading\\n\\n\\n'", "  leading\n\n\n"),
+        ("echo '[Exit code: 9]'", "[Exit code: 9]\n"),
+        ("echo a; echo '[STDERR] not stderr'", "a\n[STDERR] not stderr\n"),
+        ("echo '(no output)'", "(no output)\n"),
+    ],
+)
+def test_structured_shell_output_round_trips_what_plain_text_could_not(run, script, stdout):
+    ran = run(MACHINE, "Shell", script)
+    assert (ran.code, ran.stdout, ran.stderr) == (0, stdout, "")
+
+
 def test_shell_exit_code_without_any_output(run):
     ran = run(MACHINE, "Shell", "exit 42")
     assert (ran.code, ran.stdout, ran.stderr) == (42, "", "")
@@ -389,22 +404,95 @@ def test_get_of_a_multi_megabyte_file_through_the_gateway_matches_its_sha256(run
     assert _sha256(back.read_bytes()) == _sha256(payload)
 
 
-def test_put_of_almost_3_mb_through_the_gateway_works(run, tmp_path):
-    payload = secrets.token_bytes(2_900_000)  # ~3.9 MB of base64 + JSON: just inside the machine's 4 MiB
-    local = tmp_path / "almost.bin"
+def test_put_of_10_mb_through_the_gateway_matches_its_sha256(run, tmp_path):
+    payload = secrets.token_bytes(10_000_000)  # four chunks, each under the machine's 4 MiB per request
+    local = tmp_path / "ten.bin"
     local.write_bytes(payload)
-    remote = tmp_path / "almost-remote.bin"
-    assert run(MACHINE, "put", str(local), str(remote)).code == 0
+    remote = tmp_path / "ten-remote.bin"
+    ran = run(MACHINE, "put", str(local), str(remote))
+    assert (ran.code, ran.stdout, ran.stderr) == (0, "", "")
     assert _sha256(remote.read_bytes()) == _sha256(payload)
+    assert not (tmp_path / "ten-remote.bin.part").exists()
+
+
+def test_an_interrupted_put_leaves_the_target_and_the_next_put_finishes(run, tmp_path, monkeypatch):
+    local = tmp_path / "new.bin"
+    local.write_bytes(secrets.token_bytes(6_000_000))
+    remote = tmp_path / "target.bin"
+    remote.write_bytes(b"the old content")
+    real_run = cli_call._run
+    calls = []
+
+    def dies_at_the_second_chunk(machine, tool, arguments, wait_s):
+        calls.append(tool)
+        if len(calls) == 2:
+            raise cli_call.CallFailed(126, "connection lost")
+        return real_run(machine, tool, arguments, wait_s)
+
+    monkeypatch.setattr(cli_call, "_run", dies_at_the_second_chunk)
+    ran = run(MACHINE, "put", str(local), str(remote))
+    assert (ran.code, ran.stderr) == (126, "remoteos-call: connection lost\n")
+    assert remote.read_bytes() == b"the old content"
+    assert (tmp_path / "target.bin.part").stat().st_size == cli_call.PUT_CHUNK_BYTES
+
+    monkeypatch.setattr(cli_call, "_run", real_run)
+    assert run(MACHINE, "put", str(local), str(remote)).code == 0
+    assert remote.read_bytes() == local.read_bytes()
+    assert not (tmp_path / "target.bin.part").exists()
+
+
+def test_put_over_an_existing_file_keeps_its_mode_and_a_symlink_stays_a_symlink(run, tmp_path):
+    local = tmp_path / "new.txt"
+    local.write_bytes(b"new")
+    secret_file = tmp_path / "real-target"
+    secret_file.write_bytes(b"old")
+    secret_file.chmod(0o600)
+    link = tmp_path / "link"
+    link.symlink_to(secret_file)
+    assert run(MACHINE, "put", str(local), str(link)).code == 0
+    assert link.is_symlink()
+    assert secret_file.read_bytes() == b"new"
+    assert secret_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_an_interrupted_put_over_a_private_file_leaves_a_private_part(run, tmp_path, monkeypatch):
+    local = tmp_path / "new.bin"
+    local.write_bytes(secrets.token_bytes(3_000_000))
+    remote = tmp_path / "private"
+    remote.write_bytes(b"old")
+    remote.chmod(0o600)
+    real_run = cli_call._run
+    calls = []
+
+    def dies_at_the_second_chunk(machine, tool, arguments, wait_s):
+        calls.append(tool)
+        if len(calls) == 2:
+            raise cli_call.CallFailed(126, "connection lost")
+        return real_run(machine, tool, arguments, wait_s)
+
+    monkeypatch.setattr(cli_call, "_run", dies_at_the_second_chunk)
+    assert run(MACHINE, "put", str(local), str(remote)).code == 126
+    assert (tmp_path / "private.part").stat().st_mode & 0o777 == 0o600
+
+
+def test_a_put_to_a_directory_is_refused_before_any_data_lands(run, tmp_path):
+    local = tmp_path / "f"
+    local.write_bytes(b"x")
+    target = tmp_path / "a-dir"
+    target.mkdir()
+    ran = run(MACHINE, "put", str(local), str(target))
+    assert (ran.code, ran.stderr) == (125, f"remoteos-call: FileUpload error: {target} is a directory\n")
+    assert not (tmp_path / "a-dir.part").exists()
 
 
 @pytest.mark.parametrize("machine", [MACHINE, "linux-direct"])
-def test_a_put_over_the_machine_s_request_limit_is_refused_in_one_line(run, tmp_path, machine):
+def test_a_request_over_the_machine_s_limit_is_refused_in_one_line(run, tmp_path, machine, monkeypatch):
+    monkeypatch.setattr(cli_call, "PUT_CHUNK_BYTES", 3_500_000)  # never a real put's chunk size
     local = tmp_path / "big.bin"
     local.write_bytes(b"\0" * 3_500_000)  # ~4.7 MB of base64: over the machine's 4 MiB, under the gateway's 16
     ran = run(machine, "put", str(local), str(tmp_path / "big-remote.bin"))
     assert ran.code == 126
-    reason = "request too large (413): a machine takes at most 4 MiB per request, so a put carries about 3 MB"
+    reason = "request too large (413): a machine takes at most 4 MiB per request"
     assert ran.stderr.startswith(f"remoteos-call: {machine}: {reason} (")
     assert ran.stderr.count("\n") == 1
     assert not (tmp_path / "big-remote.bin").exists()
@@ -776,7 +864,8 @@ def test_put_refuses_a_size_mismatch_and_an_unexpected_reply(remote_replies, tmp
     queued.append(_reply("[task:a1] Written 4 bytes to /r"))
     failure = _expect_failure(lambda: cli_call.run_put(_M, local, "/r", 9.0))
     assert (failure.code, failure.message) == (125, "put: size mismatch, sent 5 bytes, remote wrote 4")
-    assert asked == [("FileUpload", {"path": "/r", "data_base64": "MTIzNDU="}, 9.0)]
+    first_chunk = {"path": "/r.part", "data_base64": "MTIzNDU=", "append": False, "permissions_from": "/r"}
+    assert asked == [("FileUpload", first_chunk, 9.0)]
     queued.append(_reply("[task:a2] something else"))
     assert _expect_failure(lambda: cli_call.run_put(_M, local, "/r", 9.0)).message == (
         "put: unexpected FileUpload reply: something else"
@@ -784,7 +873,13 @@ def test_put_refuses_a_size_mismatch_and_an_unexpected_reply(remote_replies, tmp
     queued.append(_reply("[task:a3] FileUpload error: Permission denied", is_error=True))
     failure = _expect_failure(lambda: cli_call.run_put(_M, local, "/r", 9.0))
     assert (failure.code, failure.message) == (125, "FileUpload error: Permission denied")
-    queued.append(_reply("[task:a4] Written 5 bytes to /r"))
+    queued.extend(
+        [
+            _reply("[task:a4] Written 5 bytes to /r.part"),
+            _reply(f"[task:a5] sha256:{_sha256(b'12345')} 5 bytes"),
+            _reply("[task:a6] Renamed /r.part to /r"),
+        ]
+    )
     assert cli_call.run_put(_M, local, "/r", 9.0) == 0
 
 
