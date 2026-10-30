@@ -429,8 +429,10 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     Administrators-only data folder + `schtasks /Run`. The script writes
     `rollback-watching.txt` first, and the arm waits for it: `schtasks /Run` only requests a start. It
     polls: marker gone = exit; the installer's pid gone, or 30 minutes passed (Ctrl+C in a piped run
-    keeps its powershell, a pid may be reused), with the marker there = take the install lock (held =
-    a new run owns the box, exit), `Invoke-RemoteOSRollback`, `rollback.log`. A new arm first
+    keeps its powershell, a pid may be reused), with the marker there = take the install lock (held and
+    the installer dead = a new run owns the box, exit; held by the installer still alive = roll back
+    anyway), `Invoke-RemoteOSRollback`, `rollback.log`. The flow releases the lock at its very end: `irm | iex`
+    leaves the console open, and a held mutex would refuse every later run. A new arm first
     `schtasks /End`s an old watcher. The
     installer's own functions go in as text (`(Get-Command).Definition`), so it is the same code and
     needs no download. Disarmed after the proof, and at the end of `Exit-RemoteOSAfterFailure`
