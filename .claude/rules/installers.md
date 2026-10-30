@@ -7,6 +7,9 @@ paths:
   - "scripts/build_installers.py"
   - "src/remoteos/selfupgrade.py"
   - "tests/test_selfupgrade.py"
+  - "src/remoteos/updater.py"
+  - "tests/test_updater.py"
+  - "tests_windows/test_install_ps1_updater.py"
   - "uninstall-linux.sh"
   - "tests/test_installer_*.py"
   - "tests/installer_harness.py"
@@ -71,6 +74,28 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 - The runners' `curl` has `--max-time 120`: a transient unit or a launchd job has no runtime limit.
 - `systemd-run` answers 0 once the unit is queued, so a read-only `/var/log` or a held install lock
   still replies "started": `/health` decides, as the reply says.
+
+## The updater (#65): `src/remoteos/updater.py`
+
+- Pull model: scheduler -> `python -m remoteos.updater` -> `release_channel.choose` -> pure `decide`
+  (forward only) -> `selfupgrade`. `selfupgrade` is imported at the call: it reaches fastmcp through
+  `errors.py`, and the decisions must be logged even on a box with broken packages.
+- The ring: `updater.json` next to `config.json` (Linux `/etc/remoteos-mcp`). `REMOTEOS_MCP_RING`
+  on an installer run sets it, a run without it keeps it (SelfUpgrade and the updater's own runs pass
+  none), refused before anything changes when it is neither `stable` nor `canary`. No BOM: `json.loads`.
+- **Set up after the proof**: nothing there touches the server; a failure leaves the proven install.
+  Linux: `install_updater` (`47-updater.sh`), `write_if_changed` through HERE-STRINGS (a pipe runs it
+  in a subshell: CHANGED and WRITE_TMP are lost). macOS: at the end of `install.sh`. Windows is the
+  exception: `Register-RemoteOSUpdaterTask` sits with the other tasks, under `@rollback`.
+- **Not on enable-only boxes** (camera-box's cams, #60): a second updater would fight its pin.
+- Windows: the task runs `pythonw.exe` (a daily console window would steal the focus on a live
+  desktop; `sys.stderr` is None there, so `--log-file`) as the desktop user, like
+  RemoteOSMCP-Upgrade, NOT as SYSTEM as the first ticket text said: `windows_plan` writes
+  `upgrade-ref.txt` under `Path.home()`. Interactive logon: no one logged on = no run, but then the
+  server's task has no session either; `StartWhenAvailable` catches up.
+- `Stop-RemoteOSServer`'s `-m remoteos` pattern also matches `-m remoteos.updater`. Harmless: it
+  has handed over to the Upgrade task by then.
+- macOS: `RunAtLoad`: launchd runs a missed calendar date only after a sleep, not after a power-off.
 
 ## The key, on every OS (#12, since 0.7.0.dev32)
 
@@ -367,7 +392,11 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   - **The wheelhouse root feeds an elevated pip from the desktop user's profile** (review round
     1): `Protect-RemoteOSWheelhouseRoot` before the download: owner Administrators, protected
     ACL, SYSTEM + Administrators full, the desktop user read; a root that is not like that
-    (`Test-RemoteOSWheelhouseRootTrusted`, by SID) is deleted with everything in it. **Every
+    (`Test-RemoteOSWheelhouseRootTrusted`, by SID) is deleted with everything in it. **The root is
+    `%ProgramData%\remoteos-mcp\wheelhouse` since #65**, and `%ProgramData%\remoteos-mcp` gets the
+    same protection FIRST: any account may create a folder in ProgramData, and its owner could swap
+    what is inside. The old `<config>\wheelhouse` is never trusted: the installed commit's wheelhouse
+    is built again (`New-RemoteOSRollbackWheelhouse`), and the old root goes after the proof. **Every
     elevated delete goes through `Remove-RemoteOSTree`** (review round 2): 5.1's `Remove-Item
     -Recurse` enters a junction and deletes the TARGET's contents, and Get-Acl/Set-Acl follow one,
     so a link as the root is removed alone, a link as the config folder is refused, and a
@@ -379,22 +408,27 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     that exists but cannot be read counts as a link). The prune does nothing when the root or its
     folder became a link since the check, and deletes only `<sha>` / `<sha>.partial` names: a
     root swapped for a junction to a system folder mid-run cannot make it delete that folder.
-    **Partial protection only:** the desktop user owns the PROFILE, so they can rename the root and
-    put their own in during the whole download (the run checks it once). This stops a wheel planted
-    BEFORE the run; `%ProgramData%\remoteos-mcp\wheelhouse` would close the rest (not ticketed yet:
-    a follow-up candidate on #64, it changes the design's location). It matters only where the
-    desktop user is NOT an administrator and an administrator runs the installer.
   - The installed version is read from a `REMOTEOS_VER=` line (a stderr warning on the merged
     output must not read as the version and roll back a good install).
   - The firewall rule: the new one is created BEFORE the old ones are removed, so a failure that
     rolls back keeps the LAN reachable.
   - The pre-uninstall's exit code is fatal now (it was ignored); the rollback runs the same
     uninstall. A re-run of the same commit keeps only that wheelhouse (`@($sha, $sha)`): the
-    proven commit is the current one. A run killed between the stop and the install (an SSH drop)
-    still leaves no server, as before: no armed trap on Windows (a follow-up candidate on #64, not
-    ticketed yet). uninstall.ps1 says so when a non-elevated run cannot remove the wheelhouse; it
-    still uses `$env:USERPROFILE` (an administrator of another account removes the wrong profile)
-    and has no elevation gate (a follow-up candidate on #64).
+    proven commit is the current one.
+  - **The rollback trap (#65, `35-rollback-trap.ps1`).** PowerShell has no EXIT trap for a killed
+    process, and an SSH drop kills the session's children, so the watcher is a scheduled task,
+    `RemoteOSMCP-Rollback`. Before the stop (only with a rollback point):
+    `rollback-pending.txt` (the marker, next to config.json) + `rollback-trap.ps1` in the
+    Administrators-only data folder + `schtasks /Run`. The script polls: marker gone = exit; the
+    installer's pid gone with the marker there = `Invoke-RemoteOSRollback`, then `rollback.log`. The
+    installer's own functions go in as text (`(Get-Command).Definition`), so it is the same code and
+    needs no download. Disarmed after the proof, and at the end of `Exit-RemoteOSAfterFailure`
+    (`Disarm` in the splat), never before its rollback. A trap that cannot start is a `[!]`: the run's own
+    rollback still stands. It runs as the desktop user, never SYSTEM: its pip runs a Python the user
+    may own. Where that user is no administrator, pip may be refused: `rollback.log` says so.
+  - **uninstall.ps1** has the elevation gate before its first change, the console user's profile
+    (`Get-RemoteOSDesktopProfile`), and copies of `Test-RemoteOSLink` / `Remove-RemoteOSTree` (a test
+    keeps them equal). It stops the server through Win32_Process: 5.1's Get-Process has no CommandLine.
   - **Size:** `irm | iex` delivers ONE file; its source is split into parts since #71 (top of
     this file).
   - A native child's output goes through `Invoke-RemoteOSNative` (`2>&1`, each record as text,

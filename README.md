@@ -39,7 +39,7 @@ come from that sha. The sha is printed and written to
 
 **Download first, install offline, roll back (#64).** Before anything on the PC changes, the
 installer downloads every wheel the install needs (and builds one for every source archive, the
-remoteos archive itself included) into `C:\Users\<user>\.remoteos-mcp\wheelhouse\<sha>`
+remoteos archive itself included) into `%ProgramData%\remoteos-mcp\wheelhouse\<sha>`
 (about 60 MB; the folder is owned by Administrators, the desktop user may only read it, because an
 elevated pip installs from it). A failed download prints `[X] could not download ... -- nothing was changed on
 this box` and the running server is untouched. Only then is the server stopped, and the install
@@ -48,7 +48,19 @@ task, the firewall, the start, the health check) reinstalls the previous commit'
 (the one `installed-ref.txt` names), restarts the server, proves its health and prints
 `[X] ... -- rolled back to <old version>`; the first install with wheelhouses has nothing to go
 back to and says so. After a proven install the current and the previous wheelhouse are kept and
-older ones deleted. A re-run of the same commit reuses its wheelhouse (no download).
+older ones deleted. A re-run of the same commit reuses its wheelhouse (no download). A run KILLED
+after the stop (an SSH drop, a crash) is rolled back from outside: the `RemoteOSMCP-Rollback` task
+watches the installer, and its result is in `.remoteos-mcp\rollback.log`.
+
+**The box updates itself (#65).** Every installer sets up a daily check (Linux: a systemd timer;
+Windows: the `RemoteOSMCP-Updater` task; macOS: a LaunchAgent), which also catches up after the box
+was off. `python -m remoteos.updater` reads the ring in `updater.json` (next to `config.json`) and
+installs that ring's release through SelfUpgrade when it is newer; the installers prove it and roll
+back. `stable` (default) = the newest release at least 14 days old, `canary` = the newest. A release
+marked `prerelease` on GitHub is HELD: no box takes it. Nothing is ever downgraded. Set the ring with
+`REMOTEOS_MCP_RING=stable|canary` on an installer run; a run without it keeps what the box has.
+The log: Windows and macOS `.remoteos-mcp\updater.log`, Linux `journalctl -u remoteos-mcp-updater`.
+Camera-box's enable-only cams get no timer: its provisioning updates them.
 
 That's it. The script will:
 
@@ -665,6 +677,7 @@ that declares its runtime (Shell's `timeout`, Wait's `seconds`) is waited for th
 ## Uninstall
 
 ```powershell
+# in an elevated PowerShell
 irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps1 | iex
 ```
 
