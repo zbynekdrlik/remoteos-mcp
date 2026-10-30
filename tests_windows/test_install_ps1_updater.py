@@ -220,6 +220,22 @@ def test_a_new_run_holding_the_lock_keeps_the_trap_out(tmp_path):
     assert "a new run holds the lock" in (config / "rollback.log").read_text(encoding="utf-8", errors="replace")
 
 
+def test_a_console_stuck_past_the_deadline_is_rolled_back_though_it_holds_the_lock(tmp_path, venv):  # noqa: F811
+    """Ctrl+C in a piped run: the installer's powershell lives on and holds the lock, the box has no server."""
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "rollback-pending.txt").write_text("1")
+    trap = TestRollbackTrap()
+    script = trap._script(tmp_path, config, venv, os.getpid())  # alive
+    text = script.read_text(encoding="utf-8-sig")
+    assert "AddMinutes(30)" in text
+    text = text.replace("AddMinutes(30)", "AddMinutes(0)").replace("$lock = Enter-RemoteOSInstallLock", "$lock = $null")
+    script.write_text(text, encoding="utf-8-sig")
+    result = trap._run(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _installed(tmp_path, venv) == "1.0"
+
+
 def test_the_failure_exit_disarms_only_after_the_rollback(tmp_path):
     body = """
 function Exit-RemoteOSInstaller { param($Code, $Pause); exit $Code }

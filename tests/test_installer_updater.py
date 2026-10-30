@@ -188,6 +188,12 @@ def test_the_installer_takes_the_lock_before_it_looks_at_the_box(flow):
     assert flow.index("$installLock = Enter-RemoteOSInstallLock") < flow.index("$desktopUser = $null")
 
 
+def test_the_lock_is_released_at_the_end_of_the_flow(flow):
+    """irm | iex leaves the console open: a held mutex would refuse every later run, and burn the updater's tries."""
+    code = [line for line in flow.splitlines() if line.strip() and not line.startswith("#")]
+    assert code[-2:] == ["$installLock.ReleaseMutex()", "$installLock.Dispose()"]
+
+
 def test_the_uninstaller_is_gated_before_its_first_change_and_ascii():
     raw = (ROOT / "uninstall.ps1").read_bytes()
     assert raw.isascii()
