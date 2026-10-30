@@ -22,6 +22,7 @@ Write-Host "        Done" -ForegroundColor Green
 # Remove scheduled task
 Write-Host "  [2/4] Removing scheduled task..." -ForegroundColor White
 Unregister-ScheduledTask -TaskName "RemoteOSMCP" -Confirm:$false -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName "RemoteOSMCP-Upgrade" -Confirm:$false -ErrorAction SilentlyContinue
 Write-Host "        Done" -ForegroundColor Green
 
 # Remove firewall rule

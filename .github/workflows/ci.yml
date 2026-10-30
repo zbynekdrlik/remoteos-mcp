@@ -70,7 +70,7 @@ jobs:
           ln -sf /usr/local/bin/bash /bin/bash && apk add -q python3 py3-pytest && adduser -D -u 1000 t &&
           su t -c "cd /w && INSTALLER_TEST_BASH=/bin/bash python3 -m pytest -q -p no:cacheprovider --noconftest
           -k \"not RealMetadata\" tests/test_installer_macos_key.py tests/test_installer_preflight_rollback.py
-          tests/test_installer_python_gate.py"'
+          tests/test_installer_python_gate.py tests/test_installer_macos_sudoers.py"'
 
   # Real Windows PowerShell 5.1, no fakes (#48 round 2): en-US, OEM code page 437 like resolume-pp.
   # Its own directory, which the Linux job never collects (testpaths = tests).

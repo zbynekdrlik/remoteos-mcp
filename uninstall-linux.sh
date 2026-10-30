@@ -3,8 +3,8 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall-linux.sh | sudo bash
 #
 # Removes what install-linux.sh installs (the venv layout, #12): the service, its unit, the key
-# files in /etc/remoteos-mcp, /opt/remoteos-mcp-venv and the builds in /opt/remoteos-mcp-venvs,
-# plus a copy in the system python that older installers left.
+# files in /etc/remoteos-mcp, the sudoers drop-in, /opt/remoteos-mcp-venv and the builds in
+# /opt/remoteos-mcp-venvs, plus a copy in the system python that older installers left.
 set -euo pipefail
 
 SERVICE_NAME="remoteos-mcp"
@@ -12,6 +12,8 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 CONFIG_DIR="/etc/remoteos-mcp"
 VENV_LINK="/opt/remoteos-mcp-venv"
 VENV_STORE="/opt/remoteos-mcp-venvs"
+SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"
+UPGRADE_LOGS="/var/log/remoteos-mcp-upgrade"
 
 echo ""
 echo "  RemoteOS MCP Uninstaller (Linux)"
@@ -29,8 +31,8 @@ if grep -q "/${SERVICE_NAME}\.service" "$CGROUP_FILE" 2>/dev/null; then
     exit 1
 fi
 
-# --- [1/6] Stop service ---
-echo "  [1/6] Stopping service..."
+# --- [1/7] Stop service ---
+echo "  [1/7] Stopping service..."
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     systemctl stop "$SERVICE_NAME"
     echo "        Stopped $SERVICE_NAME"
@@ -38,8 +40,8 @@ else
     echo "        Service not active, skipping"
 fi
 
-# --- [2/6] Disable service ---
-echo "  [2/6] Disabling service..."
+# --- [2/7] Disable service ---
+echo "  [2/7] Disabling service..."
 if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
     systemctl disable "$SERVICE_NAME"
     echo "        Disabled $SERVICE_NAME"
@@ -47,8 +49,8 @@ else
     echo "        Service not enabled, skipping"
 fi
 
-# --- [3/6] Remove service file ---
-echo "  [3/6] Removing service file..."
+# --- [3/7] Remove service file ---
+echo "  [3/7] Removing service file..."
 if [[ -f "$SERVICE_FILE" ]]; then
     rm -f "$SERVICE_FILE"
     systemctl daemon-reload
@@ -57,8 +59,8 @@ else
     echo "        Service file not found, skipping"
 fi
 
-# --- [4/6] Remove config directory (the key files) ---
-echo "  [4/6] Removing config directory..."
+# --- [4/7] Remove config directory (the key files) ---
+echo "  [4/7] Removing config directory..."
 if [[ -d "$CONFIG_DIR" ]]; then
     rm -rf "$CONFIG_DIR"
     echo "        Removed $CONFIG_DIR"
@@ -66,8 +68,18 @@ else
     echo "        Config directory not found, skipping"
 fi
 
-# --- [5/6] Remove the venv (a link into the build store, or a real directory) ---
-echo "  [5/6] Removing the venv..."
+# --- [5/7] Remove the service account's sudoers drop-in ---
+echo "  [5/7] Removing the sudoers drop-in..."
+if [[ -e "$SUDOERS_FILE" ]]; then
+    rm -f "$SUDOERS_FILE"
+    echo "        Removed $SUDOERS_FILE"
+else
+    echo "        $SUDOERS_FILE not found, skipping"
+fi
+rm -f "$UPGRADE_LOGS"-*.log  # SelfUpgrade's
+
+# --- [6/7] Remove the venv (a link into the build store, or a real directory) ---
+echo "  [6/7] Removing the venv..."
 if [[ -L "$VENV_LINK" ]]; then
     rm -f "$VENV_LINK"
     echo "        Removed $VENV_LINK"
@@ -82,8 +94,8 @@ if [[ -d "$VENV_STORE" ]]; then
     echo "        Removed $VENV_STORE"
 fi
 
-# --- [6/6] A copy in the system python (installers before the venv layout) ---
-echo "  [6/6] Removing a remoteos-mcp copy in the system python..."
+# --- [7/7] A copy in the system python (installers before the venv layout) ---
+echo "  [7/7] Removing a remoteos-mcp copy in the system python..."
 PYTHON=""
 for cmd in python3 python /usr/bin/python3 /usr/local/bin/python3; do
     if command -v "$cmd" &>/dev/null || [[ -x "$cmd" ]]; then

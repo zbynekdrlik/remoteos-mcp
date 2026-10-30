@@ -178,6 +178,50 @@ if ! key_ok "$AUTH_KEY"; then
     exit 1
 fi
 
+# --- The account's admin (#71) ---
+# The drop-in a reprovision keeps: passwordless sudo for the LaunchAgent's account, as on Linux. One
+# line: a hand-made file with this text is adopted as it is. Root (no drop-in) has no use for one.
+SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"
+SUDOERS_TMP=""
+
+# Before anything changes: render the drop-in and let visudo judge it.
+prepare_sudoers() {
+    [[ "$(id -u)" -ne 0 ]] || return 0
+    if ! command -v visudo &>/dev/null; then
+        echo "        [X] visudo is missing, and this account needs its sudoers drop-in — nothing was changed on this box"
+        exit 1
+    fi
+    SUDOERS_TMP="$WORK_DIR/sudoers"
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$(id -un)" >"$SUDOERS_TMP"
+    if ! visudo -cf "$SUDOERS_TMP" >"$WORK_DIR/visudo.log" 2>&1; then
+        echo "        [X] visudo refused the sudoers line for $(id -un) — nothing was changed on this box:"
+        cat "$WORK_DIR/visudo.log"
+        exit 1
+    fi
+}
+
+# sudo with no prompt, else with sudo's prompt when a terminal can answer it (stdin is the script).
+admin() {
+    sudo -n "$@" </dev/null 2>/dev/null && return 0
+    (: </dev/tty) 2>/dev/null || return 1
+    sudo "$@" </dev/null
+}
+
+# After the health check: 0440 root, through a temp name sudo ignores (it skips names with a dot).
+# This installer runs as the user: with no way to sudo it says so and the install stands.
+install_sudoers() {
+    [[ -n "$SUDOERS_TMP" ]] || return 0
+    if sudo -n cmp -s "$SUDOERS_TMP" "$SUDOERS_FILE" </dev/null 2>/dev/null; then
+        echo "        sudoers drop-in: unchanged ($SUDOERS_FILE)"
+    elif admin mkdir -p "${SUDOERS_FILE%/*}" \
+        && admin install -m 0440 -o root -g wheel "$SUDOERS_TMP" "${SUDOERS_FILE}.new" \
+        && admin mv -f "${SUDOERS_FILE}.new" "$SUDOERS_FILE"; then
+        echo "        sudoers drop-in: written ($SUDOERS_FILE, passwordless sudo for $(id -un))"
+    else
+        echo "        [!] No sudo here (no terminal for its password): $SUDOERS_FILE was not written. Rerun on a terminal for admin."
+    fi
+}
+
 # --- [2/5] Install remoteos-mcp ---
 echo "  [2/5] Installing remoteos-mcp..."
 # No --ignore-installed here: macOS has no apt-owned python packages (that is
@@ -329,6 +373,7 @@ ADDED_DEPS=()
 exec 3>&1 4>&2
 trap on_exit EXIT
 mkdir -p "$WORK_DIR/pip-tmp"
+prepare_sudoers
 
 # Rollback helper (python: it ships with what we install).  It reads installed
 # dists through importlib.metadata — RECORD + INSTALLER, exactly what pip itself
@@ -683,6 +728,8 @@ if [[ "$HEALTH_OK" != "true" ]]; then
     echo "  [X] Health endpoint (http://127.0.0.1:${PORT}/health) did not respond within 30s"
     exit 1
 fi
+
+install_sudoers
 
 # --- [5/5] Get network info ---
 echo "  [5/5] Getting network info..."

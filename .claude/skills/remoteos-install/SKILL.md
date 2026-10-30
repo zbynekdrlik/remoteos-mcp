@@ -20,7 +20,16 @@ triggers:
 ## The golden rule — always use the one-liner installer
 
 NEVER run ad-hoc `pip install` or other manual commands. The installer is the single source of truth.
-After pushing source changes, deploy by running the appropriate one-liner on each target via SSH. On Linux never through the agent's own MCP Shell: that run is inside `remoteos-mcp.service`, whose restart would kill it half-way, so the installer (and the uninstaller) refuses with "nothing was changed".
+
+**Upgrade through MCP (#71):** after pushing source changes, call the `SelfUpgrade` tool on each target: from a script `remoteos-call <box> SelfUpgrade --json '{"ref": "<sha, tag or branch>"}'`, or plain `remoteos-call <box> SelfUpgrade` for `main`. It starts the OS's one-liner installer detached from the server and returns at once with the log path; the installer proves the new version or rolls back. Poll `/health` for the version, read the log when it does not come.
+
+- Linux: `sudo -n systemd-run --unit remoteos-mcp-upgrade-<ts> --collect` (a root unit: no sudo), log `/var/log/remoteos-mcp-upgrade-<ts>.log`. The unit is collected when it ends.
+- Windows: `schtasks /Run /TN RemoteOSMCP-Upgrade` (registered by `install.ps1`, elevated, for the desktop user, who must be logged in), ref in `upgrade-ref.txt`, log `upgrade.log`, both next to `config.json`.
+- macOS: `launchctl submit` of a job that removes itself at the end, log `~/.remoteos-mcp/upgrade-<ts>.log`.
+- `SelfUpgrade did not start`: the box was installed before 0.7.0.dev39 (no drop-in, no task). Run its installer once.
+- camera-box cams (read-only root) stay on camera-box's provisioning.
+
+**SSH is break-glass:** the one-liners below over SSH, only for a first install or a box whose server is down. Never through the agent's own MCP Shell: on Linux that run is inside `remoteos-mcp.service`, whose restart would kill it half-way, so the installer (and the uninstaller) refuses with "nothing was changed".
 
 ## Windows
 
@@ -88,6 +97,7 @@ Requires `sudo`. Uses systemd for service management. Supports Ubuntu 24.04+ and
 - With nothing proven to go back to (a fresh box, a pending switch, files the running process never ran, an agent with authentication off), a failed proof stops and disables the service; its files and the pending marker stay for a re-run. An unproven agent never stays up.
 - After `REMOTEOS_MCP_POLICY=enable-only` the switch is pending (`/etc/remoteos-mcp/.switch-pending`): the next normal run restarts and proves it. An enable-only run that changed nothing on a proven box leaves it proven.
 - A desktop unit gets the X11 session's `DISPLAY` (or keeps the existing unit's); a Wayland session gets none.
+- A non-root unit's account gets `/etc/sudoers.d/90-remoteos-mcp` (passwordless sudo, #67/#71), after the proof, adopted when identical; a root unit gets none. macOS the same through `sudo`, with a `[!]` warning when it cannot.
 
 **Migration from the old system-python layout:** the first run builds the venv, switches the unit and proves it; only then does it remove the old copy from the system python (`pip uninstall --break-system-packages remoteos-mcp fastmcp fastmcp-slim`). If the proof fails, the old unit and the old copy stay and the box runs as before. The box keeps its key (#51), which the old unit showed to every local account (`systemctl cat`, `ps`) and the old installers printed in their summaries (so it may sit in setup logs and ssh transcripts): on a box with other local accounts, or whose earlier install output was logged, rotate it with `REMOTEOS_MCP_AUTH_KEY` and update the clients. The same holds for a migrated mac (the old plist's ProgramArguments) and Windows box (the old `.bat`'s `--auth-key`). On an enable-only cam the old copy goes at the first proven no-op run after it rebooted into the venv.
 
@@ -109,7 +119,8 @@ Verify after a run (from dev1 and on the box):
 - `An earlier switch has run since (the unit started again)`: an enable-only switch that a reboot (or a restart) has started since; the run checks it as it runs.
 - The key-out-of-the-environment guarantee needs a source at or after the #12 merge: an older `REMOTEOS_MCP_REF` (e.g. camera-box's pin before its bump) runs a server that keeps `REMOTEOS_AUTH_KEY` in its environment, so Shell children inherit it.
 - `another process holds :8092, not the unit's`: something else listens on the port (`sudo ss -ltnp 'sport = :8092'`). The key was not sent. Stop that process, then rerun.
-- `this run is inside remoteos-mcp.service (the agent's own Shell)`: nothing was changed; run the one-liner over SSH.
+- `this run is inside remoteos-mcp.service (the agent's own Shell)`: nothing was changed; use `SelfUpgrade`, or the one-liner over SSH.
+- `visudo refused the sudoers line`: nothing was changed; the service account's name does not fit a sudoers line. `visudo (the sudo package) is missing`: install sudo, rerun.
 - Every restart run on an unchanged box ends `an authenticated initialize answered 401` + `Nothing was switched`: the running process holds another key than the key files (they were changed under it). `sudo systemctl restart remoteos-mcp` once, then rerun to prove it.
 
 **Gotcha — camera-box cams run a read-only rootfs by design** (camera-box's `scripts/lib/ro-root.sh`; its provisioning opens an rw window and runs this installer inside it). The installer refuses a read-only root and changes nothing: update a cam through camera-box's provisioning, never by editing its `/etc/fstab`. On any other box, `mount -o remount,rw /` for the run. Both Linux and macOS installers also verify after restart that the `/health` endpoint reports the version just installed — a stale pre-existing install is caught and reported as failure.
@@ -134,7 +145,7 @@ ssh user@box 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\user\
 
 ## Repository structure
 
-- `install.ps1` / `uninstall.ps1` — Windows installer scripts
+- `install.ps1` / `uninstall.ps1` — Windows installer scripts (`install.ps1` and `install-linux.sh` are generated from `installers/`: `scripts/build_installers.py`)
 - `install.sh` / `uninstall.sh` — macOS installer scripts
 - `install-linux.sh` / `uninstall-linux.sh` — Linux installer scripts
 - `src/remoteos/` — the Python package (forked from dddabtc/winremote-mcp, MIT license)
