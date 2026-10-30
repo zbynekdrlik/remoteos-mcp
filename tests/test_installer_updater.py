@@ -68,6 +68,15 @@ def test_camera_box_s_enable_only_boxes_get_no_timer(tmp_path):
     assert not (box.config_dir / "updater.json").exists()
 
 
+def test_an_enable_only_run_removes_a_timer_a_default_run_left(tmp_path):
+    box = linux_box(tmp_path)
+    assert box.run().returncode == 0
+    assert box.updater_timer.exists()
+    result = box.run(REMOTEOS_MCP_POLICY="enable-only")
+    assert result.returncode == 0, output(result)
+    assert not box.updater_timer.exists() and not box.updater_service.exists()
+
+
 def test_a_failed_proof_installs_no_timer(tmp_path):
     box = linux_box(tmp_path)
     box.configure(service={"start_fails": True})
@@ -80,8 +89,9 @@ def test_a_timer_that_will_not_enable_says_the_install_stands(tmp_path):
     real = (box.shims / "systemctl").read_text().split("\n", 2)[2]
     box.shim("systemctl", 'if [[ "$*" == *updater.timer* ]]; then exit 1; fi\n' + real)
     result = box.run()
-    assert result.returncode == 1
-    assert "the install itself is proven and stays" in output(result)
+    assert result.returncode == 0, output(result)
+    assert "stays on v" in output(result)
+    assert "SETUP COMPLETE" in output(result)
 
 
 def test_a_rerun_changes_no_updater_file_and_adds_no_reload(tmp_path):
@@ -172,6 +182,10 @@ def test_every_windows_task_is_removed_by_the_uninstaller():
     text = (ROOT / "uninstall.ps1").read_text(encoding="utf-8")
     assert all(f'"{task}"' in text for task in ("RemoteOSMCP", "RemoteOSMCP-Upgrade", "RemoteOSMCP-Updater",
                                                 "RemoteOSMCP-Rollback"))
+
+
+def test_the_installer_takes_the_lock_before_it_looks_at_the_box(flow):
+    assert flow.index("$installLock = Enter-RemoteOSInstallLock") < flow.index("$desktopUser = $null")
 
 
 def test_the_uninstaller_is_gated_before_its_first_change_and_ascii():

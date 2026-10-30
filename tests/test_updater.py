@@ -138,6 +138,61 @@ def test_the_ring_file_is_where_each_installer_writes_it(monkeypatch, tmp_path, 
     assert updater.config_path() == expected
 
 
+class TestAttempts:
+    """A box-specific failure must not stop the server and roll back every day, forever."""
+
+    def test_a_release_is_tried_twice_then_left_alone_and_said_so(self, tmp_path, caplog):
+        run = Run(tmp_path, [release("0.7.0.dev50", 20)])
+        assert [run(), run(), run()] == [0, 0, 0]
+        assert run.started == ["v0.7.0.dev50"] * 2
+        assert "failed here 2 times" in caplog.text
+
+    def test_a_newer_release_gets_its_own_tries(self, tmp_path):
+        run = Run(tmp_path, [release("0.7.0.dev50", 20)])
+        run(), run(), run()
+        run.releases = [release("0.7.0.dev51", 20), release("0.7.0.dev50", 40)]
+        run()
+        assert run.started[-1] == "v0.7.0.dev51"
+
+    def test_up_to_date_never_counts(self, tmp_path):
+        run = Run(tmp_path, [release(INSTALLED, 20)])
+        run()
+        assert not (tmp_path / updater.STATE_NAME).exists()
+
+    def test_the_attempt_is_recorded_before_the_start(self, tmp_path):
+        run = Run(tmp_path, [release("0.7.0.dev50", 20)])
+
+        def killed(tag: str) -> str:
+            assert json.loads((tmp_path / updater.STATE_NAME).read_text()) == {"tag": tag, "attempts": 1}
+            raise SystemExit(9)
+
+        with pytest.raises(SystemExit):
+            run(start=killed)
+
+    def test_no_record_no_upgrade(self, tmp_path, caplog):
+        run = Run(tmp_path, [release("0.7.0.dev50", 20)])
+        (tmp_path / updater.STATE_NAME).mkdir()  # a write fails, on any account
+        assert run() == 1
+        assert run.started == []
+        assert "cannot record" in caplog.text
+
+    @pytest.mark.parametrize("text", ["{bad", "[]", '{"tag": "v0.7.0.dev50", "attempts": "9"}',
+                                      '{"tag": "v0.7.0.dev50", "attempts": true}'])
+    def test_a_broken_state_file_costs_one_try_at_most(self, tmp_path, text):
+        path = tmp_path / updater.STATE_NAME
+        path.write_text(text)
+        assert updater.attempts_at(path, "v0.7.0.dev50") == 0
+
+
+def test_an_unexpected_failure_is_logged_for_a_run_nobody_watches(tmp_path, monkeypatch):
+    def broken(path):
+        raise KeyError("boom")
+
+    monkeypatch.setattr(updater, "_set_up_logging", lambda log_file: None)
+    monkeypatch.setattr(updater, "run", broken)
+    assert updater.main(["--config", str(tmp_path / "u.json")]) == 1
+
+
 def test_a_target_reaches_selfupgrade_as_the_release_tag(monkeypatch):
     seen = {}
     monkeypatch.setattr(selfupgrade, "start", lambda plan: seen.setdefault("plan", plan).ref)

@@ -357,6 +357,7 @@ on_exit() {
         rollback_install
         rc=1
     fi
+    if [[ -n "$LOCK_DIR" ]]; then rm -rf "$LOCK_DIR"; fi
     if [[ -z "$KEEP_WORK_DIR" ]]; then
         rm -rf "$WORK_DIR"
     fi
@@ -371,6 +372,7 @@ on_exit() {
 # command whose output is redirected to a log).
 WORK_DIR=$(mktemp -d)
 KEEP_WORK_DIR=""
+LOCK_DIR=""
 ROLLBACK_ARMED=""
 INTERRUPTED=""
 WRITE_TMP=""
@@ -379,6 +381,18 @@ CHANGED_DEPS=()
 ADDED_DEPS=()
 exec 3>&1 4>&2
 trap on_exit EXIT
+# One run at a time: the updater makes a second one routine. No flock on macOS; a dead run's pid frees it.
+LOCK_DIR="$CONFIG_DIR.install-lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    if kill -0 "$(cat "$LOCK_DIR/pid" 2>/dev/null || echo 0)" 2>/dev/null; then
+        LOCK_DIR=""
+        echo "        [X] Another install.sh run is going on — nothing was changed on this box"
+        exit 1
+    fi
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR"
+fi
+echo "$$" >"$LOCK_DIR/pid"
 mkdir -p "$WORK_DIR/pip-tmp"
 prepare_sudoers
 

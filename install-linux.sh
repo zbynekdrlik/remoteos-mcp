@@ -869,10 +869,16 @@ updater_timer_text() {
 
 # After the proof: nothing here touches the running server, and a failure leaves the proven install
 # up. Not on enable-only boxes: camera-box's provisioning updates its cams (#60), and a timer here
-# would fight its pin. The ring stays what the box has, unless REMOTEOS_MCP_RING names one.
+# would fight its pin (one a default run left there goes). The ring stays what the box has, unless
+# REMOTEOS_MCP_RING names one.
 install_updater() {
     if [[ "$POLICY" != restart ]]; then
-        say "Updater: not installed (enable-only: camera-box's provisioning updates this box)"
+        if [[ -f "$UPDATER_TIMER" ]]; then
+            systemctl disable --now "${UPDATER_TIMER##*/}" >/dev/null 2>&1 || true
+            rm -f "$UPDATER_TIMER" "$UPDATER_SERVICE"
+            systemctl daemon-reload
+        fi
+        say "Updater: none (enable-only: camera-box's provisioning updates this box)"
         return 0
     fi
     if [[ -n "$GIVEN_RING" || ! -f "$UPDATER_CONFIG" ]]; then
@@ -883,8 +889,10 @@ install_updater() {
     write_if_changed "$UPDATER_SERVICE" 644 "Updater unit" <<<"$(updater_service_text)"
     write_if_changed "$UPDATER_TIMER" 644 "Updater timer" <<<"$(updater_timer_text)"
     if [[ -n "$CHANGED" ]]; then systemctl daemon-reload; fi
-    systemctl enable --now "${UPDATER_TIMER##*/}" >/dev/null 2>&1 \
-        || fail "the updater's timer could not be enabled: the install itself is proven and stays"
+    if ! systemctl enable --now "${UPDATER_TIMER##*/}" >/dev/null 2>&1; then
+        say "[!] The updater's timer could not be enabled: this box stays on v${PKG_VER} until a re-run"
+        return 0
+    fi
     say "Updater: daily, ring $(sed -n 's/.*"ring": "\([a-z]*\)".*/\1/p' "$UPDATER_CONFIG")"
 }
 

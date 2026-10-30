@@ -227,3 +227,13 @@ class TestAdmin:
         clock[0] += 2
         assert identity.has_admin() is True
         assert self.sudo_calls == 1
+
+    def test_a_failed_read_keeps_the_last_answer(self, monkeypatch):
+        """A slow sudo must not announce a lost admin."""
+        clock = [100.0]
+        monkeypatch.setattr(identity.time, "monotonic", lambda: clock[0])
+        self.sudo(monkeypatch, returncode=0)
+        assert identity.has_admin() is True
+        self.sudo(monkeypatch, error=subprocess.TimeoutExpired("sudo", 5))
+        clock[0] += identity.ADMIN_CACHE_S + 1
+        assert identity.has_admin() is True

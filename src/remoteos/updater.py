@@ -6,6 +6,11 @@ for that ring's target (``release_channel``), and when the target is newer than 
 version starts this OS's installer through ``selfupgrade``. The installers own the proof and the
 rollback; a held release is never a target, and nothing is ever downgraded.
 
+A release this box could not reach is tried ``MAX_ATTEMPTS`` times, then left alone until a newer one
+exists: a box-specific failure stops the server and rolls back, and doing that every day is the
+restart loop the design rejected (``updater-state.json``, next to the ring; the drift report names
+the box). An installer run by hand is the way out.
+
 ``decide`` is pure. Every decision is logged, and no secret passes through here: the installers
 read the key on the box. A release list that cannot be read skips the run (exit 0: the next run
 tries again); an upgrade that did not start exits 1.
@@ -38,6 +43,8 @@ LINUX_CONFIG_DIR = "/etc/remoteos-mcp"
 CGROUP_FILE = "/proc/self/cgroup"
 SERVER_CGROUP = "/remoteos-mcp.service"
 LOG_MAX_BYTES = 1_000_000
+STATE_NAME = "updater-state.json"
+MAX_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,16 @@ def decide(ring: str, installed: str, channels: Channels) -> Decision:
     return Decision(target, f"newer release (installed {installed}, {ring} {target.tag})")
 
 
+def attempts_at(state_path: Path, tag: str) -> int:
+    """How often this release was started here. Anything unreadable counts as none: it only costs a try."""
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        attempts = state.get("attempts") if state.get("tag") == tag else 0
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return 0
+    return attempts if isinstance(attempts, int) and not isinstance(attempts, bool) else 0
+
+
 def inside_server_service(cgroup_file: str = CGROUP_FILE) -> bool:
     """Is this process in the server's own unit (a Shell call)? install-linux.sh's guard, here."""
     try:
@@ -120,8 +137,20 @@ def run(
     log.info("updater: %s", decision.reason)
     if decision.target is None:
         return 0
+    tag, state_path = decision.target.tag, config.with_name(STATE_NAME)
+    attempts = attempts_at(state_path, tag)
+    if attempts >= MAX_ATTEMPTS:
+        log.error("updater: %s failed here %d times — left alone until a newer release or an installer run",
+                  tag, attempts)
+        return 0
     try:
-        log.info("updater: %s", start(decision.target.tag))
+        # Before the start: a run that kills this process counts too.
+        state_path.write_text(json.dumps({"tag": tag, "attempts": attempts + 1}) + "\n", encoding="utf-8")
+    except OSError as exc:
+        log.error("updater: cannot record the attempt (%s) — not starting an upgrade that could repeat daily", exc)
+        return 1
+    try:
+        log.info("updater: %s", start(tag))
     except Exception as exc:  # an unattended run: the log is the only reader
         log.error("updater: the upgrade to %s did not start: %s: %s", decision.target.tag, type(exc).__name__, exc)
         return 1
@@ -153,7 +182,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-file", default=None, help="also log there, rotated (systemd's journal needs none)")
     args = parser.parse_args(argv)
     _set_up_logging(args.log_file)
-    return run(args.config or config_path())
+    try:
+        return run(args.config or config_path())
+    except Exception:  # under pythonw.exe a traceback goes nowhere
+        log.exception("updater: the run failed")
+        return 1
 
 
 if __name__ == "__main__":

@@ -57,7 +57,8 @@ Windows: the `RemoteOSMCP-Updater` task; macOS: a LaunchAgent), which also catch
 was off. `python -m remoteos.updater` reads the ring in `updater.json` (next to `config.json`) and
 installs that ring's release through SelfUpgrade when it is newer; the installers prove it and roll
 back. `stable` (default) = the newest release at least 14 days old, `canary` = the newest. A release
-marked `prerelease` on GitHub is HELD: no box takes it. Nothing is ever downgraded. Set the ring with
+marked `prerelease` on GitHub is HELD: no box takes it. Nothing is ever downgraded. A release that
+fails on a box is tried twice, then left alone until a newer one exists or an installer is run by hand. Set the ring with
 `REMOTEOS_MCP_RING=stable|canary` on an installer run; a run without it keeps what the box has.
 The log: Windows and macOS `.remoteos-mcp\updater.log`, Linux `journalctl -u remoteos-mcp-updater`.
 Camera-box's enable-only cams get no timer: its provisioning updates them.

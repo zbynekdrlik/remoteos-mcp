@@ -87,7 +87,14 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   Linux: `install_updater` (`47-updater.sh`), `write_if_changed` through HERE-STRINGS (a pipe runs it
   in a subshell: CHANGED and WRITE_TMP are lost). macOS: at the end of `install.sh`. Windows is the
   exception: `Register-RemoteOSUpdaterTask` sits with the other tasks, under `@rollback`.
-- **Not on enable-only boxes** (camera-box's cams, #60): a second updater would fight its pin.
+- **Not on enable-only boxes** (camera-box's cams, #60): a second updater would fight its pin; an
+  enable-only run removes a timer a default run left. Its failure to enable is a `[!]`, like macOS.
+- **Two tries per release** (`updater-state.json`, counted BEFORE the start, so a killed run counts): a
+  box-specific failure stops the server and rolls back, and daily repeats are the restart loop the
+  design rejected. A newer tag, or a success (the version moves), ends it. The drift report names the box.
+- **One run at a time** everywhere: Linux `flock`, Windows `Enter-RemoteOSInstallLock` (a Global named
+  mutex: it dies with its holder, an abandoned one is simply ours), macOS `<config>.install-lock` (a
+  directory + pid, a dead run's is taken over).
 - Windows: the task runs `pythonw.exe` (a daily console window would steal the focus on a live
   desktop; `sys.stderr` is None there, so `--log-file`) as the desktop user, like
   RemoteOSMCP-Upgrade, NOT as SYSTEM as the first ticket text said: `windows_plan` writes
@@ -419,8 +426,12 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     process, and an SSH drop kills the session's children, so the watcher is a scheduled task,
     `RemoteOSMCP-Rollback`. Before the stop (only with a rollback point):
     `rollback-pending.txt` (the marker, next to config.json) + `rollback-trap.ps1` in the
-    Administrators-only data folder + `schtasks /Run`. The script polls: marker gone = exit; the
-    installer's pid gone with the marker there = `Invoke-RemoteOSRollback`, then `rollback.log`. The
+    Administrators-only data folder + `schtasks /Run`. The script writes
+    `rollback-watching.txt` first, and the arm waits for it: `schtasks /Run` only requests a start. It
+    polls: marker gone = exit; the installer's pid gone, or 30 minutes passed (Ctrl+C in a piped run
+    keeps its powershell, a pid may be reused), with the marker there = take the install lock (held =
+    a new run owns the box, exit), `Invoke-RemoteOSRollback`, `rollback.log`. A new arm first
+    `schtasks /End`s an old watcher. The
     installer's own functions go in as text (`(Get-Command).Definition`), so it is the same code and
     needs no download. Disarmed after the proof, and at the end of `Exit-RemoteOSAfterFailure`
     (`Disarm` in the splat), never before its rollback. A trap that cannot start is a `[!]`: the run's own

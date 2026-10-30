@@ -644,10 +644,23 @@ function Get-RemoteOSQuoted([string]$Text) {
     return "'" + $Text.Replace("'", "''") + "'"
 }
 
+function Enter-RemoteOSInstallLock {
+    # One run at a time (#65): the updater makes a second one routine, and two pips break a box. The mutex
+    # dies with its holder. -> the held mutex (keep it in a variable), or $null when another run holds it
+    $mutex = New-Object System.Threading.Mutex($false, 'Global\RemoteOSMCP-Install')
+    try {
+        if ($mutex.WaitOne(0)) { return ,$mutex }
+    } catch [System.Threading.AbandonedMutexException] {
+        return ,$mutex  # its holder was killed: ours now
+    }
+    $mutex.Dispose()
+    return $null
+}
+
 function Get-RemoteOSRollbackTrapScript($Point, [string]$Python, [string]$ConfigDir, [int]$Port, [int]$InstallerPid) {
     # The whole watcher as one script; the installer's own functions go in as text, so the rollback is the
     # same code as the installer's (and the script needs no download). Pure.
-    $functions = foreach ($name in @('Invoke-RemoteOSNative', 'Invoke-RemoteOSPip', 'Get-RemoteOSInstalledVersion',
+    $functions = foreach ($name in @('Enter-RemoteOSInstallLock', 'Invoke-RemoteOSNative', 'Invoke-RemoteOSPip', 'Get-RemoteOSInstalledVersion',
                                      'Install-RemoteOSWheelhouse', 'Stop-RemoteOSServer', 'Start-RemoteOSServer',
                                      'Get-RemoteOSListenerSessionId', 'Test-RemoteOSServerHealth', 'Invoke-RemoteOSRollback')) {
         "function $name {`n$((Get-Command $name).Definition)`n}"
@@ -660,10 +673,15 @@ function Get-RemoteOSRollbackTrapScript($Point, [string]$Python, [string]$Config
         "`$python = $(Get-RemoteOSQuoted $Python)",
         "`$point = [pscustomobject]@{ Ref = $(Get-RemoteOSQuoted $Point.Ref); Path = $(Get-RemoteOSQuoted $Point.Path); Version = $(Get-RemoteOSQuoted $Point.Version) }",
         '$marker = Join-Path $ConfigDir "rollback-pending.txt"',
-        '$log = Join-Path $ConfigDir "rollback.log"'
+        '$log = Join-Path $ConfigDir "rollback.log"',
+        'Set-Content -LiteralPath (Join-Path $ConfigDir "rollback-watching.txt") -Value $PID'  # the heartbeat
     ) + @($functions) + @(
-        'while ((Test-Path -LiteralPath $marker) -and (Get-Process -Id $installerPid -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
+        # The deadline: a piped run stopped with Ctrl+C leaves its powershell alive, and so does a reused pid.
+        '$deadline = (Get-Date).AddMinutes(30)',
+        'while ((Test-Path -LiteralPath $marker) -and (Get-Process -Id $installerPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }',
         'if (-not (Test-Path -LiteralPath $marker)) { exit 0 }',
+        '$lock = Enter-RemoteOSInstallLock',  # free once the installer is dead; held = a new run owns the box
+        'if (-not $lock) { exit 0 }',
         'Add-Content -LiteralPath $log -Value "$(Get-Date -Format s) The installer (pid $installerPid) died armed: rolling back to v$($point.Version)"',
         'try {',
         '    $back = Invoke-RemoteOSRollback -Point $point -Python $python -StopServer { Stop-RemoteOSServer -Port $Port } `',
@@ -679,6 +697,15 @@ function Get-RemoteOSRollbackTrapScript($Point, [string]$Python, [string]$Config
     )) -join "`n"
 }
 
+function Wait-RemoteOSRollbackTrap([string]$ConfigDir, [int]$Seconds = 20) {
+    # schtasks /Run only requests a start (with nobody logged on, nothing runs): the heartbeat proves it
+    for ($i = 0; $i -lt $Seconds; $i++) {
+        if (Test-Path -LiteralPath (Join-Path $ConfigDir 'rollback-watching.txt')) { return $true }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
 function Start-RemoteOSRollbackTrap($Point, [string]$Python, [string]$ConfigDir, [string]$DataDir, [int]$Port, [string]$User) {
     # Before the stop. The script is in the Administrators-only data folder, so the desktop user's task
     # cannot be fed another one; the marker and the log are the task's own. -> $null or why there is no trap
@@ -689,14 +716,17 @@ function Start-RemoteOSRollbackTrap($Point, [string]$Python, [string]$ConfigDir,
         Get-RemoteOSRollbackTrapScript -Point $Point -Python $Python -ConfigDir $ConfigDir -Port $Port -InstallerPid $PID |
             Set-Content -LiteralPath $script -Encoding UTF8
         Set-Content -LiteralPath $marker -Value $PID
+        Remove-Item -LiteralPath (Join-Path $ConfigDir 'rollback-watching.txt') -Force -ErrorAction SilentlyContinue
         $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
         $principal = New-ScheduledTaskPrincipal -UserId (Get-RemoteOSAccountName $User) -RunLevel Highest -LogonType Interactive
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
         $task = @{ TaskName = "RemoteOSMCP-Rollback"; Action = $action; Principal = $principal; Settings = $settings; Force = $true }
         Register-ScheduledTask @task | Out-Null
         $ErrorActionPreference = 'Continue'
+        schtasks /End /TN "RemoteOSMCP-Rollback" 2>&1 | Out-Null  # a watcher of a dead run: this run owns the box
         $out = schtasks /Run /TN "RemoteOSMCP-Rollback" 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) { throw "schtasks /Run failed: $($out.Trim())" }
+        if (-not (Wait-RemoteOSRollbackTrap -ConfigDir $ConfigDir)) { throw "the watcher did not start" }
         return $null
     } catch {
         Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
@@ -792,7 +822,9 @@ function Register-RemoteOSUpdaterTask([string]$ConfigDir, [string]$PythonPath, [
     $existing = Get-ScheduledTask -TaskName "RemoteOSMCP-Updater" -ErrorAction SilentlyContinue
     if ($existing) {
         $current = @($existing.Actions)[0]
-        if ($current.Execute -ceq $wanted.Execute -and $current.Arguments -ceq $wanted.Argument) { return $false }
+        $account = (Get-RemoteOSAccountName $User).Split('\')[-1]
+        if ($current.Execute -ceq $wanted.Execute -and $current.Arguments -ceq $wanted.Argument -and
+            $existing.Principal.UserId.Split('\')[-1] -ieq $account) { return $false }
     }
     $action = New-ScheduledTaskAction -Execute $wanted.Execute -Argument $wanted.Argument
     $trigger = New-ScheduledTaskTrigger -Daily -At '03:00' -RandomDelay (New-TimeSpan -Hours 6)
@@ -864,6 +896,13 @@ if ($elevation -eq 'relaunch') {
     if ($null -eq $elevatedExit) { Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit }
     Write-Host "  The elevated install finished with exit code $elevatedExit." -ForegroundColor Gray
     Exit-RemoteOSInstaller -Code $elevatedExit -Pause $pauseOnExit
+}
+
+# --- One run at a time (#65), from here to the end of this process ---
+$installLock = Enter-RemoteOSInstallLock
+if (-not $installLock) {
+    Write-Host "  [X] Another run of this installer is going on -- nothing was changed on this box" -ForegroundColor Red
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
 # --- Detect logged-in desktop user (may differ from SSH user) ---
@@ -1015,8 +1054,8 @@ if ($preflight.Reused) {
 }
 # What a failure after the stop goes back to, read before anything changes
 $rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python
-if (-not $rollbackPoint -and (Test-Path -LiteralPath $legacyWheelhouseRoot)) {
-    Write-Host "        Fetching the running version again for the rollback (the wheelhouses moved to $dataDir)..." -ForegroundColor Gray
+if (-not $rollbackPoint) {
+    Write-Host "        Fetching the running version again for the rollback..." -ForegroundColor Gray
     $rebuilt = New-RemoteOSRollbackWheelhouse -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python
     if ($rebuilt -and $rebuilt.Ok) {
         $rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python

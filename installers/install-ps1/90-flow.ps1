@@ -61,6 +61,13 @@ if ($elevation -eq 'relaunch') {
     Exit-RemoteOSInstaller -Code $elevatedExit -Pause $pauseOnExit
 }
 
+# --- One run at a time (#65), from here to the end of this process ---
+$installLock = Enter-RemoteOSInstallLock
+if (-not $installLock) {
+    Write-Host "  [X] Another run of this installer is going on -- nothing was changed on this box" -ForegroundColor Red
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+}
+
 # --- Detect logged-in desktop user (may differ from SSH user) ---
 $desktopUser = $null
 try {
@@ -210,8 +217,8 @@ if ($preflight.Reused) {
 }
 # What a failure after the stop goes back to, read before anything changes
 $rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python
-if (-not $rollbackPoint -and (Test-Path -LiteralPath $legacyWheelhouseRoot)) {
-    Write-Host "        Fetching the running version again for the rollback (the wheelhouses moved to $dataDir)..." -ForegroundColor Gray
+if (-not $rollbackPoint) {
+    Write-Host "        Fetching the running version again for the rollback..." -ForegroundColor Gray
     $rebuilt = New-RemoteOSRollbackWheelhouse -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python
     if ($rebuilt -and $rebuilt.Ok) {
         $rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python

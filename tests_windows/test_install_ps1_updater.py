@@ -64,7 +64,6 @@ class TestRollbackTrap:
     def _script(self, tmp_path: Path, config: Path, python: Path, installer_pid: int) -> Path:
         point = self._point(tmp_path, "1.0")
         body = f"""
-function Stop-RemoteOSServer {{ }}
 $text = Get-RemoteOSRollbackTrapScript -Point ({point}) -Python {_q(python)} -ConfigDir {_q(config)} `
     -Port 8092 -InstallerPid {installer_pid}
 @{{ text = $text }} | ConvertTo-Json -Compress
@@ -98,6 +97,7 @@ function Test-RemoteOSServerHealth { param($Port, $Version, $StartDirect)
         (config / "rollback-pending.txt").write_text("1")
         result = self._run(self._script(tmp_path, config, venv, self._dead_pid()))
         assert result.returncode == 0, result.stdout + result.stderr
+        assert (config / "rollback-watching.txt").exists()
         assert _installed(tmp_path, venv) == "1.0"
         assert not (config / "rollback-pending.txt").exists()
         assert "Rolled back to v1.0" in (config / "rollback.log").read_text(encoding="utf-8", errors="replace")
@@ -123,6 +123,48 @@ function Test-RemoteOSServerHealth { param($Port, $Version, $StartDirect)
         config.mkdir()
         result = self._run(self._script(tmp_path, config, venv, os.getpid()))
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+class TestRollbackWheelhouse:
+    def _call(self, tmp_path: Path, config: Path) -> dict:
+        body = f"""
+function New-RemoteOSWheelhouse {{ param($Python, $Root, $Sha, $SourceUrl, $ConstraintsUrl)
+    return [pscustomobject]@{{ Sha = $Sha; Source = $SourceUrl; Constraints = $ConstraintsUrl; Root = $Root }} }}
+@{{ r = (New-RemoteOSRollbackWheelhouse -ConfigDir {_q(config)} -Root 'R' -Python 'p') }} | ConvertTo-Json -Compress
+"""
+        return _ps(tmp_path, body)["r"]
+
+    def test_the_installed_commit_is_built_again_never_taken_from_the_profile(self, tmp_path):
+        (tmp_path / "installed-ref.txt").write_text(SHA_OLD + "\n")
+        got = self._call(tmp_path, tmp_path)
+        assert got["Sha"] == SHA_OLD and got["Root"] == "R"
+        assert got["Source"] == f"https://github.com/zbynekdrlik/remoteos-mcp/archive/{SHA_OLD}.zip"
+        assert got["Constraints"].endswith(f"/{SHA_OLD}/constraints.txt")
+
+    @pytest.mark.parametrize("text", [None, "not-a-sha"])
+    def test_without_a_proven_commit_there_is_nothing_to_build(self, tmp_path, text):
+        if text is not None:
+            (tmp_path / "installed-ref.txt").write_text(text)
+        assert self._call(tmp_path, tmp_path) is None
+
+
+def test_the_heartbeat_decides_whether_the_trap_runs(tmp_path):
+    body = f"""
+$before = Wait-RemoteOSRollbackTrap -ConfigDir {_q(tmp_path)} -Seconds 1
+Set-Content -LiteralPath (Join-Path {_q(tmp_path)} 'rollback-watching.txt') -Value 1
+$after = Wait-RemoteOSRollbackTrap -ConfigDir {_q(tmp_path)} -Seconds 1
+@{{ before = $before; after = $after }} | ConvertTo-Json -Compress
+"""
+    assert _ps(tmp_path, body) == {"before": False, "after": True}
+
+
+def test_the_trap_gives_up_on_an_installer_that_never_finishes(tmp_path):
+    """A piped run stopped with Ctrl+C keeps its powershell: the deadline must be in the watcher."""
+    body = """$point = [pscustomobject]@{ Ref = 'r'; Path = 'p'; Version = '1' }
+@{ s = (Get-RemoteOSRollbackTrapScript -Point $point -Python 'p' -ConfigDir 'c' -Port 1 -InstallerPid 1) } |
+    ConvertTo-Json -Compress"""
+    script = _ps(tmp_path, body)["s"]
+    assert "(Get-Date) -lt $deadline" in script and "AddMinutes(30)" in script
 
 
 def test_the_failure_exit_disarms_only_after_the_rollback(tmp_path):
@@ -200,6 +242,6 @@ try {{
 
 
 def test_the_ring_crosses_the_elevation_inside_the_command(tmp_path):
-    body = """@{ c = (Get-RemoteOSRelaunchCommand -ScriptPath 'x.ps1' -InstallerUrl 'u' -SourceRef 'r' -Ring 'canary') } |
-    ConvertTo-Json -Compress"""
+    command = "Get-RemoteOSRelaunchCommand -ScriptPath 'x.ps1' -InstallerUrl 'u' -SourceRef 'r' -Ring 'canary'"
+    body = f"@{{ c = ({command}) }} | ConvertTo-Json -Compress"
     assert "$env:REMOTEOS_MCP_RING = 'canary'" in _ps(tmp_path, body)["c"]

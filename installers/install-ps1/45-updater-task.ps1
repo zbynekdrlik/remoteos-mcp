@@ -30,7 +30,9 @@ function Register-RemoteOSUpdaterTask([string]$ConfigDir, [string]$PythonPath, [
     $existing = Get-ScheduledTask -TaskName "RemoteOSMCP-Updater" -ErrorAction SilentlyContinue
     if ($existing) {
         $current = @($existing.Actions)[0]
-        if ($current.Execute -ceq $wanted.Execute -and $current.Arguments -ceq $wanted.Argument) { return $false }
+        $account = (Get-RemoteOSAccountName $User).Split('\')[-1]
+        if ($current.Execute -ceq $wanted.Execute -and $current.Arguments -ceq $wanted.Argument -and
+            $existing.Principal.UserId.Split('\')[-1] -ieq $account) { return $false }
     }
     $action = New-ScheduledTaskAction -Execute $wanted.Execute -Argument $wanted.Argument
     $trigger = New-ScheduledTaskTrigger -Daily -At '03:00' -RandomDelay (New-TimeSpan -Hours 6)

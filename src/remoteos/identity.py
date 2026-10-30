@@ -98,7 +98,8 @@ def _read_admin() -> bool:
 
 
 def has_admin() -> bool:
-    """The cached answer. Whatever fails reads as False and never reaches ``/health``'s caller."""
+    """The cached answer. A failure keeps the last answer (a slow sudo must not read as a lost admin),
+    with none yet it reads as False, and it never reaches ``/health``'s caller."""
     global _admin_cache
     with _admin_lock:
         now = time.monotonic()
@@ -108,6 +109,6 @@ def has_admin() -> bool:
             answer = _read_admin()
         except Exception as exc:  # no sudo on PATH, a timeout: no proof of admin
             log.info("admin check failed: %s", type(exc).__name__)
-            answer = False
+            answer = _admin_cache[1] if _admin_cache is not None else False
         _admin_cache = (now, answer)
         return answer
