@@ -20,7 +20,7 @@ fi
 tags=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
 newest=0
 printf '%s\n' "$tags" | python3 -I src/remoteos/release_channel.py is-newest "$version" || newest=$?
-if [ "$newest" -eq 1 ]; then
+if [ "$newest" -eq 3 ]; then
   echo "a newer release exists, $tag is not published"
   exit 0
 elif [ "$newest" -ne 0 ]; then

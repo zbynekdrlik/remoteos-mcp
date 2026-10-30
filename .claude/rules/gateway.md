@@ -188,7 +188,8 @@ paths:
     It needs no history, and a new stable does not restart the count.
   - A re-run of an older merge publishes nothing (`create-release.sh`, `is-newest`): the resolver
     goes by publish date, so a late older release would become "newest". CI never cancels a run
-    on main, or a merge could get no release.
+    on main: each merge has its own concurrency group, because a shared group's pending run is
+    cancelled by the next one, and that merge would get no release.
   - Drift can never cost the run its status write (`drift.update` catches everything, logged): a
     skipped write would re-send every state notice on every run.
   - A stable tag `version_key` refuses skips drift for the run (it must not read as "caught up").

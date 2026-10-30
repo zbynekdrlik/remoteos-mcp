@@ -174,8 +174,5 @@ def fetch_releases(url: str = RELEASES_URL, *, timeout: float = FETCH_TIMEOUT_S)
 
 
 if __name__ == "__main__":  # scripts/create-release.sh: is-newest <version>, the tags on stdin
-    try:
-        sys.exit(0 if is_newest(sys.argv[2], sys.stdin.read().split()) else 1)
-    except ValueError as exc:  # exit 1 means "a newer release exists": this must fail the job
-        print(exc, file=sys.stderr)
-        sys.exit(2)
+    # 3 = a newer release exists. Not 1: that is any uncaught exception, which must fail the job.
+    sys.exit(0 if is_newest(sys.argv[2], sys.stdin.read().split()) else 3)

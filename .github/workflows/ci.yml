@@ -7,9 +7,10 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  # never on main: a second merge must not cancel the run that releases the first (#63)
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # Each merge to main has its own group: a group holds one running and one pending run, and a
+  # newer run cancels the pending one, so a shared group could leave a merge with no release (#63).
+  group: ci-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:

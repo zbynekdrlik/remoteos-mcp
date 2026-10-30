@@ -244,7 +244,7 @@ def test_a_version_that_cannot_be_compared_fails_the_job_instead_of_skipping_the
         text=True,
         check=False,
     )
-    assert proc.returncode == 2
+    assert proc.returncode == 1 and "ValueError" in proc.stderr
 
 
 def test_a_failed_tag_list_fails_the_job(tmp_path):
@@ -277,8 +277,9 @@ def test_the_release_job_runs_only_on_a_push_to_main_after_every_test_job():
     assert any(step.get("run") == "scripts/create-release.sh" for step in release["steps"])
 
 
-def test_a_run_on_main_is_never_cancelled_so_every_merge_reaches_the_release_job():
-    assert workflow()["concurrency"]["cancel-in-progress"] == "${{ github.ref != 'refs/heads/main' }}"
+def test_each_merge_to_main_has_its_own_concurrency_group_so_each_reaches_the_release_job():
+    group = workflow()["concurrency"]["group"]
+    assert "github.ref == 'refs/heads/main' && github.sha || github.ref" in group
 
 
 def test_the_release_script_is_executable_in_git():
