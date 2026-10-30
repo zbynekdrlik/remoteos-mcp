@@ -51,9 +51,11 @@ paths:
 - **Request size: a machine takes 4 MiB per request** (mcp `transport_security.DEFAULT_MAX_REQUEST_BODY_SIZE`;
   the gateway's own cap is 16 MiB). Both are tested at 3.5 MB, by raising `PUT_CHUNK_BYTES`.
 - **`put` (#67):** `PUT_CHUNK_BYTES` (2.5 MB) chunks to `<remote>.part`, then FileHash, then
-  FileRename. The first chunk always carries `append=False`, explicitly: it replaces a leftover
-  `.part`, and an older server refuses the unknown argument before writing anything
-  (`unexpected_keyword_argument`, named in one line). Each call is its own `_run` (session), so
+  FileRename. The first chunk always carries `append=False` and `permissions_from=<remote>`,
+  explicitly: the server drops a leftover `.part` (even a read-only one), starts the new one with
+  the target's mode so a 0600 target's content is never in a 0644 file, and refuses a directory
+  target before any data moves. An older server refuses the unknown arguments before writing
+  anything (`unexpected_keyword_argument`, named in one line). Each call is its own `_run` (session), so
   `--timeout` is per call, and a test can cut a real put at the network boundary. `_run` per chunk
   costs a handshake each: nothing next to the chunk itself.
 - **The MCP SDK hides HTTP statuses.** A non-2xx answer to a request becomes a JSON-RPC error

@@ -446,8 +446,11 @@ def run_shell(machine: Machine, command: str, timeout: int, cwd: str | None) -> 
     return code
 
 
-def _upload_chunk(machine: Machine, path: str, chunk: bytes, append: bool, wait_s: float) -> None:
-    arguments = {"path": path, "data_base64": base64.b64encode(chunk).decode(), "append": append}
+def _upload_chunk(machine: Machine, path: str, chunk: bytes, wait_s: float, target: str | None) -> None:
+    """The first chunk names the *target*, so the part starts with its permissions; the rest append."""
+    arguments: dict = {"path": path, "data_base64": base64.b64encode(chunk).decode(), "append": target is None}
+    if target is not None:
+        arguments["permissions_from"] = target
     result = _run(machine, "FileUpload", arguments, wait_s)
     if result.is_error:
         if "unexpected_keyword_argument" in result_text(result):  # refused before anything was written
@@ -462,7 +465,7 @@ def _upload_chunk(machine: Machine, path: str, chunk: bytes, append: bool, wait_
         raise CallFailed(EXIT_TOOL_ERROR, f"put: size mismatch, sent {len(chunk)} bytes, remote wrote {written}")
 
 
-def _upload(machine: Machine, local: Path, part: str, wait_s: float) -> tuple[str, int]:
+def _upload(machine: Machine, local: Path, remote: str, part: str, wait_s: float) -> tuple[str, int]:
     """Send *local* to *part* in chunks; returns the sha256 and size of what was sent."""
     digest = hashlib.sha256()
     size = 0
@@ -470,7 +473,7 @@ def _upload(machine: Machine, local: Path, part: str, wait_s: float) -> tuple[st
     try:
         with local.open("rb") as source:
             while (chunk := source.read(PUT_CHUNK_BYTES)) or not append:
-                _upload_chunk(machine, part, chunk, append, wait_s)
+                _upload_chunk(machine, part, chunk, wait_s, None if append else remote)
                 digest.update(chunk)
                 size += len(chunk)
                 append = True
@@ -485,7 +488,7 @@ def run_put(machine: Machine, local: Path, remote: str, wait_s: float) -> int:
     Any failure leaves *remote* as it was. A leftover ``.part`` is replaced by the next put.
     """
     part = remote + PUT_SUFFIX
-    sent_sha256, sent_size = _upload(machine, local, part, wait_s)
+    sent_sha256, sent_size = _upload(machine, local, remote, part, wait_s)
     result = _run(machine, "FileHash", {"path": part}, wait_s)
     if result.is_error:
         raise _tool_failed(result)

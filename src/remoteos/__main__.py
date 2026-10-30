@@ -46,7 +46,7 @@ from remoteos import __version__, desktop, network, ocr, process_mgr, recording,
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
-from remoteos.file_transfer import hash_file, replace_file
+from remoteos.file_transfer import hash_file, replace_file, start_file_like
 from remoteos.identity import LINUX_SHELL, MACOS_SHELL, has_admin, machine_identity, server_instructions
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.platform.command import powershell_argv, run_child
@@ -598,6 +598,7 @@ def App(
             "stdout": {"type": "string"},
             "stderr": {"type": "string"},
             "exit_code": {"type": "integer"},
+            "task_id": {"type": "string"},
         },
         "required": ["stdout", "stderr", "exit_code"],
     },
@@ -1020,7 +1021,7 @@ _B64_WHITESPACE = str.maketrans("", "", " \t\r\n")  # line-wrapped base64 (e.g. 
     )
 )
 @reports_errors
-def FileUpload(path: str, data_base64: str, append: bool = False) -> str:
+def FileUpload(path: str, data_base64: str, append: bool = False, permissions_from: str = "") -> str:
     """Upload a file from base64-encoded content. Use for binary files.
 
     Over HTTP one request carries at most 4 MiB, so one call carries about 3 MB of file. Send a
@@ -1034,6 +1035,8 @@ def FileUpload(path: str, data_base64: str, append: bool = False) -> str:
             allowed; any other character outside the base64 alphabet is an error and nothing is
             written.
         append: Add to the end of the file instead of replacing it (a missing file is created).
+        permissions_from: Without append: start a new file with this existing file's permissions,
+            so a temporary copy of a private file is private too. A directory here is an error.
     """
     # Both checks run before the directory is created or the file opened (#31):
     # lax decoding dropped junk characters, so "!!!!" truncated a file to 0 bytes.
@@ -1049,6 +1052,8 @@ def FileUpload(path: str, data_base64: str, append: bool = False) -> str:
         raise ValueError(f"data_base64 is not valid base64 ({e})") from e
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
+    if permissions_from and not append:
+        start_file_like(p, permissions_from)
     with p.open("ab" if append else "wb") as handle:
         handle.write(data)
     log.info("FileUpload wrote %d bytes", len(data))  # never the path: logs carry no tool arguments (#31)
@@ -1073,6 +1078,7 @@ def FileHash(path: str) -> str:
     if not p.exists():
         raise failure(f"File not found: {path}")
     digest, size = hash_file(p)
+    log.info("FileHash read %d bytes", size)  # never the path (#31)
     return f"sha256:{digest} {size} bytes"
 
 
@@ -1087,8 +1093,9 @@ def FileHash(path: str) -> str:
 def FileRename(path: str, new_path: str) -> str:
     """Rename a file, replacing ``new_path`` in one step if it exists.
 
-    An existing ``new_path`` keeps its permissions (and, when the server runs as root, its owner),
-    and a symlink there is written through. Both paths must be on the same filesystem.
+    The new file takes an existing ``new_path``'s POSIX mode and group (and, when the server runs
+    as root, its owner), not its ACLs or extended attributes. A symlink there is written through,
+    a ``new_path`` this account may not write is refused. Both paths must be on the same filesystem.
 
     Args:
         path: The file to rename.
@@ -1098,6 +1105,7 @@ def FileRename(path: str, new_path: str) -> str:
     if not p.exists():
         raise failure(f"File not found: {path}")
     replace_file(p, new_path)
+    log.info("FileRename replaced a file")  # never the paths (#31)
     return f"Renamed {path} to {new_path}"
 
 

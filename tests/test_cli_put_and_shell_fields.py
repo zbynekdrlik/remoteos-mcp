@@ -6,8 +6,10 @@ real-stack tests are in ``test_cli_call.py``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 
+import httpx2
 import pytest
 from click.testing import CliRunner
 from fastmcp.client.client import CallToolResult
@@ -69,7 +71,9 @@ def test_only_the_first_chunk_replaces_and_each_is_under_the_machine_s_request_l
     queued.extend(_reply(f"Written {n} bytes to /r.part") for n in (2, 2, 1))
     queued.extend([_reply(f"sha256:{_SHA} 5 bytes"), _reply("Renamed")])
     assert cli_call.run_put(_M, path, "/r", 9.0) == 0
-    assert [args["append"] for tool, args, _ in asked if tool == "FileUpload"] == [False, True, True]
+    uploads = [args for tool, args, _ in asked if tool == "FileUpload"]
+    assert [args["append"] for args in uploads] == [False, True, True]
+    assert [args.get("permissions_from") for args in uploads] == ["/r", None, None]
 
 
 def test_the_chunk_size_fits_a_machine_s_request_with_room_for_the_json():
@@ -164,3 +168,31 @@ def test_timeout_is_the_wait_of_a_put(monkeypatch, tmp_path):
 def test_the_gateway_lets_a_one_hour_shell_call_finish():
     assert gateway_app.UPSTREAM_TIMEOUT.read > cli_call.declared_runtime({"timeout": 3600})
     assert gateway_app.UPSTREAM_TIMEOUT.read == 3700.0
+
+
+def test_only_a_post_gets_the_long_read_and_the_trace_survives_either_way():
+    trace = object()
+    assert gateway_app.upstream_extensions("POST", None) == {}
+    assert gateway_app.upstream_extensions("POST", trace) == {"trace": trace}
+    extensions = gateway_app.upstream_extensions("GET", trace)
+    assert extensions["trace"] is trace
+    assert extensions["timeout"]["read"] == 600.0
+
+
+def test_a_request_s_timeout_extension_beats_the_client_s_long_read():
+    async def silent(reader, writer):
+        await reader.read(1000)
+        await asyncio.sleep(5)
+        writer.close()
+
+    async def go() -> None:
+        server = await asyncio.start_server(silent, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        timeout = dict(gateway_app.upstream_extensions("GET", None)["timeout"], read=0.2)
+        async with httpx2.AsyncClient(timeout=gateway_app.UPSTREAM_TIMEOUT, trust_env=False) as client:
+            request = httpx2.Request("GET", f"http://127.0.0.1:{port}/", extensions={"timeout": timeout})
+            with pytest.raises(httpx2.ReadTimeout):
+                await client.send(request, stream=True)
+        server.close()
+
+    asyncio.run(go())

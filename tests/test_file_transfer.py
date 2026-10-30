@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import os
 
 import pytest
 from fastmcp import Client
@@ -94,11 +95,109 @@ def test_rename_as_root_keeps_the_owner_of_the_existing_file(tmp_path, monkeypat
     source.write_bytes(b"new")
     target.write_bytes(b"old")
     owner = (target.stat().st_uid, target.stat().st_gid)
-    owners = []
+    calls = []
+    real_chmod = file_transfer.os.chmod
     monkeypatch.setattr(file_transfer.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(file_transfer.os, "chown", lambda path, uid, gid: owners.append((path, uid, gid)))
+    monkeypatch.setattr(file_transfer.os, "chown", lambda path, uid, gid: calls.append(("chown", path, uid, gid)))
+    monkeypatch.setattr(file_transfer.os, "chmod", lambda path, mode: (calls.append("chmod"), real_chmod(path, mode)))
     server.FileRename(str(source), str(target))
-    assert owners == [(source, *owner)]
+    assert calls == [("chown", source, *owner), "chmod"]
+
+
+def test_a_non_root_rename_keeps_the_group_and_leaves_the_owner(tmp_path, monkeypatch):
+    source, target = tmp_path / "a", tmp_path / "b"
+    source.write_bytes(b"new")
+    target.write_bytes(b"old")
+    calls = []
+    monkeypatch.setattr(file_transfer.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(file_transfer.os, "chown", lambda path, uid, gid: calls.append((path, uid, gid)))
+    server.FileRename(str(source), str(target))
+    assert calls == [(source, -1, target.stat().st_gid)]
+
+
+def test_a_group_the_account_is_not_in_is_logged_and_the_rename_still_happens(tmp_path, monkeypatch, caplog):
+    source, target = tmp_path / "a", tmp_path / "b"
+    source.write_bytes(b"new")
+    target.write_bytes(b"old")
+
+    def refused(*_args):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(file_transfer.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(file_transfer.os, "chown", refused)
+    with caplog.at_level("WARNING", logger="remoteos.file_transfer"):
+        server.FileRename(str(source), str(target))
+    assert target.read_bytes() == b"new"
+    assert "could not keep the target's group" in caplog.text
+
+
+def test_a_refused_chown_as_root_is_an_error(tmp_path, monkeypatch):
+    source, target = tmp_path / "a", tmp_path / "b"
+    source.write_bytes(b"new")
+    target.write_bytes(b"old")
+
+    def refused(*_args):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(file_transfer.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(file_transfer.os, "chown", refused)
+    assert tool_error(lambda: server.FileRename(str(source), str(target))).startswith("FileRename error: ")
+    assert target.read_bytes() == b"old"
+
+
+def test_rename_refuses_a_target_this_account_may_not_write_like_the_plain_write(tmp_path):
+    source, target = tmp_path / "a", tmp_path / "b"
+    source.write_bytes(b"new")
+    target.write_bytes(b"old")
+    target.chmod(0o444)
+    if os.access(target, os.W_OK):
+        pytest.fail("this test needs a non-root account")
+    out = tool_error(lambda: server.FileRename(str(source), str(target)))
+    assert out == f"FileRename error: {target} is not writable"
+    assert target.read_bytes() == b"old"
+
+
+def test_permissions_from_starts_the_file_with_the_model_s_mode_before_any_data(tmp_path):
+    model, part = tmp_path / "target", tmp_path / "target.part"
+    model.write_bytes(b"old")
+    model.chmod(0o600)
+    server.FileUpload(str(part), _b64(b"x"), permissions_from=str(model))
+    assert part.stat().st_mode & 0o777 == 0o600
+    assert part.read_bytes() == b"x"
+
+
+def test_permissions_from_replaces_a_leftover_read_only_part(tmp_path):
+    model, part = tmp_path / "target", tmp_path / "target.part"
+    model.write_bytes(b"old")
+    model.chmod(0o444)
+    part.write_bytes(b"leftover")
+    part.chmod(0o444)
+    server.FileUpload(str(part), _b64(b"x"), permissions_from=str(model))
+    assert part.read_bytes() == b"x"
+    assert part.stat().st_mode & 0o200  # the owner can still append
+
+
+def test_permissions_from_a_missing_file_uses_the_default_and_clears_a_leftover(tmp_path):
+    part = tmp_path / "new.part"
+    part.write_bytes(b"leftover")
+    part.chmod(0o444)
+    server.FileUpload(str(part), _b64(b"x"), permissions_from=str(tmp_path / "new"))
+    assert part.read_bytes() == b"x"
+
+
+def test_permissions_from_a_directory_is_refused_and_writes_nothing(tmp_path):
+    part = tmp_path / "x.part"
+    out = tool_error(lambda: server.FileUpload(str(part), _b64(b"x"), permissions_from=str(tmp_path)))
+    assert out == f"FileUpload error: {tmp_path} is a directory"
+    assert not part.exists()
+
+
+def test_permissions_from_is_ignored_while_appending(tmp_path):
+    model, part = tmp_path / "target", tmp_path / "target.part"
+    model.write_bytes(b"old")
+    part.write_bytes(b"first")
+    server.FileUpload(str(part), _b64(b"+"), append=True, permissions_from=str(model))
+    assert part.read_bytes() == b"first+"
 
 
 def test_rename_writes_through_a_symlink(tmp_path):
@@ -130,7 +229,7 @@ def test_rename_syncs_the_data_before_the_name_changes(tmp_path, monkeypatch):
     monkeypatch.setattr(file_transfer.os, "fsync", lambda fd: order.append("fsync"))
     monkeypatch.setattr(file_transfer.os, "replace", lambda a, b: (order.append("replace"), real_replace(a, b)))
     server.FileRename(str(source), str(target))
-    assert order == ["fsync", "replace"]
+    assert order == ["fsync", "replace", "fsync"]  # the data, then the rename itself
 
 
 @pytest.mark.parametrize("tool", ["FileHash", "FileRename"])
@@ -140,9 +239,11 @@ def test_the_new_tools_are_tier_3(tool):
 
 def test_shell_carries_exact_structured_fields_beside_the_prefixed_text():
     result = _call("Shell", {"command": "printf ' out\\n\\n'; echo err >&2; exit 4"})
-    assert result.structured_content == {"stdout": " out\n\n", "stderr": "err\n", "exit_code": 4}
+    fields = dict(result.structured_content)
+    task_id = fields.pop("task_id")
+    assert fields == {"stdout": " out\n\n", "stderr": "err\n", "exit_code": 4}
     text = result.content[0].text
-    assert text.startswith("[task:")
+    assert text.startswith(f"[task:{task_id}]")
     assert text.endswith("] out\n\n\n[STDERR] err\n\n[Exit code: 4]")
 
 

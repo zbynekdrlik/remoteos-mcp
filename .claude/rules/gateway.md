@@ -47,7 +47,10 @@ paths:
     are about the retry, so a stalled runner cannot expire a connection between calls.
 - **`UPSTREAM_TIMEOUT.read` = 3700 s (#67):** a running tool sends no bytes, so this is the
   longest tool call through the gateway: Shell's one hour, the client's 60 s, 40 s spare. A value
-  test pins it (`test_cli_put_and_shell_fields.py`); no test waits that long.
+  test pins it (`test_cli_put_and_shell_fields.py`); no test waits that long. Only a POST gets it:
+  `upstream_extensions` gives anything else (the idle GET stream) the old 600 s through the
+  request's `timeout` extension, because a vanished box would hold a slot of the fleet's shared
+  pool for an hour. A bare `httpx2.Request` otherwise takes the client's timeout.
 - **Decision order:** malformed machine name → 404 (before auth, so the raw value never
   reaches a log), then 401 → 403 → 404 (the design order), then 413 (body over the cap).
   - The 403 comes before the 404 so an authenticated consumer cannot probe which other

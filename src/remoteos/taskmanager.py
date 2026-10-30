@@ -346,7 +346,8 @@ class TaskManager:
                 if isinstance(result, StructuredText):
                     from fastmcp.tools import ToolResult
 
-                    return ToolResult(content=f"{prefix} {result}", structured_content=result.structured)
+                    fields = {**result.structured, "task_id": task.task_id}  # some clients show only these
+                    return ToolResult(content=f"{prefix} {result}", structured_content=fields)
                 if isinstance(result, str):
                     return f"{prefix} {result}"
                 if isinstance(result, list):

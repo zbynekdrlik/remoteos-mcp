@@ -57,6 +57,9 @@ logger = logging.getLogger("remoteos.gateway")
 #   40 s more (#67). It is a stated bound on a real operation, and a hung machine still cannot
 #   hold a connection forever.
 UPSTREAM_TIMEOUT = httpx2.Timeout(connect=10.0, read=3700.0, write=60.0, pool=10.0)
+# Only a POST can be a tool call. Anything else (the idle GET stream) keeps the old bound, so a box
+# that vanished holds a slot of the fleet's shared pool for 10 minutes, not an hour.
+UPSTREAM_IDLE_TIMEOUT = httpx2.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
 
 # keepalive_expiry: well under the machines' uvicorn timeout_keep_alive (5 s, its default). With
 # the httpx2 default of 5 s too, a connection idle for just under 5 s was reused at the very
@@ -326,7 +329,7 @@ class Gateway:
                 url,
                 headers=headers,
                 content=body or None,
-                extensions={"trace": trace} if trace is not None else None,
+                extensions=upstream_extensions(request.method, trace),
             )
 
         logger.debug(
@@ -492,6 +495,14 @@ async def _read_body(request: Request) -> bytes | None:
 
 async def healthz(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "version": __version__})
+
+
+def upstream_extensions(method: str, trace: _ConnectionTrace | None) -> dict:
+    """The request's trace hook and, for anything but a POST, its shorter read timeout."""
+    extensions: dict = {} if method == "POST" else {"timeout": UPSTREAM_IDLE_TIMEOUT.as_dict()}
+    if trace is not None:
+        extensions["trace"] = trace
+    return extensions
 
 
 def _upstream_client(limits: httpx2.Limits) -> httpx2.AsyncClient:

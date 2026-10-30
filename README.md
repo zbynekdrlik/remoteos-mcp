@@ -246,7 +246,8 @@ diacritics, symbols and emoji. `\n` (also `\r\n`) presses Enter and `\t` presses
   - It saves the clipboard text, pastes with Ctrl+V (Command+V on macOS), then restores the
     clipboard.
   - Only text can be restored. When the clipboard held none, the reply says so.
-  - The reply means the paste keys were pressed; it does not confirm the app took the text.
+  - The reply means the paste keys were pressed; it does not confirm the app took the text. Structured content goes out next to the text, so a reply is twice its output on the
+wire: the 256 MiB reply limit means about 128 MiB of output.
   - Not for secrets: clipboard history and sync keep a copy.
 
 ## Tool errors and desktop diagnoses
@@ -649,12 +650,15 @@ failing tool answered with success text (`Error in Shell: …`) and the CLI woul
 
 **Shell.** stdout goes to stdout and stderr to stderr, exactly as the command wrote them (ANSI
 escapes included): Shell's structured content carries `stdout`, `stderr` and `exit_code` next to
-the text. `--timeout` (default 30 s) is Shell's own
+the text. Structured content goes out next to the text, so a reply is twice its output on the
+wire: the 256 MiB reply limit means about 128 MiB of output. `--timeout` (default 30 s) is Shell's own
 timeout; the client waits 60 s more. Through the gateway a call must answer within 3700 s (its
-upstream read timeout), so `--timeout 3600` is the most a call can use. Use `--` before a command
+upstream read timeout), so `--timeout 3600` is the most a call can use, and a machine runs at most
+3 Shell calls at once (a fourth waits 60 s, then fails). Use `--` before a command
 that starts with `-`. `sudo` inside Shell works without a password on the Linux MCP boxes (#67).
 
-A server older than 0.7.0.dev43 sends only the text. The CLI then parses it, prints each stream
+A server older than 0.7.0.dev43 sends only the text. Structured content goes out next to the text, so a reply is twice its output on the
+wire: the 256 MiB reply limit means about 128 MiB of output. The CLI then parses it, prints each stream
 with one trailing newline, and some output cannot round-trip:
 
 - leading whitespace of stdout and trailing whitespace of the last part are lost, and blank
@@ -666,10 +670,12 @@ with one trailing newline, and some output cannot round-trip:
 **put / get.** A machine takes at most 4 MiB per request (the mcp transport's limit; the gateway
 allows 16 MiB), so `put` sends the file in 2.5 MB chunks to `<remote>.part` (FileUpload
 `append`), checks its size and sha256 (FileHash), then renames it over the target (FileRename).
-Any failure leaves the target as it was and may leave the `.part`, which the next `put` replaces;
-two `put`s to the same target at once are not supported. An existing target keeps its mode (and,
-when the server runs as root, its owner), and a symlink is written through; the `.part` must be on
-the target's filesystem. `put` needs remoteos-mcp 0.7.0.dev43 or later (an older server: exit
+Any failure leaves the target as it was and may leave the `.part`, which the next `put` replaces
+(so a file of yours called `<remote>.part` is overwritten); two `put`s to the same target at once
+are not supported. The `.part` starts with an existing target's permissions, and the new file takes
+its POSIX mode and group (as root, its owner too), not its ACLs or extended attributes. A symlink
+is written through, a target the account may not write is refused, and the `.part` must be on the
+target's filesystem. `put` needs remoteos-mcp 0.7.0.dev43 or later (an older server: exit
 125, nothing written). `--timeout` is the wait of each call, not of the whole `put`. `get` checks the byte count FileDownload declared, then writes the local file like `cp` (through a
 symlink, an existing file keeps its mode, a new one gets `0666 & ~umask`), but through a fsynced
 temp file in the same directory, so never a half-written file. A `get` reply may be up to

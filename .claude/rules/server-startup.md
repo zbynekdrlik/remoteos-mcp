@@ -160,14 +160,20 @@ paths:
     fastmcp 4.1.2 does not pass mcp's `max_request_body_size` through. Replies have no such cap on the server side; the mcp
     CLIENT's 1 MiB SSE event limit is in `.claude/rules/cli-call.md`.
 - **`FileRename` (`file_transfer.replace_file`, #67) is `put`'s last step**, so it keeps what an
-  in-place write kept: an existing target's mode (and owner as root), a symlink written through.
-  It fsyncs the data first. `os.replace` fails across filesystems (a symlink to another mount):
+  in-place write kept: an existing target's mode and group (owner too as root; a group the account
+  is not in is logged, not fatal), a symlink written through, an unwritable target refused (a
+  rename would replace it where the write failed). ACLs and xattrs are NOT kept: a new inode. It
+  fsyncs the data, renames, fsyncs the directory (POSIX). `os.replace` fails across filesystems (a symlink to another mount):
   the target stays, no copy fallback, because a copy is not atomic.
 - **Structured tool content: return `taskmanager.StructuredText(text, fields)` (#67, Shell).**
   It is a `str`, so direct test calls compare as before; `wrap_sync_tool` turns it into a
   `ToolResult` with the task prefix on the text. A plain `ToolResult` from a tool would lose the
-  prefix. `-> str` tools declare fastmcp's `{"result": ...}` output schema, and a client may
+  prefix. The fields get `task_id` too: Claude Code shows `structuredContent` INSTEAD of the text
+  blocks when present (it already did for `{"result": ...}`, so this is no new loss of text),
+  and the prefix would be gone otherwise. A reply is twice its output on the wire. `-> str` tools declare fastmcp's `{"result": ...}` output schema, and a client may
   validate against it: a tool with its own fields MUST pass `output_schema=` too.
+- **A long Shell blocks others:** the task manager runs 3 Shell calls at once and a fourth waits
+  60 s. One-hour calls through the gateway (#67) make that reachable.
 - **Task status writes go through `TaskManager._transition`.** It checks `is_cancelled` and
   writes the status in one step under `_lock`, the same lock `cancel_task` and
   `_cleanup_old` use. Never write `task.status` directly in the wrapper.
