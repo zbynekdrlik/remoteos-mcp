@@ -10,6 +10,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | Topic | Where to look |
 |---|---|
 | Install / upgrade / redeploy on any machine | `/remoteos-install` skill |
+| Per-box updater (rings, schedulers per OS), Windows rollback trap, ProgramData wheelhouse | `.claude/rules/installers.md` (auto-loads on its `paths:`) + README "The box updates itself" |
 | Installer code (generated parts, Linux venv layout + swap/rollback, the sudoers drop-in, the key never in a unit/argv/output, key precedence, macOS preflight/rollback, the fake-box tests) and `SelfUpgrade` | `.claude/rules/installers.md` (auto-loads on its `paths:`) |
 | `.mcp.json` setup, restore after clone, add new machine | `/remoteos-mcp-config` skill |
 | Linux X11 desktop provider (session detection, xdotool/scrot backends, deploy/test) | `.claude/skills/linux-desktop` |

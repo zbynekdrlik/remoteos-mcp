@@ -199,6 +199,9 @@ paths:
   - `probe_version` reads the public `/health` without a key. A version that is not plain
     `[0-9A-Za-z.+_-]` is dropped: it would reach the status file and Discord.
   - `check` tests never reach GitHub: `Check.releases_url` defaults to a closed port.
+- **No admin (`no_admin.py`, #57):** like drift, once per episode, by name, retried while
+  undelivered, kept when this run read no value. An older server's `/health` has no `admin` key:
+  `probe_version` gives `None`, never `False`, so the fleet is not "reported" before its upgrade.
 - **Restart notice (`live_sessions.py` + `session_scan.py`, #66):**
   - `session_scan.py` is like `fileops.py`: stdlib only, py3.8+, no package imports, its SOURCE runs
     through `Target.run_helper` as the project's account. Only that account can read

@@ -46,7 +46,7 @@ function Test-RemoteOSRefName([string]$Ref) {
         $Ref -notmatch '\.\.')
 }
 
-function Get-RemoteOSRelaunchCommand([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef) {
+function Get-RemoteOSRelaunchCommand([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef, [string]$Ring) {
     # The elevated window's script: the file again, or the resolved commit's installer for a piped run, with
     # $SourceRef in REMOTEOS_MCP_REF (no environment crosses). A CHILD powershell, then Enter to close.
     if ($ScriptPath) {
@@ -58,6 +58,7 @@ function Get-RemoteOSRelaunchCommand([string]$ScriptPath, [string]$InstallerUrl,
     return @(
         ("`$env:REMOTEOS_MCP_REF = '" + $SourceRef.Replace("'", "''") + "'"),
         '$env:REMOTEOS_MCP_RELAUNCHED = "1"',
+        ("`$env:REMOTEOS_MCP_RING = '" + $Ring + "'"),  # checked by the flow; empty = keep the box's
         $run,
         '$code = $LASTEXITCODE',
         'Write-Host ""',
@@ -66,9 +67,9 @@ function Get-RemoteOSRelaunchCommand([string]$ScriptPath, [string]$InstallerUrl,
     ) -join "`n"
 }
 
-function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef) {
+function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef, [string]$Ring) {
     # Elevated window (UAC) -> its exit code, or $null when cancelled/refused; -EncodedCommand: no quoting.
-    $command = Get-RemoteOSRelaunchCommand -ScriptPath $ScriptPath -InstallerUrl $InstallerUrl -SourceRef $SourceRef
+    $command = Get-RemoteOSRelaunchCommand -ScriptPath $ScriptPath -InstallerUrl $InstallerUrl -SourceRef $SourceRef -Ring $Ring
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($command))
     # -PassThru + WaitForExit, not -Wait (5.1's -Wait also waits for the server the run leaves)
     try {

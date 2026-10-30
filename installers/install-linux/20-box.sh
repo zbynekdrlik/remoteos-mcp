@@ -140,5 +140,7 @@ check_inputs() {
     fi
     [[ "$POLICY" =~ ^(restart|enable-only)$ ]] \
         || fail "REMOTEOS_MCP_POLICY must be restart or enable-only — nothing was changed on this box"
+    [[ "$GIVEN_RING" =~ ^(stable|canary)?$ ]] \
+        || fail "REMOTEOS_MCP_RING must be stable or canary — nothing was changed on this box"
 }
 

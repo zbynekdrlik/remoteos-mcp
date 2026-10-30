@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import json
+import os
 import platform
 import secrets
 import socket
@@ -40,9 +41,22 @@ def _runner_os() -> str:
     return platform.freedesktop_os_release()["PRETTY_NAME"]
 
 
+def _runner_admin() -> bool:
+    """Read the way ``identity`` must: root, or sudo that asks no password."""
+    if os.geteuid() == 0:
+        return True
+    return subprocess.run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL, capture_output=True).returncode == 0
+
+
 def _health() -> dict:
-    """``/health`` on this runner: status + version (the installers' contract) and #59's os + hostname."""
-    return {"status": "ok", "version": __version__, "os": _runner_os(), "hostname": socket.gethostname()}
+    """``/health`` on this runner: status + version (the installers' contract), #59's os + hostname, #57's admin."""
+    return {
+        "status": "ok",
+        "version": __version__,
+        "os": _runner_os(),
+        "hostname": socket.gethostname(),
+        "admin": _runner_admin(),
+    }
 
 
 def _empty_config(tmp_path) -> Path:

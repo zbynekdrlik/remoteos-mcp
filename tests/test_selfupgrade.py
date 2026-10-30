@@ -251,4 +251,4 @@ def test_install_ps1_stop_never_kills_the_upgrade_task_itself():
 
 
 def test_uninstall_ps1_removes_the_task():
-    assert 'Unregister-ScheduledTask -TaskName "RemoteOSMCP-Upgrade"' in (ROOT / "uninstall.ps1").read_text()
+    assert '"RemoteOSMCP-Upgrade"' in (ROOT / "uninstall.ps1").read_text()

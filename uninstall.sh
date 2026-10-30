@@ -5,6 +5,7 @@ set -euo pipefail
 
 PLIST_LABEL="com.remoteos-mcp"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
+UPDATER_PLIST="$HOME/Library/LaunchAgents/com.remoteos-mcp.updater.plist"
 CONFIG_DIR="$HOME/.remoteos-mcp"
 SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"
 
@@ -15,6 +16,8 @@ echo ""
 # --- Stop LaunchAgent ---
 echo "  [1/5] Stopping LaunchAgent..."
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
+launchctl unload "$UPDATER_PLIST" 2>/dev/null || true
+rm -f "$UPDATER_PLIST"
 echo "        LaunchAgent unloaded"
 
 # --- Kill running processes ---

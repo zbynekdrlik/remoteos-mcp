@@ -8,6 +8,8 @@
 #   GH_TOKEN               sent as the download's Authorization header on curl's stdin (a fork)
 #   REMOTEOS_MCP_MODE      desktop | headless (default: the existing unit's, else the session check)
 #   REMOTEOS_MCP_USER      the service account (default: the existing unit's User=, else SUDO_USER, else root)
+#   REMOTEOS_MCP_RING      stable | canary, the release ring of the box's updater (default: what the
+#                          box has, else stable)
 #   REMOTEOS_MCP_POLICY    restart (default: restart and prove the new install) | enable-only
 #                          (install + enable for the next boot, never start: camera-box's cams)
 # A secret never goes on a command line, sudo's included: `sudo REMOTEOS_MCP_AUTH_KEY=… bash`

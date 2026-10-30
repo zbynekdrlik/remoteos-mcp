@@ -36,6 +36,9 @@ paths:
     `.version` (install-linux.sh, install.sh, install.ps1). Only ADD keys there.
   - `/health` needs no key (`auth._PUBLIC_PATHS`): every key added there is public on the port.
     Hostname and OS are accepted (#59); nothing secret or per-user goes there.
+  - `admin` (#57, `identity.has_admin`): Windows the elevated token, else root or `sudo -n true`.
+    Cached 60 s, never read once at import: the installers write the sudoers drop-in AFTER their
+    proof and restart nothing. Cached because `/health` is public; a thread, because sudo blocks.
   - Windows OS name = `Windows <release> (build <version>)`, but a Server edition
     (`platform.win32_edition()` contains "Server") is `Windows Server (build <version>)`: CPython
     3.12's `release()` says "2022Server" for every Server build from 20348 up (windows-latest,
