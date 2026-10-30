@@ -134,6 +134,10 @@ class LinuxBox:
         _shim(self.shims / name, body, Path(self.cfg()["records"]))
 
     @property
+    def sudoers_file(self) -> Path:
+        return self.root / "sudoers.d" / "90-remoteos-mcp"
+
+    @property
     def lock_file(self) -> Path:
         return self.root / "install.lock"
 
@@ -357,6 +361,7 @@ def _redirected(script: Path, tmp_path: Path, config_dir: Path, unit_path: Path,
         'VENV_STORE="/opt/remoteos-mcp-venvs"': f'VENV_STORE="{venv_store}"',
         'LOCK_FILE="/run/lock/remoteos-mcp-install.lock"': f'LOCK_FILE="{tmp_path / "install.lock"}"',
         'LOCK_FILE="/run/remoteos-mcp-install.lock"': f'LOCK_FILE="{tmp_path / "install.lock"}"',
+        'SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"': f'SUDOERS_FILE="{tmp_path / "sudoers.d" / "90-remoteos-mcp"}"',
         "HEALTH_TRIES=12": "HEALTH_TRIES=3",
         "HEALTH_SLEEP=5": "HEALTH_SLEEP=0",
         'CGROUP_FILE="/proc/self/cgroup"': f'CGROUP_FILE="{tmp_path / "cgroup"}"',
@@ -426,6 +431,7 @@ exec "{real_py}" "$@"
     ls_remote = f'printf "%s\\trefs/heads/main\\n" "{FAKE_SHA}"'
     _shim(shims / "git", f'if [[ "$1" == "ls-remote" ]]; then {ls_remote}; fi\nexit 0\n', records)
     _shim(shims / "apt-get", "exit 0\n", records)
+    _shim(shims / "visudo", "exit 0\n", records)
     _shim(shims / "findmnt", 'echo "rw,relatime"\n', records)
     _shim(shims / "hostname", 'case "$1" in -I) echo "192.168.1.100" ;; *) echo "testhost" ;; esac\n', records)
     for name in ("ufw", "firewall-cmd"):

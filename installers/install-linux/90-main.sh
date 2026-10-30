@@ -15,6 +15,7 @@ main() {
     CONFIG_FILE="$CONFIG_DIR/config.json"
     ENV_FILE="$CONFIG_DIR/remoteos-mcp.env"
     PENDING_FILE="$CONFIG_DIR/.switch-pending"
+    SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"
     umask 022
     shopt -s globasciiranges  # [A-Za-z0-9] = ASCII in any locale (bash >= 4.3)
 
@@ -35,7 +36,7 @@ main() {
     WORK_DIR="" TMP_LINK="" WAS_PENDING="" SESSION_TYPE="" SESSION_DISPLAY="" UNIT_DISPLAY=""
     ARMED="" INTERRUPTED="" CHANGED="" SWAPPED="" NEW_BUILD="" STORE_CREATED=""
     PREV_LINK_TARGET="" ADOPTED_DIR="" HAD_UNIT="" HEALTH_FAILURE="" MODIFIED="" PREV_PROVEN=""
-    GI_LINKED="" WRITE_TMP=""
+    GI_LINKED="" WRITE_TMP="" SUDOERS_TMP=""
 
     printf '\n  RemoteOS MCP Installer (Linux)\n  Remote desktop control for Claude Code\n\n'
 
@@ -47,7 +48,7 @@ main() {
         fail "Root filesystem is read-only — nothing was changed on this box. A camera-box cam is read-only by design: update it through camera-box's provisioning (its rw window). Elsewhere: mount -o remount,rw / for this run, then rerun."
     fi
     check_inputs
-    ! grep -q "/${SERVICE_NAME}\.service" "$CGROUP_FILE" 2>/dev/null || fail "this run is inside ${SERVICE_NAME}.service (the agent's own Shell): its restart (or a rollback's stop) would kill the run — nothing was changed on this box. Run it over SSH."
+    ! grep -q "/${SERVICE_NAME}\.service" "$CGROUP_FILE" 2>/dev/null || fail "this run is inside ${SERVICE_NAME}.service (the agent's own Shell): its restart (or a rollback's stop) would kill the run — nothing was changed on this box. Use the SelfUpgrade tool, or SSH."
     # One run at a time: a second run's prune could delete the build this one just swapped in.
     command -v flock &>/dev/null || fail "flock (util-linux) is missing — nothing was changed on this box"
     [[ "$POLICY" != restart ]] || command -v ss &>/dev/null \
@@ -70,6 +71,7 @@ main() {
     exec 3>&1 4>&2
     trap on_exit EXIT
     trap on_signal HUP INT TERM
+    prepare_sudoers
 
     echo "  [3/6] Downloading the source..."
     fetch_source
@@ -129,6 +131,7 @@ main() {
         fi
         prune_builds
     fi
+    install_sudoers
 
     echo "  [6/6] Configuring firewall and getting network info..."
     configure_firewall
