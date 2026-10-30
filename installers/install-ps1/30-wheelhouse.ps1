@@ -231,8 +231,9 @@ function Stop-RemoteOSServer([int]$Port) {
     $ErrorActionPreference = 'Continue'
     try {
         schtasks /End /TN "RemoteOSMCP" 2>&1 | Out-Null
+        # never this process: a SelfUpgrade run is in the RemoteOSMCP-Upgrade task
         Get-Process -ErrorAction SilentlyContinue | Where-Object {
-            $_.MainWindowTitle -match "RemoteOS|WinRemote"
+            $_.Id -ne $PID -and $_.MainWindowTitle -match "RemoteOS|WinRemote"
         } | Stop-Process -Force -ErrorAction SilentlyContinue
         # python, the CMD restart loop (it re-launches python) and the wscript launcher; never this process or
         # its parent (the installer's source and the SSH cmd.exe wrapper hold these patterns)

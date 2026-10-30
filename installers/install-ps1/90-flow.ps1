@@ -309,6 +309,13 @@ try {
     # The run is elevated here (the gate above), so this is a real failure, not a missing right
     Exit-RemoteOSAfterFailure -Reason "Could not register the scheduled task 'RemoteOSMCP': $_" -Output '' @rollback
 }
+try {
+    if (Register-RemoteOSUpgradeTask -ConfigDir $ConfigDir -User $desktopUser) {
+        Write-Host "        Task 'RemoteOSMCP-Upgrade' registered for $desktopUser (the SelfUpgrade tool starts it)" -ForegroundColor Green
+    }
+} catch {
+    Exit-RemoteOSAfterFailure -Reason "Could not register the scheduled task 'RemoteOSMCP-Upgrade': $_" -Output '' @rollback
+}
 
 # --- Firewall + Network profile ---
 Write-Host "  [7/7] Configuring firewall..." -ForegroundColor White

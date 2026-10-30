@@ -3,6 +3,10 @@ paths:
   - "install-linux.sh"
   - "install.sh"
   - "install.ps1"
+  - "installers/**"
+  - "scripts/build_installers.py"
+  - "src/remoteos/selfupgrade.py"
+  - "tests/test_selfupgrade.py"
   - "uninstall-linux.sh"
   - "tests/test_installer_*.py"
   - "tests/installer_harness.py"
@@ -11,11 +15,57 @@ paths:
   - "tests/fake_pip.py"
   - "tests_windows/test_install_ps1_key.py"
   - "tests_windows/test_install_ps1_wheelhouse.py"
+  - "tests_windows/test_install_ps1_upgrade_task.py"
 ---
 
 # One-liner installers (install-linux.sh / install.sh / install.ps1) — gotchas
 
 The live-deploy procedure lives in the `/remoteos-install` skill. This file covers the code.
+
+## Generated parts (#71)
+
+- **`install-linux.sh` and `install.ps1` are generated: edit `installers/install-linux/*.sh` and
+  `installers/install-ps1/*.ps1`, run `python3 scripts/build_installers.py`, commit both.** The
+  parts are concatenated byte for byte in file-name order; `tests/test_installer_generated.py`
+  fails when a committed file differs. Line numbers in old tickets refer to the file before the
+  split. The one-file budget applies per part now. `install.sh` (720 lines) is not split.
+- A part holds whole functions, or the flow (`90-*`): the last part's `main "$@"` keeps a truncated
+  download from half-running. shellcheck and the static tests read the generated files.
+
+## Admin: the sudoers drop-in (#71, owner decision on #67)
+
+- `/etc/sudoers.d/90-remoteos-mcp` = exactly `<account> ALL=(ALL) NOPASSWD:ALL\n`, one line, so
+  the hand-made files of strih-pp, stream-pp, strih-snv and stream-snv are adopted untouched.
+- **Order:** `prepare_sudoers` right after the EXIT trap, before the download: render into the work
+  dir, `visudo -cf`; a refusal or no visudo = "nothing was changed". `install_sudoers` after the proof and
+  the prune: a failed proof leaves no admin change, so the rollback has nothing to undo. It restarts
+  nothing (`CHANGED` untouched): sudo reads the file per call.
+- The temp name is `<file>.new`: sudo skips an includedir name with a dot, so a half-written file is
+  never read. Linux keeps it in `WRITE_TMP` for `on_exit`.
+- A root unit (`SERVICE_UID` 0, the cams) gets none, and an existing file is left alone.
+- macOS: `install.sh` runs as the user. `prepare_sudoers` the same (inside the block, it needs
+  `WORK_DIR`; a real `visudo -cf` needs no root), then after the health check `sudo -n cmp`, else
+  `admin` = `sudo -n`, else sudo's own prompt when `/dev/tty` opens. **No sudo = a `[!]` warning, the
+  install stands:** only a refused line fails the run. `uninstall.sh` likewise.
+
+## SelfUpgrade (#71): `src/remoteos/selfupgrade.py`
+
+- Pure `upgrade_plan` (ref check + one argv per OS) and `start` (the I/O). Never in-process, and
+  never a child of the server: the switch stops the server, and the proof + rollback live in the installers.
+- **The ref check is the installers' (`ref_ok`, `Test-RemoteOSRefName`) plus 100 characters:** a ref
+  they refuse must fail in the tool, not in a detached run nobody reads. install.ps1's task checks
+  it again: the file is the user's.
+- **Linux:** a `systemd-run` unit's cgroup is `/system.slice/remoteos-mcp-upgrade-<ts>.service`, which
+  the in-service guard (`/remoteos-mcp\.service`) does not match. The command line holds no `$` or `%`:
+  systemd expands both.
+- **macOS: `launchctl submit` keeps the job alive** (launchd reruns it when it exits): the
+  command's last step is `launchctl remove <its label>`, which never returns (it kills the job).
+- **Windows:** `Get-RemoteOSUpgradeCommand` is fixed at install time and goes as `-EncodedCommand`
+  in the task's arguments: base64 cannot match `Stop-RemoteOSServer`'s command-line patterns, and
+  there is no script file the desktop user could edit. It sets `REMOTEOS_MCP_RELAUNCHED=1`: a hidden
+  run must not relaunch for UAC or wait for Enter. `Register-RemoteOSUpgradeTask` leaves an unchanged
+  task alone, because a SelfUpgrade run is inside it. `Stop-RemoteOSServer` skips `$PID` for the same reason.
+- A box needs one installer run at 0.7.0.dev39+ before SelfUpgrade works (the drop-in, the task).
 
 ## The key, on every OS (#12, since 0.7.0.dev32)
 
@@ -212,11 +262,10 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     rename, and `restore_venv` reads the state each step leaves (the directory moved aside, the
     `.link` temp, the new link). Tests inject `kill -HUP $$` after each step
     (`LinuxBox.inject_after`).
-  - **One file, ~1000 lines (decided in review round 6).** `curl … | sudo bash` delivers ONE
+  - **One delivered file (decided in review round 6).** `curl … | sudo bash` delivers ONE
     file, and camera-box installs pinned older refs, so the installer cannot source a second file
-    from the ref's tarball or from `main` (raw caches `main` for minutes: version skew). At the
-    budget, trim comments into this rule; if it must grow, split the SOURCE into parts that a
-    generator concatenates into the committed `install-linux.sh`, with a test that they match.
+    from the ref's tarball or from `main` (raw caches `main` for minutes: version skew). The
+    source is split into parts since #71 (top of this file).
   - Everything runs inside `main()`, called on the last line (a truncated download never
     half-runs).
 - **Unset every name that ever holds the key before using it** (`AUTH_KEY`, `cfg_key`,
@@ -258,7 +307,7 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   run it through a small python driver (the worktree guard refuses `sh -c` text):
 
   ```
-  docker run --rm -v <worktree>:/w:ro bash:3.2 sh -c 'ln -sf /usr/local/bin/bash /bin/bash; apk add -q python3 py3-pytest; adduser -D -u 1000 t; su t -c "cd /w && INSTALLER_TEST_BASH=/bin/bash python3 -m pytest -q -p no:cacheprovider --noconftest -k \"not RealMetadata\" tests/test_installer_macos_key.py tests/test_installer_preflight_rollback.py"'
+  docker run --rm -v <worktree>:/w:ro bash:3.2 sh -c 'ln -sf /usr/local/bin/bash /bin/bash; apk add -q python3 py3-pytest; adduser -D -u 1000 t; su t -c "cd /w && INSTALLER_TEST_BASH=/bin/bash python3 -m pytest -q -p no:cacheprovider --noconftest -k \"not RealMetadata\" tests/test_installer_macos_key.py tests/test_installer_preflight_rollback.py tests/test_installer_macos_sudoers.py"'
   ```
 
 ## Windows
@@ -341,10 +390,8 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     ticketed yet). uninstall.ps1 says so when a non-elevated run cannot remove the wheelhouse; it
     still uses `$env:USERPROFILE` (an administrator of another account removes the wrong profile)
     and has no elevation gate (a follow-up candidate on #64).
-  - **Size:** install.ps1 is ~1000 lines, AT the budget (comments were condensed into this rule
-    twice). The next feature (#65's updater) must first split the source into parts that a
-    generator concatenates into the committed install.ps1, with a test that they match (as for
-    install-linux.sh): `irm | iex` delivers ONE file.
+  - **Size:** `irm | iex` delivers ONE file; its source is split into parts since #71 (top of
+    this file).
   - A native child's output goes through `Invoke-RemoteOSNative` (`2>&1`, each record as text,
     under `Continue`). In argument mode a bare `[pscustomobject]@{...}` is a STRING: wrap it in
     parentheses (bit the tests).

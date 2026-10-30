@@ -533,3 +533,14 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
   `.deb` installs will hit it; structured Shell output (exit code / stderr as fields) to remove
   the plain-text round-trip limits; the gateway's 600 s upstream read timeout cuts Shell calls
   over ~540 s (SSE keep-alive pings).
+
+## #71 — installers keep admin + SelfUpgrade (67 a+c), 0.7.0.dev39
+
+- **Design:** main's Approach 1 on #71. The installers own a sudoers drop-in; `remoteos.selfupgrade`
+  starts the installer detached (systemd-run, the `RemoteOSMCP-Upgrade` task, `launchctl submit`).
+- **Decisions in the lane:** both generated installers (`installers/`, `scripts/build_installers.py`);
+  the drop-in goes in AFTER the proof, visudo BEFORE the download; macOS with no sudo warns (only a
+  refused line fails); the macOS job removes its own label because launchd keeps a submitted job alive.
+- **Tests:** `tests/test_installer_generated.py`, `tests/test_installer_linux_sudoers.py`,
+  `tests/test_installer_macos_sudoers.py` (bash 3.2 too), `tests/test_selfupgrade.py`,
+  `tests_windows/test_install_ps1_upgrade_task.py`.

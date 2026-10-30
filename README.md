@@ -98,8 +98,24 @@ reaches sudo's environment only; nothing is exported to curl or the rest of the 
   logged, rotate it with `REMOTEOS_MCP_AUTH_KEY` and update the clients. The same holds for a
   migrated mac (the old plist's ProgramArguments) and Windows box (the old `.bat`'s
   `--auth-key`).
-- **Run the installers over SSH**, never through the agent's own Shell: on Linux that run is
-  inside `remoteos-mcp.service`, whose restart would kill it, so it is refused.
+- **Admin on Linux and macOS (#71).** The installer keeps `/etc/sudoers.d/90-remoteos-mcp`
+  (`<account> ALL=(ALL) NOPASSWD:ALL`, checked by `visudo -cf`, 0440 root) for the service's
+  account, so `sudo` in Shell needs no password and a reprovision keeps that. A root unit gets
+  none; a refused line stops the run before any change; an identical file is left as it is; the
+  uninstallers remove it. macOS's installer runs as the user: with no way to sudo (no terminal
+  for the password) it warns and the install stands.
+- **Upgrade a box through MCP: the `SelfUpgrade` tool (Tier 3, #71)**, `remoteos-call <box>
+  SelfUpgrade --json '{"ref": "<sha, tag or branch>"}'` (no ref = main). It starts the OS's
+  installer detached from the server and returns at once with the log path; the installer proves
+  the new version or rolls back. Poll `/health` for the version. Linux: `sudo -n systemd-run`
+  (a root unit: no sudo), log in `/var/log/remoteos-mcp-upgrade-<ts>.log`, read with sudo.
+  Windows: the elevated task `RemoteOSMCP-Upgrade`, log `upgrade.log` next to `config.json`, ref in
+  `upgrade-ref.txt` beside it. macOS: `launchctl submit`, log in `~/.remoteos-mcp/`.
+  A box installed before 0.7.0.dev39 has neither the drop-in nor the task: its first upgrade to
+  this version needs the installer once more. A camera-box cam (read-only root) stays on camera-box's provisioning.
+- **SSH is break-glass:** for a first install, or a box whose server is down. Never run an
+  installer through the agent's own Shell: on Linux that run is inside `remoteos-mcp.service`,
+  whose restart would kill it, so it is refused.
 
 ## Connect from Claude Code
 

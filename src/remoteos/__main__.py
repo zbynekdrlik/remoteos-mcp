@@ -41,7 +41,7 @@ except ImportError:
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 
-from remoteos import __version__, desktop, network, ocr, process_mgr, recording
+from remoteos import __version__, desktop, network, ocr, process_mgr, recording, selfupgrade
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
@@ -1083,6 +1083,27 @@ def ServiceList(filter: str = "") -> str:
         filter: Filter by service name or display name (substring match).
     """
     return get_services().service_list(filter)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="SelfUpgrade",
+        destructiveHint=True,
+        openWorldHint=True,
+    )
+)
+@reports_errors
+def SelfUpgrade(ref: str = "") -> str:
+    """Upgrade this box to a git ref: start the OS's installer detached from this server, return at once.
+
+    The installer proves the new version and rolls back on a failure. It restarts this server,
+    so the reply is only "started": poll /health for the new version, and read the log the reply
+    names (root-owned on Linux, reachable with sudo).
+
+    Args:
+        ref: A commit sha, tag or branch of remoteos-mcp (default main).
+    """
+    return selfupgrade.start(selfupgrade.upgrade_plan(ref))
 
 
 @mcp.tool(
