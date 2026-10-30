@@ -102,7 +102,8 @@ try {{
     $other = Register-RemoteOSUpgradeTask -ConfigDir {_q(tmp_path)} -User $env:USERNAME
     $task = Get-ScheduledTask -TaskName 'RemoteOSMCP-Upgrade'
     @{{ first = $first; second = $second; other = $other; level = [string]$task.Principal.RunLevel
-        triggers = @($task.Triggers).Count; run = [string]@($task.Actions)[0].Execute }} | ConvertTo-Json -Compress
+        triggers = @($task.Triggers | Where-Object {{ $_ }}).Count
+        run = [string]@($task.Actions)[0].Execute }} | ConvertTo-Json -Compress
 }} finally {{
     Unregister-ScheduledTask -TaskName 'RemoteOSMCP-Upgrade' -Confirm:$false -ErrorAction SilentlyContinue
 }}
