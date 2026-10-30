@@ -9,6 +9,9 @@ real server) and of the Windows runner in ``tests_windows/test_identity_windows.
 
 from __future__ import annotations
 
+import subprocess
+from types import SimpleNamespace
+
 import pytest
 from fake_console_child import assert_runs_powershell, returned
 
@@ -166,3 +169,61 @@ def test_shell_runs_exactly_the_shell_identity_announces(monkeypatch, popen, win
     else:
         assert argv == [*announced.split(" "), "whoami"]
         assert announced == {"macos": "/bin/zsh -c", "linux": "/bin/bash -c"}[os_kind]
+
+
+class TestAdmin:
+    """``has_admin`` (#57): the ``admin`` of ``/health``, cached so a public endpoint is no process factory."""
+
+    @pytest.fixture(autouse=True)
+    def clean(self, monkeypatch):
+        monkeypatch.setattr(identity, "_admin_cache", None)
+        monkeypatch.setattr(identity, "is_windows", lambda: False)
+        monkeypatch.setattr(identity.os, "geteuid", lambda: 1000, raising=False)
+        self.sudo_calls = 0
+
+    def sudo(self, monkeypatch, returncode=0, error=None):
+        def run(argv, timeout):
+            assert argv == ["sudo", "-n", "true"]
+            self.sudo_calls += 1
+            if error is not None:
+                raise error
+            return SimpleNamespace(returncode=returncode)
+
+        monkeypatch.setattr(identity, "run_child", run)
+
+    def test_root_needs_no_sudo(self, monkeypatch):
+        self.sudo(monkeypatch)
+        monkeypatch.setattr(identity.os, "geteuid", lambda: 0, raising=False)
+        assert identity.has_admin() is True
+        assert self.sudo_calls == 0
+
+    @pytest.mark.parametrize(("code", "expected"), [(0, True), (1, False)])
+    def test_a_user_has_admin_when_sudo_asks_no_password(self, monkeypatch, code, expected):
+        self.sudo(monkeypatch, returncode=code)
+        assert identity.has_admin() is expected
+
+    @pytest.mark.parametrize("error", [FileNotFoundError("sudo"), subprocess.TimeoutExpired("sudo", 5)])
+    def test_no_sudo_or_a_hanging_one_reads_false_and_never_raises(self, monkeypatch, error):
+        self.sudo(monkeypatch, error=error)
+        assert identity.has_admin() is False
+
+    @pytest.mark.parametrize(("token", "expected"), [(1, True), (0, False)])
+    def test_windows_reads_the_elevated_token(self, monkeypatch, token, expected):
+        monkeypatch.setattr(identity, "is_windows", lambda: True)
+        shell32 = SimpleNamespace(IsUserAnAdmin=lambda: token)
+        monkeypatch.setattr(identity.ctypes, "windll", SimpleNamespace(shell32=shell32), raising=False)
+        assert identity.has_admin() is expected
+
+    def test_a_minute_of_health_calls_costs_one_sudo_and_then_it_is_read_again(self, monkeypatch):
+        """Read again, never once: the sudoers drop-in lands AFTER the installer's proof, no restart."""
+        clock = [100.0]
+        monkeypatch.setattr(identity.time, "monotonic", lambda: clock[0])
+        self.sudo(monkeypatch, returncode=1)
+        assert identity.has_admin() is False
+        clock[0] += identity.ADMIN_CACHE_S - 1
+        self.sudo_calls, _ = 0, identity.has_admin()
+        assert self.sudo_calls == 0
+        self.sudo(monkeypatch, returncode=0)
+        clock[0] += 2
+        assert identity.has_admin() is True
+        assert self.sudo_calls == 1

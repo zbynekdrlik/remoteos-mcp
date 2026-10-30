@@ -20,8 +20,8 @@ A 401 is auto-repaired ONLY for a machine with an explicit ``repair`` recipe in 
 the key in it is probed, and only a key the machine ACCEPTS is stored. Nothing is ever guessed.
 No key is ever logged, printed, written to the status file or put in a notification.
 
-Each machine's public ``/health`` gives its version; ``drift.py`` reports a box older than the
-stable release (#63).
+Each machine's public ``/health`` gives its version and whether it has admin rights: ``drift.py``
+reports a box older than the stable release (#63), ``no_admin.py`` a box without admin (#57).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from remoteos.gateway import drift as drift_report
-from remoteos.gateway import fileops
+from remoteos.gateway import fileops, no_admin
 from remoteos.gateway.drift import DriftPolicy
 from remoteos.gateway.keystore import edit_keystore, load_keystore
 from remoteos.gateway.messages import split_to_fit
@@ -79,6 +79,7 @@ class Observation:
     detail: str
     repaired: bool = False
     version: str | None = None  # from /health, this run; None = no answer
+    admin: bool | None = None  # from /health, this run; None = no answer, or an older server
 
 
 # -- probing + repair -------------------------------------------------------------------------
@@ -86,8 +87,8 @@ class Observation:
 
 async def _probe_all(
     entries: dict[str, MachineEntry], gateway_url: str
-) -> tuple[dict[str, ProbeResult], dict[str, str], ProbeResult]:
-    """Per machine the ``initialize`` result, the versions that answered, and the gateway's health."""
+) -> tuple[dict[str, ProbeResult], dict[str, ProbeResult], ProbeResult]:
+    """Per machine the ``initialize`` result, the ``/health`` reads that answered, and the gateway's health."""
     async with new_client() as client:
         names = sorted(entries)
         results = await gather_probes(
@@ -97,8 +98,8 @@ async def _probe_all(
                 probe_healthz(client, gateway_url),
             ]
         )
-    versions = {n: r.detail for n, r in zip(names, results[len(names) : -1]) if r.ok}
-    return dict(zip(names, results)), versions, results[-1]
+    healths = {n: r for n, r in zip(names, results[len(names) : -1]) if r.ok}
+    return dict(zip(names, results)), healths, results[-1]
 
 
 def read_key_by_recipe(entry: MachineEntry, *, ssh_bin: str) -> tuple[str | None, str]:
@@ -151,9 +152,9 @@ async def _repair(name: str, entry: MachineEntry, *, keystore_path: Path, ssh_bi
 async def observe(
     entries: dict[str, MachineEntry], *, gateway_url: str, keystore_path: Path, ssh_bin: str
 ) -> tuple[dict[str, Observation], Observation]:
-    results, versions, health = await _probe_all(entries, gateway_url)
+    results, healths, health = await _probe_all(entries, gateway_url)
     observations = {name: Observation(r.state, r.detail) for name, r in results.items()}
-    for name in sorted(set(results) - set(versions)):
+    for name in sorted(set(results) - set(healths)):
         logger.info("check: %s reported no version this run", name)
 
     async def guarded(name: str) -> Observation:
@@ -169,8 +170,8 @@ async def observe(
     repairable = [n for n, r in results.items() if r.state == STATE_UNAUTHORIZED and entries[n].repair is not None]
     for name, observation in zip(repairable, await asyncio.gather(*(guarded(n) for n in repairable))):
         observations[name] = observation
-    for name, observation in observations.items():
-        observation.version = versions.get(name)
+    for name, read in healths.items():
+        observations[name].version, observations[name].admin = read.detail, read.admin
     return observations, Observation(health.state, health.detail)
 
 
@@ -383,8 +384,11 @@ def _check_loaded(
                 status["recovery_pending"] = True
     versions = {name: observation.version for name, observation in observations.items()}
     drift_sent = drift_report.update(status["machines"], old_machines, versions, drift, stamp, moment, host, notifier)
-    if drift_sent is not None:
-        sent = drift_sent if sent is None else (sent and drift_sent)
+    admins = {name: observation.admin for name, observation in observations.items()}
+    admin_sent = no_admin.update(status["machines"], old_machines, admins, stamp, host, notifier)
+    for extra in (drift_sent, admin_sent):
+        if extra is not None:
+            sent = extra if sent is None else (sent and extra)
     try:
         _write_status(status_path, status)
     except OSError as exc:

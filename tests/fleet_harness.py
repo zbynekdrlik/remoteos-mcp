@@ -63,12 +63,14 @@ class FakeFleetMachine:
         status: int | None = None,
         healthz: bool = False,
         version: str | None = None,
+        admin: bool | None = None,
         releases: list | None = None,
     ):
         self.accept_keys = list(accept_keys)
         self.status = status  # a fixed answer (e.g. 500) instead of the key check
         self.healthz = healthz
         self.version = version  # answers GET /health like a machine; None = 404
+        self.admin = admin  # /health's admin key (#57); None = a server that has none
         self.releases = releases  # answers GET /releases like GitHub; None = 404
         self.seen_health_authorization: list[str | None] = []
         self.seen_authorization: list[str | None] = []
@@ -111,7 +113,8 @@ class FakeFleetMachine:
                     self._answer(200, {"status": "ok", "version": "0.0.0-test"})
                 elif self.path == "/health" and machine.version is not None:
                     machine.seen_health_authorization.append(self.headers.get("authorization"))
-                    self._answer(200, {"status": "ok", "version": machine.version})
+                    extra = {} if machine.admin is None else {"admin": machine.admin}
+                    self._answer(200, {"status": "ok", "version": machine.version, **extra})
                 elif self.path == "/releases" and machine.releases is not None:
                     self._answer(200, machine.releases)
                 else:
