@@ -7,6 +7,8 @@ $Port = 8092
 # The source (#12): REMOTEOS_MCP_REF (default main) resolves to ONE commit below: constraints, archive, relaunch
 $Ref = $env:REMOTEOS_MCP_REF
 if (-not $Ref) { $Ref = "main" }
+# The release ring of the box's updater (#65): stable | canary, default what the box has, else stable
+$Ring = $env:REMOTEOS_MCP_RING
 # Set by the elevated relaunch (#57): a relaunch still not elevated fails, and does not pause at exit
 $relaunched = [bool]$env:REMOTEOS_MCP_RELAUNCHED
 Remove-Item Env:REMOTEOS_MCP_RELAUNCHED -ErrorAction SilentlyContinue
@@ -230,7 +232,7 @@ function Test-RemoteOSRefName([string]$Ref) {
         $Ref -notmatch '\.\.')
 }
 
-function Get-RemoteOSRelaunchCommand([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef) {
+function Get-RemoteOSRelaunchCommand([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef, [string]$Ring) {
     # The elevated window's script: the file again, or the resolved commit's installer for a piped run, with
     # $SourceRef in REMOTEOS_MCP_REF (no environment crosses). A CHILD powershell, then Enter to close.
     if ($ScriptPath) {
@@ -242,6 +244,7 @@ function Get-RemoteOSRelaunchCommand([string]$ScriptPath, [string]$InstallerUrl,
     return @(
         ("`$env:REMOTEOS_MCP_REF = '" + $SourceRef.Replace("'", "''") + "'"),
         '$env:REMOTEOS_MCP_RELAUNCHED = "1"',
+        ("`$env:REMOTEOS_MCP_RING = '" + $Ring + "'"),  # checked by the flow; empty = keep the box's
         $run,
         '$code = $LASTEXITCODE',
         'Write-Host ""',
@@ -250,9 +253,9 @@ function Get-RemoteOSRelaunchCommand([string]$ScriptPath, [string]$InstallerUrl,
     ) -join "`n"
 }
 
-function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef) {
+function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$InstallerUrl, [string]$SourceRef, [string]$Ring) {
     # Elevated window (UAC) -> its exit code, or $null when cancelled/refused; -EncodedCommand: no quoting.
-    $command = Get-RemoteOSRelaunchCommand -ScriptPath $ScriptPath -InstallerUrl $InstallerUrl -SourceRef $SourceRef
+    $command = Get-RemoteOSRelaunchCommand -ScriptPath $ScriptPath -InstallerUrl $InstallerUrl -SourceRef $SourceRef -Ring $Ring
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($command))
     # -PassThru + WaitForExit, not -Wait (5.1's -Wait also waits for the server the run leaves)
     try {
@@ -272,7 +275,7 @@ function Invoke-RemoteOSElevatedRelaunch([string]$ScriptPath, [string]$Installer
 }
 
 # --- Download first, install offline, roll back (#64) ------------------------------------------
-# Every wheel goes into <config>\wheelhouse\<sha> while the old server runs, the install is offline, and a
+# Every wheel goes into %ProgramData%\remoteos-mcp\wheelhouse\<sha> while the old server runs, the install is offline, and a
 # failure after the stop reinstalls the previous commit's wheelhouse (.claude/rules/installers.md).
 
 function Test-RemoteOSPythonVersion([string]$VersionText) {
@@ -445,13 +448,26 @@ function New-RemoteOSWheelhouse([string]$Python, [string]$Root, [string]$Sha, [s
     }
 }
 
-function Get-RemoteOSRollbackPoint([string]$ConfigDir, [string]$Python) {
+function New-RemoteOSRollbackWheelhouse([string]$ConfigDir, [string]$Root, [string]$Python) {
+    # The first run with the ProgramData root (#65): the installed commit's wheelhouse is in the profile, a
+    # folder the desktop user controls, so it is built again rather than moved -> New-RemoteOSWheelhouse's
+    # result, or $null when the box has no such commit
+    $refFile = Join-Path $ConfigDir 'installed-ref.txt'
+    if (-not (Test-Path -LiteralPath $refFile)) { return $null }
+    $ref = ([string](Get-Content -LiteralPath $refFile -Raw)).Trim()
+    if ($ref -cnotmatch '^[0-9a-f]{40}\z') { return $null }
+    return New-RemoteOSWheelhouse -Python $Python -Root $Root -Sha $ref `
+        -SourceUrl "https://github.com/zbynekdrlik/remoteos-mcp/archive/$ref.zip" `
+        -ConstraintsUrl "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$ref/constraints.txt"
+}
+
+function Get-RemoteOSRollbackPoint([string]$ConfigDir, [string]$Root, [string]$Python) {
     # installed-ref.txt's commit (proven) + its kept wheelhouse, installable here -> @{Ref; Path; Version} or $null
     $refFile = Join-Path $ConfigDir 'installed-ref.txt'
     if (-not (Test-Path -LiteralPath $refFile)) { return $null }
     $ref = ([string](Get-Content -LiteralPath $refFile -Raw)).Trim()
     if ($ref -cnotmatch '^[0-9a-f]{40}\z') { return $null }
-    $path = Join-Path (Join-Path $ConfigDir 'wheelhouse') $ref
+    $path = Join-Path $Root $ref
     $version = Get-RemoteOSWheelhouseVersion $path
     if (-not $version) { return $null }
     $check = Test-RemoteOSWheelhouseInstallable $Python $path $version
@@ -592,7 +608,7 @@ function Invoke-RemoteOSRollback($Point, [string]$Python, [scriptblock]$StopServ
 }
 
 function Exit-RemoteOSAfterFailure([string]$Reason, [string]$Output, $Point, [string]$Python, [scriptblock]$StopServer,
-                                   [scriptblock]$StartServer, [scriptblock]$ProveHealth, [bool]$Pause) {
+                                   [scriptblock]$StartServer, [scriptblock]$ProveHealth, [scriptblock]$Disarm, [bool]$Pause) {
     # Every failure after the stop: roll back when a wheelhouse is kept, then exit 1. None kept (the first
     # install with wheelhouses): the box stays as the failure left it, as before #64, and it says so.
     Write-Host "  [X] $Reason" -ForegroundColor Red
@@ -610,7 +626,89 @@ function Exit-RemoteOSAfterFailure([string]$Reason, [string]$Output, $Point, [st
         Write-Host "  [X] $Reason -- and the rollback to $($Point.Version) failed too: $($back.Error)" -ForegroundColor Red
         if ($back.Output) { Write-Host $back.Output }
     }
+    if ($Disarm) { & $Disarm }  # only now: a kill during this rollback leaves it to the trap
     Exit-RemoteOSInstaller -Code 1 -Pause $Pause
+}
+
+# --- The rollback trap (#65): a run killed after the stop must not leave a box with no server ------
+# PowerShell has no EXIT trap for a killed process, and an SSH drop kills every child of the session. So
+# a scheduled task watches the installer from outside: a marker next to config.json says "armed", and when
+# the installer's process is gone while the marker is still there, the task rolls back, offline.
+
+function Get-RemoteOSDataDir {
+    # Machine-wide, not in a profile: the wheelhouses and the trap's script feed elevated runs
+    return Join-Path $env:ProgramData 'remoteos-mcp'
+}
+
+function Get-RemoteOSQuoted([string]$Text) {
+    return "'" + $Text.Replace("'", "''") + "'"
+}
+
+function Get-RemoteOSRollbackTrapScript($Point, [string]$Python, [string]$ConfigDir, [int]$Port, [int]$InstallerPid) {
+    # The whole watcher as one script; the installer's own functions go in as text, so the rollback is the
+    # same code as the installer's (and the script needs no download). Pure.
+    $functions = foreach ($name in @('Invoke-RemoteOSNative', 'Invoke-RemoteOSPip', 'Get-RemoteOSInstalledVersion',
+                                     'Install-RemoteOSWheelhouse', 'Stop-RemoteOSServer', 'Start-RemoteOSServer',
+                                     'Get-RemoteOSListenerSessionId', 'Test-RemoteOSServerHealth', 'Invoke-RemoteOSRollback')) {
+        "function $name {`n$((Get-Command $name).Definition)`n}"
+    }
+    return (@(
+        '$ErrorActionPreference = "Stop"',
+        "`$ConfigDir = $(Get-RemoteOSQuoted $ConfigDir)",
+        "`$Port = $Port",
+        "`$installerPid = $InstallerPid",
+        "`$python = $(Get-RemoteOSQuoted $Python)",
+        "`$point = [pscustomobject]@{ Ref = $(Get-RemoteOSQuoted $Point.Ref); Path = $(Get-RemoteOSQuoted $Point.Path); Version = $(Get-RemoteOSQuoted $Point.Version) }",
+        '$marker = Join-Path $ConfigDir "rollback-pending.txt"',
+        '$log = Join-Path $ConfigDir "rollback.log"'
+    ) + @($functions) + @(
+        'while ((Test-Path -LiteralPath $marker) -and (Get-Process -Id $installerPid -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 2 }',
+        'if (-not (Test-Path -LiteralPath $marker)) { exit 0 }',
+        'Add-Content -LiteralPath $log -Value "$(Get-Date -Format s) The installer (pid $installerPid) died armed: rolling back to v$($point.Version)"',
+        'try {',
+        '    $back = Invoke-RemoteOSRollback -Point $point -Python $python -StopServer { Stop-RemoteOSServer -Port $Port } `',
+        '        -StartServer { Start-RemoteOSServer -ConfigDir $ConfigDir -StartDirect $false } `',
+        '        -ProveHealth { param($Version) Test-RemoteOSServerHealth -Port $Port -Version $Version -StartDirect $false }',
+        '} catch {',
+        '    $back = [pscustomobject]@{ Ok = $false; Error = "$_"; Output = "" }',  # nobody reads a hidden task's stderr
+        '}',
+        'Remove-Item -LiteralPath $marker -Force',
+        'if ($back.Ok) { Add-Content -LiteralPath $log -Value "$(Get-Date -Format s) Rolled back to v$($point.Version): its health check passed"; exit 0 }',
+        'Add-Content -LiteralPath $log -Value "$(Get-Date -Format s) The rollback failed: $($back.Error)`n$($back.Output)"',
+        'exit 1'
+    )) -join "`n"
+}
+
+function Start-RemoteOSRollbackTrap($Point, [string]$Python, [string]$ConfigDir, [string]$DataDir, [int]$Port, [string]$User) {
+    # Before the stop. The script is in the Administrators-only data folder, so the desktop user's task
+    # cannot be fed another one; the marker and the log are the task's own. -> $null or why there is no trap
+    $marker = Join-Path $ConfigDir 'rollback-pending.txt'
+    $prevEAP = $ErrorActionPreference
+    try {
+        $script = Join-Path $DataDir 'rollback-trap.ps1'
+        Get-RemoteOSRollbackTrapScript -Point $Point -Python $Python -ConfigDir $ConfigDir -Port $Port -InstallerPid $PID |
+            Set-Content -LiteralPath $script -Encoding UTF8
+        Set-Content -LiteralPath $marker -Value $PID
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
+        $principal = New-ScheduledTaskPrincipal -UserId (Get-RemoteOSAccountName $User) -RunLevel Highest -LogonType Interactive
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+        $task = @{ TaskName = "RemoteOSMCP-Rollback"; Action = $action; Principal = $principal; Settings = $settings; Force = $true }
+        Register-ScheduledTask @task | Out-Null
+        $ErrorActionPreference = 'Continue'
+        $out = schtasks /Run /TN "RemoteOSMCP-Rollback" 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) { throw "schtasks /Run failed: $($out.Trim())" }
+        return $null
+    } catch {
+        Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+        return "$_"
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
+function Stop-RemoteOSRollbackTrap([string]$ConfigDir) {
+    # The watcher sees the marker gone and exits
+    Remove-Item -LiteralPath (Join-Path $ConfigDir 'rollback-pending.txt') -Force -ErrorAction SilentlyContinue
 }
 
 # --- SelfUpgrade (#71): the elevated task the server starts, for the desktop user -----------------
@@ -662,6 +760,49 @@ function Register-RemoteOSUpgradeTask([string]$ConfigDir, [string]$User) {
     return $true
 }
 
+# --- The per-box updater (#65): the ring and the daily task --------------------------------------
+
+function Test-RemoteOSRing([string]$Ring) {
+    # Empty = keep what the box has
+    return [bool](-not $Ring -or $Ring -ceq 'stable' -or $Ring -ceq 'canary')
+}
+
+function Set-RemoteOSRing([string]$ConfigDir, [string]$Ring) {
+    # updater.json: an explicit ring wins, else what the box has stays, else stable. No BOM: Python reads it.
+    $path = Join-Path $ConfigDir 'updater.json'
+    if (-not $Ring -and (Test-Path -LiteralPath $path)) { return }
+    if (-not $Ring) { $Ring = 'stable' }
+    [System.IO.File]::WriteAllText($path, "{`"ring`": `"$Ring`"}`n", (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Get-RemoteOSUpdaterAction([string]$PythonPath, [string]$ConfigDir) {
+    # pythonw.exe: a console window every day would steal the focus on a live desktop -> @{Execute; Argument}
+    $execute = $PythonPath
+    $windowless = Join-Path (Split-Path -Parent $PythonPath) 'pythonw.exe'
+    if (Test-Path -LiteralPath $windowless) { $execute = $windowless }
+    return [pscustomobject]@{ Execute = $execute
+                              Argument = "-m remoteos.updater --log-file `"$(Join-Path $ConfigDir 'updater.log')`"" }
+}
+
+function Register-RemoteOSUpdaterTask([string]$ConfigDir, [string]$PythonPath, [string]$User) {
+    # Daily at a random time; StartWhenAvailable catches up a date missed while the box was off. The desktop
+    # user, highest, like RemoteOSMCP-Upgrade (the updater starts that task). An unchanged task stays as it
+    # is, with its time. -> $true when it was (re)registered
+    $wanted = Get-RemoteOSUpdaterAction -PythonPath $PythonPath -ConfigDir $ConfigDir
+    $existing = Get-ScheduledTask -TaskName "RemoteOSMCP-Updater" -ErrorAction SilentlyContinue
+    if ($existing) {
+        $current = @($existing.Actions)[0]
+        if ($current.Execute -ceq $wanted.Execute -and $current.Arguments -ceq $wanted.Argument) { return $false }
+    }
+    $action = New-ScheduledTaskAction -Execute $wanted.Execute -Argument $wanted.Argument
+    $trigger = New-ScheduledTaskTrigger -Daily -At '03:00' -RandomDelay (New-TimeSpan -Hours 6)
+    $principal = New-ScheduledTaskPrincipal -UserId (Get-RemoteOSAccountName $User) -RunLevel Highest -LogonType Interactive
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+    $task = @{ TaskName = "RemoteOSMCP-Updater"; Action = $action; Trigger = $trigger; Principal = $principal; Settings = $settings; Force = $true }
+    Register-ScheduledTask @task | Out-Null
+    return $true
+}
+
 Write-Host ""
 Write-Host "  RemoteOS MCP Installer" -ForegroundColor Cyan
 Write-Host "  Remote Windows control for Claude Code" -ForegroundColor Gray
@@ -690,6 +831,11 @@ if ($elevation -eq 'fail') {
     Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
+if (-not (Test-RemoteOSRing $Ring)) {
+    Write-Host "  [X] REMOTEOS_MCP_RING must be stable or canary -- nothing was changed on this box" -ForegroundColor Red
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+}
+
 # --- The source commit (#12): resolved once, before anything changes ---
 if (-not (Test-RemoteOSRefName $Ref)) {
     Write-Host "  [X] REMOTEOS_MCP_REF is not a plain branch, tag or commit name -- nothing was changed on this box" -ForegroundColor Red
@@ -714,7 +860,7 @@ $InstallerUrl = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$sou
 
 if ($elevation -eq 'relaunch') {
     Write-Host "  Not elevated: the install continues in an elevated PowerShell window - confirm the UAC prompt." -ForegroundColor Yellow
-    $elevatedExit = Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl -SourceRef $sourceSha
+    $elevatedExit = Invoke-RemoteOSElevatedRelaunch -ScriptPath $PSCommandPath -InstallerUrl $InstallerUrl -SourceRef $sourceSha -Ring $Ring
     if ($null -eq $elevatedExit) { Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit }
     Write-Host "  The elevated install finished with exit code $elevatedExit." -ForegroundColor Gray
     Exit-RemoteOSInstaller -Code $elevatedExit -Pause $pauseOnExit
@@ -844,8 +990,12 @@ $AuthKey = $resolvedKey.Key
 
 # --- The download (#64): every wheel the install needs, while the old server still runs ---
 Write-Host "  [2/7] Downloading remoteos-mcp and its dependencies (the running server is not touched)..." -ForegroundColor White
-$wheelhouseRoot = Join-Path $ConfigDir 'wheelhouse'
-$protectError = Protect-RemoteOSWheelhouseRoot -Root $wheelhouseRoot -User $desktopUser
+$dataDir = Get-RemoteOSDataDir
+$wheelhouseRoot = Join-Path $dataDir 'wheelhouse'
+$legacyWheelhouseRoot = Join-Path $ConfigDir 'wheelhouse'
+# The folder first: any account may create a folder in ProgramData, and its owner could swap what is inside
+$protectError = Protect-RemoteOSWheelhouseRoot -Root $dataDir -User $desktopUser
+if (-not $protectError) { $protectError = Protect-RemoteOSWheelhouseRoot -Root $wheelhouseRoot -User $desktopUser }
 if ($protectError) {
     Write-Host "  [X] $protectError -- the running server and package were not touched" -ForegroundColor Red
     Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
@@ -864,7 +1014,16 @@ if ($preflight.Reused) {
     Write-Host "        v$($preflight.Version): downloaded into $($preflight.Path)" -ForegroundColor Green
 }
 # What a failure after the stop goes back to, read before anything changes
-$rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Python $python
+$rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python
+if (-not $rollbackPoint -and (Test-Path -LiteralPath $legacyWheelhouseRoot)) {
+    Write-Host "        Fetching the running version again for the rollback (the wheelhouses moved to $dataDir)..." -ForegroundColor Gray
+    $rebuilt = New-RemoteOSRollbackWheelhouse -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python
+    if ($rebuilt -and $rebuilt.Ok) {
+        $rollbackPoint = Get-RemoteOSRollbackPoint -ConfigDir $ConfigDir -Root $wheelhouseRoot -Python $python
+    } elseif ($rebuilt) {
+        Write-Host "        [!] It could not be fetched ($($rebuilt.Error))" -ForegroundColor Yellow
+    }
+}
 if ($rollbackPoint) {
     Write-Host "        Rollback: v$($rollbackPoint.Version) (commit $($rollbackPoint.Ref)), from its kept wheelhouse" -ForegroundColor Gray
 } else {
@@ -879,6 +1038,7 @@ $rollback = @{
     StopServer  = { Stop-RemoteOSServer -Port $Port }
     StartServer = { Start-RemoteOSServer -ConfigDir $ConfigDir -StartDirect $startDirect }
     ProveHealth = { param($Version) Test-RemoteOSServerHealth -Port $Port -Version $Version -StartDirect $startDirect }
+    Disarm      = { Stop-RemoteOSRollbackTrap -ConfigDir $ConfigDir }
 }
 
 # --- Install remoteos-mcp, offline from the wheelhouse ---
@@ -900,6 +1060,15 @@ if (Test-Path $oldConfigDir) {
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
 $ErrorActionPreference = $prevEAP
+# A run killed from here on (an SSH drop, a crash) is rolled back from outside (#65)
+if ($rollbackPoint) {
+    $trapPython = (Get-Command $python -ErrorAction SilentlyContinue).Source
+    if (-not $trapPython) { $trapPython = $python }
+    $trapError = Start-RemoteOSRollbackTrap -Point $rollbackPoint -Python $trapPython -ConfigDir $ConfigDir -DataDir $dataDir -Port $Port -User $desktopUser
+    if ($trapError) {
+        Write-Host "        [!] No rollback trap ($trapError): a run killed from here on leaves no server" -ForegroundColor Yellow
+    }
+}
 Write-Host "        Stopping running server..." -ForegroundColor Gray
 Stop-RemoteOSServer -Port $Port
 $install = Install-RemoteOSWheelhouse -Python $python -Wheelhouse $preflight.Path -Version $preflight.Version
@@ -980,6 +1149,14 @@ try {
 } catch {
     Exit-RemoteOSAfterFailure -Reason "Could not register the scheduled task 'RemoteOSMCP-Upgrade': $_" -Output '' @rollback
 }
+try {
+    if (Register-RemoteOSUpdaterTask -ConfigDir $ConfigDir -PythonPath $pythonPath -User $desktopUser) {
+        Write-Host "        Task 'RemoteOSMCP-Updater' registered for $desktopUser (daily)" -ForegroundColor Green
+    }
+    Set-RemoteOSRing -ConfigDir $ConfigDir -Ring $Ring
+} catch {
+    Exit-RemoteOSAfterFailure -Reason "Could not set up the updater: $_" -Output '' @rollback
+}
 
 # --- Firewall + Network profile ---
 Write-Host "  [7/7] Configuring firewall..." -ForegroundColor White
@@ -1036,12 +1213,16 @@ if (-not $health.Ok) {
     Exit-RemoteOSAfterFailure -Reason $health.Message -Output '' @rollback
 }
 Write-Host "        Health check OK: $($health.Message)" -ForegroundColor Green
+Stop-RemoteOSRollbackTrap -ConfigDir $ConfigDir
 
 # The commit this box runs, once proven (#12; the updater and the next rollback read it). No secret.
 $sourceSha | Set-Content "$ConfigDir\installed-ref.txt"
 # Only now: the current and the previous wheelhouse stay, older ones go (#64)
 $pruned = @(Remove-RemoteOSStaleWheelhouses -Root $wheelhouseRoot -Keep @($sourceSha, $rollbackPoint.Ref))
 if ($pruned.Count -gt 0) { Write-Host "        Removed old wheelhouses: $($pruned -join ', ')" -ForegroundColor Gray }
+if (Test-Path -LiteralPath $legacyWheelhouseRoot) {
+    try { Remove-RemoteOSTree $legacyWheelhouseRoot } catch { Write-Host "        [!] Could not remove ${legacyWheelhouseRoot}: $_" -ForegroundColor Yellow }
+}
 
 # --- Summary ---
 Write-Host ""

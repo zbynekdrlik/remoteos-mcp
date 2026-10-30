@@ -134,6 +134,14 @@ class LinuxBox:
         _shim(self.shims / name, body, Path(self.cfg()["records"]))
 
     @property
+    def updater_service(self) -> Path:
+        return self.root / "remoteos-mcp-updater.service"
+
+    @property
+    def updater_timer(self) -> Path:
+        return self.root / "remoteos-mcp-updater.timer"
+
+    @property
     def sudoers_file(self) -> Path:
         return self.root / "sudoers.d" / "90-remoteos-mcp"
 
@@ -362,6 +370,10 @@ def _redirected(script: Path, tmp_path: Path, config_dir: Path, unit_path: Path,
         'LOCK_FILE="/run/lock/remoteos-mcp-install.lock"': f'LOCK_FILE="{tmp_path / "install.lock"}"',
         'LOCK_FILE="/run/remoteos-mcp-install.lock"': f'LOCK_FILE="{tmp_path / "install.lock"}"',
         'SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"': f'SUDOERS_FILE="{tmp_path / "sudoers.d" / "90-remoteos-mcp"}"',
+        'UPDATER_SERVICE="/etc/systemd/system/remoteos-mcp-updater.service"':
+            f'UPDATER_SERVICE="{tmp_path / "remoteos-mcp-updater.service"}"',
+        'UPDATER_TIMER="/etc/systemd/system/remoteos-mcp-updater.timer"':
+            f'UPDATER_TIMER="{tmp_path / "remoteos-mcp-updater.timer"}"',
         'UPGRADE_LOGS="/var/log/remoteos-mcp-upgrade"': f'UPGRADE_LOGS="{tmp_path / "remoteos-mcp-upgrade"}"',
         "HEALTH_TRIES=12": "HEALTH_TRIES=3",
         "HEALTH_SLEEP=5": "HEALTH_SLEEP=0",

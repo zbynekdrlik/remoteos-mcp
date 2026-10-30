@@ -13,6 +13,8 @@ CONFIG_DIR="/etc/remoteos-mcp"
 VENV_LINK="/opt/remoteos-mcp-venv"
 VENV_STORE="/opt/remoteos-mcp-venvs"
 SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"
+UPDATER_SERVICE="/etc/systemd/system/remoteos-mcp-updater.service"
+UPDATER_TIMER="/etc/systemd/system/remoteos-mcp-updater.timer"
 UPGRADE_LOGS="/var/log/remoteos-mcp-upgrade"
 
 echo ""
@@ -49,8 +51,14 @@ else
     echo "        Service not enabled, skipping"
 fi
 
-# --- [3/7] Remove service file ---
+# --- [3/7] Remove service file (and the updater's timer: it must not run into a removed venv) ---
 echo "  [3/7] Removing service file..."
+if [[ -f "$UPDATER_TIMER" ]]; then
+    systemctl disable --now "${UPDATER_TIMER##*/}" 2>/dev/null || true
+    rm -f "$UPDATER_TIMER" "$UPDATER_SERVICE"
+    systemctl daemon-reload
+    echo "        Removed the updater's timer"
+fi
 if [[ -f "$SERVICE_FILE" ]]; then
     rm -f "$SERVICE_FILE"
     systemctl daemon-reload

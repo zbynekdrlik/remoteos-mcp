@@ -1,0 +1,201 @@
+"""The Windows side of #65 in real PowerShell: the ring, the updater's task action, the rollback trap
+(run for real against a venv, with a dead installer pid), and the uninstaller's desktop profile.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from test_install_ps1_key import _ps, _q
+from test_install_ps1_wheelhouse import SHA_OLD, _installed, _run, _wheelhouse, shared_venv, venv  # noqa: F401
+
+ROOT = Path(__file__).parent.parent
+
+
+@pytest.mark.parametrize(("ring", "ok"), [("", True), ("stable", True), ("canary", True), ("Canary", False),
+                                          ("nightly", False), ("canary\n", False)])
+def test_the_ring_check(tmp_path, ring, ok):
+    assert _ps(tmp_path, f"@{{ ok = (Test-RemoteOSRing {_q(ring)}) }} | ConvertTo-Json -Compress")["ok"] is ok
+
+
+def _set_ring(tmp_path: Path, config: Path, ring: str) -> str:
+    _ps(tmp_path, f"Set-RemoteOSRing -ConfigDir {_q(config)} -Ring {_q(ring)}; @{{ a = 1 }} | ConvertTo-Json -Compress")
+    return (config / "updater.json").read_bytes().decode("ascii")
+
+
+def test_the_ring_file_is_what_the_updater_reads_and_a_rerun_keeps_it(tmp_path):
+    config = tmp_path / "config"
+    config.mkdir()
+    assert json.loads(_set_ring(tmp_path, config, "")) == {"ring": "stable"}  # no BOM: ascii, and json.loads took it
+    assert json.loads(_set_ring(tmp_path, config, "canary")) == {"ring": "canary"}
+    assert json.loads(_set_ring(tmp_path, config, "")) == {"ring": "canary"}
+
+
+def _action(tmp_path: Path, python: Path, config: Path) -> dict:
+    body = f"Get-RemoteOSUpdaterAction -PythonPath {_q(python)} -ConfigDir {_q(config)} | ConvertTo-Json -Compress"
+    return _ps(tmp_path, body)
+
+
+def test_the_task_runs_pythonw_so_no_window_opens_on_a_live_desktop(tmp_path):
+    folder = tmp_path / "py dir"
+    folder.mkdir()
+    python, pythonw = folder / "python.exe", folder / "pythonw.exe"
+    python.touch()
+    assert _action(tmp_path, python, tmp_path)["Execute"] == str(python)  # none there: python.exe still works
+    pythonw.touch()
+    action = _action(tmp_path, python, tmp_path / "it's config")
+    assert action["Execute"] == str(pythonw)
+    assert action["Argument"].startswith('-m remoteos.updater --log-file "')
+    assert "updater.log" in action["Argument"]
+
+
+class TestRollbackTrap:
+    def _point(self, tmp_path: Path, version: str) -> str:
+        folder = tmp_path / "wheelhouse" / SHA_OLD
+        _wheelhouse(folder, version)
+        return f"[pscustomobject]@{{ Ref = '{SHA_OLD}'; Path = {_q(folder)}; Version = '{version}' }}"
+
+    def _script(self, tmp_path: Path, config: Path, python: Path, installer_pid: int) -> Path:
+        point = self._point(tmp_path, "1.0")
+        body = f"""
+function Stop-RemoteOSServer {{ }}
+$text = Get-RemoteOSRollbackTrapScript -Point ({point}) -Python {_q(python)} -ConfigDir {_q(config)} -Port 8092 -InstallerPid {installer_pid}
+@{{ text = $text }} | ConvertTo-Json -Compress
+"""
+        text = _ps(tmp_path, body)["text"]
+        # The box's real server functions stop tasks and read ports: faked at their names, after the installer's.
+        fake = """
+function Stop-RemoteOSServer { param($Port) }
+function Start-RemoteOSServer { param($ConfigDir, $StartDirect); return $null }
+function Test-RemoteOSServerHealth { param($Port, $Version, $StartDirect)
+    return [pscustomobject]@{ Ok = ($Version -eq '1.0'); Message = 'fake' } }
+"""
+        script = tmp_path / "trap.ps1"
+        marker_line = text.index("while ((Test-Path")
+        script.write_text(text[:marker_line] + fake + text[marker_line:], encoding="utf-8-sig")
+        return script
+
+    def _run(self, script: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                               "-File", str(script)], capture_output=True, text=True, timeout=240,
+                              stdin=subprocess.DEVNULL)
+
+    def _dead_pid(self) -> int:
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        return child.pid
+
+    def test_a_dead_installer_while_armed_rolls_back_offline(self, tmp_path, venv):  # noqa: F811
+        config = tmp_path / "config"
+        config.mkdir()
+        (config / "rollback-pending.txt").write_text("1")
+        result = self._run(self._script(tmp_path, config, venv, self._dead_pid()))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _installed(tmp_path, venv) == "1.0"
+        assert not (config / "rollback-pending.txt").exists()
+        assert "Rolled back to v1.0" in (config / "rollback.log").read_text(encoding="utf-8", errors="replace")
+
+    def test_a_disarmed_run_does_nothing(self, tmp_path, venv):  # noqa: F811
+        config = tmp_path / "config"
+        config.mkdir()
+        result = self._run(self._script(tmp_path, config, venv, os.getpid()))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _installed(tmp_path, venv) is None
+        assert not (config / "rollback.log").exists()
+
+    def test_a_failed_rollback_is_logged_and_fails_the_task(self, tmp_path):
+        config = tmp_path / "config"
+        config.mkdir()
+        (config / "rollback-pending.txt").write_text("1")
+        script = self._script(tmp_path, config, tmp_path / "no-python", self._dead_pid())
+        assert self._run(script).returncode == 1
+        assert "The rollback failed" in (config / "rollback.log").read_text(encoding="utf-8", errors="replace")
+
+    def test_a_quote_in_a_path_cannot_break_the_script(self, tmp_path, venv):  # noqa: F811
+        config = tmp_path / "it's config"
+        config.mkdir()
+        result = self._run(self._script(tmp_path, config, venv, os.getpid()))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_failure_exit_disarms_only_after_the_rollback(tmp_path):
+    body = """
+function Exit-RemoteOSInstaller { param($Code, $Pause); exit $Code }
+function Invoke-RemoteOSRollback { param($Point, $Python, $StopServer, $StartServer, $ProveHealth)
+    Write-Host "ROLLBACK"; return [pscustomobject]@{ Ok = $true } }
+Exit-RemoteOSAfterFailure -Reason 'x' -Output '' -Point ([pscustomobject]@{ Ref = 'r'; Version = '1' }) -Python 'p' `
+    -StopServer { } -StartServer { } -ProveHealth { } -Disarm { Write-Host "DISARM" } -Pause $false
+"""
+    result = _run(tmp_path, body)
+    assert result.returncode == 1
+    assert result.stdout.index("ROLLBACK") < result.stdout.index("DISARM")
+
+
+def _uninstall_functions(tmp_path: Path) -> Path:
+    text = (ROOT / "uninstall.ps1").read_text(encoding="utf-8")
+    functions = re.findall(r"^function .*?^}\n", text, re.S | re.M)
+    path = tmp_path / "uninstall-functions.ps1"
+    path.write_text("".join(functions), encoding="utf-8-sig")
+    return path
+
+
+@pytest.mark.parametrize(("sessions", "expected"), [
+    ([" USERNAME  SESSIONNAME  ID  STATE", ">foh  console  1  Active"], "foh"),
+    ([" admin  rdp-tcp#1  2  Active", " foh  console  1  Active"], "foh"),
+    (["No User exists for *"], "runner"),
+])
+def test_the_uninstaller_finds_the_console_user_s_profile_not_its_own(tmp_path, sessions, expected):
+    root = tmp_path / "Users"
+    for name in ("foh", "runner"):
+        (root / name).mkdir(parents=True)
+    script = tmp_path / "t.ps1"
+    listed = ", ".join(_q(line) for line in sessions)
+    script.write_text(f"""
+. {_q(_uninstall_functions(tmp_path))}
+Write-Host (Get-RemoteOSDesktopProfile -Sessions @({listed}) -UserName 'runner' -FallbackProfile 'FALLBACK' -ProfilesRoot {_q(root)})
+""", encoding="utf-8-sig")
+    result = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    assert result.stdout.strip() == str(root / expected), result.stderr
+
+
+def test_a_console_user_with_no_profile_falls_back(tmp_path):
+    script = tmp_path / "t.ps1"
+    script.write_text(f"""
+. {_q(_uninstall_functions(tmp_path))}
+Write-Host (Get-RemoteOSDesktopProfile -Sessions @('x console 1 Active') -UserName 'r' -FallbackProfile 'FALLBACK' -ProfilesRoot {_q(tmp_path)})
+""", encoding="utf-8-sig")
+    result = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                            capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    assert result.stdout.strip() == "FALLBACK", result.stderr
+
+
+def test_registering_is_idempotent_and_leaves_a_daily_catching_up_highest_task(tmp_path):
+    python = Path(sys.executable)
+    body = f"""
+try {{
+    $first = Register-RemoteOSUpdaterTask -ConfigDir {_q(tmp_path)} -PythonPath {_q(python)} -User $env:USERNAME
+    $second = Register-RemoteOSUpdaterTask -ConfigDir {_q(tmp_path)} -PythonPath {_q(python)} -User $env:USERNAME
+    $task = Get-ScheduledTask -TaskName 'RemoteOSMCP-Updater'
+    @{{ first = $first; second = $second; level = [string]$task.Principal.RunLevel
+        catchUp = [bool]$task.Settings.StartWhenAvailable
+        triggers = @($task.Triggers | Where-Object {{ $_ }}).Count }} | ConvertTo-Json -Compress
+}} finally {{
+    Unregister-ScheduledTask -TaskName 'RemoteOSMCP-Updater' -Confirm:$false -ErrorAction SilentlyContinue
+}}
+"""
+    got = _ps(tmp_path, body)
+    assert (got["first"], got["second"], got["level"]) == (True, False, "Highest")
+    assert got["catchUp"] is True and got["triggers"] == 1
+
+
+def test_the_ring_crosses_the_elevation_inside_the_command(tmp_path):
+    body = """@{ c = (Get-RemoteOSRelaunchCommand -ScriptPath 'x.ps1' -InstallerUrl 'u' -SourceRef 'r' -Ring 'canary') } |
+    ConvertTo-Json -Compress"""
+    assert "$env:REMOTEOS_MCP_RING = 'canary'" in _ps(tmp_path, body)["c"]

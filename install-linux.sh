@@ -8,6 +8,8 @@
 #   GH_TOKEN               sent as the download's Authorization header on curl's stdin (a fork)
 #   REMOTEOS_MCP_MODE      desktop | headless (default: the existing unit's, else the session check)
 #   REMOTEOS_MCP_USER      the service account (default: the existing unit's User=, else SUDO_USER, else root)
+#   REMOTEOS_MCP_RING      stable | canary, the release ring of the box's updater (default: what the
+#                          box has, else stable)
 #   REMOTEOS_MCP_POLICY    restart (default: restart and prove the new install) | enable-only
 #                          (install + enable for the next boot, never start: camera-box's cams)
 # A secret never goes on a command line, sudo's included: `sudo REMOTEOS_MCP_AUTH_KEY=… bash`
@@ -283,6 +285,8 @@ check_inputs() {
     fi
     [[ "$POLICY" =~ ^(restart|enable-only)$ ]] \
         || fail "REMOTEOS_MCP_POLICY must be restart or enable-only — nothing was changed on this box"
+    [[ "$GIVEN_RING" =~ ^(stable|canary)?$ ]] \
+        || fail "REMOTEOS_MCP_RING must be stable or canary — nothing was changed on this box"
 }
 
 # --- the source and the venv -------------------------------------------------------------------
@@ -848,6 +852,42 @@ install_sudoers() {
     say "sudoers drop-in: written (${SUDOERS_FILE}, passwordless sudo for ${SERVICE_USER})"
 }
 
+# --- the per-box updater (#65) -------------------------------------------------------------------
+
+updater_service_text() {
+    printf '%s\n' "[Unit]" "Description=RemoteOS MCP updater: move this box to its ring's release" \
+        "After=network-online.target" "Wants=network-online.target" "" \
+        "[Service]" "Type=oneshot" "ExecStart=${VENV_LINK}/bin/python -m remoteos.updater"
+}
+
+# Daily at a random time, plus after a boot; Persistent= runs a date missed while the box was off.
+updater_timer_text() {
+    printf '%s\n' "[Unit]" "Description=RemoteOS MCP updater: daily, and after a boot" "" \
+        "[Timer]" "OnCalendar=daily" "RandomizedDelaySec=6h" "Persistent=true" "OnBootSec=10min" "" \
+        "[Install]" "WantedBy=timers.target"
+}
+
+# After the proof: nothing here touches the running server, and a failure leaves the proven install
+# up. Not on enable-only boxes: camera-box's provisioning updates its cams (#60), and a timer here
+# would fight its pin. The ring stays what the box has, unless REMOTEOS_MCP_RING names one.
+install_updater() {
+    if [[ "$POLICY" != restart ]]; then
+        say "Updater: not installed (enable-only: camera-box's provisioning updates this box)"
+        return 0
+    fi
+    if [[ -n "$GIVEN_RING" || ! -f "$UPDATER_CONFIG" ]]; then
+        write_if_changed "$UPDATER_CONFIG" 644 "Updater ring" <<<"{\"ring\": \"${GIVEN_RING:-stable}\"}"
+    fi
+    CHANGED=""
+    # here-strings, not pipes: a pipe would run the writer in a subshell and lose CHANGED and WRITE_TMP
+    write_if_changed "$UPDATER_SERVICE" 644 "Updater unit" <<<"$(updater_service_text)"
+    write_if_changed "$UPDATER_TIMER" 644 "Updater timer" <<<"$(updater_timer_text)"
+    if [[ -n "$CHANGED" ]]; then systemctl daemon-reload; fi
+    systemctl enable --now "${UPDATER_TIMER##*/}" >/dev/null 2>&1 \
+        || fail "the updater's timer could not be enabled: the install itself is proven and stays"
+    say "Updater: daily, ring $(sed -n 's/.*"ring": "\([a-z]*\)".*/\1/p' "$UPDATER_CONFIG")"
+}
+
 # --- after the proof ---------------------------------------------------------------------------
 
 # Our pre-#12 installer's SYSTEM-python copy goes: the service runs the proven venv now.
@@ -907,6 +947,9 @@ main() {
     ENV_FILE="$CONFIG_DIR/remoteos-mcp.env"
     PENDING_FILE="$CONFIG_DIR/.switch-pending"
     SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"
+    UPDATER_CONFIG="$CONFIG_DIR/updater.json"
+    UPDATER_SERVICE="/etc/systemd/system/remoteos-mcp-updater.service"
+    UPDATER_TIMER="/etc/systemd/system/remoteos-mcp-updater.timer"
     umask 022
     shopt -s globasciiranges  # [A-Za-z0-9] = ASCII in any locale (bash >= 4.3)
 
@@ -922,6 +965,7 @@ main() {
     GIVEN_MODE="${REMOTEOS_MCP_MODE:-}"
     GIVEN_USER="${REMOTEOS_MCP_USER:-}"
     POLICY="${REMOTEOS_MCP_POLICY:-restart}"
+    GIVEN_RING="${REMOTEOS_MCP_RING:-}"
 
     # The run's state (each set below where it happens).
     WORK_DIR="" TMP_LINK="" WAS_PENDING="" SESSION_TYPE="" SESSION_DISPLAY="" UNIT_DISPLAY=""
@@ -1023,6 +1067,7 @@ main() {
         prune_builds
     fi
     install_sudoers
+    install_updater
 
     echo "  [6/6] Configuring firewall and getting network info..."
     configure_firewall

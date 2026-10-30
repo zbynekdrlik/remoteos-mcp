@@ -7,6 +7,8 @@ $Port = 8092
 # The source (#12): REMOTEOS_MCP_REF (default main) resolves to ONE commit below: constraints, archive, relaunch
 $Ref = $env:REMOTEOS_MCP_REF
 if (-not $Ref) { $Ref = "main" }
+# The release ring of the box's updater (#65): stable | canary, default what the box has, else stable
+$Ring = $env:REMOTEOS_MCP_RING
 # Set by the elevated relaunch (#57): a relaunch still not elevated fails, and does not pause at exit
 $relaunched = [bool]$env:REMOTEOS_MCP_RELAUNCHED
 Remove-Item Env:REMOTEOS_MCP_RELAUNCHED -ErrorAction SilentlyContinue
