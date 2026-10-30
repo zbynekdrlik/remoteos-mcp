@@ -156,9 +156,18 @@ paths:
   one, not `binascii.Error`.
   - Over HTTP the 100 MB cap is never reached: the mcp transport refuses a request body over
     4 MiB (`mcp/server/transport_security.py` `DEFAULT_MAX_REQUEST_BODY_SIZE`, 413), so one
-    FileUpload carries about 3 MB of file (#70, `remoteos-call put`). fastmcp 4.1.2 does not pass
-    mcp's `max_request_body_size` through. Replies have no such cap on the server side; the mcp
+    FileUpload carries about 3 MB of file, and a larger one goes in pieces with `append` (#67).
+    fastmcp 4.1.2 does not pass mcp's `max_request_body_size` through. Replies have no such cap on the server side; the mcp
     CLIENT's 1 MiB SSE event limit is in `.claude/rules/cli-call.md`.
+- **`FileRename` (`file_transfer.replace_file`, #67) is `put`'s last step**, so it keeps what an
+  in-place write kept: an existing target's mode (and owner as root), a symlink written through.
+  It fsyncs the data first. `os.replace` fails across filesystems (a symlink to another mount):
+  the target stays, no copy fallback, because a copy is not atomic.
+- **Structured tool content: return `taskmanager.StructuredText(text, fields)` (#67, Shell).**
+  It is a `str`, so direct test calls compare as before; `wrap_sync_tool` turns it into a
+  `ToolResult` with the task prefix on the text. A plain `ToolResult` from a tool would lose the
+  prefix. `-> str` tools declare fastmcp's `{"result": ...}` output schema, and a client may
+  validate against it: a tool with its own fields MUST pass `output_schema=` too.
 - **Task status writes go through `TaskManager._transition`.** It checks `is_cancelled` and
   writes the status in one step under `_lock`, the same lock `cancel_task` and
   `_cleanup_old` use. Never write `task.status` directly in the wrapper.

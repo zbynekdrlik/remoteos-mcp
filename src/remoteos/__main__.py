@@ -46,6 +46,7 @@ from remoteos import __version__, desktop, network, ocr, process_mgr, recording,
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
+from remoteos.file_transfer import hash_file, replace_file
 from remoteos.identity import LINUX_SHELL, MACOS_SHELL, has_admin, machine_identity, server_instructions
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.platform.command import powershell_argv, run_child
@@ -53,6 +54,7 @@ from remoteos.platform.linux.shell_env import shell_env
 from remoteos.scroll import normalize_request
 from remoteos.security import IPAllowlistMiddleware, check_bind_exposure, parse_ip_allowlist
 from remoteos.snapshot import draw_annotations, element_lines, encode_jpeg, window_lines
+from remoteos.taskmanager import StructuredText
 from remoteos.taskmanager import manager as task_manager
 from remoteos.tiers import (
     ALL_TOOLS,
@@ -589,7 +591,16 @@ def App(
         title="Shell",
         destructiveHint=True,
         openWorldHint=True,
-    )
+    ),
+    output_schema={
+        "type": "object",
+        "properties": {
+            "stdout": {"type": "string"},
+            "stderr": {"type": "string"},
+            "exit_code": {"type": "integer"},
+        },
+        "required": ["stdout", "stderr", "exit_code"],
+    },
 )
 @reports_errors
 def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
@@ -605,6 +616,9 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     stopped with it. A prompt (ssh, sudo -A, a locked keyring) may open a dialog on the screen
     instead of failing: run it non-interactively (``ssh -o BatchMode=yes``,
     ``env -u DBUS_SESSION_BUS_ADDRESS``).
+
+    The text reply is stdout, ``[STDERR] …`` and ``[Exit code: N]``; the structured content has
+    the exact ``stdout``, ``stderr`` and ``exit_code``, for a client that must not parse text.
 
     Args:
         command: Command to execute.
@@ -644,7 +658,9 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     except subprocess.TimeoutExpired:
         raise failure(f"Command timed out after {timeout}s") from None  # run_child logged it
     # A non-zero exit is the command's own answer (it ran), not a tool failure.
-    return result.reply()
+    return StructuredText(
+        result.reply(), {"stdout": result.stdout, "stderr": result.stderr, "exit_code": result.returncode}
+    )
 
 
 @mcp.tool(
@@ -1004,14 +1020,20 @@ _B64_WHITESPACE = str.maketrans("", "", " \t\r\n")  # line-wrapped base64 (e.g. 
     )
 )
 @reports_errors
-def FileUpload(path: str, data_base64: str) -> str:
+def FileUpload(path: str, data_base64: str, append: bool = False) -> str:
     """Upload a file from base64-encoded content. Use for binary files.
+
+    Over HTTP one request carries at most 4 MiB, so one call carries about 3 MB of file. Send a
+    larger file in pieces: ``append=False`` first, then ``append=True``, ideally to a temporary
+    name, checked with FileHash and moved into place with FileRename (``remoteos-call put`` does
+    exactly that).
 
     Args:
         path: Destination file path.
-        data_base64: Base64-encoded file content, at most 100 MB of base64 text
-            (about 75 MB of file). Line breaks are allowed; any other character
-            outside the base64 alphabet is an error and nothing is written.
+        data_base64: Base64-encoded file content, at most 100 MB of base64 text. Line breaks are
+            allowed; any other character outside the base64 alphabet is an error and nothing is
+            written.
+        append: Add to the end of the file instead of replacing it (a missing file is created).
     """
     # Both checks run before the directory is created or the file opened (#31):
     # lax decoding dropped junk characters, so "!!!!" truncated a file to 0 bytes.
@@ -1027,9 +1049,56 @@ def FileUpload(path: str, data_base64: str) -> str:
         raise ValueError(f"data_base64 is not valid base64 ({e})") from e
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(data)
+    with p.open("ab" if append else "wb") as handle:
+        handle.write(data)
     log.info("FileUpload wrote %d bytes", len(data))  # never the path: logs carry no tool arguments (#31)
     return f"Written {len(data)} bytes to {path}"
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="FileHash",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+@reports_errors
+def FileHash(path: str) -> str:
+    """The SHA-256 and size of a file: ``sha256:<hex> <size> bytes``. Use it to check a transfer.
+
+    Args:
+        path: File path.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise failure(f"File not found: {path}")
+    digest, size = hash_file(p)
+    return f"sha256:{digest} {size} bytes"
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="FileRename",
+        destructiveHint=True,
+        openWorldHint=False,
+    )
+)
+@reports_errors
+def FileRename(path: str, new_path: str) -> str:
+    """Rename a file, replacing ``new_path`` in one step if it exists.
+
+    An existing ``new_path`` keeps its permissions (and, when the server runs as root, its owner),
+    and a symlink there is written through. Both paths must be on the same filesystem.
+
+    Args:
+        path: The file to rename.
+        new_path: Its new path.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise failure(f"File not found: {path}")
+    replace_file(p, new_path)
+    return f"Renamed {path} to {new_path}"
 
 
 # ============================== REGISTRY ===================================

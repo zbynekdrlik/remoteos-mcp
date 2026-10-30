@@ -555,3 +555,10 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - Decisions: behind-since is computed from the releases, no history; judged only on a version read this run; one
   report per episode. `suppressed` from airuleset counts as delivered (owner policy posts nothing for zbynek, so both
   messages stay in the journal / sync output until the owner decides otherwise).
+
+## #67 — The limits of the remoteos-call lane: chunked put, one-hour Shell, structured Shell (0.7.0.dev43)
+
+- `put` = 2.5 MB chunks to `<remote>.part` (`FileUpload(append)`), `FileHash`, `FileRename` (both new, Tier 3, `file_transfer.py`). The rename tool is this lane's addition: the design named no mechanism.
+- Gateway read timeout 3700 s, value test + the Shell `--timeout` pass-through test.
+- Shell: `StructuredText` keeps `-> str` for direct callers, `wrap_sync_tool` makes the `ToolResult`; the tool declares its own `output_schema`, replacing fastmcp's `{"result": ...}`. The CLI prints the exact streams and parses text only for an older server.
+- Tests: `test_put_of_10_mb_through_the_gateway_matches_its_sha256`, `test_an_interrupted_put_leaves_the_target_and_the_next_put_finishes`, `test_structured_shell_output_round_trips_what_plain_text_could_not`.

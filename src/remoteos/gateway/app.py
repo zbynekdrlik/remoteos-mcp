@@ -52,9 +52,11 @@ from remoteos.gateway.registry import LiveConfig, is_valid_machine_name
 logger = logging.getLogger("remoteos.gateway")
 
 # connect/pool: a machine that is down must fail fast into the 503 path.
-# read: generous, between bytes — a long tool call (Wait, ScreenRecord) or an idle SSE stream
-#   must not be cut by the gateway, but a hung machine cannot hold a connection forever.
-UPSTREAM_TIMEOUT = httpx2.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
+# read: between bytes, and a running tool sends none. 3700 s = a Shell call of one hour (the longest
+#   run a script is meant to ask for), its 60 s client margin (taskmanager.declared_runtime) and
+#   40 s more (#67). It is a stated bound on a real operation, and a hung machine still cannot
+#   hold a connection forever.
+UPSTREAM_TIMEOUT = httpx2.Timeout(connect=10.0, read=3700.0, write=60.0, pool=10.0)
 
 # keepalive_expiry: well under the machines' uvicorn timeout_keep_alive (5 s, its default). With
 # the httpx2 default of 5 s too, a connection idle for just under 5 s was reused at the very

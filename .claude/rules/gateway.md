@@ -45,6 +45,9 @@ paths:
   - Pool tests run a REAL loopback server against the production clients
     (`tests/test_gateway_upstream_pool.py`). Pin a long expiry (`long_keepalive`) in tests that
     are about the retry, so a stalled runner cannot expire a connection between calls.
+- **`UPSTREAM_TIMEOUT.read` = 3700 s (#67):** a running tool sends no bytes, so this is the
+  longest tool call through the gateway: Shell's one hour, the client's 60 s, 40 s spare. A value
+  test pins it (`test_cli_put_and_shell_fields.py`); no test waits that long.
 - **Decision order:** malformed machine name → 404 (before auth, so the raw value never
   reaches a log), then 401 → 403 → 404 (the design order), then 413 (body over the cap).
   - The 403 comes before the 404 so an authenticated consumer cannot probe which other

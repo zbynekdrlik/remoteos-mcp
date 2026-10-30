@@ -26,7 +26,10 @@ paths:
   without text gets a prefix-only text block in front. `result_text` strips it ONCE there and drops
   a block it empties; nothing downstream strips again (a stdout that itself starts with
   `[task:x] ` must survive — tested).
-- **Shell's reply is `ChildOutput.reply()` text**, parsed back by `parse_shell_reply`: the exit
+- **Shell's structured content wins (`shell_reply`, #67):** `stdout`, `stderr`, `exit_code`,
+  exact, printed with `nl=False`. Anything else in `structured_content` (an older server's
+  `{"result": text}`) falls back to the parser, one trailing newline per stream.
+- **Fallback: Shell's reply is `ChildOutput.reply()` text**, parsed back by `parse_shell_reply`: the exit
   code only from a FINAL `[Exit code: N]` line, the split at the FIRST `\n[STDERR] ` (or a leading
   `[STDERR] ` when stdout is empty), `(no output)` = nothing. Plain text cannot round-trip every
   output (the four cases are in the README); a change to `reply()` breaks this parser: change
@@ -46,8 +49,13 @@ paths:
   This swap and the logger silencing are `prepare_process()`, called by `main` only (never by
   `call_tool`, so an in-process caller keeps its own logging and SDK).
 - **Request size: a machine takes 4 MiB per request** (mcp `transport_security.DEFAULT_MAX_REQUEST_BODY_SIZE`;
-  the gateway's own cap is 16 MiB), so a `put` carries about 3 MB and the 413 text says so. Both
-  the gateway and the direct entry are tested at 3.5 MB.
+  the gateway's own cap is 16 MiB). Both are tested at 3.5 MB, by raising `PUT_CHUNK_BYTES`.
+- **`put` (#67):** `PUT_CHUNK_BYTES` (2.5 MB) chunks to `<remote>.part`, then FileHash, then
+  FileRename. The first chunk always carries `append=False`, explicitly: it replaces a leftover
+  `.part`, and an older server refuses the unknown argument before writing anything
+  (`unexpected_keyword_argument`, named in one line). Each call is its own `_run` (session), so
+  `--timeout` is per call, and a test can cut a real put at the network boundary. `_run` per chunk
+  costs a handshake each: nothing next to the chunk itself.
 - **The MCP SDK hides HTTP statuses.** A non-2xx answer to a request becomes a JSON-RPC error
   "Server returned an error response" (mcp `client/streamable_http.py`). So the CLI builds the
   httpx client itself (`httpx_client_factory`) with a response hook (`_HttpErrors`) that records
@@ -57,7 +65,7 @@ paths:
 - **125 vs 126 after the session is up:** an `MCPError` with no HTTP error status is the server's
   own JSON-RPC answer (125), except `REQUEST_TIMEOUT` (-32001, the client's wait ran out) and
   `CONNECTION_CLOSED` (-32000, "connection closed before the reply (the command may have run)":
-  a dropped stream, the gateway's 600 s cutoff, a reply over 256 MiB), which are 126. An
+  a dropped stream, the gateway's 3700 s cutoff, a reply over 256 MiB), which are 126. An
   `isError` result is always 125. A handshake timeout is fastmcp's `RuntimeError` from a builtin
   `TimeoutError`: also "timed out".
 - **`write_atomically` (get) behaves like `cp`:** a symlink is written through (`realpath`), an
@@ -67,8 +75,8 @@ paths:
   probe speak it; `"auto"` would probe `server/discover` on every call first.
 - **The client's wait = `taskmanager.declared_runtime()`** (the declared `timeout`/`seconds` + 60,
   the server's own stale-task sweep margin) for Shell and for a `--json` call that declares one;
-  else `--timeout`, default 300 s. Through the gateway a call must answer within its 600 s
-  upstream read timeout.
+  else `--timeout`, default 300 s. Through the gateway a call must answer within its 3700 s
+  upstream read timeout (`--timeout 3600` for Shell, #67).
 - **Output:** `_echo` = `click.echo(..., color=True)`: plain `click.echo` strips ANSI escapes when
   stdout is not a tty, which changed remote output. A closed stdout is caught in `main`
   (`sys.stdout.flush()` inside the try), stdout is pointed at /dev/null so the interpreter's

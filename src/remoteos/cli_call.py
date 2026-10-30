@@ -2,7 +2,7 @@
 
     remoteos-call --list
     remoteos-call linux-stream-snv Shell 'sudo -n true; echo ok' [--timeout 60] [--cwd /tmp]
-    remoteos-call linux-stream-snv put ./config.tar /tmp/config.tar   # one request: about 3 MB at most
+    remoteos-call linux-stream-snv put ./big.deb /tmp/big.deb   # any size, checked, atomic
     remoteos-call linux-stream-snv get /var/log/syslog ./syslog
     remoteos-call win-resolume-pp GetSystemInfo --json '{}'
 
@@ -13,12 +13,13 @@ goes into an argv, an output line or a log record.
 
 Exit codes:
 
-- ``Shell``: the remote command's exit code (``[Exit code: N]`` in Shell's reply, none = 0).
+- ``Shell``: the remote command's exit code (Shell's structured ``exit_code``; from an older
+  server ``[Exit code: N]`` in its text, none = 0).
   A code outside 0..255 is reported as 255 (a negative POSIX signal code ``-S`` as 128+S),
   with one ``remoteos-call:`` line on stderr that names the real code.
 - 0: put/get/any other tool succeeded.
 - 125: the tool itself failed (the MCP result has ``isError``, or the server answered the call
-  with a JSON-RPC error), or a put/get size check failed.
+  with a JSON-RPC error), or a put/get size or sha256 check failed.
 - 126: the CLI got no result: a missing/broken config, an unknown machine, a refused connection,
   401/403/404/413, no reply in time, a dropped connection, a local file it cannot read/write.
   After a timeout or a dropped connection the remote command MAY have run (or still run).
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -68,10 +70,14 @@ _STDERR_MARK = "[STDERR] "
 _NO_OUTPUT = "(no output)"  # ChildOutput.reply() when there is nothing at all
 _DOWNLOAD_RE = re.compile(r"\Abase64:(\d+)bytes:", re.ASCII)
 _UPLOAD_RE = re.compile(r"\AWritten (\d+) bytes to ", re.ASCII)
+_HASH_RE = re.compile(r"\Asha256:([0-9a-f]{64}) (\d+) bytes\Z", re.ASCII)
 
 SHELL_DEFAULT_TIMEOUT_S = 30  # Shell's own default
 DEFAULT_WAIT_S = 300.0  # put/get/--json: how long the client waits for the reply
 CONNECT_TIMEOUT_S = 30.0
+# One FileUpload call of a put: 2.5 MB is 3.34 MB of base64, under a machine's 4 MiB per request.
+PUT_CHUNK_BYTES = 2_500_000
+PUT_SUFFIX = ".part"
 # One reply is ONE server-sent event. httpx2's EventSource refuses an event over 1 MiB by default,
 # which a FileDownload of ~780 KB or a Shell printing 1 MB already exceeds. The largest legitimate
 # reply is a FileDownload of a big file (its base64), so the CLI allows this much.
@@ -151,6 +157,7 @@ class ShellReply:
     stdout: str
     stderr: str
     exit_code: int
+    exact: bool = False  # the streams as the command wrote them (structured), not parsed from text
 
 
 def strip_task_prefix(text: str) -> str:
@@ -178,6 +185,16 @@ def parse_shell_reply(text: str) -> ShellReply:
         return ShellReply("", text[len(_STDERR_MARK) :].rstrip("\n"), exit_code)
     stdout, mark, stderr = text.partition("\n" + _STDERR_MARK)
     return ShellReply(stdout.rstrip("\n"), stderr.rstrip("\n") if mark else "", exit_code)
+
+
+def shell_reply(result) -> ShellReply:
+    """Shell's structured fields; a server without them (older than 0.7.0.dev43) gets the parser."""
+    fields = getattr(result, "structured_content", None)
+    if isinstance(fields, dict):
+        stdout, stderr, code = fields.get("stdout"), fields.get("stderr"), fields.get("exit_code")
+        if isinstance(stdout, str) and isinstance(stderr, str) and type(code) is int:
+            return ShellReply(stdout, stderr, code, exact=True)
+    return parse_shell_reply(result_text(result))
 
 
 def process_exit_code(remote: int) -> int:
@@ -245,7 +262,7 @@ _HTTP_REASONS = {
     404: "not found (404): the gateway does not expose this machine",
     # the machine's MCP transport takes 4 MiB per request (mcp DEFAULT_MAX_REQUEST_BODY_SIZE), the
     # gateway 16 MiB (gateway/app.py MAX_BODY_BYTES): the machine's limit is the one a put meets
-    413: "request too large (413): a machine takes at most 4 MiB per request, so a put carries about 3 MB",
+    413: "request too large (413): a machine takes at most 4 MiB per request",
 }
 
 
@@ -280,7 +297,7 @@ def _transport_failure(exc: BaseException, machine: Machine, status: int | None 
     ):
         reason = "timed out waiting for the reply (the command may still run)"
     elif isinstance(leaf, MCPError) and leaf.code == CONNECTION_CLOSED:
-        # a dropped stream, the gateway's 600 s upstream cutoff, a reply over MAX_REPLY_EVENT_BYTES
+        # a dropped stream, the gateway's upstream read timeout, a reply over MAX_REPLY_EVENT_BYTES
         reason = f"connection closed before the reply (the command may have run): {leaf.message}"
     elif isinstance(leaf, httpx2.ConnectError):
         reason = "cannot connect (connection refused or host unreachable)"
@@ -405,9 +422,9 @@ def _tool_failed(result) -> CallFailed:
     return CallFailed(EXIT_TOOL_ERROR, result_text(result))
 
 
-def _echo(text: str, err: bool = False) -> None:
+def _echo(text: str, err: bool = False, nl: bool = True) -> None:
     """Print remote text unchanged: ``color=True`` keeps ANSI escapes click strips off a pipe."""
-    click.echo(text, err=err, color=True)
+    click.echo(text, err=err, color=True, nl=nl)
 
 
 def run_shell(machine: Machine, command: str, timeout: int, cwd: str | None) -> int:
@@ -418,32 +435,71 @@ def run_shell(machine: Machine, command: str, timeout: int, cwd: str | None) -> 
     result = _run(machine, "Shell", arguments, declared_runtime(arguments))
     if result.is_error:
         raise _tool_failed(result)
-    reply = parse_shell_reply(result_text(result))
+    reply = shell_reply(result)
     if reply.stdout:
-        _echo(reply.stdout)
+        _echo(reply.stdout, nl=not reply.exact)
     if reply.stderr:
-        _echo(reply.stderr, err=True)
+        _echo(reply.stderr, err=True, nl=not reply.exact)
     code = process_exit_code(reply.exit_code)
     if code != reply.exit_code:
         _echo(f"remoteos-call: remote exit code {reply.exit_code}, reported as {code}", err=True)
     return code
 
 
-def run_put(machine: Machine, local: Path, remote: str, wait_s: float) -> int:
-    try:
-        data = local.read_bytes()
-    except OSError as exc:
-        raise CallFailed(EXIT_NO_CALL, f"cannot read {local}: {exc.strerror}") from None
-    result = _run(machine, "FileUpload", {"path": remote, "data_base64": base64.b64encode(data).decode()}, wait_s)
+def _upload_chunk(machine: Machine, path: str, chunk: bytes, append: bool, wait_s: float) -> None:
+    arguments = {"path": path, "data_base64": base64.b64encode(chunk).decode(), "append": append}
+    result = _run(machine, "FileUpload", arguments, wait_s)
     if result.is_error:
+        if "unexpected_keyword_argument" in result_text(result):  # refused before anything was written
+            raise CallFailed(EXIT_TOOL_ERROR, f"put: {machine.name} runs a server older than 0.7.0.dev43: upgrade it")
         raise _tool_failed(result)
     reply = result_text(result)
     match = _UPLOAD_RE.match(reply)
     if not match:
         raise CallFailed(EXIT_TOOL_ERROR, f"put: unexpected FileUpload reply: {reply[:200]}")
     written = int(match.group(1))
-    if written != len(data):
-        raise CallFailed(EXIT_TOOL_ERROR, f"put: size mismatch, sent {len(data)} bytes, remote wrote {written}")
+    if written != len(chunk):
+        raise CallFailed(EXIT_TOOL_ERROR, f"put: size mismatch, sent {len(chunk)} bytes, remote wrote {written}")
+
+
+def _upload(machine: Machine, local: Path, part: str, wait_s: float) -> tuple[str, int]:
+    """Send *local* to *part* in chunks; returns the sha256 and size of what was sent."""
+    digest = hashlib.sha256()
+    size = 0
+    append = False  # the first chunk replaces a leftover .part, and an empty file still gets one
+    try:
+        with local.open("rb") as source:
+            while (chunk := source.read(PUT_CHUNK_BYTES)) or not append:
+                _upload_chunk(machine, part, chunk, append, wait_s)
+                digest.update(chunk)
+                size += len(chunk)
+                append = True
+    except OSError as exc:
+        raise CallFailed(EXIT_NO_CALL, f"cannot read {local}: {exc.strerror}") from None
+    return digest.hexdigest(), size
+
+
+def run_put(machine: Machine, local: Path, remote: str, wait_s: float) -> int:
+    """Upload to ``<remote>.part``, check its size and sha256, then rename it over *remote*.
+
+    Any failure leaves *remote* as it was. A leftover ``.part`` is replaced by the next put.
+    """
+    part = remote + PUT_SUFFIX
+    sent_sha256, sent_size = _upload(machine, local, part, wait_s)
+    result = _run(machine, "FileHash", {"path": part}, wait_s)
+    if result.is_error:
+        raise _tool_failed(result)
+    reply = result_text(result)
+    match = _HASH_RE.match(reply)
+    if not match:
+        raise CallFailed(EXIT_TOOL_ERROR, f"put: unexpected FileHash reply: {reply[:200]}")
+    if int(match.group(2)) != sent_size:
+        raise CallFailed(EXIT_TOOL_ERROR, f"put: size mismatch, sent {sent_size} bytes, {part} has {match.group(2)}")
+    if match.group(1) != sent_sha256:
+        raise CallFailed(EXIT_TOOL_ERROR, f"put: sha256 mismatch on {part}, {remote} is untouched")
+    result = _run(machine, "FileRename", {"path": part, "new_path": remote}, wait_s)
+    if result.is_error:
+        raise _tool_failed(result)
     return 0
 
 

@@ -612,7 +612,7 @@ in the package (console script, module `remoteos.cli_call`). On dev1 it is in th
 remoteos-call --list                                         # the fleet machines in the config
 remoteos-call linux-stream-snv Shell 'sudo -n true; echo ok' # stdout, stderr, the remote exit code
 remoteos-call linux-stream-snv Shell 'make' --cwd /opt/app --timeout 500
-remoteos-call linux-stream-snv put ./small.tar /tmp/small.tar # FileUpload, size-checked (about 3 MB max)
+remoteos-call linux-stream-snv put ./big.deb /tmp/big.deb   # any size, sha256-checked, atomic
 remoteos-call linux-stream-snv get /var/log/syslog ./syslog # FileDownload, size-checked
 remoteos-call win-resolume-pp GetSystemInfo --json '{}'      # any tool, its text on stdout
 ```
@@ -630,9 +630,9 @@ straight to the url: `HTTP(S)_PROXY`, `~/.netrc` and `SSL_CERT_FILE`/`SSL_CERT_D
 
 | Code | Meaning |
 |---|---|
-| Shell: N | the remote command's exit code (`[Exit code: N]`, none = 0). A code outside 0..255 is 255 (a POSIX signal `-S` is 128+S), and one stderr line names the real code. |
+| Shell: N | the remote command's exit code. A code outside 0..255 is 255 (a POSIX signal `-S` is 128+S), and one stderr line names the real code. |
 | 0 | put/get/any other tool succeeded |
-| 125 | the tool failed (the MCP result is an error: `Command timed out after 30s`, `File not found: …`, `Unknown tool: …`, invalid arguments), or a put/get size check failed |
+| 125 | the tool failed (the MCP result is an error: `Command timed out after 30s`, `File not found: …`, `Unknown tool: …`, invalid arguments), or a put/get size or sha256 check failed |
 | 126 | the CLI got no result: no or broken config, an unknown machine, connection refused, 401/403/404, 413 (request too large), no reply in time, a dropped connection, a local file it cannot read or write. After a timeout or a dropped connection the remote command MAY have run, or may still run: do not blindly retry a command that is not idempotent. |
 | 130 | interrupted (Ctrl-C); the remote command may still run |
 | 141 | stdout was closed (a broken pipe, e.g. `\| head`) |
@@ -647,13 +647,15 @@ gives Python's own traceback.
 **Server version.** Machines must run remoteos-mcp 0.7.0.dev28 or later (#32). Before that, a
 failing tool answered with success text (`Error in Shell: …`) and the CLI would exit 0.
 
-**Shell.** stdout goes to stdout and the `[STDERR]` part to stderr, each with one trailing
-newline, unchanged otherwise (ANSI escapes included). `--timeout` (default 30 s) is Shell's own
-timeout; the client waits 60 s more. Through the gateway a call must answer within 600 s (its
-upstream read timeout), so keep `--timeout` under 540 there. Use `--` before a command that
-starts with `-`. `sudo` inside Shell works without a password on the Linux MCP boxes (#67).
+**Shell.** stdout goes to stdout and stderr to stderr, exactly as the command wrote them (ANSI
+escapes included): Shell's structured content carries `stdout`, `stderr` and `exit_code` next to
+the text. `--timeout` (default 30 s) is Shell's own
+timeout; the client waits 60 s more. Through the gateway a call must answer within 3700 s (its
+upstream read timeout), so `--timeout 3600` is the most a call can use. Use `--` before a command
+that starts with `-`. `sudo` inside Shell works without a password on the Linux MCP boxes (#67).
 
-Shell's reply is plain text, so some output cannot round-trip:
+A server older than 0.7.0.dev43 sends only the text. The CLI then parses it, prints each stream
+with one trailing newline, and some output cannot round-trip:
 
 - leading whitespace of stdout and trailing whitespace of the last part are lost, and blank
   lines at the end of either stream;
@@ -661,10 +663,14 @@ Shell's reply is plain text, so some output cannot round-trip:
 - a LAST line `[Exit code: N]` printed by the command itself is read as its exit code;
 - a command whose whole output is `(no output)` prints nothing.
 
-**put / get.** `put` sends the whole file in ONE FileUpload call and checks the byte count the
-machine wrote. A machine takes at most 4 MiB per request (the mcp transport's limit; the gateway
-allows 16 MiB), so a `put` carries about 3 MB; a larger one fails with 413 (exit 126). `get`
-checks the byte count FileDownload declared, then writes the local file like `cp` (through a
+**put / get.** A machine takes at most 4 MiB per request (the mcp transport's limit; the gateway
+allows 16 MiB), so `put` sends the file in 2.5 MB chunks to `<remote>.part` (FileUpload
+`append`), checks its size and sha256 (FileHash), then renames it over the target (FileRename).
+Any failure leaves the target as it was and may leave the `.part`, which the next `put` replaces;
+two `put`s to the same target at once are not supported. An existing target keeps its mode (and,
+when the server runs as root, its owner), and a symlink is written through; the `.part` must be on
+the target's filesystem. `put` needs remoteos-mcp 0.7.0.dev43 or later (an older server: exit
+125, nothing written). `--timeout` is the wait of each call, not of the whole `put`. `get` checks the byte count FileDownload declared, then writes the local file like `cp` (through a
 symlink, an existing file keeps its mode, a new one gets `0666 & ~umask`), but through a fsynced
 temp file in the same directory, so never a half-written file. A `get` reply may be up to
 256 MiB of base64 (about 190 MB of file). `--timeout` is how long the client waits (default 300 s).
