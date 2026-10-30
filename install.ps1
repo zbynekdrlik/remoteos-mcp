@@ -20,6 +20,21 @@ Remove-Item Env:PIP_CONSTRAINT -ErrorAction SilentlyContinue
 # Precedence: an explicit REMOTEOS_MCP_AUTH_KEY, the running start script's, config.json, remoteos.toml's
 # [server] auth_key, the old winremote config, else new. The server reads REMOTEOS_AUTH_KEY, never --auth-key.
 
+function Get-RemoteOSAccount([string]$User) {
+    # The account as a SID. The computer name comes first: where computer and user share a name
+    # (ABLETON-FOH), the bare name does not translate. A domain user only resolves bare.
+    foreach ($name in @("$env:COMPUTERNAME\$User", $User)) {
+        try {
+            return (New-Object System.Security.Principal.NTAccount($name)).Translate([System.Security.Principal.SecurityIdentifier])
+        } catch { continue }
+    }
+    throw "the account $User does not exist on this box"
+}
+
+function Get-RemoteOSAccountName([string]$User) {
+    return (Get-RemoteOSAccount $User).Translate([System.Security.Principal.NTAccount]).Value
+}
+
 function Test-RemoteOSKey([string]$Key) {
     # 1-128 ASCII letters/digits; \z, not $: $ also matches before a trailing newline
     return [bool]($Key -and $Key.Length -le 128 -and $Key -cmatch '^[A-Za-z0-9]+\z')
@@ -157,7 +172,7 @@ function Set-RemoteOSOwnerOnlyAcl([string]$Path, [string]$User) {
     $acl = New-Object System.Security.AccessControl.FileSecurity
     $acl.SetAccessRuleProtection($true, $false)
     $identities = @(
-        (New-Object System.Security.Principal.NTAccount($User)),
+        (Get-RemoteOSAccount $User),
         (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')),
         (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544'))
     )
@@ -353,7 +368,7 @@ function Protect-RemoteOSWheelhouseRoot([string]$Root, [string]$User) {
         $grants = @(
             @((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')), 'FullControl'),
             @((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')), 'FullControl'),
-            @((New-Object System.Security.Principal.NTAccount($User)), 'ReadAndExecute')
+            @((Get-RemoteOSAccount $User), 'ReadAndExecute')
         )
         foreach ($grant in $grants) {
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($grant[0], $grant[1], $inherit, $none, 'Allow')))
@@ -640,7 +655,7 @@ function Register-RemoteOSUpgradeTask([string]$ConfigDir, [string]$User) {
     $existing = Get-ScheduledTask -TaskName "RemoteOSMCP-Upgrade" -ErrorAction SilentlyContinue
     if ($existing -and @($existing.Actions)[0].Arguments -ceq $arguments) { return $false }
     $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments
-    $principal = New-ScheduledTaskPrincipal -UserId $User -RunLevel Highest -LogonType Interactive
+    $principal = New-ScheduledTaskPrincipal -UserId (Get-RemoteOSAccountName $User) -RunLevel Highest -LogonType Interactive
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
     $task = @{ TaskName = "RemoteOSMCP-Upgrade"; Action = $action; Principal = $principal; Settings = $settings; Force = $true }
     Register-ScheduledTask @task | Out-Null
@@ -950,7 +965,7 @@ try {
     # Trigger at logon + every 5 minutes (task won't start a second instance if already running)
     $triggerLogon = New-ScheduledTaskTrigger -AtLogon
     $triggerRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
-    $taskPrincipal = New-ScheduledTaskPrincipal -UserId $desktopUser -RunLevel Highest -LogonType Interactive
+    $taskPrincipal = New-ScheduledTaskPrincipal -UserId (Get-RemoteOSAccountName $desktopUser) -RunLevel Highest -LogonType Interactive
     $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName "RemoteOSMCP" -Action $taskAction -Trigger @($triggerLogon, $triggerRepeat) -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
     Write-Host "        Task 'RemoteOSMCP' registered for $desktopUser (at logon + every 5 min)" -ForegroundColor Green
