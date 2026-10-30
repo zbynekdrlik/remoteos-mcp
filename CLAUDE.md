@@ -14,6 +14,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | `.mcp.json` setup, restore after clone, add new machine | `/remoteos-mcp-config` skill |
 | Linux X11 desktop provider (session detection, xdotool/scrot backends, deploy/test) | `.claude/skills/linux-desktop` |
 | MCP gateway on dev1 (`remoteos-gateway`, per-consumer tokens, streaming proxy, rollout; #51 key store, `projects.toml`, `sync-configs`, `check` watchdog) | `.claude/rules/gateway.md` (auto-loads on its `paths:`) + README "MCP gateway (dev1)" |
+| Releases: the CI release job, stable/canary resolver (`release_channel.py`), the hold switch, version drift in `check` | `.claude/rules/gateway.md` + README "MCP gateway (dev1)" |
 | Script client `remoteos-call` (config resolution, Shell reply parsing, exit codes 125/126, HTTP status hook, the real-stack tests) | `.claude/rules/cli-call.md` (auto-loads on its `paths:`) + README "Scripts: `remoteos-call`" |
 | Screen coordinates: Snapshot frame, scale/origin, image→screen input mapping, Windows DPI order, Retina | `.claude/rules/coordinates.md` (auto-loads on its `paths:`) + README "Screen coordinates" |
 | Mouse wheel / Scroll: clicks + direction, Windows SendInput, Quartz wheel2 sign, xdotool 4-7 | `.claude/rules/scroll.md` (auto-loads on its `paths:`) + README "Scroll units" |
