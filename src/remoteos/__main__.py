@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import functools
 import logging
@@ -45,7 +46,7 @@ from remoteos import __version__, desktop, network, ocr, process_mgr, recording,
 from remoteos.config import discover_config_path, load_config
 from remoteos.coords import check_space, contract_line, frame_for, image_to_screen, mapping_note
 from remoteos.errors import DesktopUnavailable, failure, redact_fastmcp_argument_logs, reports_errors
-from remoteos.identity import LINUX_SHELL, MACOS_SHELL, machine_identity, server_instructions
+from remoteos.identity import LINUX_SHELL, MACOS_SHELL, has_admin, machine_identity, server_instructions
 from remoteos.platform import get_desktop, get_services, get_system, is_linux, is_macos, is_windows
 from remoteos.platform.command import powershell_argv, run_child
 from remoteos.platform.linux.shell_env import shell_env
@@ -83,10 +84,17 @@ mcp = FastMCP("remoteos-mcp", instructions=server_instructions(**_IDENTITY))
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
-    # status + version: the installers' self-check reads version; os + hostname are #59's. No key
-    # is needed here (auth._PUBLIC_PATHS), so nothing secret ever goes into this reply.
+    # status + version: the installers' self-check reads version; os + hostname are #59's; admin is
+    # #57's, read by the gateway's check. No key is needed here (auth._PUBLIC_PATHS), so nothing
+    # secret ever goes into this reply.
     return JSONResponse(
-        {"status": "ok", "version": __version__, "os": _IDENTITY["os_name"], "hostname": _IDENTITY["hostname"]}
+        {
+            "status": "ok",
+            "version": __version__,
+            "os": _IDENTITY["os_name"],
+            "hostname": _IDENTITY["hostname"],
+            "admin": await asyncio.to_thread(has_admin),
+        }
     )
 
 

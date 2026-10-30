@@ -301,7 +301,7 @@ Exit-RemoteOSAfterFailure -Reason 'pip install failed' -Output '' -Point $null -
 class TestRollbackPoint:
     def _read(self, tmp_path: Path, config: Path, python: Path) -> dict | None:
         return _ps(tmp_path, _NO_NETWORK + f"""
-$p = Get-RemoteOSRollbackPoint -ConfigDir {_q(config)} -Python {_q(python)}
+$p = Get-RemoteOSRollbackPoint -ConfigDir {_q(config)} -Root {_q(config / "wheelhouse")} -Python {_q(python)}
 if ($p) {{ @{{ ref = $p.Ref; path = $p.Path; version = $p.Version }} | ConvertTo-Json -Compress }}
 else {{ @{{ none = $true }} | ConvertTo-Json -Compress }}
 """)

@@ -1,5 +1,5 @@
 # --- Download first, install offline, roll back (#64) ------------------------------------------
-# Every wheel goes into <config>\wheelhouse\<sha> while the old server runs, the install is offline, and a
+# Every wheel goes into %ProgramData%\remoteos-mcp\wheelhouse\<sha> while the old server runs, the install is offline, and a
 # failure after the stop reinstalls the previous commit's wheelhouse (.claude/rules/installers.md).
 
 function Test-RemoteOSPythonVersion([string]$VersionText) {
@@ -172,13 +172,26 @@ function New-RemoteOSWheelhouse([string]$Python, [string]$Root, [string]$Sha, [s
     }
 }
 
-function Get-RemoteOSRollbackPoint([string]$ConfigDir, [string]$Python) {
+function New-RemoteOSRollbackWheelhouse([string]$ConfigDir, [string]$Root, [string]$Python) {
+    # The first run with the ProgramData root (#65): the installed commit's wheelhouse is in the profile, a
+    # folder the desktop user controls, so it is built again rather than moved -> New-RemoteOSWheelhouse's
+    # result, or $null when the box has no such commit
+    $refFile = Join-Path $ConfigDir 'installed-ref.txt'
+    if (-not (Test-Path -LiteralPath $refFile)) { return $null }
+    $ref = ([string](Get-Content -LiteralPath $refFile -Raw)).Trim()
+    if ($ref -cnotmatch '^[0-9a-f]{40}\z') { return $null }
+    return New-RemoteOSWheelhouse -Python $Python -Root $Root -Sha $ref `
+        -SourceUrl "https://github.com/zbynekdrlik/remoteos-mcp/archive/$ref.zip" `
+        -ConstraintsUrl "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/$ref/constraints.txt"
+}
+
+function Get-RemoteOSRollbackPoint([string]$ConfigDir, [string]$Root, [string]$Python) {
     # installed-ref.txt's commit (proven) + its kept wheelhouse, installable here -> @{Ref; Path; Version} or $null
     $refFile = Join-Path $ConfigDir 'installed-ref.txt'
     if (-not (Test-Path -LiteralPath $refFile)) { return $null }
     $ref = ([string](Get-Content -LiteralPath $refFile -Raw)).Trim()
     if ($ref -cnotmatch '^[0-9a-f]{40}\z') { return $null }
-    $path = Join-Path (Join-Path $ConfigDir 'wheelhouse') $ref
+    $path = Join-Path $Root $ref
     $version = Get-RemoteOSWheelhouseVersion $path
     if (-not $version) { return $null }
     $check = Test-RemoteOSWheelhouseInstallable $Python $path $version
@@ -319,7 +332,7 @@ function Invoke-RemoteOSRollback($Point, [string]$Python, [scriptblock]$StopServ
 }
 
 function Exit-RemoteOSAfterFailure([string]$Reason, [string]$Output, $Point, [string]$Python, [scriptblock]$StopServer,
-                                   [scriptblock]$StartServer, [scriptblock]$ProveHealth, [bool]$Pause) {
+                                   [scriptblock]$StartServer, [scriptblock]$ProveHealth, [scriptblock]$Disarm, [bool]$Pause) {
     # Every failure after the stop: roll back when a wheelhouse is kept, then exit 1. None kept (the first
     # install with wheelhouses): the box stays as the failure left it, as before #64, and it says so.
     Write-Host "  [X] $Reason" -ForegroundColor Red
@@ -337,6 +350,7 @@ function Exit-RemoteOSAfterFailure([string]$Reason, [string]$Output, $Point, [st
         Write-Host "  [X] $Reason -- and the rollback to $($Point.Version) failed too: $($back.Error)" -ForegroundColor Red
         if ($back.Output) { Write-Host $back.Output }
     }
+    if ($Disarm) { & $Disarm }  # only now: a kill during this rollback leaves it to the trap
     Exit-RemoteOSInstaller -Code 1 -Pause $Pause
 }
 

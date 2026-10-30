@@ -16,6 +16,9 @@ main() {
     ENV_FILE="$CONFIG_DIR/remoteos-mcp.env"
     PENDING_FILE="$CONFIG_DIR/.switch-pending"
     SUDOERS_FILE="/etc/sudoers.d/90-remoteos-mcp"
+    UPDATER_CONFIG="$CONFIG_DIR/updater.json"
+    UPDATER_SERVICE="/etc/systemd/system/remoteos-mcp-updater.service"
+    UPDATER_TIMER="/etc/systemd/system/remoteos-mcp-updater.timer"
     umask 022
     shopt -s globasciiranges  # [A-Za-z0-9] = ASCII in any locale (bash >= 4.3)
 
@@ -31,6 +34,7 @@ main() {
     GIVEN_MODE="${REMOTEOS_MCP_MODE:-}"
     GIVEN_USER="${REMOTEOS_MCP_USER:-}"
     POLICY="${REMOTEOS_MCP_POLICY:-restart}"
+    GIVEN_RING="${REMOTEOS_MCP_RING:-}"
 
     # The run's state (each set below where it happens).
     WORK_DIR="" TMP_LINK="" WAS_PENDING="" SESSION_TYPE="" SESSION_DISPLAY="" UNIT_DISPLAY=""
@@ -132,6 +136,7 @@ main() {
         prune_builds
     fi
     install_sudoers
+    install_updater
 
     echo "  [6/6] Configuring firewall and getting network info..."
     configure_firewall

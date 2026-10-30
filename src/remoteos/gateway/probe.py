@@ -45,6 +45,7 @@ class ProbeResult:
     state: str
     status: int | None = None
     detail: str = ""
+    admin: bool | None = None  # /health's, when the server reports it
 
     @property
     def ok(self) -> bool:
@@ -121,7 +122,8 @@ def health_url(mcp_url: str) -> str:
 
 
 async def probe_version(client: httpx2.AsyncClient, mcp_url: str) -> ProbeResult:
-    """GET a machine's ``/health`` (public: no key is sent); ``detail`` is its version when ``ok``."""
+    """GET a machine's ``/health`` (public: no key is sent); ``detail`` is its version when ``ok``,
+    ``admin`` its admin report (None from a server older than #57)."""
     try:
         response = await client.get(health_url(mcp_url))
     except (httpx2.RequestError, httpx2.InvalidURL, ValueError) as exc:
@@ -129,12 +131,13 @@ async def probe_version(client: httpx2.AsyncClient, mcp_url: str) -> ProbeResult
     if response.status_code != 200:
         return ProbeResult(STATE_ERROR, response.status_code, f"HTTP {response.status_code}")
     try:
-        version = response.json().get("version")
+        payload = response.json()
+        version, admin = payload.get("version"), payload.get("admin")
     except (ValueError, AttributeError):
-        version = None
+        version, admin = None, None
     if not isinstance(version, str) or _VERSION_TEXT.fullmatch(version) is None:
         return ProbeResult(STATE_ERROR, 200, "no version in /health")
-    return ProbeResult(STATE_OK, 200, version)
+    return ProbeResult(STATE_OK, 200, version, admin if isinstance(admin, bool) else None)
 
 
 async def gather_probes(probes: Iterable[Awaitable[ProbeResult]]) -> list[ProbeResult]:

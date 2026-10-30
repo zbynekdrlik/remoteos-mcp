@@ -24,6 +24,8 @@ unset REMOTEOS_MCP_AUTH_KEY
 # The source (#64): a commit sha, a tag or a branch (default main, empty = main), resolved below to
 # ONE commit that the install and its constraints both use, like install-linux.sh.
 REF="${REMOTEOS_MCP_REF:-main}"
+# The release ring of the box's updater (#65): stable | canary, default what the box has, else stable.
+GIVEN_RING="${REMOTEOS_MCP_RING:-}"
 
 echo ""
 echo "  RemoteOS MCP Installer (macOS)"
@@ -51,6 +53,11 @@ fi
 python_ok() {
     [[ "${1-}" =~ Python\ 3\.([0-9]+) ]] && (( BASH_REMATCH[1] >= 11 ))
 }
+
+if [[ ! "$GIVEN_RING" =~ ^(stable|canary)?$ ]]; then
+    echo "        [X] REMOTEOS_MCP_RING must be stable or canary — nothing was changed on this box"
+    exit 1
+fi
 
 # --- [1/5] Check Python ---
 echo "  [1/5] Checking Python..."
@@ -350,6 +357,7 @@ on_exit() {
         rollback_install
         rc=1
     fi
+    if [[ -n "$LOCK_DIR" ]]; then rm -rf "$LOCK_DIR"; fi
     if [[ -z "$KEEP_WORK_DIR" ]]; then
         rm -rf "$WORK_DIR"
     fi
@@ -364,6 +372,7 @@ on_exit() {
 # command whose output is redirected to a log).
 WORK_DIR=$(mktemp -d)
 KEEP_WORK_DIR=""
+LOCK_DIR=""
 ROLLBACK_ARMED=""
 INTERRUPTED=""
 WRITE_TMP=""
@@ -372,6 +381,24 @@ CHANGED_DEPS=()
 ADDED_DEPS=()
 exec 3>&1 4>&2
 trap on_exit EXIT
+# One run at a time: the updater makes a second one routine. No flock on macOS; a dead run's pid frees it.
+# LOCK_DIR is set only once the lock is ours: on_exit removes it.
+lock_path="$CONFIG_DIR.install-lock"
+if ! mkdir "$lock_path" 2>/dev/null; then
+    sleep 1  # a run that just took it writes its pid next
+    holder=$(cat "$lock_path/pid" 2>/dev/null || true)
+    if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+        echo "        [X] Another install.sh run is going on — nothing was changed on this box"
+        exit 1
+    fi
+    rm -rf "$lock_path"
+    if ! mkdir "$lock_path" 2>/dev/null; then
+        echo "        [X] Another install.sh run took the lock — nothing was changed on this box"
+        exit 1
+    fi
+fi
+LOCK_DIR="$lock_path"
+echo "$$" >"$LOCK_DIR/pid"
 mkdir -p "$WORK_DIR/pip-tmp"
 prepare_sudoers
 
@@ -730,6 +757,49 @@ if [[ "$HEALTH_OK" != "true" ]]; then
 fi
 
 install_sudoers
+
+# --- The per-box updater (#65): a LaunchAgent, daily at a random time and at every login ---
+# RunAtLoad catches up a date missed while the mac was off (launchd runs a missed date only after a
+# sleep). After the proof: a failure here leaves the proven install up.
+UPDATER_CONFIG="$CONFIG_DIR/updater.json"
+UPDATER_LABEL="com.remoteos-mcp.updater"
+UPDATER_PLIST="${PLIST_PATH%/*}/${UPDATER_LABEL}.plist"
+if [[ -n "$GIVEN_RING" || ! -f "$UPDATER_CONFIG" ]]; then
+    printf '{"ring": "%s"}\n' "${GIVEN_RING:-stable}" >"$UPDATER_CONFIG"
+fi
+write_private "$UPDATER_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${UPDATER_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PYTHON_PATH}</string>
+        <string>-m</string>
+        <string>remoteos.updater</string>
+        <string>--log-file</string>
+        <string>${CONFIG_DIR}/updater.log</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>$((RANDOM % 24))</integer>
+        <key>Minute</key>
+        <integer>$((RANDOM % 60))</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+launchctl unload "$UPDATER_PLIST" 2>/dev/null || true
+if launchctl load "$UPDATER_PLIST"; then
+    echo "        Updater: daily, ring $(sed -n 's/.*"ring": "\([a-z]*\)".*/\1/p' "$UPDATER_CONFIG")"
+else
+    echo "        [!] The updater's LaunchAgent did not load: this box stays on v${PKG_VER} until a re-run"
+fi
 
 # --- [5/5] Get network info ---
 echo "  [5/5] Getting network info..."

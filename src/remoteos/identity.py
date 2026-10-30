@@ -8,20 +8,36 @@ announces its real hostname, OS, architecture and shell in the MCP ``instruction
 ``server_instructions`` is pure: facts in, text out. ``machine_identity`` reads the live facts.
 The POSIX shells live here and ``Shell`` runs exactly these (one place); the Windows text
 describes ``powershell_argv``. ``tests/test_identity.py`` pins that ``Shell`` runs what is announced.
+
+``has_admin`` is the ``admin`` of ``/health`` (#57): can this server administer its box? It is read
+live and cached, never once at import: the installers write the sudoers drop-in AFTER their proof
+and restart nothing, so a first install would report false until its next restart.
 """
 
 from __future__ import annotations
 
+import ctypes
+import logging
+import os
 import platform
 import socket
+import threading
+import time
 
 from remoteos.platform import is_macos, is_windows
+from remoteos.platform.command import run_child
+
+log = logging.getLogger("remoteos.identity")
 
 # The shell binary Shell runs as ``[<shell>, "-c", command]`` on macOS / Linux.
 MACOS_SHELL = "/bin/zsh"
 LINUX_SHELL = "/bin/bash"
 # What Shell runs on Windows: ``powershell_argv`` (remoteos/platform/command.py).
 WINDOWS_SHELL_TEXT = "PowerShell (powershell -NoProfile -Command, through the UTF-8 console trampoline)"
+
+# /health is public: at most one `sudo` per minute, however often it is asked.
+ADMIN_CACHE_S = 60
+SUDO_TIMEOUT_S = 5
 
 CAPABILITIES = (
     "Provides desktop control, window management, shell execution, file operations, network tools, "
@@ -66,3 +82,33 @@ def machine_identity() -> dict[str, str]:
         "arch": platform.machine() or "unknown architecture",
         "shell": shell_text(),
     }
+
+
+_admin_lock = threading.Lock()
+_admin_cache: tuple[float, bool] | None = None  # (read at, answer)
+
+
+def _read_admin() -> bool:
+    """Windows: an elevated token. Linux, macOS: root, or sudo that asks no password."""
+    if is_windows():
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    if os.geteuid() == 0:
+        return True
+    return run_child(["sudo", "-n", "true"], timeout=SUDO_TIMEOUT_S).returncode == 0
+
+
+def has_admin() -> bool:
+    """The cached answer. A failure keeps the last answer (a slow sudo must not read as a lost admin),
+    with none yet it reads as False, and it never reaches ``/health``'s caller."""
+    global _admin_cache
+    with _admin_lock:
+        now = time.monotonic()
+        if _admin_cache is not None and now - _admin_cache[0] < ADMIN_CACHE_S:
+            return _admin_cache[1]
+        try:
+            answer = _read_admin()
+        except Exception as exc:  # no sudo on PATH, a timeout: no proof of admin
+            log.info("admin check failed: %s", type(exc).__name__)
+            answer = _admin_cache[1] if _admin_cache is not None else False
+        _admin_cache = (now, answer)
+        return answer
