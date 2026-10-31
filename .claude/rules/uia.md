@@ -49,8 +49,10 @@ paths:
   RuntimeId read at the walk: a mismatch, a COM error reading it, or an invisible window
   (`IsWindowVisible`: a closed window's element may still answer) is "gone". An element with an
   empty RuntimeId gets no ref: nothing could prove later that it is the same one.
-- **`Snapshot`/`AnnotatedSnapshot` read through `Session.elements`, which publishes no refs**, with
-  a shorter budget and only the `limit` they show (`get_interactive_elements(limit=)`). A UIA failure
+- **`Snapshot` reads through `Session.elements`, which publishes no refs; `AnnotatedSnapshot`
+  through `Session.marked`, which does (#36)**, so it ends an earlier ElementTree's refs. Both have
+  a shorter budget and only the `limit` they show (`get_interactive_elements(limit=)`,
+  `marked_elements(limit=)`). An element with no RuntimeId stays a mark with no ref. A UIA failure
   there costs the list, never the image; ElementTree reports it. Every name in a reply goes through
   `element_tree.one_line`: a name can be a whole document, and text of an app must not forge a reply line.
 - **ClickElement order:** `_live` (ref, identity, enabled), Invoke. A failed HRESULT raises

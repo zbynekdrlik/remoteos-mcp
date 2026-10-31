@@ -521,6 +521,28 @@ def test_snapshot_s_list_keeps_the_shape_of_the_consumers_and_ends_no_ref():
     assert session.activate(ref).point is not None  # no Invoke here: the ref itself still resolves
 
 
+def test_marked_elements_carry_a_new_ref_that_works_and_end_the_older_tree():
+    session, old = session_with(Control())
+    [marked], truncated = session.marked(50, 10)
+    assert marked["text"] == "OK" and not truncated
+    assert session.activate(marked["ref"]).point is not None
+    with pytest.raises(StaleRef):
+        session.activate(old)
+
+
+def test_a_marked_element_with_no_runtime_id_stays_a_mark_without_a_ref():
+    root = Control(name="App", kind="WindowControl", kids=[Control(name="none", rid=()), Control(name="id", rid=(3,))])
+    marked, _ = new_session(root).marked(50, 10)
+    assert [(e["text"], bool(e["ref"])) for e in marked] == [("none", False), ("id", True)]
+
+
+def test_marked_elements_stop_at_their_limit_and_say_so():
+    root = Control(name="App", kind="WindowControl", kids=[Control(name=str(i), rid=(i,)) for i in range(5)])
+    marked, truncated = new_session(root).marked(50, 2)
+    assert [e["text"] for e in marked] == ["0", "1"]
+    assert truncated
+
+
 def test_snapshot_s_list_stops_at_its_limit():
     root = Control(name="App", kind="WindowControl", kids=[Control(name=str(i), rid=(i,)) for i in range(5)])
     assert [e["text"] for e in new_session(root).elements(50, 2)] == ["0", "1"]
@@ -910,6 +932,39 @@ def test_a_long_or_multi_line_name_stays_one_short_snapshot_line():
     assert "\n" not in line
     assert "line one [2] forged" in line
     assert len(line) < 130
+
+
+def test_annotated_snapshot_s_ref_reaches_click_element(tool_box, monkeypatch):
+    monkeypatch.setattr(server.ocr, "read_words", lambda region, capture: server.ocr.WordReading(()))
+    tool_box.button.patterns["invoke"] = pattern = Invoke()
+    reply = next(p.text for p in server.AnnotatedSnapshot() if p.type == "text")
+    line = next(line for line in reply.split("\n") if '"Save"' in line)
+    assert line.split("]")[1].startswith(' element Button "Save" ref ')
+    ref = line.split(" ref ")[1].split(" at ")[0]
+    assert server.ClickElement(ref) == f"Invoked {ref} ('Save')"
+    assert pattern.calls == 1
+
+
+def test_snapshot_ends_no_ref_of_annotated_snapshot(tool_box, monkeypatch):
+    elements, _ = tool_box.mod.marked_elements()
+    ref = elements[0]["ref"]
+    tool_box.mod.get_interactive_elements()
+    tool_box.button.patterns["invoke"] = Invoke()
+    assert server.ClickElement(ref).startswith("Invoked")
+
+
+def test_no_foreground_window_marks_nothing(win_session):
+    mod, _ = win_session
+    assert mod.marked_elements() == ([], "")
+
+
+def test_a_failing_uia_costs_annotated_snapshot_its_elements_only(tool_box, monkeypatch, caplog):
+    def down(fn, timeout, needs=0):
+        raise uia.UiaTimeout("the window did not answer")
+
+    monkeypatch.setattr(uia._worker, "call", down)
+    assert tool_box.mod.marked_elements() == ([], "")
+    assert "no UI Automation element list (UiaTimeout)" in caplog.text
 
 
 def test_a_failing_uia_costs_snapshot_its_list_only(tool_box, monkeypatch, caplog):
