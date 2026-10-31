@@ -22,7 +22,8 @@ from remoteos.displays import DisplayInfo
 # "Screen 0: minimum 8 x 8, current 2560 x 1600, maximum 32767 x 32767"
 _SCREEN_RE = re.compile(r"\bcurrent\s+(\d+)\s*x\s*(\d+)")
 # " 0: +*HDMI-1 1920/527x1080/296+2560+0  HDMI-1" → primary marker, name, width, height, x, y
-_MONITOR_RE = re.compile(r"^\s*\d+:\s+\+?(\*?)(\S+)\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)")
+# The name is a raw X atom, spaces allowed: a line that does not match would shift every later monitor=N.
+_MONITOR_RE = re.compile(r"^\s*\d+:\s+\+?(\*?)(.+?)\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)")
 
 
 class XrandrMonitor(NamedTuple):

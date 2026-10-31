@@ -276,7 +276,7 @@ wrong, and for a tool call it keeps the task id, e.g.
 
 Before a desktop tool touches the screen, it checks that the desktop can be used:
 
-- **Screen tools** (Snapshot, AnnotatedSnapshot, OCR, ScreenRecord) and **input tools**
+- **Screen tools** (Snapshot, AnnotatedSnapshot, Zoom, OCR, ScreenRecord) and **input tools**
   (Click, Move, Type, Scroll, Shortcut, MinimizeAll).
 - **Windows:**
   - the server runs in session 0: start it with `schtasks /Run /TN RemoteOSMCP`;

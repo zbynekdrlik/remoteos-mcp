@@ -39,9 +39,11 @@ paths:
     comes from `CGDisplayModeGetPixelWidth`.
 - **Rounding is `floor(v + 0.5)` everywhere.** Never use the built-in `round()`. It does
   banker's rounding (4.5 → 4), and then the resize height and the two mapping directions
-  disagree.
-- **Clamp only in `image_to_screen`.** `screen_to_image` is unclamped on purpose: listings mark
-  points outside the frame `(off-frame)` instead of moving them.
+  disagree. The one exception is a rectangle: `region_to_screen` rounds OUTWARD in exact integers,
+  so it covers every pixel asked for (half-up lost the last pixel of a native Retina frame).
+- **Clamp points only in `image_to_screen`**, a rectangle only in `region_to_screen`.
+  `screen_to_image` is unclamped on purpose: listings mark points outside the frame `(off-frame)`
+  instead of moving them.
 - **Windows DPI:** pyautogui's import calls `SetProcessDPIAware()`. After that, per-monitor
   awareness is refused. So `app.py` and `platform/win/desktop.py` call
   `enable_per_monitor_dpi_awareness()` BEFORE `import pyautogui`, and `tools/desktop.py` imports
@@ -71,7 +73,8 @@ paths:
   - Providers: `capture_region(bbox)` returns a PIL image. macOS `screencapture -R` takes POINTS and
     writes pixels; the bbox is global, so `-D` is not passed with it.
   - The capture goes through `app._capture_with_retry`, the Windows retry Snapshot uses. Only the
-    grab: a bad rectangle must not trigger a reconnect check.
+    grab: a bad rectangle must not trigger a reconnect check. So the geometry stays the one from
+    before a reattach; a `tscon` that changes the resolution shows as `fit_to_frame`'s WARNING.
   - `region_to_screen` raises when nothing is inside the frame. Clamping that to an empty capture
     would look like a black screen.
 - **`DisplayInventory` (#33) = `remoteos/displays.py`.** Providers: `list_displays()` plus
@@ -80,6 +83,8 @@ paths:
   xrandr's millimetres give a physical DPI, not a UI scale. It needs only the `"windows"` preflight
   (it works locked) and is a QUERY-category tool, so it never waits behind a capture or `Wait`.
 - **Tests:**
+  - `tests/test_zoom_display_inventory.py` shares the other modules' fixtures by assignment
+    (`win = provider_geometry.win`): `from … import win` is ruff F811 at every test that uses it.
   - Tool-level tests run the real MCP tool functions on a fake X11 display, stubbing only
     `_run_x` and `_load_atspi`.
   - Windows/macOS providers are imported against fake `ctypes.windll` / pywin32 / `Quartz`

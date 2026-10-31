@@ -124,6 +124,20 @@ def test_an_unknown_monitor_is_an_error(fake_x11):
     assert tool_error(lambda: server.Zoom(0, 0, 10, 10, monitor=5)) == "Zoom error: Monitor 5 not found (have 1)"
 
 
+def test_zoom_encodes_above_snapshots_quality_for_small_text(monkeypatch, fake_x11):
+    qualities = []
+    real = server.encode_jpeg
+
+    def _encode(img, quality):
+        qualities.append(quality)
+        return real(img, quality)
+
+    monkeypatch.setattr(server, "encode_jpeg", _encode)
+    server.Zoom(100, 50, 320, 200)
+    server.Snapshot()
+    assert qualities == [85, 65]
+
+
 def test_zoom_warns_when_the_grabber_disagrees_with_the_geometry(monkeypatch, fake_x11, caplog):
     def _small_png(bbox):
         buf = io.BytesIO()
@@ -145,8 +159,8 @@ def test_zoom_warns_when_the_grabber_disagrees_with_the_geometry(monkeypatch, fa
 def test_windows_zoom_grabs_the_bbox_from_all_screens(win, pyautogui_branch):
     _, grabs = win
     parts = server.Zoom(100, 100, 200, 100)  # virtual screen (-1920,0) 4480x1600, scale 3.5
-    assert grabs == [{"bbox": (-1570, 350, -870, 700), "all_screens": True}]
-    assert _image(parts).size == (700, 350)
+    assert grabs == [{"bbox": (-1570, 350, -870, 701), "all_screens": True}]
+    assert _image(parts).size == (700, 351)
     assert "at origin (-1570,350)" in _text(parts)
 
 
@@ -154,7 +168,7 @@ def test_windows_zoom_retries_a_failed_grab_like_snapshot(monkeypatch, win, pyau
     monkeypatch.setattr(server, "is_windows", lambda: True)
     monkeypatch.setattr(server, "_ensure_session_connected", lambda: "reattached")
     _flaky_grab(monkeypatch, failures=1)
-    assert _image(server.Zoom(100, 100, 200, 100)).size == (700, 350)
+    assert _image(server.Zoom(100, 100, 200, 100)).size == (700, 351)
 
 
 def test_mac_zoom_uses_points_and_returns_retina_pixels(monkeypatch, mac, mac_tool_layer):
@@ -168,9 +182,9 @@ def test_mac_zoom_uses_points_and_returns_retina_pixels(monkeypatch, mac, mac_to
 
     monkeypatch.setattr(mod.subprocess, "run", _run)
     parts = server.Zoom(100, 100, 200, 100)  # main display 1440x900 pt at scale 1.125
-    assert commands[0][:4] == ["screencapture", "-x", "-R", "113,113,225,112"]
-    assert _image(parts).size == (450, 224)
-    assert "screen 225x112 at origin (113,113), scale 0.500" in _text(parts)
+    assert commands[0][:4] == ["screencapture", "-x", "-R", "112,112,226,113"]
+    assert _image(parts).size == (452, 226)
+    assert "screen 226x113 at origin (112,112), scale 0.500" in _text(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +203,14 @@ def test_parse_xrandr_keeps_the_name_and_the_primary_marker():
 def test_parse_xrandr_reads_a_user_defined_monitor_without_the_plus():
     (monitor,) = parse_xrandr_monitors("Monitors: 1\n 0: *LEFT 1280/300x1024/200+-1280+0  LEFT\n")
     assert monitor == (-1280, 0, 1280, 1024, "LEFT", True)
+
+
+def test_parse_xrandr_reads_negative_offsets_and_any_atom_name():
+    text = "Monitors: 2\n 0: +*DP_1 1920/527x1080/296+-1920+-180  DP_1\n 1: MY MONÍTOR 800/300x600/200+0+0  x\n"
+    assert parse_xrandr_monitors(text) == [
+        (-1920, -180, 1920, 1080, "DP_1", True),
+        (0, 0, 800, 600, "MY MONÍTOR", False),
+    ]
 
 
 def test_inventory_text_renders_every_field():

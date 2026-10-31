@@ -574,4 +574,4 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 
 - Approach 1 of the main's design: view-only `Zoom` through the #28 frame, `displays.py`, one provider primitive per OS (`capture_region`, `list_displays`, `MONITOR_ZERO`).
 - `parse_xrandr_monitors` returns `XrandrMonitor`, a NamedTuple: `m[:4]` is the old tuple.
-- Decisions on the ticket: Zoom JPEG quality fixed at 85 (no new argument), `scale` n/a on X11.
+- Decisions, on #33: Zoom JPEG quality fixed at 85 (no new argument), `scale` n/a on X11, a rectangle rounds outward.

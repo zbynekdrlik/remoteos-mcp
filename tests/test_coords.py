@@ -193,9 +193,15 @@ def test_region_keeps_the_frame_origin():
     assert region_to_screen(frame, 10, 20, 100, 50, "image") == (-1890, -120, -1590, 30)
 
 
-def test_region_rounds_half_up_like_the_rest_of_the_contract():
+def test_region_rounds_outward_to_cover_every_pixel_asked_for():
     frame = frame_for(0, 1280, _geo(0, 0, 1440, 900, 2880, 1800))  # scale 1.125
-    assert region_to_screen(frame, 100, 100, 200, 100, "image") == (113, 113, 338, 225)
+    assert region_to_screen(frame, 100, 100, 200, 100, "image") == (112, 112, 338, 225)
+    assert region_to_screen(frame, 1, 1, 1, 1, "image") == (1, 1, 3, 3)
+
+
+def test_region_uses_each_axis_own_scale():
+    frame = frame_for(0, 1280, _geo(0, 0, 1920, 1081))  # image 1280x721: scale_y is not scale_x
+    assert region_to_screen(frame, 0, 100, 10, 100, "image") == (0, 149, 15, 300)
 
 
 def test_region_in_screen_coordinates_is_taken_as_it_is():
@@ -216,9 +222,10 @@ def test_region_is_cut_to_the_frame(rect, expected):
     assert region_to_screen(frame, *rect, "image") == expected
 
 
-def test_region_below_one_screen_unit_keeps_one():
-    frame = frame_for(0, 0, _geo(0, 0, 1440, 900, 2880, 1800))  # native Retina: scale 0.5
-    assert region_to_screen(frame, 11, 11, 1, 1, "image") == (6, 6, 7, 7)
+def test_region_of_one_native_retina_pixel_is_the_point_it_lies_in():
+    frame = frame_for(0, 0, _geo(0, 0, 1440, 900, 2880, 1800))  # scale 0.5
+    assert region_to_screen(frame, 11, 11, 1, 1, "image") == (5, 5, 6, 6)
+    assert region_to_screen(frame, 2879, 1799, 1, 1, "image") == (1439, 899, 1440, 900)  # the last pixel
 
 
 @pytest.mark.parametrize("size", [(0, 10), (10, 0), (-5, 10), (10, -5)])

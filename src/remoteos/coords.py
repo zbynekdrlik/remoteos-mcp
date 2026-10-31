@@ -143,20 +143,20 @@ def region_to_screen(frame: Frame, x: int, y: int, width: int, height: int, spac
     """Zoom's rectangle as ``(left, top, right, bottom)`` in screen units, cut to ``frame``.
 
     ``space`` is ``"image"`` (pixels of the parent frame) or ``"screen"``. Right and
-    bottom are exclusive, so they may reach the frame's far edge. A rectangle that
-    shrinks below one screen unit keeps one (image pixels of a native Retina frame are
-    half a point). Nothing of it inside the frame is an error: a capture of nothing
-    would look like a black screen.
+    bottom are exclusive, so they may reach the frame's far edge. Image pixels round
+    OUTWARD, in exact integers, unlike a point: the capture must cover every pixel
+    asked for, and a pixel of a native Retina frame is half a point. Nothing of it
+    inside the frame is an error: a capture of nothing would look like a black screen.
     """
     if width <= 0 or height <= 0:
         raise ValueError(f"region size must be positive, got {width}x{height}")
     if space == "image":
-        left, top = frame.x + _round_half_up(x * frame.scale_x), frame.y + _round_half_up(y * frame.scale_y)
-        right = frame.x + _round_half_up((x + width) * frame.scale_x)
-        bottom = frame.y + _round_half_up((y + height) * frame.scale_y)
+        left = frame.x + x * frame.width // frame.image_width
+        top = frame.y + y * frame.height // frame.image_height
+        right = frame.x - (-(x + width) * frame.width // frame.image_width)
+        bottom = frame.y - (-(y + height) * frame.height // frame.image_height)
     else:
         left, top, right, bottom = x, y, x + width, y + height
-    right, bottom = max(right, left + 1), max(bottom, top + 1)
     far_x, far_y = frame.x + frame.width, frame.y + frame.height
     bbox = (
         _clamp(left, frame.x, far_x),
