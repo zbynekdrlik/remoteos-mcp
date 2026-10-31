@@ -50,8 +50,8 @@ paths:
   wait at once; only "not found yet" polls. That is why it is `list_windows`: the Linux
   `enumerate_windows` swallows a wmctrl failure into `[]`, and each failed poll would re-detect the
   session. Without the desktop lock these tools run next to `_load_atspi`'s temporary `os.environ`
-  keys, so `session._session_env` copies through `shell_env._snapshot`. `run_ocr` has no word boxes, so `text` reports the monitor
-  and the line, no pixels. Its `timeout` is in `_RUNTIME_ARGS`, so the stale sweep leaves it alone.
+  keys, so `session._session_env` copies through `shell_env._snapshot`. `run_ocr` has no word
+  boxes, so `text` reports the monitor and the line, no pixels. Its `timeout` is in `_RUNTIME_ARGS`, so the stale sweep leaves it alone.
 - **OCR grabs with `all_screens=True` (`ocr._grab`).** Without it a non-primary Windows monitor is
   black. So a default `OCR()` on Windows reads every monitor, as Snapshot does; the WinRT engine has
   an image-size limit (`OcrEngine.MaxImageDimension`) that a very wide desktop can hit, and that fails

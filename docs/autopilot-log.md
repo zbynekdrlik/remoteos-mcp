@@ -575,3 +575,10 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - Approach 1 of the main's design: view-only `Zoom` through the #28 frame, `displays.py`, one provider primitive per OS (`capture_region`, `list_displays`, `MONITOR_ZERO`).
 - `parse_xrandr_monitors` returns `XrandrMonitor`, a NamedTuple: `m[:4]` is the old tuple.
 - Decisions, on #33: Zoom JPEG quality fixed at 85 (no new argument), `scale` n/a on X11, a rectangle rounds outward.
+
+## #34 Computer-use action parity (0.7.0.dev46)
+
+- Click triple/down/up/modifiers, Scroll modifiers, Shortcut repeat, HoldKey, CursorPosition, Wait cap + no lock, WaitFor. Tests: `tests/test_input_actions.py`.
+- RED→GREEN: `test_ocr_of_another_monitor_grabs_from_all_screens` (ff49259 → 5c206d7), `test_an_x_command_survives_a_key_popped_while_the_environment_is_copied` (45a2138 → 243161c).
+- Decisions: `ToolCategory.WAIT` of its own; WaitFor(text=) reports the monitor and the OCR line (no word boxes); `max_width` added to WaitFor; `left` on Windows is the physical button everywhere; an unknown Click action now raises.
+- xdotool exits 0 on an unknown key name: `_key_command` reads stderr. pyautogui sets no macOS click state: double and triple are Quartz.
