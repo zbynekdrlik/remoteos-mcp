@@ -40,7 +40,7 @@ paths:
   its module-level `EventSource` name: mcp 2.2 (constraints.txt, what the installers ship) as
   `EventSource(response)`, mcp 2.3 (what CI's unconstrained `pip install -e .[test]` resolves) with
   `max_event_size=self.max_sse_event_size`, which fastmcp 4.1.2 leaves at 1 MiB. So
-  `_allow_large_replies()` swaps that name for a subclass that IGNORES the passed value and always
+  `mcp_sse.allow_large_replies()` (also the fleet server's) swaps that name for a subclass that IGNORES the passed value and always
   uses `MAX_REPLY_EVENT_BYTES` (256 MiB) — a first version that only changed the DEFAULT passed
   locally (2.2) and failed in CI (2.3). Run `test_cli_call` against both before touching it. A
   process-local patch, idempotent, and an SDK

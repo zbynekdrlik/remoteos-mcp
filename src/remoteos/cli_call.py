@@ -50,6 +50,7 @@ import click
 
 from remoteos import __version__
 from remoteos.gateway.registry import MachineSourceError, authorization_header, is_http_url, read_json_file
+from remoteos.mcp_sse import allow_large_replies
 from remoteos.taskmanager import declared_runtime
 
 log = logging.getLogger("remoteos.cli_call")
@@ -78,10 +79,6 @@ CONNECT_TIMEOUT_S = 30.0
 # One FileUpload call of a put: 2.5 MB is 3.34 MB of base64, under a machine's 4 MiB per request.
 PUT_CHUNK_BYTES = 2_500_000
 PUT_SUFFIX = ".part"
-# One reply is ONE server-sent event. httpx2's EventSource refuses an event over 1 MiB by default,
-# which a FileDownload of ~780 KB or a Shell printing 1 MB already exceeds. The largest legitimate
-# reply is a FileDownload of a big file (its base64), so the CLI allows this much.
-MAX_REPLY_EVENT_BYTES = 256 * 1024 * 1024
 # Libraries whose loggers the CLI silences: their DEBUG lines carry tool arguments and replies,
 # and any line they print would land in the remote command's stderr stream.
 _LIBRARY_LOGGERS = ("fastmcp", "mcp", "httpx2", "httpcore2")
@@ -331,34 +328,11 @@ def _display_url(url: str) -> str:
 
 
 def _allow_large_replies() -> None:
-    """Lift the SDK's 1 MiB per-event limit for this process (see ``MAX_REPLY_EVENT_BYTES``).
-
-    ``mcp.client.streamable_http`` reads a POST reply with its module-level name ``EventSource``:
-    mcp 2.2 as ``EventSource(response)`` (httpx2's 1 MiB default, no option), mcp 2.3 as
-    ``EventSource(response, max_event_size=self.max_sse_event_size)`` (1 MiB again: fastmcp 4.1.2
-    never passes ``max_sse_event_size`` to ``streamable_http_client``). The CLI swaps that name for
-    a subclass that always uses ``MAX_REPLY_EVENT_BYTES``, which covers both. Idempotent. An SDK
-    without that name fails loudly here; one that stops using it fails a big reply with the SDK's
-    own "exceeded the 1048576 byte limit" line (and ``test_cli_call``'s large-reply tests).
-    """
-    import httpx2
-    from mcp.client import streamable_http
-
-    current = getattr(streamable_http, "EventSource", None)
-    if current is None or not (isinstance(current, type) and issubclass(current, httpx2.EventSource)):
-        raise CallFailed(
-            EXIT_NO_CALL,
-            "this mcp SDK is incompatible: mcp.client.streamable_http no longer uses httpx2.EventSource "
-            "(replies over 1 MiB could not be received)",
-        )
-    if current is not httpx2.EventSource:
-        return  # already swapped
-
-    class LargeEventSource(httpx2.EventSource):
-        def __init__(self, response, max_event_size: int | None = None) -> None:  # the SDK's value is ignored
-            super().__init__(response, max_event_size=MAX_REPLY_EVENT_BYTES)
-
-    streamable_http.EventSource = LargeEventSource
+    """``mcp_sse.allow_large_replies``, with an SDK that does not fit as a usage failure."""
+    try:
+        allow_large_replies()
+    except RuntimeError as exc:
+        raise CallFailed(EXIT_NO_CALL, str(exc)) from None
 
 
 def _quiet_library_logging() -> None:

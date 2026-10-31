@@ -14,13 +14,21 @@ file lives under ``tmp_path``: the real ``~/.config/remoteos-gateway`` and
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import uvicorn
+from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.utilities.types import Image
+from starlette.responses import JSONResponse
 
 SRC_DIR = str(Path(__file__).resolve().parents[1] / "src")  # this checkout's src/, not whatever is installed
 
@@ -265,3 +273,111 @@ def remote_calls(log: Path) -> list[dict]:
     if not log.exists():
         return []
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+# -- real servers in this process: a machine and the gateway, both on real sockets -----------
+
+
+class LoopbackServer:
+    """A uvicorn server for *app* on a free 127.0.0.1 port, in a daemon thread. In this process, so
+    caplog sees its log lines, and ``stop()`` can drop it mid-call like a box that dies."""
+
+    def __init__(self, app) -> None:
+        self.port = free_port()
+        self._server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning"))
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def start(self) -> None:
+        self._thread.start()
+        deadline = time.monotonic() + 15
+        while not self._server.started:
+            if time.monotonic() > deadline:
+                raise TimeoutError("the loopback server did not start")
+            time.sleep(0.01)
+
+    def stop(self, *, force: bool = False) -> None:
+        self._server.force_exit = force
+        self._server.should_exit = True
+        self._thread.join(timeout=15)
+
+    def __enter__(self) -> LoopbackServer:
+        self.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop(force=True)
+
+
+PIXEL_PNG = base64.b64decode(  # a real 1x1 PNG
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+class RealMachine(LoopbackServer):
+    """A real FastMCP server behind the machines' bearer check, with the shapes a box returns:
+    text, image + text, a tool failure, a box that dies mid-answer. ``/health`` answers like remoteos."""
+
+    def __init__(self, key: str, *, os_name: str = "Linux test", version: str = "9.9.9", health: bool = True) -> None:
+        server = FastMCP("fake-box")
+        self.received: list[dict] = []
+        self.key = key
+        self.die_at_tool_answer = False  # drop the connection after the headers of a tools/call
+
+        @server.tool(name="Echo")
+        def echo(text: str) -> str:
+            """Echo the text."""
+            self.received.append({"text": text})
+            return f"echo: {text}"
+
+        @server.tool(name="Snap")
+        def snap() -> list:
+            """Text and an image."""
+            return ["a caption", Image(data=PIXEL_PNG, format="png")]
+
+        @server.tool(name="Blob")
+        def blob(size: int) -> str:
+            """A reply of *size* characters."""
+            return "x" * size
+
+        @server.tool(name="Boom")
+        def boom() -> str:
+            """Always fails."""
+            raise ToolError("box says no")
+
+        if health:
+
+            @server.custom_route("/health", methods=["GET"])
+            async def health_route(request):
+                return JSONResponse({"status": "ok", "version": version, "os": os_name, "hostname": "fakebox"})
+
+        app = server.http_app(path="/mcp", stateless_http=True)
+        machine = self
+
+        async def checked(scope, receive, send):
+            headers = dict(scope.get("headers") or [])
+            if (
+                scope["type"] == "http"
+                and scope["path"] == "/mcp"
+                and headers.get(b"authorization") != f"Bearer {machine.key}".encode()
+            ):
+                await JSONResponse({"error": "Unauthorized"}, status_code=401)(scope, receive, send)
+                return
+
+            async def dying_send(message):
+                # uvicorn drops the connection when the app raises after the headers went out.
+                # "content" is in a tool's result only, not in the initialize reply.
+                if message["type"] == "http.response.body" and b'"content"' in message.get("body", b""):
+                    raise ConnectionAbortedError("the box died")
+                await send(message)
+
+            await app(scope, receive, dying_send if machine.die_at_tool_answer else send)
+
+        super().__init__(checked)
+
+    @property
+    def url(self) -> str:
+        return f"{self.base_url}/mcp"
