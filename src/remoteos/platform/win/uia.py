@@ -179,6 +179,16 @@ class Activation:
     point: Optional[tuple[int, int]] = None
 
 
+def _listed(index: int, facts: ElementFacts) -> dict:
+    """``facts`` as the element dict every provider's list uses."""
+    return {
+        "index": index,
+        "class": facts.role,
+        "text": facts.name,
+        "rect": dict(zip(("left", "top", "right", "bottom"), facts.rect)),
+    }
+
+
 class Session:
     """UI Automation on its own thread: every method runs there, through :class:`UiaWorker`."""
 
@@ -220,11 +230,10 @@ class Session:
         expired = lambda: self.abandoned.is_set() or time.monotonic() >= deadline  # noqa: E731
         return root, walk(root, self._facts, self._children, expired=expired, **bounds)
 
-    def tree(self, hwnd: int) -> ElementTree:
-        """Walk ``hwnd``'s window and start a new generation of refs."""
-        root, result = self._walk(hwnd, TREE_WALK_S)
+    def _publish(self, hwnd: int, found: Any) -> list[tuple[str, ElementFacts]]:
+        """Start a new ref tree of the elements in ``found`` that can be proven later: ``(ref, facts)``."""
         entries, kept = [], []
-        for control, facts in result.found:
+        for control, facts in found:
             try:
                 runtime_id = list(control.GetRuntimeId())
             except self.com_error as e:
@@ -233,8 +242,12 @@ class Session:
             if runtime_id:  # without one, nothing could prove later that it is the same element
                 entries.append(_Entry(control, runtime_id, hwnd, one_line(facts.name)))
                 kept.append(facts)
-        refs = self.refs.publish(entries)
-        items = tuple(TreeItem(r, f.role, f.name, f.enabled, f.rect) for r, f in zip(refs, kept))
+        return list(zip(self.refs.publish(entries), kept))
+
+    def tree(self, hwnd: int) -> ElementTree:
+        """Walk ``hwnd``'s window and start a new generation of refs."""
+        root, result = self._walk(hwnd, TREE_WALK_S)
+        items = tuple(TreeItem(r, f.role, f.name, f.enabled, f.rect) for r, f in self._publish(hwnd, result.found))
         try:
             title = one_line(root.Name or "")
         except self.com_error:
@@ -244,15 +257,14 @@ class Session:
     def elements(self, hwnd: int, limit: int) -> list[dict]:
         """Snapshot's list: publishes no refs, so reading it ends none (a timeout ends them, as any)."""
         _, result = self._walk(hwnd, SNAPSHOT_WALK_S, limit=limit)
-        return [
-            {
-                "index": index,
-                "class": facts.role,
-                "text": facts.name,
-                "rect": dict(zip(("left", "top", "right", "bottom"), facts.rect)),
-            }
-            for index, (_, facts) in enumerate(result.found, start=1)
-        ]
+        return [_listed(index, facts) for index, (_, facts) in enumerate(result.found, start=1)]
+
+    def marked(self, hwnd: int, limit: int) -> tuple[list[dict], str]:
+        """AnnotatedSnapshot's list (#36) and why it is cut: refs in a new tree, so a mark can be acted on."""
+        _, result = self._walk(hwnd, SNAPSHOT_WALK_S, limit=limit)
+        refs = {id(facts): ref for ref, facts in self._publish(hwnd, result.found)}
+        listed = [(index, facts) for index, (_, facts) in enumerate(result.found, start=1)]
+        return [{**_listed(index, facts), "ref": refs.get(id(facts))} for index, facts in listed], result.truncated
 
     def _live(self, ref: str) -> _Entry:
         """The entry behind ``ref``, proven to be that same element, still there and enabled."""
@@ -397,6 +409,12 @@ def read_elements(hwnd: int, limit: int) -> list[dict]:
     """Up to ``limit`` elements of window ``hwnd`` for Snapshot. Existing refs stay valid."""
     needs = SNAPSHOT_WALK_S + WALK_MARGIN_S
     return _worker.call(lambda session: session.elements(hwnd, limit), SNAPSHOT_TIMEOUT_S, needs=needs)
+
+
+def read_marked(hwnd: int, limit: int) -> tuple[list[dict], str]:
+    """AnnotatedSnapshot's elements, each with a ref: a new tree, on Snapshot's short budget (#36)."""
+    needs = SNAPSHOT_WALK_S + WALK_MARGIN_S
+    return _worker.call(lambda session: session.marked(hwnd, limit), SNAPSHOT_TIMEOUT_S, needs=needs)
 
 
 def _after_timeout(ref: str, what: str) -> RuntimeError:

@@ -131,12 +131,12 @@ def test_event_log_count_is_a_number_in_the_script(monkeypatch, windows_child, w
 # ---------------------------------------------------------------------------
 
 
-def _recording_popen(monkeypatch) -> list[tuple[list[str], dict]]:
+def _recording_popen(monkeypatch, stdout: str = "") -> list[tuple[list[str], dict]]:
     calls: list[tuple[list[str], dict]] = []
 
     def _run(cmd, **kwargs):
         calls.append((list(cmd), kwargs))
-        return run_result(kwargs)
+        return run_result(kwargs, stdout=stdout)
 
     monkeypatch.setattr("subprocess.Popen", popen_answered_by(_run))
     return calls
@@ -192,8 +192,8 @@ def test_windows_ocr_path_is_a_single_quoted_literal(monkeypatch, windows_python
     monkeypatch.setattr(tempfile, "tempdir", str(folder))
     blank = Image.new("RGB", (8, 8))
     monkeypatch.setattr(ocr, "ImageGrab", types.SimpleNamespace(grab=lambda bbox=None, all_screens=False: blank))
-    calls = _recording_popen(monkeypatch)
-    assert ocr.ocr_windows_builtin() == ""
+    calls = _recording_popen(monkeypatch, stdout='{"language": "en-US", "missing": [], "text": "", "words": []}')
+    assert ocr.ocr_windows_builtin().text == ""
     [(argv, _)] = calls
     [line] = [x for x in argv[-1].splitlines() if x.startswith("$path = ")]
     assert line.startswith(f"$path = '{tmp_path}/it''s $(x)/")

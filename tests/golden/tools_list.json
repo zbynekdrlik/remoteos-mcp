@@ -772,7 +772,7 @@
    "readOnlyHint": true,
    "title": "ElementTree"
   },
-  "description": "List a window's interactive UI elements from the OS accessibility tree, each with a ref.\n\nUnlike a screenshot this sees real controls: buttons, fields and links in browsers\nand in Electron, WPF and UWP apps too, each with its role, name, state and bounds.\nOne line per element: [ref] role \"name\" enabled|disabled (WxH at X,Y). Bounds are\nIMAGE pixels of the Snapshot frame (monitor, max_width). Pass a ref to ClickElement\nor TypeElement instead of guessing pixels. Refs belong to the latest tree only: a\nnew ElementTree ends them. At most 300 elements are listed, and the reply says when\nthe list is incomplete. Windows only for now.",
+  "description": "List a window's interactive UI elements from the OS accessibility tree, each with a ref.\n\nUnlike a screenshot this sees real controls: buttons, fields and links in browsers\nand in Electron, WPF and UWP apps too, each with its role, name, state and bounds.\nOne line per element: [ref] role \"name\" enabled|disabled (WxH at X,Y). Bounds are\nIMAGE pixels of the Snapshot frame (monitor, max_width). Pass a ref to ClickElement\nor TypeElement instead of guessing pixels. Refs belong to the latest tree only: a\nnew ElementTree or AnnotatedSnapshot ends them. At most 300 elements are listed, and the reply says when\nthe list is incomplete. Windows only for now.",
   "execution": null,
   "icons": null,
   "inputSchema": {
@@ -824,7 +824,7 @@
    "readOnlyHint": null,
    "title": "ClickElement"
   },
-  "description": "Activate an element from the latest ElementTree, by its ref.\n\nUses the element's own Invoke action, which needs no mouse. An element without one\ngets a left click at its centre, unless something else is on top of it there. A ref of\nan older tree, or an element that is gone or disabled, is an error, never a click elsewhere.",
+  "description": "Activate an element from the latest ElementTree or AnnotatedSnapshot, by its ref.\n\nUses the element's own Invoke action, which needs no mouse. An element without one\ngets a left click at its centre, unless something else is on top of it there. A ref of\nan older tree, or an element that is gone or disabled, is an error, never a click elsewhere.",
   "execution": null,
   "icons": null,
   "inputSchema": {
@@ -868,7 +868,7 @@
    "readOnlyHint": null,
    "title": "TypeElement"
   },
-  "description": "Enter text in an element from the latest ElementTree, by its ref.\n\nAn element with a settable value (most text fields) gets ``text`` as its whole new\nvalue, replacing what was there, with no keystrokes. Any other element gets the\nkeyboard focus and ``text`` is typed at its caret, as Type does; the reply says which\none happened. A read-only element, or one that will not take the focus, is an error\nand nothing is typed. A ref of an older tree, or an element that is gone or disabled,\nis an error too.",
+  "description": "Enter text in an element from the latest ElementTree or AnnotatedSnapshot, by its ref.\n\nAn element with a settable value (most text fields) gets ``text`` as its whole new\nvalue, replacing what was there, with no keystrokes. Any other element gets the\nkeyboard focus and ``text`` is typed at its caret, as Type does; the reply says which\none happened. A read-only element, or one that will not take the focus, is an error\nand nothing is typed. A ref of an older tree, or an element that is gone or disabled,\nis an error too.",
   "execution": null,
   "icons": null,
   "inputSchema": {
@@ -2557,7 +2557,7 @@
    "readOnlyHint": true,
    "title": "OCR"
   },
-  "description": "Extract text from screen using OCR. Captures a region or the full screen.\n\nUses pytesseract if available, falls back to platform-specific OCR engine.\n\nThe region is in SCREEN coordinates (physical pixels on Windows/Linux, points\non macOS) \u2014 NOT Snapshot image pixels.",
+  "description": "Extract text from screen using OCR. Captures a region or the full screen.\n\nUses pytesseract if available, falls back to platform-specific OCR engine. A language\nthat is not installed is left out and the reply says so.\n\nThe region is in SCREEN coordinates (physical pixels on Windows/Linux, points\non macOS) \u2014 NOT Snapshot image pixels.",
   "execution": null,
   "icons": null,
   "inputSchema": {
@@ -2569,8 +2569,8 @@
      "type": "integer"
     },
     "lang": {
-     "default": "eng",
-     "description": "OCR language for pytesseract (default 'eng').",
+     "default": "slk+eng",
+     "description": "OCR languages joined by + (default 'slk+eng'). The Windows engine reads with the first one installed.",
      "type": "string"
     },
     "left": {
@@ -2680,15 +2680,15 @@
    "readOnlyHint": true,
    "title": "AnnotatedSnapshot"
   },
-  "description": "Take a screenshot with numbered labels on interactive UI elements.\n\nDraws red rectangles and white numbered labels on each interactive element,\nmaking it easy for AI agents to identify click targets visually. Same frame and\ncoordinate contract as Snapshot: the text starts with the contract line, element\ncenters are IMAGE pixels, and Click / Move / Scroll / Type take them as-is.\n\nUses the platform accessibility tree for the foreground window (UI Automation\non Windows, AT-SPI on Linux X11); returns the plain screenshot with a\nnote when the focused app exposes no elements.",
+  "description": "Take a screenshot with one numbered set of marks: UI elements plus the text OCR read.\n\nFinds click targets in custom-drawn apps too (Ableton, Resolume, JUCE), which show\nlittle to accessibility. Elements of the foreground window (UI Automation on Windows,\nAT-SPI on Linux X11) are red; a line of OCR text (Slovak and English) no element\ncovers is blue. One line per mark: [n] source role \"name\" at (x,y), numbered top-left\nto bottom-right. Same frame and coordinate contract as Snapshot: the text starts with\nthe contract line, the points are IMAGE pixels, and Click / Move / Scroll / Type take\nthem as-is. On Windows an element's line also gives its ref for ClickElement and\nTypeElement; this starts a new ref tree, as ElementTree does. If OCR fails, the\nreply says so and keeps the image and the elements.",
   "execution": null,
   "icons": null,
   "inputSchema": {
    "additionalProperties": false,
    "properties": {
     "max_elements": {
-     "default": 30,
-     "description": "Maximum number of elements to annotate (default 30).",
+     "default": 300,
+     "description": "Maximum number of marks, 1-300 (default 300). The reply says when more were found.",
      "type": "integer"
     },
     "max_width": {

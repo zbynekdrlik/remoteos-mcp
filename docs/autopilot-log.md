@@ -588,3 +588,9 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - ElementTree, ClickElement, TypeElement; `get_interactive_elements` on Windows is UIA now. Tests: `tests/test_element_tree.py`, real package in `tests_windows/test_uia_windows.py`.
 - Decisions: refs are `<tree>.<n>` with a random first tree; a timed-out Invoke never falls through to a click; a fallback click refuses a covered element (`WindowFromPoint` root owner); a read-only value is refused; Snapshot's list publishes no refs.
 - `uiautomation` facts: `_AutomationClient` is a process singleton, `import comtypes` CoInitializes the importing thread, `Logger.Write` prints to stdout. See `.claude/rules/uia.md`.
+
+## #36 Hybrid perception: UIA + OCR marks (0.7.0.dev48)
+
+- `marks.py` (pure merge), `ocr.read_words` on Tesseract CLI / pytesseract / WinRT, `AnnotatedSnapshot` lists one numbered set; default language `slk+eng` with a stated fallback; `tesseract-ocr-slk` in the Linux installer. Tests: `tests/test_marks.py`, `tests/test_ocr_words.py`, `tests_windows/test_ocr_windows.py`.
+- Decisions: words are filtered before joining; elements go in first at the limit; AnnotatedSnapshot publishes a new ref tree (Snapshot still none); `max_elements` default 300; the WinRT script now waits through `AsTask` and answers JSON. See `.claude/rules/marks.md`.
+- A fake hid a real bug: `--psm 11` as one argv item fails on real tesseract; caught by a local run.

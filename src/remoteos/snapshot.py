@@ -4,7 +4,7 @@ The providers capture; this module turns a capture into what the model sees and
 keeps every coordinate it prints in the SAME space as that image (the frame from
 :mod:`remoteos.coords`): fit the capture to the frame, JPEG-encode it, list window
 rects / element centers in image pixels, and draw AnnotatedSnapshot's numbered
-boxes there. No OS calls.
+marks there. No OS calls.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from remoteos.coords import CaptureGeometry, Frame, in_image, screen_to_image
 from remoteos.element_tree import one_line
+from remoteos.marks import ELEMENT, Mark
 
 log = logging.getLogger("remoteos.snapshot")
 
@@ -60,11 +61,6 @@ def _rect_to_image(frame: Frame, left: int, top: int, right: int, bottom: int) -
     x1, y1 = screen_to_image(frame, left, top)
     x2, y2 = screen_to_image(frame, right, bottom)
     return x1, y1, x2, y2
-
-
-def _element_rect(frame: Frame, el: dict) -> tuple[int, int, int, int]:
-    r = el["rect"]
-    return _rect_to_image(frame, r["left"], r["top"], r["right"], r["bottom"])
 
 
 def _element_center(frame: Frame, el: dict) -> tuple[int, int]:
@@ -124,24 +120,33 @@ def _label_font():
     return ImageFont.load_default()
 
 
-def draw_annotations(img: Image.Image, elements: list[dict], frame: Frame, max_elements: int) -> list[str]:
-    """Draw numbered red boxes on ``img`` (in place, image pixels); return the text lines.
+def mark_line(frame: Frame, mark: Mark) -> str:
+    """``[n] source role "name" at (x,y)``, the point in image pixels, as Click takes it (#36)."""
+    left, top, right, bottom = mark.rect
+    cx, cy = screen_to_image(frame, (left + right) // 2, (top + bottom) // 2)
+    ref = f" ref {mark.ref}" if mark.ref else ""
+    marker = "" if in_image(frame, cx, cy) else _OFF_FRAME
+    return f"  [{mark.number}] {mark.source} {one_line(mark.role)} {_quoted(mark.name)}{ref} at ({cx},{cy}){marker}"
 
-    ``elements`` are the providers' shared ``{index, class, text, rect}`` dicts
-    with ``rect`` in screen coordinates; ``img`` must already be fitted to
-    ``frame``.
+
+def draw_marks(img: Image.Image, marks: Iterable[Mark], frame: Frame) -> list[str]:
+    """Draw numbered boxes on ``img`` (in place, image pixels); return the text lines.
+
+    ``img`` must already be fitted to ``frame``. Elements are red, OCR words blue.
     """
     draw = ImageDraw.Draw(img)
     font = _label_font()
     lines: list[str] = []
-    for el in elements[:max_elements]:
-        x1, y1, x2, y2 = _element_rect(frame, el)
-        draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
-        label = str(el["index"])
+    for mark in marks:
+        x1, y1, x2, y2 = _rect_to_image(frame, *mark.rect)
+        color = "red" if mark.source == ELEMENT else "blue"
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+        label = str(mark.number)
         bbox = font.getbbox(label)
         lw = bbox[2] - bbox[0] + 6
         lh = bbox[3] - bbox[1] + 4
-        draw.rectangle([x1, y1 - lh - 2, x1 + lw, y1 - 2], fill="red")
-        draw.text((x1 + 3, y1 - lh - 1), label, fill="white", font=font)
-        lines.append(_element_line(frame, el))
+        top = max(0, y1 - lh - 2)  # a word in the first row of the image keeps its number
+        draw.rectangle([x1, top, x1 + lw, top + lh], fill=color)
+        draw.text((x1 + 3, top + 1), label, fill="white", font=font)
+        lines.append(mark_line(frame, mark))
     return lines
