@@ -4,6 +4,8 @@ Routes:
 
 - ``GET /healthz`` — unauthenticated, ``{"status": "ok", "version": ...}`` only.
 - ``GET|POST|DELETE /{machine}/mcp`` — the MCP streamable-HTTP endpoint of *machine*.
+- ``/fleet/mcp`` — the fleet server (``fleet.py``): every machine this token may use, through the
+  same token, allow-list and kill switch. ``fleet`` is a reserved machine name.
 
 Decision order for ``/{machine}/mcp`` (the design's numbered order, plus two guards):
 
@@ -47,7 +49,8 @@ from starlette.types import Receive, Scope, Send
 
 from remoteos import __version__
 from remoteos.gateway.accesslog import AccessLog
-from remoteos.gateway.registry import LiveConfig, is_valid_machine_name
+from remoteos.gateway.fleet import FLEET_MCP_PATH, FleetEndpoint
+from remoteos.gateway.registry import LiveConfig, Registry, is_valid_machine_name
 
 logger = logging.getLogger("remoteos.gateway")
 
@@ -272,24 +275,61 @@ class Gateway:
         if self.retry_client is not self.client:
             await self.retry_client.aclose()
 
-    async def handle(self, request: Request) -> Response:
-        entry = _Entry(
-            machine=request.path_params["machine"],
-            http_method=request.method,
+    def begin(self, machine: str, http_method: str) -> _Entry:
+        return _Entry(
+            machine=machine,
+            http_method=http_method,
             started=time.monotonic(),
             started_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds"),
         )
+
+    def identify(self, authorization: str | None, registry: Registry) -> str | None:
+        """The consumer an ``Authorization`` header value belongs to."""
+        token = bearer_token(authorization)
+        return registry.authenticate(token) if token else None
+
+    def authenticate(self, request: Request, entry: _Entry, registry: Registry) -> JSONResponse | None:
+        """Step 1: fills in ``entry.consumer``, or returns the 401."""
+        consumer = self.identify(request.headers.get("authorization"), registry)
+        if consumer is None:
+            token = bearer_token(request.headers.get("authorization"))
+            outcome = "denied_unknown_token" if token else "denied_missing_token"
+            return self._deny(entry, 401, outcome, {"error": "Unauthorized"})
+        entry.consumer = consumer
+        return None
+
+    async def read_rpc(self, request: Request, entry: _Entry) -> tuple[bytes, RpcSummary] | JSONResponse:
+        """Step 4: the body and what the log may know of it, or the 413."""
+        body = await _read_body(request)
+        if body is None:
+            return self._deny(
+                entry, 413, "payload_too_large", {"error": f"Payload Too Large (max {MAX_BODY_BYTES} bytes)"}
+            )
+        rpc = summarize_rpc(body)
+        entry.rpc_method, entry.tool = rpc.method, rpc.tool
+        return body, rpc
+
+    def finish(self, entry: _Entry, status: int | None, outcome: str) -> None:
+        entry.status, entry.outcome = status, outcome
+        self._record(entry)
+
+    def record_refusal(self, consumer: str, machine: str, tool: str, status: int, outcome: str) -> None:
+        """A fleet tool refused a machine: the same audit line a refused ``/<machine>/mcp`` gets."""
+        entry = self.begin(machine if is_valid_machine_name(machine) else "<invalid>", "POST")
+        entry.consumer, entry.rpc_method, entry.tool = consumer, "tools/call", tool
+        self.finish(entry, status, outcome)
+
+    async def handle(self, request: Request) -> Response:
+        entry = self.begin(request.path_params["machine"], request.method)
         if not is_valid_machine_name(entry.machine):
             # Unauthenticated input: refused before auth, and only ever logged via %r.
             return self._deny(entry, 404, "denied_bad_machine_name", {"error": "Not Found"})
         registry, machines = self.config.snapshot()
 
-        token = bearer_token(request.headers.get("authorization"))
-        consumer = registry.authenticate(token) if token else None
-        if consumer is None:
-            outcome = "denied_unknown_token" if token else "denied_missing_token"
-            return self._deny(entry, 401, outcome, {"error": "Unauthorized"})
-        entry.consumer = consumer
+        denied = self.authenticate(request, entry, registry)
+        if denied is not None:
+            return denied
+        consumer = entry.consumer
 
         if entry.machine not in registry.consumers[consumer].machines:
             return self._deny(
@@ -298,13 +338,10 @@ class Gateway:
         if entry.machine not in registry.exposed:
             return self._deny(entry, 404, "denied_unexposed", {"error": "Not Found"})
 
-        body = await _read_body(request)
-        if body is None:
-            return self._deny(
-                entry, 413, "payload_too_large", {"error": f"Payload Too Large (max {MAX_BODY_BYTES} bytes)"}
-            )
-        rpc = summarize_rpc(body)
-        entry.rpc_method, entry.tool = rpc.method, rpc.tool
+        read = await self.read_rpc(request, entry)
+        if isinstance(read, JSONResponse):
+            return read
+        body, rpc = read
 
         upstream = machines.get(entry.machine)
         if upstream is None:
@@ -527,6 +564,8 @@ def create_app(
             retry_client=_upstream_client(UPSTREAM_RETRY_LIMITS),
         )
 
+    fleet = FleetEndpoint(gateway)
+
     @asynccontextmanager
     async def lifespan(app: Starlette):
         loop = asyncio.get_running_loop()
@@ -540,7 +579,8 @@ def create_app(
                 logger.warning("SIGHUP reload unavailable (%s) — file-change reload still active", exc)
         logger.info("remoteos-gateway v%s started (SIGHUP reload %s)", __version__, "on" if installed else "off")
         try:
-            yield
+            async with fleet.lifespan():
+                yield
         finally:
             if installed:
                 loop.remove_signal_handler(sighup)
@@ -549,10 +589,12 @@ def create_app(
 
     routes = [
         Route("/healthz", healthz, methods=["GET"]),
+        Route(FLEET_MCP_PATH, fleet),  # before the machine route: "fleet" is no machine name
         Route("/{machine}/mcp", gateway.handle, methods=["GET", "POST", "DELETE"]),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.gateway = gateway
+    app.state.fleet = fleet
     return app
 
 

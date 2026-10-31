@@ -220,6 +220,43 @@ paths:
   - A failed scan or notify is echoed and never counts as a failed project.
   - Real-process test: a shebang script named `claude` has comm `claude`
     (`tests/test_gateway_live_sessions.py`).
+- **Fleet server (`fleet.py`, #51 Phase 2):** `/fleet/mcp`, tools `ListMachines` / `MachineTools` /
+  `Call`, FastMCP mounted by `Route(FLEET_MCP_PATH, FleetEndpoint)` before the machine route.
+  - `FLEET_SERVER` is reserved: `is_valid_machine_name("fleet")` is False, so a key store or
+    manifest with it is refused, and `fleet` is never in an allow-list.
+  - **No second access path:** `Call` / `MachineTools` are a fastmcp `Client` over
+    `httpx2.ASGITransport` to `Gateway.handle`, with the consumer's own `Authorization`. Never
+    give it a client of its own to the machines: that would be a second place for the allow-list,
+    key swap, retry and audit. `_admit` only gives a clear error + an audit line.
+    `FleetEndpoint.__call__` reuses `authenticate` and `read_rpc`, so 401 and 413 are the same.
+  - The token is re-read per tool call (`get_http_request`), so a stateless session never
+    outlives a revocation. Refused machines: "not allowed" for an unknown one too (no probing),
+    `record_refusal` writes the access-log line a fleet 200 would otherwise hide.
+  - `ASGITransport` buffers, and a reply peaks at ~10x its wire size (measured), so `_ReplyBudget`
+    caps one reply (`MAX_REPLY_BYTES`, 20 MB) and all in flight (`MAX_BUFFERED_BYTES`, 32 MB) against
+    `MemoryMax=512M`. FileDownload has no cap of its own. `/<machine>/mcp` still streams.
+    - A reply's bytes stay reserved until the OUTER response has gone out (`_Reservation`, via the
+      ASGI scope): the parsed and re-serialised copies outlive the machine's reply. Releasing when
+      the inner app returned let stalled readers reach 815 MB.
+    - `SEND_TIMEOUT_SECONDS` drops a consumer that stops reading, so it cannot pin the budget.
+    - Simultaneous big replies can all be refused (each holds a part): safe, and "try again" works.
+  - `allow_large_replies` (`mcp_sse.py`, shared with `remoteos-call`) is needed by every in-repo
+    MCP client: the SDK refuses an SSE event over 1 MiB, and its error reads like a dying box
+    ("SSE stream ended without a response"). A test must use a REAL reply over 1 MiB.
+  - `Call` uses `session.send_request`, never `call_tool_mcp`: the SDK validates by a `tools/list`
+    AFTER the tool ran, so a box failing that turns a finished call into an error and a retry.
+  - **`--log-level debug` prints payloads:** `mcp`, `fastmcp`, `httpcore2` and `sse_starlette` log
+    whole messages (arguments, results, for the plain proxy too). `_PAYLOAD_LOGGERS` holds them at
+    INFO; a new dependency that logs bodies goes there, the sentinel test catches it.
+  - `ListMachines` reads the public `/health` only (no key) in parallel, each cut off at
+    `PROBE_BOUND_SECONDS`. Any HTTP answer is `reachable`; a stale key shows on `Call`.
+  - sync: `fleet` joins `desired` in gateway mode only, so a direct project gets none and `owned()`
+    removes it when a project turns direct. An entry named `fleet` stays only with a url not
+    ending in `/fleet/mcp`: the shape alone decides, because an old-url entry's token may be dead.
+  - Tests: `RealMachine` + `LoopbackServer` (`fleet_harness.py`) are real FastMCP / uvicorn on
+    loopback, in-process so caplog sees them. uvicorn keeps a connection open through
+    `force_exit`, so a dying box is simulated by raising after the headers (`die_at_tool_answer`).
+    Match `"content"`: `"result"` is in the initialize reply too, and the box would die there.
 - **Dry run = one choke point:** `sync._Saver(dry_run=True).commit()` never writes. Registry
   edits of a dry run (narrowing, withdrawing, `--prune`) happen in memory only. Never add a
   second save path around it.
@@ -274,3 +311,5 @@ paths:
   symlink stays one), and writes only when the result parses to the same manifest plus that machine.
 - Tests: the child of the fake `secret exec` is a real process, so a monkeypatch does not reach
   `enroll-finish`: machines on 127.0.0.1 go through `--url`.
+
+- **Enroll a box behind the sites' NAT with `--url`.** A box posts the addresses it sees: strih-pp is 10.77.8.202 on its own NIC and 10.76.8.202 from dev1, so the posted address is unreachable and the finish fails (live, #26). The registration stays in the vault for an hour: rerun the printed finish command with `--url http://<name>.lan:8092/mcp`. A name must start with `win-`, `linux-` or `mac-`.
