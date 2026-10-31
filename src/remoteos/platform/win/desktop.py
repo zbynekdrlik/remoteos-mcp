@@ -108,6 +108,11 @@ class WindowInfo:
         return self.rect[3] - self.rect[1]
 
 
+def list_windows() -> list[WindowInfo]:
+    """The window list for a caller that polls: :func:`enumerate_windows` already raises on a failure."""
+    return enumerate_windows()
+
+
 def enumerate_windows() -> list[WindowInfo]:
     """List all visible top-level windows."""
     if not HAS_WIN32:
@@ -334,7 +339,6 @@ class _INPUT(ctypes.Structure):
 # Mouse buttons, held keys, the cursor (#34)
 # ---------------------------------------------------------------------------
 
-_SM_SWAPBUTTON = 23
 _BUTTON_EVENTS = {"left": (0x0002, 0x0004), "right": (0x0008, 0x0010), "middle": (0x0020, 0x0040)}  # down, up
 
 
@@ -346,15 +350,11 @@ def _send_one(event: _INPUT, what: str) -> None:
 
 
 def _mouse_button(x: int, y: int, button: str, pressed: bool) -> None:
-    """Press or release ``button`` at screen point (x, y), honouring swapped mouse buttons.
+    """Press or release ``button`` at screen point (x, y).
 
-    SendInput speaks of physical buttons: with SwapMouseButton on, "left" (the logical one
-    pyautogui's click means) is the physical right one.
+    The physical button, as pyautogui's click: with SwapMouseButton on, both mean the same one.
     """
-    user32 = ctypes.windll.user32
-    if button != "middle" and user32.GetSystemMetrics(_SM_SWAPBUTTON):
-        button = "right" if button == "left" else "left"
-    if not user32.SetCursorPos(int(x), int(y)):
+    if not ctypes.windll.user32.SetCursorPos(int(x), int(y)):
         raise RuntimeError(f"SetCursorPos({x},{y}) failed — no interactive desktop (locked or disconnected session?)")
     event = _INPUT(type=_INPUT_MOUSE)
     event.u.mi.dwFlags = _BUTTON_EVENTS[button][0 if pressed else 1]
@@ -409,15 +409,21 @@ _NAMED_KEYS = {
 
 
 def _virtual_key(key: str) -> tuple[int, bool]:
-    if key in _NAMED_KEYS:
-        return _NAMED_KEYS[key]
-    if len(key) == 1 and key.isascii() and key.isalnum():
-        return ord(key.upper()), False  # VK_A..VK_Z and VK_0..VK_9 are their ASCII codes
+    name = canonical(key).lower()
+    if name in _NAMED_KEYS:
+        return _NAMED_KEYS[name]
+    if len(name) == 1 and name.isascii() and name.isalnum():
+        return ord(name.upper()), False  # VK_A..VK_Z and VK_0..VK_9 are their ASCII codes
     raise ValueError(f"Unknown key: {key}")
 
 
+def check_key(key: str) -> None:
+    """Raise when ``key`` is not one :func:`key_down` can press."""
+    _virtual_key(key)
+
+
 def _send_key(key: str, up: int) -> None:
-    vk, extended = _virtual_key(canonical(key))
+    vk, extended = _virtual_key(key)
     event = _INPUT(type=_INPUT_KEYBOARD)
     event.u.ki.wVk = vk
     event.u.ki.dwFlags = up | (_KEYEVENTF_EXTENDEDKEY if extended else 0)

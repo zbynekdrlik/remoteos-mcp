@@ -41,6 +41,10 @@ class _Desktop:
         self.log: list[tuple[str, str]] = []
         self.refuse_down, self.refuse_up = refuse_down, refuse_up
 
+    def check_key(self, key):
+        if key == "unknown":
+            raise ValueError("Unknown key")
+
     def key_down(self, key):
         if key in self.refuse_down:
             raise RuntimeError("no down")
@@ -80,6 +84,14 @@ def test_held_keys_releases_what_was_pressed_when_a_later_press_fails():
     assert desktop.log == [("down", "ctrl"), ("up", "ctrl")]
 
 
+def test_held_keys_with_an_unknown_key_presses_nothing():
+    desktop = _Desktop()
+    with pytest.raises(ValueError, match="Unknown key"):
+        with input_keys.held_keys(["ctrl", "unknown"], desktop):
+            pytest.fail("the body must not run")
+    assert desktop.log == []
+
+
 def test_held_keys_a_failed_release_still_releases_the_rest_and_raises():
     desktop = _Desktop(refuse_up=("shift",))
     with pytest.raises(RuntimeError, match="could not release shift"):
@@ -97,7 +109,15 @@ def test_held_keys_a_failed_release_never_hides_the_body_failure():
 
 @pytest.mark.parametrize(
     ("given", "keys"),
-    [("", []), (" ", []), ("ctrl+shift", ["ctrl", "shift"]), ("Control + WIN", ["ctrl", "super"]), ("cmd", ["super"])],
+    [
+        ("", []),
+        (" ", []),
+        ("ctrl+shift", ["ctrl", "shift"]),
+        ("Control + WIN", ["ctrl", "super"]),
+        ("CTRL", ["ctrl"]),
+        ("cmd", ["super"]),
+        ("Page_Up", ["Page_Up"]),  # an X keysym keeps its case
+    ],
 )
 def test_split_keys(given, keys):
     assert input_keys.split_keys(given) == keys
@@ -175,6 +195,32 @@ def test_linux_hold_key_holds_for_the_time_and_releases(fake_x11, monkeypatch):
     assert server.HoldKey("shift+F5", seconds=2) == "Held shift+F5 for 2s"
     assert slept == [(2, [["keydown", "shift"], ["keydown", "F5"]])]
     assert _xdotool(fake_x11)[2:] == [["keyup", "F5"], ["keyup", "shift"]]
+
+
+def test_linux_a_key_xdotool_does_not_know_is_an_error(fake_x11, monkeypatch):
+    # xdotool prints "No such key name" and exits 0 (real xdotool 3.20160805)
+    real = linux_session._run_x
+
+    def _ignoring(cmd, **kwargs):
+        reply = real(cmd, **kwargs)
+        if cmd[1:2] == ["keydown"] and cmd[2] == "nosuchkey":
+            reply.stderr = b"(symbol) No such key name 'nosuchkey'. Ignoring it."
+        return reply
+
+    monkeypatch.setattr(linux_session, "_run_x", _ignoring)
+    assert "Unknown key: nosuchkey" in tool_error(lambda: server.HoldKey("ctrl+nosuchkey"))
+    assert _xdotool(fake_x11)[-1] == ["keyup", "ctrl"]
+
+
+def test_linux_hold_key_keeps_a_keysyms_case(fake_x11, monkeypatch):
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    server.HoldKey("Page_Up", seconds=1)
+    assert _xdotool(fake_x11) == [["keydown", "Page_Up"], ["keyup", "Page_Up"]]
+
+
+def test_linux_held_keys_are_not_logged():
+    assert linux_session._loggable(["xdotool", "keydown", "p"]) == ["xdotool", "keydown", "<key>"]
+    assert linux_session._loggable(["sudo", "xdotool", "keyup", "p"]) == ["sudo", "xdotool", "keyup", "<key>"]
 
 
 def test_linux_cursor_position_reports_both_spaces(fake_x11):
@@ -268,13 +314,6 @@ def test_windows_mouse_buttons_are_sendinput_at_the_point(pyautogui_branch, butt
     assert _mouse_flags() == [flag]
 
 
-def test_windows_swapped_mouse_buttons_press_the_physical_other_one(pyautogui_branch, monkeypatch):
-    server_, _ = pyautogui_branch
-    monkeypatch.setitem(provider_geometry._METRICS, 23, 1)
-    server_.Click(640, 228, action="down")
-    assert _mouse_flags() == [0x0008]  # the logical left button is the physical right one
-
-
 def test_windows_mouse_button_on_a_blocked_desktop_is_an_error(pyautogui_branch):
     server_, _ = pyautogui_branch
     ctypes.windll.input.inserted = 0
@@ -311,10 +350,16 @@ def test_windows_hold_key_codes(pyautogui_branch, key, vk, extended):
     assert _key_events() == [(vk, extended), (vk, extended | 2)]
 
 
-def test_windows_unknown_key_sends_nothing(pyautogui_branch):
+def test_windows_unknown_key_in_a_combination_sends_nothing(pyautogui_branch):
     server_, _ = pyautogui_branch
-    assert "Unknown key: ?" in tool_error(lambda: server_.HoldKey("?"))
+    assert "Unknown key: ?" in tool_error(lambda: server_.HoldKey("ctrl+?"))
     assert _sends() == []
+
+
+def test_windows_key_names_are_case_insensitive(pyautogui_branch):
+    server_, _ = pyautogui_branch
+    server_.HoldKey("F5", seconds=1)
+    assert _key_events() == [(0x74, 0), (0x74, 2)]
 
 
 def test_windows_shortcut_repeat(pyautogui_branch):
@@ -349,11 +394,20 @@ def _posted_mouse() -> list[dict]:
     return [event for _, event in _quartz().posted if "mouse" in event]
 
 
-def test_mac_plain_triple_click_stays_pyautogui(mac_tool_layer):
+def test_mac_plain_click_stays_pyautogui(mac_tool_layer):
     server_, fake, *_ = mac_tool_layer
-    server_.Click(720, 450, action="triple", max_width=0, coords="screen")
-    assert fake.tripleClick.calls == [((720, 450), {"button": "left"})]
+    server_.Click(720, 450, coords="screen")
+    assert fake.click.calls == [((720, 450), {"button": "left"})]
     assert _quartz().posted == []
+
+
+@pytest.mark.parametrize(("action", "states"), [("double", [1, 1, 2, 2]), ("triple", [1, 1, 2, 2, 3, 3])])
+def test_mac_plain_double_and_triple_click_count_for_the_app(mac_tool_layer, action, states):
+    # pyautogui sets no kCGMouseEventClickState: the app would see single clicks
+    server_, fake, *_ = mac_tool_layer
+    server_.Click(720, 450, action=action, coords="screen")
+    assert fake.doubleClick.calls == [] and fake.tripleClick.calls == []
+    assert [e.get("field1") for e in _posted_mouse()][1:] == states
 
 
 def test_mac_modified_triple_click_carries_the_flags_and_the_click_count(mac_tool_layer):
@@ -398,10 +452,25 @@ def test_mac_down_move_up_is_a_real_drag(mac_tool_layer, button, code, down, up,
         (5, (10.0, 20.0), code),
         (down, (10.0, 20.0), code),
         (dragged, (30.0, 40.0), code),
-        (5, (30.0, 40.0), code),
+        (dragged, (30.0, 40.0), code),
         (up, (30.0, 40.0), code),
     ]
     assert fake.moveTo.calls == [((50, 60), {"duration": 0.3})]  # released: an ordinary move again
+
+
+def test_mac_up_elsewhere_and_hover_drag_while_a_button_is_held(mac_tool_layer):
+    server_, fake, *_ = mac_tool_layer
+    server_.Click(10, 20, action="down", coords="screen")
+    server_.Click(30, 40, action="hover", coords="screen")
+    server_.Click(50, 60, action="up", coords="screen")
+    assert [e["mouse"][0] for e in _posted_mouse()] == [5, 1, 6, 6, 2]
+    assert fake.moveTo.calls == []
+
+
+def test_mac_unknown_key_in_a_combination_posts_nothing(mac_tool_layer):
+    server_, *_ = mac_tool_layer
+    assert "Unknown key: ?" in tool_error(lambda: server_.HoldKey("ctrl+?"))
+    assert _quartz().posted == []
 
 
 def test_mac_without_posting_permission_nothing_is_held_or_pressed(mac_tool_layer):
@@ -511,6 +580,24 @@ def test_wait_for_window_reports_its_rect_in_image_pixels(screen):
     out = server.WaitFor(window="edit", timeout=0)
     assert out.endswith("window (image pixels):\n  [67108874] Editor (400x300 at 50,25)")
     assert screen.regions == []  # no OCR for a window
+
+
+def test_wait_for_a_failing_window_list_is_an_error_at_once(screen, monkeypatch):
+    def _no_wmctrl(cmd, **kwargs):
+        if cmd[:1] == ["wmctrl"]:
+            raise RuntimeError("wmctrl not installed")
+        return real(cmd, **kwargs)
+
+    real = linux_session._run_x
+    monkeypatch.setattr(linux_session, "_run_x", _no_wmctrl)
+    assert "wmctrl not installed" in tool_error(lambda: server.WaitFor(window="x", timeout=60))
+    assert screen.sleeps == []
+
+
+@pytest.mark.parametrize("monitor", [-1, 9])
+def test_wait_for_a_monitor_that_does_not_exist_fails_before_waiting(screen, monitor):
+    assert tool_error(lambda: server.WaitFor(window="edit", monitor=monitor)).startswith("WaitFor error:")
+    assert screen.sleeps == []
 
 
 def test_wait_for_window_timeout(screen):

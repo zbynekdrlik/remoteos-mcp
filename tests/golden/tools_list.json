@@ -626,7 +626,7 @@
    "additionalProperties": false,
    "properties": {
     "keys": {
-     "description": "One key or several joined by '+', e.g. 'w', 'shift+w', 'ctrl+alt'.",
+     "description": "One key or several joined by '+', e.g. 'w', 'shift+w', 'ctrl+alt': letters,\ndigits, F-keys and named keys (space, enter, tab, esc, up, pageup, ...).",
      "type": "string"
     },
     "seconds": {

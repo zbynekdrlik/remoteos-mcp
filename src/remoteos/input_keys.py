@@ -35,9 +35,10 @@ _ALIASES = {
 
 
 def canonical(key: str) -> str:
-    """The one name of ``key`` that every provider's key table is keyed on."""
-    name = key.strip().lower()
-    return _ALIASES.get(name, name)
+    """The one name of a modifier or an alias. Any other key keeps its case: X keysyms are case-sensitive."""
+    name = key.strip()
+    lower = name.lower()
+    return _ALIASES.get(lower, lower if lower in MODIFIERS else name)
 
 
 def split_keys(keys: str) -> list[str]:
@@ -101,6 +102,8 @@ def held_keys(keys: list[str], desktop) -> Iterator[None]:
     After a failed body the body's error stays the one reported, the release failure is logged.
     """
     pressed: list[str] = []
+    for key in keys:
+        desktop.check_key(key)  # a combination with an unknown key presses nothing
     try:
         for key in keys:
             desktop.key_down(key)

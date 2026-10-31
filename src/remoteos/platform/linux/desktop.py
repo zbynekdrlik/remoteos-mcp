@@ -43,6 +43,7 @@ from remoteos.platform.linux.windows import (  # noqa: F401
     focus_window,
     get_interactive_elements,
     launch_app,
+    list_windows,
     minimize_all,
     resize_window,
 )
@@ -56,6 +57,7 @@ from remoteos.platform.linux.x11_capture import (  # noqa: F401
     record_screen,
 )
 from remoteos.platform.linux.x11_input import (  # noqa: F401
+    check_key,
     click,
     cursor_position,
     get_clipboard,

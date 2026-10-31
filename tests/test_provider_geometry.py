@@ -33,7 +33,7 @@ from remoteos.coords import image_to_screen
 # ---------------------------------------------------------------------------
 
 # A 1920x1080 monitor LEFT of a 2560x1600 primary → virtual screen (-1920,0) 4480x1600.
-_METRICS = {23: 0, 76: -1920, 77: 0, 78: 4480, 79: 1600}  # 23: SM_SWAPBUTTON
+_METRICS = {76: -1920, 77: 0, 78: 4480, 79: 1600}
 _MONITOR_RECTS = [(0, 0, 2560, 1600), (-1920, 0, 0, 1080)]
 
 

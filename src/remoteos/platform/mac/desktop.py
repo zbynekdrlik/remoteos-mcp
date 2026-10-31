@@ -95,6 +95,11 @@ class WindowInfo:
         return self.rect[3] - self.rect[1]
 
 
+def list_windows() -> list[WindowInfo]:
+    """The window list for a caller that polls: :func:`enumerate_windows` already raises on a failure."""
+    return enumerate_windows()
+
+
 def enumerate_windows() -> list[WindowInfo]:
     """List all visible on-screen windows."""
     if not HAS_QUARTZ:
@@ -337,13 +342,23 @@ def _apply_held_flags(event) -> None:
         Quartz.CGEventSetFlags(event, flags)
 
 
+def _key_name(key: str) -> str:
+    name = canonical(key).lower()
+    if name not in _KEY_CODES:
+        raise ValueError(f"Unknown key: {key}")
+    return name
+
+
+def check_key(key: str) -> None:
+    """Raise when ``key`` is not one :func:`key_down` can press."""
+    _key_name(key)
+
+
 def _post_key(key: str, down: bool) -> None:
     if not HAS_QUARTZ:
         raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
     _require_post_event_access()
-    name = canonical(key)
-    if name not in _KEY_CODES:
-        raise ValueError(f"Unknown key: {key}")
+    name = _key_name(key)
     event = _created(Quartz.CGEventCreateKeyboardEvent(None, _KEY_CODES[name], down), "CGEventCreateKeyboardEvent")
     if down:
         _held.append(name)
@@ -374,15 +389,19 @@ def _mouse_event(kind: int, point: tuple[float, float], button: int, clicks: int
 def _post_mouse(x: int, y: int, button: str, presses: list[bool]) -> None:
     """Move to (x, y), then one press or release per ``presses`` entry: all built, then all posted.
 
-    Quartz, not pyautogui: pyautogui's events carry no modifier flags. The click state
-    counts the presses, so ``[True, False] * 3`` is a triple click.
+    Quartz, not pyautogui: pyautogui's events carry neither modifier flags nor a click
+    state. The click state counts the presses, so ``[True, False] * 3`` is a triple click.
+    The move to (x, y) is a drag while a button is held: a plain move is none.
     """
     if not HAS_QUARTZ:
         raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
     _require_post_event_access()
     point = (float(x), float(y))
     down, up, _dragged, code = _BUTTONS[button]
-    events = [_mouse_event(_MOUSE_MOVED, point, code)]
+    if _held_button is None:
+        events = [_mouse_event(_MOUSE_MOVED, point, code)]
+    else:
+        events = [_mouse_event(_BUTTONS[_held_button][2], point, _BUTTONS[_held_button][3])]
     count = 0
     for pressed in presses:
         count += pressed
@@ -394,7 +413,8 @@ def _post_mouse(x: int, y: int, button: str, presses: list[bool]) -> None:
 def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
     """Mouse click / double / triple / hover / button down / button up at screen coordinates (points).
 
-    A plain click stays pyautogui's. Under a held modifier and for a button down or up it is Quartz.
+    A plain single click stays pyautogui's. The rest is Quartz: a double or triple click needs the
+    click state, or apps see single clicks, and a modifier needs the flags.
     """
     global _held_button
     if action == "down":
@@ -406,15 +426,12 @@ def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
         _held_button = None
         return f"Released {button} at ({x},{y})"
     if action == "hover":
-        pyautogui.moveTo(x, y)
+        if not move_held(x, y):
+            pyautogui.moveTo(x, y)
         return f"Hovered at ({x},{y})"
     count, word = _CLICKS[action]
-    if _held_flags():
+    if count > 1 or _held_flags():
         _post_mouse(x, y, button, [True, False] * count)
-    elif action == "double":
-        pyautogui.doubleClick(x, y, button=button)
-    elif action == "triple":
-        pyautogui.tripleClick(x, y, button=button)
     else:
         pyautogui.click(x, y, button=button)
     return f"{word} {button} at ({x},{y})"

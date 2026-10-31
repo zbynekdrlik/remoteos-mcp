@@ -28,6 +28,7 @@ if _sys.platform != "linux":
     import pyautogui  # remoteos.app imported it first: DPI awareness set, FAILSAFE and PAUSE configured
 
 from remoteos.coords import (
+    Frame,
     check_space,
     contract_line,
     frame_for,
@@ -487,7 +488,8 @@ def HoldKey(keys: str, seconds: float = 1.0) -> str:
     """Hold keys down for a time, then release them. They are released also on a failure.
 
     Args:
-        keys: One key or several joined by '+', e.g. 'w', 'shift+w', 'ctrl+alt'.
+        keys: One key or several joined by '+', e.g. 'w', 'shift+w', 'ctrl+alt': letters,
+            digits, F-keys and named keys (space, enter, tab, esc, up, pageup, ...).
         seconds: How long to hold, capped at 30.
     """
     names = split_keys(keys)
@@ -538,13 +540,13 @@ def _find_text(needle: str, monitor: int) -> str | None:
     return f"text on monitor {monitor}" + (f", line: {lines[0]}" if lines else "")
 
 
-def _find_window(needle: str, monitor: int, max_width: int) -> str | None:
-    """A reply when a window title contains ``needle``, else None."""
+def _find_window(needle: str, frame: Frame) -> str | None:
+    """A reply when a window title contains ``needle``, else None. A failing window list raises."""
     wanted = needle.strip().casefold()
-    hits = [w for w in get_desktop().enumerate_windows() if wanted in w.title.casefold()]
+    hits = [w for w in get_desktop().list_windows() if wanted in w.title.casefold()]
     if not hits:
         return None
-    return "\n".join(["window (image pixels):", *window_lines(_current_frame(monitor, max_width), hits)])
+    return "\n".join(["window (image pixels):", *window_lines(frame, hits)])
 
 
 @mcp.tool(
@@ -580,10 +582,13 @@ def WaitFor(
         raise ValueError("Give exactly one of text and window")
     if not 0 <= timeout <= _MAX_WAIT_S:
         raise ValueError(f"timeout must be 0..{_MAX_WAIT_S:.0f}, got {timeout}")
+    if monitor < 0:
+        raise ValueError(f"No monitor {monitor}")
     _desktop_preflight("capture" if by_text else "windows")
+    frame = _current_frame(monitor, max_width)  # a monitor that does not exist fails now, not after the wait
     started = time.monotonic()
     while True:
-        found = _find_text(text, monitor) if by_text else _find_window(window, monitor, max_width)
+        found = _find_text(text, monitor) if by_text else _find_window(window, frame)
         elapsed = time.monotonic() - started
         if found:
             log.debug("WaitFor matched after %.1fs", elapsed)

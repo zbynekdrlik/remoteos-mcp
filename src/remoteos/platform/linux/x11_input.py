@@ -167,18 +167,27 @@ def _map_key(part: str) -> str:
     return _KEY_ALIASES.get(p, part.strip())
 
 
-def key_down(key: str) -> None:
-    """Press ``key`` and leave it down: xdotool's XTEST press outlives the xdotool process (#34)."""
+def check_key(key: str) -> None:
+    """Only xdotool knows the keysyms, and it says so when it runs: :func:`_key_command` raises then."""
+
+
+def _key_command(args: list[str], keys: str) -> None:
+    """Run a key command. xdotool ignores an unknown key name and still exits 0, so its stderr decides."""
     if get_session().mode != "x11":
         raise DesktopUnavailable(_unavailable())
-    _xdotool(["keydown", _map_key(key)])
+    result = session._run_x(["xdotool", *args])
+    if b"No such key name" in (result.stderr or b""):
+        raise ValueError(f"Unknown key: {keys}")
+
+
+def key_down(key: str) -> None:
+    """Press ``key`` and leave it down: xdotool's XTEST press outlives the xdotool process (#34)."""
+    _key_command(["keydown", _map_key(key)], key)
 
 
 def key_up(key: str) -> None:
     """Release a key pressed by :func:`key_down`."""
-    if get_session().mode != "x11":
-        raise DesktopUnavailable(_unavailable())
-    _xdotool(["keyup", _map_key(key)])
+    _key_command(["keyup", _map_key(key)], key)
 
 
 _LOCATION = re.compile(r"^(X|Y)=(-?\d+)$", re.MULTILINE)
@@ -202,9 +211,9 @@ def shortcut(keys: str, repeat: int = 1) -> str:
     if not combo:
         raise ValueError("No keys given")
     if repeat > 1:
-        _xdotool(["key", "--repeat", str(repeat), combo])
+        _key_command(["key", "--repeat", str(repeat), combo], keys)
         return f"Executed shortcut: {keys} x{repeat}"
-    _xdotool(["key", combo])
+    _key_command(["key", combo], keys)
     return f"Executed shortcut: {keys}"
 
 
