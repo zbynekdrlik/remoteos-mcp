@@ -1,4 +1,4 @@
-"""Desktop control tools: Snapshot, Click, Type, Scroll, Move, Shortcut, Wait."""
+"""Desktop control tools: Snapshot, Zoom, DisplayInventory, Click, Type, Scroll, Move, Shortcut, Wait."""
 
 from __future__ import annotations
 
@@ -10,8 +10,11 @@ from mcp.types import ImageContent, TextContent
 from remoteos.app import (
     ToolAnnotations,
     _capture_snapshot_frame,
+    _capture_tool,
+    _capture_with_retry,
     _current_frame,
     _desktop_preflight,
+    _display_tool,
     _input_tool,
     _tobool,
     log,
@@ -21,11 +24,21 @@ from remoteos.app import (
 if _sys.platform != "linux":
     import pyautogui  # remoteos.app imported it first: DPI awareness set, FAILSAFE and PAUSE configured
 
-from remoteos.coords import check_space, contract_line, image_to_screen, mapping_note
+from remoteos.coords import (
+    check_space,
+    contract_line,
+    frame_for,
+    image_to_screen,
+    mapping_note,
+    region_geometry,
+    region_to_screen,
+    zoom_line,
+)
+from remoteos.displays import inventory_text
 from remoteos.errors import reports_errors
 from remoteos.platform import get_desktop, is_linux
 from remoteos.scroll import normalize_request
-from remoteos.snapshot import element_lines, encode_jpeg, window_lines
+from remoteos.snapshot import element_lines, encode_jpeg, fit_to_frame, window_lines
 from remoteos.typing_input import check_method
 
 # ============================= DESKTOP CONTROL =============================
@@ -35,6 +48,10 @@ from remoteos.typing_input import check_method
 # Every input tool takes IMAGE pixels of that frame by default and maps them back
 # to the screen here, recomputing the frame from (monitor, max_width) + the live
 # display geometry — no per-session state. ``coords="screen"`` is the escape hatch.
+# Zoom (#33) is view-only: its rectangle maps through that same frame, and its reply
+# states the region in screen coordinates, so no input tool needs a second mode.
+
+_ZOOM_QUALITY = 85  # small text is why Zoom exists: Snapshot's default 65 smears it
 
 
 def _optional_point(x: int, y: int) -> list[tuple[int, int]]:
@@ -113,6 +130,77 @@ def Snapshot(
 
     parts.append(TextContent(type="text", text="\n".join(lines)))
     return parts
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Zoom",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+@_capture_tool
+def Zoom(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    monitor: int = 0,
+    max_width: int = 1280,
+    coords: str = "image",
+) -> list:
+    """Capture a part of the Snapshot image at native resolution, to read small text.
+
+    View only. The rectangle is in IMAGE pixels of the last Snapshot (pass the same
+    monitor/max_width), cut to that frame. The result is captured at native
+    resolution and downscaled only when wider than max_width. Input tools keep
+    taking Snapshot image pixels: to click something seen in the zoom, convert it
+    with the reply's origin and scale (screen = origin + round(image * scale)) and
+    pass coords="screen". For a capture wider than 1280 px use max_width=0 with
+    coords="screen".
+
+    Args:
+        x: Left edge in Snapshot image pixels (screen coordinates if coords="screen").
+        y: Top edge in Snapshot image pixels (screen coordinates if coords="screen").
+        width: Rectangle width, in the same units as x.
+        height: Rectangle height, in the same units as y.
+        monitor: monitor of the Snapshot frame (default 0, as Snapshot).
+        max_width: max_width of the Snapshot frame, also the widest image returned (0=native).
+        coords: 'image' (default) or 'screen' = raw OS coordinates (physical pixels
+            on Windows/Linux, points on macOS).
+    """
+    space = check_space(coords)
+    desktop = get_desktop()
+    geometry = desktop.capture_geometry(monitor)
+    bbox = region_to_screen(frame_for(monitor, max_width, geometry), x, y, width, height, space)
+    region = region_geometry(geometry, bbox)
+    frame = frame_for(monitor, max_width, region)
+    img = fit_to_frame(_capture_with_retry(lambda: desktop.capture_region(bbox)), frame, region)
+    log.debug("zoom frame: %s", zoom_line(frame))
+    return [
+        ImageContent(type="image", data=encode_jpeg(img, _ZOOM_QUALITY), mimeType="image/jpeg"),
+        TextContent(type="text", text=f"**Coordinates:** {zoom_line(frame)}"),
+    ]
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="DisplayInventory",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+@_display_tool
+def DisplayInventory() -> str:
+    """List the displays: what each `monitor` value of the screen and input tools means.
+
+    One line per display: its index (the tools' monitor=N), name, bounds and origin
+    in screen coordinates, scale, and whether it is the primary. The first line says
+    what monitor=0 is on this machine: all monitors on Windows and Linux, the main
+    display on macOS.
+    """
+    desktop = get_desktop()
+    return inventory_text(desktop.MONITOR_ZERO, desktop.capture_geometry(0), desktop.list_displays())
 
 
 @mcp.tool(

@@ -569,3 +569,9 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - `app.py` + `tools/{desktop,windows,shell,files,system,network,media,tasks}.py`; `__main__.py` keeps the CLI and the task-wrapping pass. EventLog stays in `tools/network.py`: moving it to `system.py` would change the `tools/list` order.
 - `platform/linux/`: `session.py`, `windows.py`, `x11_capture.py`, `x11_input.py`; `desktop.py` is the facade.
 - Tests read and patch the real modules through `tests/tool_surface.py` (`server`). The test bodies are unchanged, except `test_updater` (scans every server module), `test_win_dpi` (one new order test) and `test_session_reconnect_helper_is_defined_once` (reads `app.py`).
+
+## #33 Zoom, DisplayInventory (0.7.0.dev45)
+
+- Approach 1 of the main's design: view-only `Zoom` through the #28 frame, `displays.py`, one provider primitive per OS (`capture_region`, `list_displays`, `MONITOR_ZERO`).
+- `parse_xrandr_monitors` returns `XrandrMonitor`, a NamedTuple: `m[:4]` is the old tuple.
+- Decisions, on #33: Zoom JPEG quality fixed at 85 (no new argument), `scale` n/a on X11, a rectangle rounds outward.

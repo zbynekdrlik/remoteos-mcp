@@ -6,6 +6,8 @@ TOOL_TIERS = {
     "tier1": {
         "Snapshot",
         "AnnotatedSnapshot",
+        "Zoom",
+        "DisplayInventory",
         "GetClipboard",
         "GetSystemInfo",
         "ListProcesses",
@@ -82,6 +84,8 @@ LINUX_ALWAYS_EXCLUDED_TOOLS = {
 LINUX_DISPLAY_TOOLS = {
     "Snapshot",
     "AnnotatedSnapshot",
+    "Zoom",
+    "DisplayInventory",
     "ScreenRecord",
     "OCR",
     "Click",

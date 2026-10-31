@@ -111,7 +111,8 @@ paths:
         apps' window titles, so the list shows their app names;
       - Linux: the stub.
   - The tools call it through `_desktop_preflight(need)`, the decorator's `preflight=` hook.
-  - `@_capture_tool` = AnnotatedSnapshot, OCR, ScreenRecord.
+  - `@_capture_tool` = AnnotatedSnapshot, Zoom, OCR, ScreenRecord.
+  - `@_display_tool` = DisplayInventory (`"windows"`: the displays are readable on a locked desktop).
   - Snapshot calls it itself: `"capture"` for the screenshot (`use_vision`), else `"windows"`.
     The window list works on a disconnected or locked session (live on win-pz-server), but
     outside the user's desktop it would be a hollow empty success.
@@ -130,7 +131,7 @@ paths:
   ("run ReconnectSession"). Only two callers run `reconnect_to_console`, because a tscon puts
   the user's desktop on the machine's physical screen:
   - the explicit ReconnectSession tool;
-  - the capture retry in `_capture_snapshot_frame` (Snapshot AND AnnotatedSnapshot), which
+  - the capture retry in `_capture_with_retry` (Snapshot, AnnotatedSnapshot and Zoom), which
     tscons only when the session went disconnected between the preflight and the grab.
 - **`reconnect_to_console`** reconnects the server's OWN session: `ProcessIdToSessionId`,
   `WTSConnectState`, `tscon <id> /dest:console`, then a re-check.

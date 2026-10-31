@@ -36,7 +36,8 @@ except ImportError:
 
 from PIL import ImageGrab  # noqa: E402
 
-from remoteos.coords import CaptureGeometry, frame_for  # noqa: E402
+from remoteos.coords import Bbox, CaptureGeometry, frame_for  # noqa: E402
+from remoteos.displays import DisplayInfo  # noqa: E402
 from remoteos.platform.command import powershell_argv, run_command  # noqa: E402
 from remoteos.platform.win.availability import diagnose, reconnect_to_console  # noqa: E402,F401  (#32)
 from remoteos.platform.win.psquote import ps_literal  # noqa: E402
@@ -189,6 +190,55 @@ def _get_monitor_bbox(monitor: int) -> tuple[int, int, int, int] | None:
         raise
 
 
+MONITOR_ZERO = "the whole virtual screen, all monitors"
+
+_MONITORINFOF_PRIMARY = 1
+_MDT_EFFECTIVE_DPI = 0
+_DEFAULT_DPI = 96
+
+
+def _monitor_scale(hmonitor) -> float | None:
+    """The monitor's scale (effective DPI / 96), or ``None`` when Windows cannot say.
+
+    ``GetDpiForMonitor`` is Windows 8.1+ (shcore).
+    """
+    dpi_x, dpi_y = ctypes.c_uint(), ctypes.c_uint()
+    try:
+        result = ctypes.windll.shcore.GetDpiForMonitor(
+            ctypes.c_void_p(int(hmonitor)), _MDT_EFFECTIVE_DPI, ctypes.byref(dpi_x), ctypes.byref(dpi_y)
+        )
+    except (AttributeError, OSError) as e:
+        log.warning("GetDpiForMonitor unavailable (%s)", type(e).__name__)
+        return None
+    if result != 0 or dpi_x.value == 0:
+        log.warning("GetDpiForMonitor failed (HRESULT %s)", result)
+        return None
+    return dpi_x.value / _DEFAULT_DPI
+
+
+def list_displays() -> list[DisplayInfo]:
+    """The displays behind ``monitor=N`` (#33): the ``EnumDisplayMonitors`` order of ``_get_monitor_bbox``."""
+    if not HAS_WIN32:
+        raise RuntimeError("pywin32 not installed — run `pip install pywin32`")
+    displays = []
+    for index, (hmonitor, _hdc, rect) in enumerate(win32api.EnumDisplayMonitors(), start=1):
+        info = win32api.GetMonitorInfo(hmonitor)
+        left, top, right, bottom = rect
+        displays.append(
+            DisplayInfo(
+                index=index,
+                x=left,
+                y=top,
+                width=right - left,
+                height=bottom - top,
+                scale=_monitor_scale(hmonitor),
+                primary=bool(info["Flags"] & _MONITORINFOF_PRIMARY),
+                name=info["Device"],
+            )
+        )
+    return displays
+
+
 # GetSystemMetrics indices of the virtual screen (the union of all monitors).
 _SM_XVIRTUALSCREEN, _SM_YVIRTUALSCREEN, _SM_CXVIRTUALSCREEN, _SM_CYVIRTUALSCREEN = 76, 77, 78, 79
 
@@ -219,11 +269,17 @@ def capture_frame(monitor: int = 0, max_width: int = 1280):
     if monitor <= 0:
         img = ImageGrab.grab(all_screens=True)
     else:
-        # all_screens=True: PIL crops the bbox out of the whole virtual screen. Without
-        # it the grab is primary-only and a non-primary monitor's bbox comes back black.
-        bbox = (geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height)
-        img = ImageGrab.grab(bbox=bbox, all_screens=True)
+        img = capture_region((geometry.x, geometry.y, geometry.x + geometry.width, geometry.y + geometry.height))
     return fit_to_frame(img, frame, geometry), frame
+
+
+def capture_region(bbox: Bbox):
+    """PIL image of ``bbox`` (screen coordinates) at native resolution.
+
+    all_screens=True: PIL crops the bbox out of the whole virtual screen. Without it
+    the grab is primary-only and a bbox on a non-primary monitor comes back black.
+    """
+    return ImageGrab.grab(bbox=bbox, all_screens=True)
 
 
 # ---------------------------------------------------------------------------

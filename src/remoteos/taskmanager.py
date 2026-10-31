@@ -60,6 +60,7 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
     # Desktop — exclusive lock
     "Snapshot": ToolCategory.DESKTOP,
     "AnnotatedSnapshot": ToolCategory.DESKTOP,
+    "Zoom": ToolCategory.DESKTOP,
     "Click": ToolCategory.DESKTOP,
     "Type": ToolCategory.DESKTOP,
     "Scroll": ToolCategory.DESKTOP,
@@ -83,6 +84,7 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
     "FileRename": ToolCategory.FILE,
     # System queries — concurrent
     "GetSystemInfo": ToolCategory.QUERY,
+    "DisplayInventory": ToolCategory.QUERY,
     "GetClipboard": ToolCategory.QUERY,
     "SetClipboard": ToolCategory.QUERY,
     "ListProcesses": ToolCategory.QUERY,
