@@ -11,7 +11,8 @@ from typing import Optional
 
 import pyautogui
 
-from remoteos.coords import CaptureGeometry, frame_for
+from remoteos.coords import Bbox, CaptureGeometry, frame_for
+from remoteos.displays import DisplayInfo
 from remoteos.platform.mac.availability import diagnose  # noqa: F401  (the provider's diagnose(), #32)
 from remoteos.scroll import chunks, wheel_steps
 from remoteos.snapshot import fit_to_frame
@@ -167,21 +168,57 @@ def capture_geometry(monitor: int = 0) -> CaptureGeometry:
     return CaptureGeometry(x=x, y=y, width=width, height=height, pixel_width=pixel_width, pixel_height=pixel_height)
 
 
+MONITOR_ZERO = "the main display"
+
+
+def list_displays() -> list[DisplayInfo]:
+    """The displays behind ``monitor=N`` (#33). A Retina display reports scale 2.0.
+
+    macOS has no short display name below AppKit, so ``name`` is the Quartz display id.
+    """
+    if not HAS_QUARTZ:
+        raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
+    (err, display_ids, count) = Quartz.CGGetActiveDisplayList(16, None, None)
+    if err != 0:
+        raise RuntimeError(f"CGGetActiveDisplayList failed ({err})")
+    main = Quartz.CGMainDisplayID()
+    displays = []
+    for index, display_id in enumerate(display_ids[:count], start=1):
+        g = capture_geometry(index)
+        scale = g.pixel_width / g.width
+        displays.append(
+            DisplayInfo(index, g.x, g.y, g.width, g.height, scale, display_id == main, f"display {display_id}")
+        )
+    return displays
+
+
 def capture_frame(monitor: int = 0, max_width: int = 1280):
     """Capture ``monitor`` and fit it to its frame → ``(PIL image, Frame)``."""
-    if Image is None:
-        raise RuntimeError("Pillow not installed — run `pip install Pillow`")
     geometry = capture_geometry(monitor)
     frame = frame_for(monitor, max_width, geometry)
+    # -D N selects the display (1 = main)
+    img = _screencapture(["-D", str(monitor)] if monitor > 0 else [])
+    return fit_to_frame(img, frame, geometry), frame
+
+
+def capture_region(bbox: Bbox):
+    """PIL image of ``bbox`` (points, the global display space) at native resolution.
+
+    ``screencapture -R x,y,w,h`` takes points and writes the display's pixels.
+    """
+    left, top, right, bottom = bbox
+    return _screencapture(["-R", f"{left},{top},{right - left},{bottom - top}"])
+
+
+def _screencapture(args: list[str]):
+    """Run ``screencapture -x`` (no sound) with ``args`` and return the capture as a PIL image."""
+    if Image is None:
+        raise RuntimeError("Pillow not installed — run `pip install Pillow`")
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp_path = tmp.name
 
-    # screencapture -x = no sound; -D N selects the display (1 = main)
-    cmd = ["screencapture", "-x"]
-    if monitor > 0:
-        cmd.extend(["-D", str(monitor)])
-    cmd.append(tmp_path)
+    cmd = ["screencapture", "-x", *args, tmp_path]
 
     try:
         try:
@@ -192,7 +229,7 @@ def capture_frame(monitor: int = 0, max_width: int = 1280):
             raise RuntimeError(f"screencapture failed: {e.stderr.decode().strip()}")
         img = Image.open(tmp_path)
         img.load()  # read the pixels before the temp file is unlinked
-        return fit_to_frame(img, frame, geometry), frame
+        return img
     finally:
         try:
             os.unlink(tmp_path)

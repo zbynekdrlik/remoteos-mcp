@@ -56,7 +56,7 @@ def test_tools_list_matches_the_golden_snapshot(tmp_path):
 
 def test_the_snapshot_covers_every_tool_with_its_contract():
     golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
-    assert len(golden) == 47
+    assert len(golden) == 49
     assert all(t["description"] and t["inputSchema"] and t["annotations"] for t in golden)
     assert golden[0]["name"] == "Snapshot" and golden[-1]["name"] == "GetRunningTasks"
     shell = next(t for t in golden if t["name"] == "Shell")

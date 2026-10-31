@@ -26,6 +26,7 @@ from typing import Sequence
 COORD_SPACES = ("image", "screen")
 
 Point = tuple[int, int]
+Bbox = tuple[int, int, int, int]  # left, top, right, bottom in screen coordinates; right/bottom exclusive
 
 
 def _round_half_up(value: float) -> int:
@@ -138,6 +139,50 @@ def screen_to_image(frame: Frame, x: int, y: int) -> Point:
     )
 
 
+def region_to_screen(frame: Frame, x: int, y: int, width: int, height: int, space: str) -> Bbox:
+    """Zoom's rectangle as ``(left, top, right, bottom)`` in screen units, cut to ``frame``.
+
+    ``space`` is ``"image"`` (pixels of the parent frame) or ``"screen"``. Right and
+    bottom are exclusive, so they may reach the frame's far edge. Image pixels round
+    OUTWARD, in exact integers, unlike a point: the capture must cover every pixel
+    asked for, and a pixel of a native Retina frame is half a point. Nothing of it
+    inside the frame is an error: a capture of nothing would look like a black screen.
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError(f"region size must be positive, got {width}x{height}")
+    if space == "image":
+        left = frame.x + x * frame.width // frame.image_width
+        top = frame.y + y * frame.height // frame.image_height
+        right = frame.x - (-(x + width) * frame.width // frame.image_width)
+        bottom = frame.y - (-(y + height) * frame.height // frame.image_height)
+    else:
+        left, top, right, bottom = x, y, x + width, y + height
+    far_x, far_y = frame.x + frame.width, frame.y + frame.height
+    bbox = (
+        _clamp(left, frame.x, far_x),
+        _clamp(top, frame.y, far_y),
+        _clamp(right, frame.x, far_x),
+        _clamp(bottom, frame.y, far_y),
+    )
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        raise ValueError(f"region {width}x{height} at ({x},{y}) is outside the frame")
+    return bbox
+
+
+def region_geometry(geometry: CaptureGeometry, bbox: Bbox) -> CaptureGeometry:
+    """Capture geometry of ``bbox``, a part of ``geometry``: same pixels per screen unit."""
+    left, top, right, bottom = bbox
+    width, height = right - left, bottom - top
+    return CaptureGeometry(
+        x=left,
+        y=top,
+        width=width,
+        height=height,
+        pixel_width=max(1, _round_half_up(width * geometry.pixel_width / geometry.width)),
+        pixel_height=max(1, _round_half_up(height * geometry.pixel_height / geometry.height)),
+    )
+
+
 def in_image(frame: Frame, x: int, y: int) -> bool:
     """Whether image point ``(x, y)`` lies inside the frame's image."""
     return 0 <= x < frame.image_width and 0 <= y < frame.image_height
@@ -157,6 +202,15 @@ def contract_line(frame: Frame) -> str:
         f"Image {frame.image_width}x{frame.image_height} = screen {frame.width}x{frame.height} "
         f"at origin ({frame.x},{frame.y}), scale {frame.scale:.3f}; "
         f"input tools take IMAGE pixels of this frame (monitor={frame.monitor}, max_width={frame.max_width})"
+    )
+
+
+def zoom_line(frame: Frame) -> str:
+    """The reply line of Zoom: where its image is on the screen. The tool is view-only."""
+    return (
+        f"Zoom image {frame.image_width}x{frame.image_height} = screen {frame.width}x{frame.height} "
+        f"at origin ({frame.x},{frame.y}), scale {frame.scale:.3f}; view only: input tools do NOT take "
+        f'pixels of this image. Pass screen = origin + round(image * scale) with coords="screen"'
     )
 
 

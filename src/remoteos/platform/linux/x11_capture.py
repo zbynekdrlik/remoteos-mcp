@@ -7,14 +7,17 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from remoteos.coords import CaptureGeometry, frame_for
+from remoteos.coords import Bbox, CaptureGeometry, frame_for
+from remoteos.displays import DisplayInfo
 from remoteos.errors import DesktopUnavailable
 from remoteos.platform.linux import session
-from remoteos.platform.linux.display import query_geometry
+from remoteos.platform.linux.display import query_displays, query_geometry
 from remoteos.platform.linux.session import _unavailable, get_session
 from remoteos.snapshot import fit_to_frame
 
 log = logging.getLogger("remoteos.platform.linux.desktop")  # one logger for the whole provider
+
+MONITOR_ZERO = "the X root, all heads"
 
 
 # ---------------------------------------------------------------------------
@@ -84,12 +87,34 @@ def capture_png(bbox: Optional[tuple[int, int, int, int]] = None) -> bytes:
             pass
 
 
+def _xrandr(cmd: list[str]) -> str:
+    return (session._run_x(cmd).stdout or b"").decode("utf-8", "replace")
+
+
 def capture_geometry(monitor: int = 0) -> CaptureGeometry:
     """Capture geometry (#28, see ``platform/linux/display.py``). Raises the stub
     message on a non-X11 session without shelling out (the headless contract)."""
     if get_session().mode != "x11":
         raise DesktopUnavailable(_unavailable())
-    return query_geometry(monitor, lambda cmd: (session._run_x(cmd).stdout or b"").decode("utf-8", "replace"))
+    return query_geometry(monitor, _xrandr)
+
+
+def list_displays() -> list[DisplayInfo]:
+    """The displays behind ``monitor=N`` (#33), with the same headless contract."""
+    if get_session().mode != "x11":
+        raise DesktopUnavailable(_unavailable())
+    return query_displays(_xrandr)
+
+
+def capture_region(bbox: Bbox):
+    """PIL image of ``bbox`` (screen coordinates) at native resolution (#33)."""
+    import io
+
+    from PIL import Image
+
+    if get_session().mode != "x11":
+        raise DesktopUnavailable(_unavailable())
+    return Image.open(io.BytesIO(capture_png(bbox)))
 
 
 def capture_frame(monitor: int = 0, max_width: int = 1280):

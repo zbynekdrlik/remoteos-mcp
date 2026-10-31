@@ -10,6 +10,7 @@ import asyncio
 import functools
 import logging
 import sys as _sys
+from typing import Callable, TypeVar
 
 if _sys.platform == "win32":
     # Per-monitor-v2 DPI awareness MUST be set before pyautogui is imported (#28):
@@ -97,15 +98,18 @@ def _current_frame(monitor: int, max_width: int):
     return frame_for(monitor, max_width, get_desktop().capture_geometry(monitor))
 
 
-def _capture_snapshot_frame(monitor: int, max_width: int):
-    """``(image, frame)`` for Snapshot/AnnotatedSnapshot.
+T = TypeVar("T")
+
+
+def _capture_with_retry(grab: Callable[[], T]) -> T:
+    """Run the screen grab ``grab``, the capture every screen-reading tool shares.
 
     On Windows a failed grab is retried once. If the session went disconnected
     since the preflight it is reattached first; the log and the error say which
     of the two happened (#32 review round 2).
     """
     try:
-        img, frame = get_desktop().capture_frame(monitor=monitor, max_width=max_width)
+        return grab()
     except Exception as first_error:
         if not is_windows():
             raise
@@ -117,9 +121,14 @@ def _capture_snapshot_frame(monitor: int, max_width: int):
         how = "after session reconnect" if status == "reattached" else "after a retry"
         log.warning("capture failed (%s) — retrying (%s)", first_error, how)
         try:
-            img, frame = get_desktop().capture_frame(monitor=monitor, max_width=max_width)
+            return grab()
         except Exception as retry_error:
             raise RuntimeError(f"{how}: {retry_error}") from retry_error
+
+
+def _capture_snapshot_frame(monitor: int, max_width: int):
+    """``(image, frame)`` for Snapshot/AnnotatedSnapshot."""
+    img, frame = _capture_with_retry(lambda: get_desktop().capture_frame(monitor=monitor, max_width=max_width))
     log.debug("snapshot frame: %s", contract_line(frame))
     return img, frame
 
@@ -148,8 +157,10 @@ def _desktop_preflight(need: str) -> None:
     log.debug("desktop preflight (%s): usable", need)
 
 
-# A tool that reads the screen / one that sends input: @reports_errors with the matching preflight.
+# A tool that reads the screen / one that sends input / one that only needs the user's desktop,
+# locked or not: @reports_errors with the matching preflight.
 _capture_tool = reports_errors(preflight=functools.partial(_desktop_preflight, "capture"))
+_display_tool = reports_errors(preflight=functools.partial(_desktop_preflight, "windows"))
 _input_tool = reports_errors(preflight=functools.partial(_desktop_preflight, "input"))
 
 

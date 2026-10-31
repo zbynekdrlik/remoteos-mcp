@@ -17,6 +17,8 @@ Landed in #6. #7 (AnnotatedSnapshot via AT-SPI) + #8 (ScreenRecord via ffmpeg x1
   - `monitor=0` = the X ROOT, sized by `xrandr --current` (`current W x H`), origin (0,0). Not `xdotool getdisplaygeometry`: that is the FIRST Xinerama head only and is wrong on multi-head.
   - `monitor=N` = entry N-1 of `xrandr --listmonitors`, captured with `scrot -a`. `capture_frame()` resizes the capture to the frame from `remoteos.coords`. The tool layer maps IMAGE pixels to screen pixels BEFORE calling `click`/`move`/`scroll`/`type_text`, so the provider input functions keep taking SCREEN pixels. Needs `xrandr` (`x11-xserver-utils`, which the installer adds) for every frame. All fleet X11 boxes had it on 2026-10-14.
 
+- **Zoom / DisplayInventory (#33).** `capture_region(bbox)` = `capture_png(bbox)` as a PIL image. `list_displays()` = `xrandr --listmonitors` with the name and the `*` primary marker; X11 has no scale, so it reports `n/a`. Both are in `LINUX_DISPLAY_TOOLS`, so an X11 box has 2 more tools.
+
 ## Session detection gotcha (the load-bearing one)
 
 `loginctl show-session <id>` returns an **empty `Display=`** for X11 sessions. Do NOT rely on it. The reliable source of `DISPLAY` + `XAUTHORITY` is `/proc/<pid>/environ` of a process owned by the session user (e.g. gnome-shell): `DISPLAY=:0`, `XAUTHORITY=/run/user/<uid>/gdm/Xauthority`. Pick the session with `Type=x11 Class=user Active=yes` (skip `tty` and `greeter`; SSH logins create transient tty sessions).
