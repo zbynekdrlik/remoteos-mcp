@@ -530,3 +530,5 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 - **Static checks find the first code line** (`_find_first_code_line`). It skips `#` and
   `Write-Host` lines, but NOT bash `echo` lines. Keep `pip install … remoteos-mcp` and
   `pip uninstall … remoteos-mcp` out of `echo` text.
+
+- **A Linux box too old for `SelfUpgrade` (before dev39) upgrades over MCP too, no SSH.** The installer refuses to run inside `remoteos-mcp.service`, but a transient unit is outside it: through `Shell`, `sudo -n systemd-run --unit=remoteos-upgrade --collect --setenv=REMOTEOS_MCP_REF=<sha> --setenv=HOME=/root bash -c 'curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/<sha>/install-linux.sh | bash'`, then poll `/health`. Needs the passwordless sudo of `/etc/sudoers.d/90-remoteos-mcp`. Done on strih-pp and stream-pp, dev20 to dev49.
