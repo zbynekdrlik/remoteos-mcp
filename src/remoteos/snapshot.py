@@ -21,6 +21,7 @@ from remoteos.coords import CaptureGeometry, Frame, in_image, screen_to_image
 log = logging.getLogger("remoteos.snapshot")
 
 _OFF_FRAME = " (off-frame)"
+_MAX_NAME = 80
 
 
 def fit_to_frame(img: Image.Image, frame: Frame, geometry: Optional[CaptureGeometry] = None) -> Image.Image:
@@ -81,6 +82,26 @@ def _element_line(frame: Frame, el: dict) -> str:
 def element_lines(frame: Frame, elements: Iterable[dict]) -> list[str]:
     """``[index] label — center (x,y)`` per element, centers in image pixels."""
     return [_element_line(frame, el) for el in elements]
+
+
+def _quoted(name: str) -> str:
+    """A name on one line, cut to a readable length: some apps put whole documents in it."""
+    text = " ".join(name.split())
+    if len(text) > _MAX_NAME:
+        text = text[: _MAX_NAME - 1] + "…"
+    return '"' + text.replace('"', '\\"') + '"'
+
+
+def tree_lines(frame: Frame, items: Iterable) -> list[str]:
+    """``[ref] role "name" enabled (WxH at X,Y)`` per element of a tree, bounds in image pixels (#35)."""
+    lines = []
+    for item in items:
+        x1, y1, x2, y2 = _rect_to_image(frame, *item.rect)
+        state = "enabled" if item.enabled else "disabled"
+        marker = "" if in_image(frame, (x1 + x2) // 2, (y1 + y2) // 2) else _OFF_FRAME
+        bounds = f"({x2 - x1}x{y2 - y1} at {x1},{y1})"
+        lines.append(f"  [{item.ref}] {item.role} {_quoted(item.name)} {state} {bounds}{marker}")
+    return lines
 
 
 def window_lines(frame: Frame, windows: Iterable) -> list[str]:

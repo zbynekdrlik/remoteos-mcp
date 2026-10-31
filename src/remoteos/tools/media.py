@@ -128,8 +128,8 @@ def AnnotatedSnapshot(
     coordinate contract as Snapshot: the text starts with the contract line, element
     centers are IMAGE pixels, and Click / Move / Scroll / Type take them as-is.
 
-    Uses the platform accessibility tree for the foreground window (Win32 child
-    windows on Windows, AT-SPI on Linux X11); returns the plain screenshot with a
+    Uses the platform accessibility tree for the foreground window (UI Automation
+    on Windows, AT-SPI on Linux X11); returns the plain screenshot with a
     note when the focused app exposes no elements.
 
     Args:
