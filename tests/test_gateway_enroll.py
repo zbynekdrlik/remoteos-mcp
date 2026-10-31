@@ -452,3 +452,12 @@ def test_a_comment_with_a_bracket_or_a_quote_does_not_fool_the_edit(tmp_path):
     )
     add_machine(path, "a", "win-x")
     assert load_manifest(path).projects["a"].machines == ("m1", "m2", "win-x")
+
+
+@pytest.mark.parametrize("name", ["enroll-test", "strih-pp", "linuxbox"])
+def test_a_name_without_an_os_prefix_is_refused_before_the_box_is_touched(fleet, name):
+    result = CliRunner().invoke(gateway_cli.main, [
+        *fleet.base(), "enroll", name, "--projects", "camera-box", "--ssh-key", str(fleet.ssh_pub)])
+    assert result.exit_code != 0
+    assert "win-, linux- or mac-" in result.output
+    assert fleet.calls() == []
