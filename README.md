@@ -196,6 +196,33 @@ with `action="down"` stays down until its `action="up"`.
 with what matched and where: the monitor and the OCR line for `text`, the window's rectangle in
 image pixels for `window`. Not found within `timeout` (0..300 s) is an error.
 
+## UI elements instead of pixels (Windows)
+
+`ElementTree` lists a window's real controls from Windows UI Automation, so buttons and fields in
+Chrome, Electron, WPF and UWP apps are named, not guessed from a screenshot:
+
+```
+ElementTree(window="", monitor=0, max_width=1280)
+
+  [4822.1] Edit "Search" enabled (300x24 at 40,12)
+  [4822.2] Button "Save" enabled (80x24 at 350,12)
+  [4822.3] Button "Delete" disabled (80x24 at 440,12)
+```
+
+- `window` is part of a title, matched as `FocusWindow` does; empty = the foreground window.
+- Bounds are image pixels of the Snapshot frame `(monitor, max_width)`. Only interactive, visible
+  elements are listed, at most 300, and the reply says when the list is incomplete.
+- `ClickElement(ref)` uses the element's Invoke action, which needs no mouse. Without one, it
+  clicks the element's centre, and refuses when another window covers it.
+- `TypeElement(ref, text)` sets the element's value, **replacing** what was there. An element with
+  no settable value gets the focus and `text` is typed at its caret. The reply says which it was.
+- A ref belongs to the latest tree. A ref of an older tree, or an element that is gone, is an
+  error asking for a new `ElementTree`, never an action somewhere else. `Snapshot` does not end refs.
+- An app that blocks the call (a modal dialog opened by the button) ends in an error saying the
+  action may have happened. Look before repeating it.
+
+Linux and macOS report "not available yet".
+
 ## Screen coordinates (Snapshot → Click)
 
 Snapshot and AnnotatedSnapshot shrink the screenshot to `max_width` (default 1280 px). The
