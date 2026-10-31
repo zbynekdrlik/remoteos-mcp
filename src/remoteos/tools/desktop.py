@@ -1,5 +1,5 @@
 """Desktop control tools: Snapshot, Zoom, DisplayInventory, CursorPosition, Click, Type, Scroll, Move,
-Shortcut, HoldKey, Wait, WaitFor.
+Shortcut, HoldKey, Wait, WaitFor, ElementTree, ClickElement, TypeElement.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ from remoteos.input_keys import (
 )
 from remoteos.platform import get_desktop, is_linux
 from remoteos.scroll import normalize_request
-from remoteos.snapshot import element_lines, encode_jpeg, fit_to_frame, window_lines
+from remoteos.snapshot import element_lines, encode_jpeg, fit_to_frame, tree_lines, window_lines
 from remoteos.typing_input import check_method
 
 # ============================= DESKTOP CONTROL =============================
@@ -67,6 +67,7 @@ from remoteos.typing_input import check_method
 
 _ZOOM_QUALITY = 85  # small text is why Zoom exists: Snapshot's default 65 smears it
 _MAX_WAIT_S = 300.0
+_SNAPSHOT_ELEMENTS = 50
 _POLL_S = 0.5
 
 
@@ -140,9 +141,13 @@ def Snapshot(
     lines += ["**Windows:**", *window_lines(frame, windows)]
 
     # Interactive elements from foreground window
-    elements = _desktop.get_interactive_elements()
+    elements = _desktop.get_interactive_elements(limit=_SNAPSHOT_ELEMENTS)
     if elements:
-        lines += ["", "**Interactive Elements (foreground window):**", *element_lines(frame, elements[:50])]
+        lines += [
+            "",
+            "**Interactive Elements (foreground window):**",
+            *element_lines(frame, elements[:_SNAPSHOT_ELEMENTS]),
+        ]
 
     parts.append(TextContent(type="text", text="\n".join(lines)))
     return parts
@@ -596,3 +601,93 @@ def WaitFor(
             what = f"text {text!r}" if by_text else f"window titled {window!r}"
             raise failure(f"WaitFor timed out after {timeout}s: no {what}")
         time.sleep(min(_POLL_S, timeout - elapsed))
+
+
+def _elements_provider(tool: str):
+    """The provider, when it has an element tree: Windows now; Linux #37, macOS #38."""
+    desktop = get_desktop()
+    if not hasattr(desktop, "element_tree"):
+        raise failure(f"{tool} is not available on this OS yet")
+    return desktop
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="ElementTree",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+@_display_tool
+def ElementTree(window: str = "", monitor: int = 0, max_width: int = 1280) -> str:
+    """List a window's interactive UI elements from the OS accessibility tree, each with a ref.
+
+    Unlike a screenshot this sees real controls: buttons, fields and links in browsers
+    and in Electron, WPF and UWP apps too, each with its role, name, state and bounds.
+    One line per element: [ref] role "name" enabled|disabled (WxH at X,Y). Bounds are
+    IMAGE pixels of the Snapshot frame (monitor, max_width). Pass a ref to ClickElement
+    or TypeElement instead of guessing pixels. Refs belong to the latest tree only: a
+    new ElementTree ends them. At most 300 elements are listed, and the reply says when
+    the list is incomplete. Windows only for now.
+
+    Args:
+        window: Part of a window title, matched as FocusWindow does. Empty = the foreground window.
+        monitor: monitor of the Snapshot frame (default 0, as Snapshot).
+        max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
+    """
+    desktop = _elements_provider("ElementTree")
+    frame = _current_frame(monitor, max_width)
+    tree = desktop.element_tree(window)
+    log.debug("ElementTree: %d elements, truncated=%s", len(tree.items), bool(tree.truncated))
+    lines = [f"**Coordinates:** {contract_line(frame)}", "", f"**Elements of {tree.title!r}:** {len(tree.items)}"]
+    lines += tree_lines(frame, tree.items)
+    if tree.truncated:
+        lines += ["", f"**Incomplete:** {tree.truncated}."]
+    return "\n".join(lines)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="ClickElement",
+        destructiveHint=False,
+        openWorldHint=False,
+    )
+)
+@_input_tool
+def ClickElement(ref: str) -> str:
+    """Activate an element from the latest ElementTree, by its ref.
+
+    Uses the element's own Invoke action, which needs no mouse. An element without one
+    gets a left click at its centre, unless something else is on top of it there. A ref of
+    an older tree, or an element that is gone or disabled, is an error, never a click elsewhere.
+
+    Args:
+        ref: The element's ref from ElementTree, e.g. "4821.12".
+    """
+    return _elements_provider("ClickElement").click_element(ref)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="TypeElement",
+        destructiveHint=False,
+        openWorldHint=False,
+    )
+)
+@_input_tool
+def TypeElement(ref: str, text: str) -> str:
+    """Enter text in an element from the latest ElementTree, by its ref.
+
+    An element with a settable value (most text fields) gets ``text`` as its whole new
+    value, replacing what was there, with no keystrokes. Any other element gets the
+    keyboard focus and ``text`` is typed at its caret, as Type does; the reply says which
+    one happened. A read-only element, or one that will not take the focus, is an error
+    and nothing is typed. A ref of an older tree, or an element that is gone or disabled,
+    is an error too.
+
+    Args:
+        ref: The element's ref from ElementTree, e.g. "4821.12".
+        text: Text to enter, in any language.
+    """
+    log.debug("TypeElement %d chars", len(text))
+    return _elements_provider("TypeElement").type_element(ref, text)

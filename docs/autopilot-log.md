@@ -582,3 +582,9 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - RED→GREEN: `test_ocr_of_another_monitor_grabs_from_all_screens` (ff49259 → 5c206d7), `test_an_x_command_survives_a_key_popped_while_the_environment_is_copied` (45a2138 → 243161c).
 - Decisions: `ToolCategory.WAIT` of its own; WaitFor(text=) reports the monitor and the OCR line (no word boxes); `max_width` added to WaitFor; `left` on Windows is the physical button everywhere; an unknown Click action now raises.
 - xdotool exits 0 on an unknown key name: `_key_command` reads stderr. pyautogui sets no macOS click state: double and triple are Quartz.
+
+## #35 Windows UI Automation tree (0.7.0.dev47)
+
+- ElementTree, ClickElement, TypeElement; `get_interactive_elements` on Windows is UIA now. Tests: `tests/test_element_tree.py`, real package in `tests_windows/test_uia_windows.py`.
+- Decisions: refs are `<tree>.<n>` with a random first tree; a timed-out Invoke never falls through to a click; a fallback click refuses a covered element (`WindowFromPoint` root owner); a read-only value is refused; Snapshot's list publishes no refs.
+- `uiautomation` facts: `_AutomationClient` is a process singleton, `import comtypes` CoInitializes the importing thread, `Logger.Write` prints to stdout. See `.claude/rules/uia.md`.

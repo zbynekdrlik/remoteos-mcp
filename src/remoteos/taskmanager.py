@@ -75,6 +75,9 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
     "ScreenRecord": ToolCategory.DESKTOP,
     "LockScreen": ToolCategory.DESKTOP,
     "HoldKey": ToolCategory.DESKTOP,
+    "ElementTree": ToolCategory.DESKTOP,
+    "ClickElement": ToolCategory.DESKTOP,
+    "TypeElement": ToolCategory.DESKTOP,
     # File operations
     "FileRead": ToolCategory.FILE,
     "FileWrite": ToolCategory.FILE,

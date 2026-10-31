@@ -38,8 +38,10 @@ from PIL import ImageGrab  # noqa: E402
 
 from remoteos.coords import Bbox, CaptureGeometry, frame_for  # noqa: E402
 from remoteos.displays import DisplayInfo  # noqa: E402
+from remoteos.element_tree import ElementTree  # noqa: E402
 from remoteos.input_keys import canonical  # noqa: E402
 from remoteos.platform.command import powershell_argv, run_command  # noqa: E402
+from remoteos.platform.win import uia  # noqa: E402
 from remoteos.platform.win.availability import diagnose, reconnect_to_console  # noqa: E402,F401  (#32)
 from remoteos.platform.win.psquote import ps_literal  # noqa: E402
 from remoteos.scroll import wheel_steps  # noqa: E402
@@ -137,41 +139,42 @@ def enumerate_windows() -> list[WindowInfo]:
     return results
 
 
-def get_interactive_elements() -> list[dict]:
-    """Simplified accessibility tree — enumerate child windows with class/text."""
+def get_interactive_elements(limit: int = 300) -> list[dict]:
+    """Up to ``limit`` interactive elements of the foreground window, from UI Automation (#35).
+
+    Snapshot and AnnotatedSnapshot show this next to their image: a window that cannot
+    be read costs them the list, never the image. ElementTree reports such a failure.
+    """
     if not HAS_WIN32:
         raise RuntimeError("pywin32 not installed — run `pip install pywin32`")
-    fg = win32gui.GetForegroundWindow()
-    if not fg:
+    foreground = win32gui.GetForegroundWindow()
+    if not foreground:
         return []
-    elements: list[dict] = []
-    idx = [0]
-
-    def _cb(hwnd: int, _extra: None) -> bool:
-        if not win32gui.IsWindowVisible(hwnd):
-            return True
-        cls = win32gui.GetClassName(hwnd)
-        text = win32gui.GetWindowText(hwnd)
-        try:
-            rect = win32gui.GetWindowRect(hwnd)
-        except Exception:
-            return True
-        idx[0] += 1
-        elements.append(
-            {
-                "index": idx[0],
-                "class": cls,
-                "text": text,
-                "rect": {"left": rect[0], "top": rect[1], "right": rect[2], "bottom": rect[3]},
-            }
-        )
-        return True
-
     try:
-        win32gui.EnumChildWindows(fg, _cb, None)
-    except Exception:
-        pass
-    return elements
+        return uia.read_elements(foreground, limit)
+    except Exception as e:
+        log.warning("no UI Automation element list (%s)", type(e).__name__)
+        return []
+
+
+def element_tree(window: str = "") -> ElementTree:
+    """The element tree of the window whose title matches ``window``, or of the foreground one."""
+    if not HAS_WIN32:
+        raise RuntimeError(_NO_PYWIN32)
+    hwnd = _window_by_title(window) if window else win32gui.GetForegroundWindow()
+    if not hwnd:
+        raise LookupError("No foreground window")
+    return uia.read_tree(hwnd)
+
+
+def click_element(ref: str) -> str:
+    """Invoke the element ``ref``, else click its centre with the left button."""
+    return uia.click_element(ref, click)
+
+
+def type_element(ref: str, text: str) -> str:
+    """Set the value of the element ``ref``, else give it the focus and type at its caret."""
+    return uia.type_element(ref, text, type_text)
 
 
 # ---------------------------------------------------------------------------
@@ -578,26 +581,26 @@ def type_text(
 _NO_PYWIN32 = "pywin32 not installed — run `pip install pywin32`"
 
 
+def _window_by_title(title: str) -> int:
+    """The handle of the window whose title best matches ``title``; raises when none does."""
+    from thefuzz import fuzz
+
+    best_score, hwnd = 0, 0
+    for w in enumerate_windows():
+        score = fuzz.partial_ratio(title.lower(), w.title.lower())
+        if score > best_score:
+            best_score, hwnd = score, w.handle
+    if best_score < 50:
+        raise LookupError(f"No window matching '{title}' (best score {best_score})")
+    return hwnd
+
+
 def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> str:
     """Bring a window to the foreground. Fuzzy-match title if provided; raises when it cannot (#32)."""
     if not HAS_WIN32:
         raise RuntimeError(_NO_PYWIN32)
 
-    hwnd = None
-    if handle:
-        hwnd = handle
-    elif title:
-        from thefuzz import fuzz
-
-        best_score = 0
-        for w in enumerate_windows():
-            score = fuzz.partial_ratio(title.lower(), w.title.lower())
-            if score > best_score:
-                best_score = score
-                hwnd = w.handle
-        if best_score < 50:
-            raise LookupError(f"No window matching '{title}' (best score {best_score})")
-
+    hwnd = handle or (_window_by_title(title) if title else None)
     if not hwnd:
         raise LookupError("No window found")
 
