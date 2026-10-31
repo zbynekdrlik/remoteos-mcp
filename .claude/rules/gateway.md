@@ -232,18 +232,26 @@ paths:
   - The token is re-read per tool call (`get_http_request`), so a stateless session never
     outlives a revocation. Refused machines: "not allowed" for an unknown one too (no probing),
     `record_refusal` writes the access-log line a fleet 200 would otherwise hide.
-  - `ASGITransport` buffers, so `MAX_REPLY_BYTES` (64 MB) caps a reply: FileDownload has no cap of
-    its own and the unit's `MemoryMax` is 512 MB. A proxied `/<machine>/mcp` reply still streams.
+  - `ASGITransport` buffers, and a reply peaks at ~11x its size (measured), so `_ReplyBudget` caps
+    one reply (`MAX_REPLY_BYTES`, 20 MB) and all in flight (`MAX_BUFFERED_BYTES`, 32 MB) against the
+    unit's `MemoryMax=512M`. FileDownload has no cap of its own. `/<machine>/mcp` still streams.
+  - `allow_large_replies` (`mcp_sse.py`, shared with `remoteos-call`) is needed by every in-repo
+    MCP client: the SDK refuses an SSE event over 1 MiB, and its error reads like a dying box
+    ("SSE stream ended without a response"). A test must use a REAL reply over 1 MiB.
+  - `Call` uses `session.send_request`, never `call_tool_mcp`: the SDK validates by a `tools/list`
+    AFTER the tool ran, so a box failing that turns a finished call into an error and a retry.
   - **`--log-level debug` prints payloads:** `mcp`, `fastmcp`, `httpcore2` and `sse_starlette` log
     whole messages (arguments, results, for the plain proxy too). `_PAYLOAD_LOGGERS` holds them at
     INFO; a new dependency that logs bodies goes there, the sentinel test catches it.
   - `ListMachines` reads the public `/health` only (no key) in parallel, each cut off at
     `PROBE_BOUND_SECONDS`. Any HTTP answer is `reachable`; a stale key shows on `Call`.
   - sync: `fleet` joins `desired` in gateway mode only, so a direct project gets none and `owned()`
-    removes it when a project turns direct. An entry named `fleet` sync did not write stays.
+    removes it when a project turns direct. An entry named `fleet` stays only with a url not
+    ending in `/fleet/mcp`: the shape alone decides, because an old-url entry's token may be dead.
   - Tests: `RealMachine` + `LoopbackServer` (`fleet_harness.py`) are real FastMCP / uvicorn on
     loopback, in-process so caplog sees them. uvicorn keeps a connection open through
     `force_exit`, so a dying box is simulated by raising after the headers (`die_at_tool_answer`).
+    Match `"content"`: `"result"` is in the initialize reply too, and the box would die there.
 - **Dry run = one choke point:** `sync._Saver(dry_run=True).commit()` never writes. Registry
   edits of a dry run (narrowing, withdrawing, `--prune`) happen in memory only. Never add a
   second save path around it.

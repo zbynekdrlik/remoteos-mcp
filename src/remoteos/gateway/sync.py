@@ -8,7 +8,7 @@ For each ``[projects.<name>]`` of ``projects.toml``:
   ``{"type": "http", "url": "<gateway>/<machine>/mcp", "headers": {"Authorization": "Bearer <token>"}}``
   under the SAME server name, so every tool name (``mcp__<machine>__Shell``) stays. One more
   entry, ``fleet`` (``<gateway>/fleet/mcp``, same token), reaches a machine added later without
-  a session restart. A ``fleet`` entry sync did not write is kept, with a warning.
+  a session restart. A ``fleet`` entry with another url is kept, with a warning.
 - **direct mode** (remoteos-mcp; only the gateway's own account on its own host): the entries
   carry the key store's url + key, so the project can debug a machine when the gateway is down.
 
@@ -289,8 +289,10 @@ def plan_project(
             if (token := bearer_value(authorization_header(entry.value) or "")) is not None
         )
         desired = {m: gateway_entry(manifest.machine_url(m), plan.token) for m in project.machines}
-        foreign = next((e for e in parsed.entries if e.name == FLEET_SERVER and not owned(e.name, e.value)), None)
-        if foreign is None:
+        # Sync's shape is enough here, unlike owned(): at an old gateway url its token may be long
+        # unregistered, and a stuck entry would leave the project without a fleet server for good.
+        fleet_url = next((_url(e.value) for e in parsed.entries if e.name == FLEET_SERVER), None)
+        if fleet_url is None or (isinstance(fleet_url, str) and fleet_url.endswith(f"/{FLEET_SERVER}/mcp")):
             desired[FLEET_SERVER] = gateway_entry(manifest.machine_url(FLEET_SERVER), plan.token)
         else:
             plan.notes.append(

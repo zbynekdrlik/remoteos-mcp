@@ -396,6 +396,17 @@ def test_a_foreign_fleet_entry_stays_byte_equal_with_a_warning(fleet):
     assert "'fleet' in this config is not sync's" in result.output
 
 
+def test_a_fleet_entry_at_an_old_gateway_url_with_a_dead_token_is_replaced(fleet):
+    dead = fresh_secret("deadtoken")
+    old = {"type": "http", "url": "http://100.64.0.1:8796/fleet/mcp", "headers": {"Authorization": f"Bearer {dead}"}}
+    path = fleet.write_config("camera-box", json.dumps({"mcpServers": {"fleet": old}}, indent=2))
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+
+    assert fleet.run().exit_code == 0
+
+    assert fleet.servers(path)["fleet"] == _gateway_entry("fleet", fleet.token_of(path, "linux-cam1"))
+
+
 def test_a_machine_cannot_be_named_fleet(fleet):
     fleet.write_manifest({"camera-box": fleet.camera_box_project(machines=("fleet",))})
     assert fleet.run().exit_code != 0

@@ -16,8 +16,9 @@ give a clear error (and an audit line) without opening a session; ``handle`` dec
 
 ``httpx2.ASGITransport`` buffers: the machine's reply is held in memory until the call ends, and
 progress notifications do not reach the consumer. That is the cost of the single path; a tool
-result is one message either way. The reply is capped (``MAX_REPLY_BYTES``), because the unit's
-``MemoryMax`` is 512 MB and an uncapped FileDownload would take every project's gateway down.
+result is one message either way. Replies are capped, one and all together (``_ReplyBudget``),
+because the unit's ``MemoryMax`` is 512 MB and an uncapped FileDownload would take every project's
+gateway down.
 
 Outside the tools, :meth:`FleetEndpoint.__call__` keeps the gateway's decision order (401, then
 413, no body read before the token is known) and writes one access-log line per request. The
@@ -31,13 +32,15 @@ import functools
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx2
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server.dependencies import get_http_request
-from mcp.types import CallToolResult
+from mcp.types import CallToolRequest, CallToolRequestParams, CallToolResult
+from pydantic import TypeAdapter
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -53,6 +56,7 @@ from remoteos.gateway.probe import (
     probe_version,
 )
 from remoteos.gateway.registry import FLEET_SERVER, is_valid_machine_name
+from remoteos.mcp_sse import allow_large_replies
 
 if TYPE_CHECKING:
     from remoteos.gateway.app import Gateway
@@ -66,8 +70,13 @@ _INTERNAL_BASE = "http://gateway.internal"  # never dialled: the transport is in
 # cut off here. A box that answers later reads as unreachable for this one listing.
 PROBE_BOUND_SECONDS = 4.0
 _PROBE_TIMEOUT = httpx2.Timeout(connect=3.0, read=3.0, write=3.0, pool=3.0)
-# A reply is held in memory three times over (transport, parsed, serialised again).
-MAX_REPLY_BYTES = 64 * 1024 * 1024
+# A reply costs about 11 times its size at peak (the transport's buffer, the parsed model, the
+# serialised copy, base64 on top; measured in the #51 review), against MemoryMax=512M with ~85 MB
+# at rest: 32 MB in flight is the most that stays under it.
+MAX_REPLY_BYTES = 20 * 1024 * 1024
+MAX_BUFFERED_BYTES = 32 * 1024 * 1024
+# MachineTools is a quick question; a box that goes silent after initialize gets no hour.
+_TOOLS_TIMEOUT_SECONDS = 30.0
 # A session to a machine that accepts the connection and then says nothing.
 _INIT_TIMEOUT_SECONDS = 30.0
 # Above UPSTREAM_TIMEOUT.read (3700 s), so the gateway's own error is what the caller sees.
@@ -83,41 +92,62 @@ _INSTRUCTIONS = (
 # Debug logging of these prints whole JSON-RPC messages, which hold tool arguments and results.
 _PAYLOAD_LOGGERS = ("mcp", "fastmcp", "httpcore2", "sse_starlette")
 
+_CALL_RESULT = TypeAdapter(CallToolResult)
 
-def _keep_arguments_out_of_the_logs() -> None:
+
+def keep_arguments_out_of_the_logs() -> None:
+    """Never below INFO, and never louder than the level the gateway was started with."""
     redact_fastmcp_argument_logs()
+    level = max(logging.INFO, logging.getLogger().getEffectiveLevel())
     for name in _PAYLOAD_LOGGERS:
-        logging.getLogger(name).setLevel(logging.INFO)
+        logging.getLogger(name).setLevel(level)
 
 
 class _ReplyTooLarge(Exception):
     pass
 
 
-class _ReplyCap:
-    """ASGI wrapper: stops a reply at ``MAX_REPLY_BYTES`` instead of buffering it to the end."""
+@dataclass
+class _ReplyBudget:
+    """The bytes of machine replies this gateway holds right now, across all fleet calls."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    used: int = 0
+
+
+class _ReplyCap:
+    """ASGI wrapper: stops a reply at ``MAX_REPLY_BYTES``, or when all replies together would pass
+    ``MAX_BUFFERED_BYTES``, instead of buffering it to the end."""
+
+    def __init__(self, app: ASGIApp, budget: _ReplyBudget) -> None:
         self.app = app
-        self.exceeded = False
+        self.budget = budget
+        self.refused: str | None = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         size = 0
 
         async def capped_send(message: Message) -> None:
             nonlocal size
-            size += len(message.get("body", b""))
-            if size > MAX_REPLY_BYTES:
-                self.exceeded = True
+            chunk = len(message.get("body", b""))
+            if size + chunk > MAX_REPLY_BYTES:
+                self.refused = f"the reply is over {MAX_REPLY_BYTES} bytes, too large for the fleet server"
+            elif self.budget.used + chunk > MAX_BUFFERED_BYTES:
+                self.refused = "the fleet server holds too many large replies right now, try again"
+            if self.refused is not None:
                 raise _ReplyTooLarge
+            size += chunk
+            self.budget.used += chunk
             await send(message)
 
-        await self.app(scope, receive, capped_send)
+        try:
+            await self.app(scope, receive, capped_send)
+        finally:
+            self.budget.used -= size
 
 
 def _failure_text(machine: str, exc: Exception, statuses: list[int], cap: _ReplyCap) -> str:
-    if cap.exceeded:
-        return f"Machine {machine!r}: the reply is over {MAX_REPLY_BYTES} bytes, too large for the fleet server"
+    if cap.refused is not None:
+        return f"Machine {machine!r}: {cap.refused}"
     if statuses and statuses[-1] in (401, 403):
         return f"Machine {machine!r} rejected the gateway's key (a stale key: `remoteos-gateway check` repairs it)"
     return f"Machine {machine!r}: {str(exc) or type(exc).__name__}"
@@ -127,8 +157,10 @@ class FleetEndpoint:
     """The ASGI app at ``/fleet/mcp``: the fleet FastMCP app behind the gateway's request handling."""
 
     def __init__(self, gateway: Gateway) -> None:
-        _keep_arguments_out_of_the_logs()
+        keep_arguments_out_of_the_logs()
+        allow_large_replies()  # our own caps below decide, not the SDK's 1 MiB
         self.gateway = gateway
+        self.budget = _ReplyBudget()
         self.machine_app = Starlette(routes=[Route("/{machine}/mcp", gateway.handle, methods=["POST", "DELETE"])])
         self.mcp = self._build_server()
         # stateless + SSE answers, like the machines (Gateway._send_upstream). The bearer token is
@@ -171,7 +203,7 @@ class FleetEndpoint:
         try:
             await self.http(scope, replay_receive, tracked_send)
         finally:
-            gateway.finish(entry, status, "ok" if status is not None and status < 500 else "fleet_error")
+            gateway.finish(entry, status, _outcome(status))
 
     # -- the tools --------------------------------------------------------------------------
 
@@ -191,7 +223,7 @@ class FleetEndpoint:
             """The tools of *machine*, each with its description and inputSchema."""
             authorization = self._admit(machine, "MachineTools")
             async with self._session(machine, authorization) as client:
-                tools = await client.list_tools()
+                tools = await asyncio.wait_for(client.list_tools(), _TOOLS_TIMEOUT_SECONDS)
             return [
                 {"name": tool.name, "description": tool.description, "inputSchema": tool.input_schema}
                 for tool in tools
@@ -203,31 +235,43 @@ class FleetEndpoint:
             and structured content pass through, and a tool's failure stays a tool error."""
             authorization = self._admit(machine, "Call")
             async with self._session(machine, authorization) as client:
-                return await client.call_tool_mcp(tool, arguments or {})
+                # Not client.call_tool_mcp: its SDK path validates the result with a tools/list
+                # AFTER the tool ran, so a box that fails that second step turns a finished call
+                # into an error, and the caller runs it again. The result is the machine's anyway.
+                request = CallToolRequest(params=CallToolRequestParams(name=tool, arguments=arguments or {}))
+                return await client.session.send_request(
+                    request, _CALL_RESULT, request_read_timeout_seconds=_CALL_TIMEOUT_SECONDS
+                )
 
         return server
 
-    def _caller(self) -> tuple[str | None, str | None]:
-        """(the consumer, its ``Authorization`` value) of the request in progress, read live."""
-        authorization = get_http_request().headers.get("authorization")
+    def _refusal(self, consumer: str | None, machine: str) -> tuple[int, str, str] | None:
+        """Why *consumer* may not use *machine* now: (status, outcome, message), or None. In the
+        gateway's order, not allowed before not exposed: a consumer cannot probe what exists."""
         registry, _ = self.gateway.config.snapshot()
-        return self.gateway.identify(authorization, registry), authorization
+        if consumer is None or consumer not in registry.consumers:  # revoked while on its way
+            return 401, "denied_unknown_token", "Unauthorized"
+        if not is_valid_machine_name(machine) or machine not in registry.consumers[consumer].machines:
+            return 403, "denied_not_allowed", f"Machine {machine!r} is not allowed for this token"
+        if machine not in registry.exposed:
+            return 404, "denied_unexposed", f"Machine {machine!r} is not available"
+        return None
+
+    def _consumer(self, authorization: str | None) -> str | None:
+        registry, _ = self.gateway.config.snapshot()
+        return self.gateway.identify(authorization, registry)
 
     def _admit(self, machine: str, tool: str) -> str:
-        """The consumer's ``Authorization`` value, or a tool error in the gateway's decision order:
-        not allowed before not exposed, so a consumer cannot probe which other machines exist."""
-        consumer, authorization = self._caller()
-        if consumer is None or authorization is None:  # revoked while the request was on its way
-            raise failure("Unauthorized")
-        registry, _ = self.gateway.config.snapshot()
-        allowed = registry.consumers[consumer].machines if consumer in registry.consumers else []
-        if not is_valid_machine_name(machine) or machine not in allowed:
-            self.gateway.record_refusal(consumer, machine, tool, 403, "denied_not_allowed")
-            raise failure(f"Machine {machine!r} is not allowed for this token")
-        if machine not in registry.exposed:
-            self.gateway.record_refusal(consumer, machine, tool, 404, "denied_unexposed")
-            raise failure(f"Machine {machine!r} is not available")
-        return authorization
+        """The consumer's ``Authorization`` value, or a tool error."""
+        authorization = get_http_request().headers.get("authorization")
+        consumer = self._consumer(authorization)
+        refusal = self._refusal(consumer, machine)
+        if refusal is None and authorization is not None:
+            return authorization
+        status, outcome, message = refusal or (401, "denied_unknown_token", "Unauthorized")
+        if consumer is not None:
+            self.gateway.record_refusal(consumer, machine, tool, status, outcome)
+        raise failure(message)
 
     def _http_client(self, cap: _ReplyCap, on_status, **kwargs: Any) -> httpx2.AsyncClient:
         """What the MCP client speaks through: ``Gateway.handle``, in-process."""
@@ -246,7 +290,7 @@ class FleetEndpoint:
     @asynccontextmanager
     async def _session(self, machine: str, authorization: str) -> AsyncIterator[Client]:
         statuses: list[int] = []
-        cap = _ReplyCap(self.machine_app)
+        cap = _ReplyCap(self.machine_app, self.budget)
         transport = StreamableHttpTransport(
             f"{_INTERNAL_BASE}/{machine}/mcp",
             headers={"Authorization": authorization},
@@ -258,10 +302,12 @@ class FleetEndpoint:
                 yield client
         except Exception as exc:
             logger.warning("fleet call to machine %r failed: %s", machine, type(exc).__name__)
-            raise failure(_failure_text(machine, exc, statuses, cap)) from None
+            # A 401 from Gateway.handle itself: the consumer lost the machine since _admit.
+            refusal = self._refusal(self._consumer(authorization), machine)
+            raise failure(refusal[2] if refusal else _failure_text(machine, exc, statuses, cap)) from None
 
     async def _list_machines(self) -> list[dict[str, Any]]:
-        consumer, _ = self._caller()
+        consumer = self._consumer(get_http_request().headers.get("authorization"))
         registry, machines = self.gateway.config.snapshot()
         if consumer is None or consumer not in registry.consumers:
             raise failure("Unauthorized")
@@ -271,6 +317,14 @@ class FleetEndpoint:
         async with httpx2.AsyncClient(timeout=_PROBE_TIMEOUT, trust_env=False, follow_redirects=False) as client:
             results = await gather_probes(_bounded_probe(client, machines[name].url) for name in names)
         return [_listing(name, result) for name, result in zip(names, results)]
+
+
+def _outcome(status: int | None) -> str:
+    if status is None:
+        return "client_disconnect"  # no answer started: the consumer left
+    if status < 400:
+        return "ok"
+    return "fleet_refused" if status < 500 else "fleet_error"
 
 
 async def _bounded_probe(client: httpx2.AsyncClient, url: str) -> ProbeResult:

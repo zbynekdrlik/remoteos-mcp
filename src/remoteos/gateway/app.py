@@ -594,6 +594,7 @@ def create_app(
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.gateway = gateway
+    app.state.fleet = fleet
     return app
 
 

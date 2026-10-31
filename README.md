@@ -672,9 +672,14 @@ mcp__fleet__Call  machine="win-new-box"  tool="Shell"  arguments={"command": "ho
 - **The per-machine entries stay.** They have typed tools, so use them when they exist. `fleet` is
   the way to a box that has no server of its own in this session yet.
 - **Direct projects get no `fleet` entry:** remoteos-mcp stays independent of the gateway.
-- **Limits.** A `Call` reply is at most 64 MB (a bigger FileDownload is an error), and progress
-  messages of a running tool do not reach the caller. `fleet` is a reserved name, so no machine
-  can have it. A `fleet` entry sync did not write is kept with a warning.
+- **Limits.** A `Call` reply is at most 20 MB, and 32 MB across all calls in flight (over that it
+  is an error, so a big FileDownload goes through `remoteos-call get` or the machine's own
+  server, which stream). Progress messages of a running tool do not reach the caller.
+- **Names.** `fleet` is reserved, so no machine can have it. A `fleet` entry with another url is
+  kept, with a warning, and that project gets no fleet server.
+- **Rollout order.** Upgrade the gateway FIRST, then `sync-configs`: the old gateway treats
+  `/fleet/mcp` as a machine and answers 403. Before the upgrade, no machine named `fleet` may be
+  in `machines.json` or `registry.json`: the new gateway refuses such a file.
 
 **Releases (stable and canary):** CI creates GitHub release `v<version>` on every merge to `main`,
 after all test jobs passed (`scripts/create-release.sh`, a no-op when it exists).

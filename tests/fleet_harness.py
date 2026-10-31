@@ -338,6 +338,11 @@ class RealMachine(LoopbackServer):
             """Text and an image."""
             return ["a caption", Image(data=PIXEL_PNG, format="png")]
 
+        @server.tool(name="Blob")
+        def blob(size: int) -> str:
+            """A reply of *size* characters."""
+            return "x" * size
+
         @server.tool(name="Boom")
         def boom() -> str:
             """Always fails."""
@@ -363,8 +368,9 @@ class RealMachine(LoopbackServer):
                 return
 
             async def dying_send(message):
-                # uvicorn drops the connection when the app raises after the headers went out
-                if message["type"] == "http.response.body" and b'"result"' in message.get("body", b""):
+                # uvicorn drops the connection when the app raises after the headers went out.
+                # "content" is in a tool's result only, not in the initialize reply.
+                if message["type"] == "http.response.body" and b'"content"' in message.get("body", b""):
                     raise ConnectionAbortedError("the box died")
                 await send(message)
 

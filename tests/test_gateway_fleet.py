@@ -24,6 +24,7 @@ from fleet_harness import (
     write_private_json,
 )
 from starlette.applications import Starlette
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from remoteos.gateway import fleet as fleet_module
@@ -64,8 +65,8 @@ class Stack:
                 },
             },
         )
-        app = create_app(LiveConfig(self.registry, self.keystore), AccessLog(self.access_log))
-        self.gateway = LoopbackServer(app)
+        self.app = create_app(LiveConfig(self.registry, self.keystore), AccessLog(self.access_log))
+        self.gateway = LoopbackServer(self.app)
         self.gateway.start()
 
     @property
@@ -137,7 +138,7 @@ def test_machine_tools_gives_the_real_schemas(stack):
             return (await client.call_tool("MachineTools", {"machine": BOX})).structured_content["result"]
 
     tools = {t["name"]: t for t in asyncio.run(go())}
-    assert set(tools) == {"Echo", "Snap", "Boom"}
+    assert set(tools) == {"Echo", "Snap", "Blob", "Boom"}
     assert tools["Echo"]["inputSchema"]["properties"]["text"]["type"] == "string"
     assert tools["Echo"]["description"] == "Echo the text."
 
@@ -401,24 +402,140 @@ def test_a_box_that_dies_during_a_call_is_an_error_not_a_hang(stack):
             return await asyncio.wait_for(client.call_tool_mcp("Call", arguments), 20)
 
     result = asyncio.run(go())
+    assert stack.machine.received == [{"text": "x"}]  # the tool ran: it died on the answer
     assert result.is_error
     assert BOX in result.content[0].text
 
 
-def test_a_reply_over_the_cap_is_a_clear_error_not_an_out_of_memory(stack, monkeypatch):
-    monkeypatch.setattr(fleet_module, "MAX_REPLY_BYTES", 4096)
+def test_a_reply_over_one_mebibyte_arrives_whole(stack):
+    """The SDK's own limit on one event is 1 MiB: a FileDownload of 780 KB would pass it."""
+    size = 3 * 1024 * 1024
 
     async def go():
         async with stack.client() as client:
-            big = await client.call_tool_mcp(
-                "Call", {"machine": BOX, "tool": "Echo", "arguments": {"text": "x" * 8192}}
-            )
-            small = await client.call_tool_mcp("Call", {"machine": BOX, "tool": "Echo", "arguments": {"text": "x"}})
+            return await client.call_tool("Call", {"machine": BOX, "tool": "Blob", "arguments": {"size": size}})
+
+    assert asyncio.run(go()).content[0].text == "x" * size
+    assert stack.app.state.fleet.budget.used == 0
+
+
+def test_a_reply_over_the_cap_is_a_clear_error_not_an_out_of_memory(stack):
+    size = fleet_module.MAX_REPLY_BYTES + 1
+
+    async def go():
+        async with stack.client() as client:
+            big = await client.call_tool_mcp("Call", {"machine": BOX, "tool": "Blob", "arguments": {"size": size}})
+            small = await client.call_tool_mcp("Call", {"machine": BOX, "tool": "Blob", "arguments": {"size": 10}})
             return big, small
 
     big, small = asyncio.run(go())
     assert big.is_error and "too large" in big.content[0].text
     assert not small.is_error
+    assert stack.app.state.fleet.budget.used == 0  # the refused reply gave its bytes back
+
+
+def test_replies_together_cannot_pass_the_budget(stack):
+    held = fleet_module.MAX_BUFFERED_BYTES - 1024  # what other calls in flight hold right now
+    stack.app.state.fleet.budget.used = held
+
+    async def go():
+        async with stack.client() as client:
+            return await client.call_tool_mcp("Call", {"machine": BOX, "tool": "Blob", "arguments": {"size": 4096}})
+
+    result = asyncio.run(go())
+    assert result.is_error and "try again" in result.content[0].text
+    assert stack.app.state.fleet.budget.used == held
+
+
+def test_a_call_never_lists_the_tools_after_the_tool_ran(stack):
+    """A tools/list after the call could turn a finished call into an error, and a retry."""
+
+    async def go():
+        async with stack.client() as client:
+            await client.call_tool("Call", {"machine": BOX, "tool": "Echo", "arguments": {"text": "x"}})
+
+    asyncio.run(go())
+    methods = [r["rpc_method"] for r in stack.log() if r["machine"] == BOX]
+    assert "tools/call" in methods and "tools/list" not in methods
+
+
+def test_a_machine_silent_after_initialize_cannot_hold_machine_tools(stack, monkeypatch):
+    monkeypatch.setattr(fleet_module, "_TOOLS_TIMEOUT_SECONDS", 0.5)
+    key = fresh_secret("machinekey")
+
+    async def initialize_then_nothing(request):
+        message = await request.json()
+        if message.get("method") == "tools/list":
+            await asyncio.Event().wait()
+        if "id" not in message:
+            return Response(status_code=202)
+        result = {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "s", "version": "1"}}
+        return JSONResponse({"jsonrpc": "2.0", "id": message["id"], "result": result})
+
+    with LoopbackServer(Starlette(routes=[Route("/mcp", initialize_then_nothing, methods=["POST"])])) as box:
+        stack.add_machine(OTHER_BOX, f"{box.base_url}/mcp", key)
+
+        async def go():
+            async with stack.client() as client:
+                started = time.monotonic()
+                result = await client.call_tool_mcp("MachineTools", {"machine": OTHER_BOX})
+                return result, time.monotonic() - started
+
+        result, elapsed = asyncio.run(go())
+    assert result.is_error and elapsed < 10
+
+
+def test_losing_a_machine_during_the_call_is_not_called_a_stale_key(stack):
+    """A deny that lands between the check and the machine: the gateway's refusal, in its words."""
+
+    fleet = stack.app.state.fleet
+    machine_app = fleet.machine_app
+
+    async def deny_then_forward(scope, receive, send):
+        with edit_registry(stack.registry) as registry:
+            registry.consumers[CONSUMER].machines = []
+        await machine_app(scope, receive, send)
+
+    fleet.machine_app = deny_then_forward  # runs after _admit, before Gateway.handle
+
+    async def go():
+        async with stack.client() as client:
+            return await client.call_tool_mcp("Call", {"machine": BOX, "tool": "Echo", "arguments": {"text": "x"}})
+
+    result = asyncio.run(go())
+    assert result.is_error
+    assert "not allowed" in result.content[0].text
+    assert "stale" not in result.content[0].text
+    assert [r["tool"] for r in stack.log() if r["outcome"] == "denied_not_allowed"] == [None]  # handle refused it
+    assert stack.machine.received == []
+
+
+def test_a_refused_request_is_not_logged_as_ok(stack):
+    response = httpx2.post(
+        stack.fleet_url,
+        content=b"not json",
+        headers={
+            "Authorization": f"Bearer {stack.token}",
+            "content-type": "application/json",
+            "accept": "application/json, text/event-stream",
+        },
+    )
+    assert response.status_code == 400
+    deadline = time.monotonic() + 5  # the line is written once the response has gone out
+    while not stack.log() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert stack.log()[-1]["outcome"] == "fleet_refused"
+
+
+def test_a_quieter_log_level_stays_quiet():
+    root = logging.getLogger()
+    before = root.level
+    root.setLevel(logging.WARNING)
+    try:
+        fleet_module.keep_arguments_out_of_the_logs()
+        assert logging.getLogger("mcp").level == logging.WARNING
+    finally:
+        root.setLevel(before)
 
 
 # -- nothing secret reaches a log ------------------------------------------------------------
@@ -427,6 +544,7 @@ def test_a_reply_over_the_cap_is_a_clear_error_not_an_out_of_memory(stack, monke
 def test_no_token_key_or_argument_reaches_any_log(stack, caplog, capfd):
     secret_argument = fresh_secret("argument")
     caplog.set_level(logging.DEBUG)
+    fleet_module.keep_arguments_out_of_the_logs()  # as `serve --log-level debug` does, in this order
 
     async def go():
         async with stack.client() as client:
