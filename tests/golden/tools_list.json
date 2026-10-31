@@ -766,6 +766,151 @@
    }
   },
   "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "ElementTree"
+  },
+  "description": "List a window's interactive UI elements from the OS accessibility tree, each with a ref.\n\nUnlike a screenshot this sees real controls: buttons, fields and links in browsers\nand in Electron, WPF and UWP apps too, each with its role, name, state and bounds.\nOne line per element: [ref] role \"name\" enabled|disabled (WxH at X,Y). Bounds are\nIMAGE pixels of the Snapshot frame (monitor, max_width). Pass a ref to ClickElement\nor TypeElement instead of guessing pixels. Refs belong to the latest tree only: a\nnew ElementTree ends them. At most 300 elements are listed, and the reply says when\nthe list is incomplete. Windows only for now.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "max_width": {
+     "default": 1280,
+     "description": "max_width of the Snapshot frame (default 1280, as Snapshot).",
+     "type": "integer"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "monitor of the Snapshot frame (default 0, as Snapshot).",
+     "type": "integer"
+    },
+    "window": {
+     "default": "",
+     "description": "Part of a window title, matched as FocusWindow does. Empty = the foreground window.",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "ElementTree",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "ElementTree"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "ClickElement"
+  },
+  "description": "Activate an element from the latest ElementTree, by its ref.\n\nUses the element's own Invoke action, which needs no mouse. An element without one\ngets a left click at its centre, unless another window covers it. A ref of an older\ntree, an element that is gone or disabled, is an error, never a click elsewhere.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "ref": {
+     "description": "The element's ref from ElementTree, e.g. \"4821.12\".",
+     "type": "string"
+    }
+   },
+   "required": [
+    "ref"
+   ],
+   "type": "object"
+  },
+  "name": "ClickElement",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "ClickElement"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "TypeElement"
+  },
+  "description": "Enter text in an element from the latest ElementTree, by its ref.\n\nAn element with a settable value (most text fields) gets ``text`` as its whole new\nvalue, replacing what was there, with no keystrokes. Any other element gets the\nkeyboard focus and ``text`` is typed at its caret, as Type does; the reply says which\none happened. A read-only element, or one that will not take the focus, is an error\nand nothing is typed. A ref of an older tree, or an element that is gone or disabled,\nis an error too.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "ref": {
+     "description": "The element's ref from ElementTree, e.g. \"4821.12\".",
+     "type": "string"
+    },
+    "text": {
+     "description": "Text to enter, in any language.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "ref",
+    "text"
+   ],
+   "type": "object"
+  },
+  "name": "TypeElement",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "TypeElement"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
    "destructiveHint": false,
    "idempotentHint": null,
    "openWorldHint": false,
@@ -2535,7 +2680,7 @@
    "readOnlyHint": true,
    "title": "AnnotatedSnapshot"
   },
-  "description": "Take a screenshot with numbered labels on interactive UI elements.\n\nDraws red rectangles and white numbered labels on each interactive element,\nmaking it easy for AI agents to identify click targets visually. Same frame and\ncoordinate contract as Snapshot: the text starts with the contract line, element\ncenters are IMAGE pixels, and Click / Move / Scroll / Type take them as-is.\n\nUses the platform accessibility tree for the foreground window (Win32 child\nwindows on Windows, AT-SPI on Linux X11); returns the plain screenshot with a\nnote when the focused app exposes no elements.",
+  "description": "Take a screenshot with numbered labels on interactive UI elements.\n\nDraws red rectangles and white numbered labels on each interactive element,\nmaking it easy for AI agents to identify click targets visually. Same frame and\ncoordinate contract as Snapshot: the text starts with the contract line, element\ncenters are IMAGE pixels, and Click / Move / Scroll / Type take them as-is.\n\nUses the platform accessibility tree for the foreground window (UI Automation\non Windows, AT-SPI on Linux X11); returns the plain screenshot with a\nnote when the focused app exposes no elements.",
   "execution": null,
   "icons": null,
   "inputSchema": {
