@@ -28,8 +28,8 @@ from pathlib import Path
 
 import psutil
 import pytest
+from tool_surface import server
 
-import remoteos.__main__ as server
 from remoteos.platform.command import KILL_GRACE_S, powershell_argv, run_child, run_command
 
 # A child that starts a grandchild sharing its stdout, writes the grandchild's pid to a file, then

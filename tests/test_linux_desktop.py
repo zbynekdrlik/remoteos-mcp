@@ -24,6 +24,9 @@ from pathlib import Path
 import pytest
 
 from remoteos.platform.linux import desktop as d
+from remoteos.platform.linux import session as linux_session
+from remoteos.platform.linux import windows as linux_windows
+from remoteos.platform.linux import x11_capture as linux_capture
 
 _MSG = "Not available on headless Linux (no display)"
 
@@ -69,12 +72,12 @@ def _clean_display_env(monkeypatch):
     ],
 )
 def test_mode_from_env(env, expected):
-    assert d._mode_from_env(env) == expected
+    assert linux_session._mode_from_env(env) == expected
 
 
 def test_parse_show_session():
     text = "Id=1\nUser=1000\nName=newlevel\nType=x11\nClass=user\nActive=yes\nState=active\nDisplay=\n"
-    props = d._parse_show_session(text)
+    props = linux_session._parse_show_session(text)
     assert props == {
         "Id": "1",
         "User": "1000",
@@ -99,7 +102,7 @@ def test_choose_session_picks_active_x11_user():
         _sess("75", "tty", "user", "yes"),
         _sess("c1", "x11", "greeter", "no", state="online", user="120"),
     ]
-    chosen = d._choose_session(sessions)
+    chosen = linux_session._choose_session(sessions)
     assert chosen is not None
     assert chosen["Id"] == "1"
     assert chosen["Type"] == "x11"
@@ -107,7 +110,7 @@ def test_choose_session_picks_active_x11_user():
 
 def test_choose_session_prefers_wayland_when_no_x11():
     sessions = [_sess("3", "wayland", "user", "yes"), _sess("9", "tty", "user", "yes")]
-    chosen = d._choose_session(sessions)
+    chosen = linux_session._choose_session(sessions)
     assert chosen is not None and chosen["Id"] == "3"
 
 
@@ -116,12 +119,12 @@ def test_choose_session_none_when_only_tty_and_greeter():
         _sess("9", "tty", "user", "yes"),
         _sess("c1", "x11", "greeter", "no", state="online", user="120"),
     ]
-    assert d._choose_session(sessions) is None
+    assert linux_session._choose_session(sessions) is None
 
 
 def test_choose_session_skips_inactive_x11():
     sessions = [_sess("1", "x11", "user", "no", state="closing")]
-    assert d._choose_session(sessions) is None
+    assert linux_session._choose_session(sessions) is None
 
 
 def test_parse_wmctrl_windows():
@@ -131,7 +134,7 @@ def test_parse_wmctrl_windows():
         "0x04200003  0 3210 100  50   800  600  imag-pc gedit — file.txt\n"
         "malformed line\n"
     )
-    wins = d._parse_wmctrl_windows(text)
+    wins = linux_windows._parse_wmctrl_windows(text)
     assert len(wins) == 2
     assert wins[0].handle == 0x03000007
     assert wins[0].pid == 2776
@@ -149,7 +152,7 @@ def test_parse_wmctrl_windows():
 
 @pytest.fixture
 def headless(monkeypatch):
-    monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
+    monkeypatch.setattr(linux_session, "_SESSION", d.SessionInfo(mode="headless"))
     return d
 
 
@@ -197,8 +200,8 @@ def test_headless_never_shells_out(headless, monkeypatch):
     def _boom(*a, **k):  # pragma: no cover - must not be called
         raise AssertionError("headless path must not run subprocesses")
 
-    monkeypatch.setattr(d, "_run_x", _boom)
-    monkeypatch.setattr(d, "_run_capture", _boom)
+    monkeypatch.setattr(linux_session, "_run_x", _boom)
+    monkeypatch.setattr(linux_session, "_run_capture", _boom)
     for call in (lambda: headless.click(1, 1), headless.get_clipboard):
         with pytest.raises(RuntimeError) as exc:
             call()
@@ -221,7 +224,7 @@ class _FakeProc:
 @pytest.fixture
 def x11(monkeypatch):
     monkeypatch.setattr(
-        d,
+        linux_session,
         "_SESSION",
         d.SessionInfo(
             mode="x11",
@@ -234,7 +237,7 @@ def x11(monkeypatch):
     )
     calls: list[list[str]] = []
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         calls.append(cmd)
         # xclip -o (get_clipboard) returns fake clipboard content
         if cmd[:1] == ["xclip"] and "-o" in cmd:
@@ -243,7 +246,7 @@ def x11(monkeypatch):
             return _FakeProc(stdout=b"0x0400000a 0 3210 100 50 800 600 host gedit\n")
         return _FakeProc()
 
-    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(linux_session, "_run_x", _fake_run_x)
     return d, calls
 
 
@@ -281,7 +284,7 @@ def x11_clipboard(monkeypatch, x11):
     board = {"text": "clip-content"}
     log: list[tuple[list[str], str]] = []
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         if cmd[:1] == ["xclip"] and "-o" in cmd:
             return _FakeProc(stdout=board["text"].encode("utf-8"))
         if cmd[:1] == ["xclip"]:
@@ -289,7 +292,7 @@ def x11_clipboard(monkeypatch, x11):
         log.append((cmd, board["text"]))
         return _FakeProc()
 
-    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(linux_session, "_run_x", _fake_run_x)
     monkeypatch.setattr(time, "sleep", lambda s: None)  # the paste settle wait
     return mod, board, log
 
@@ -396,10 +399,10 @@ def test_x11_get_clipboard(x11):
 
 
 def _xclip_fails(monkeypatch, message):
-    def _run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         raise RuntimeError(message)  # _run_x's own wording of a non-zero xclip exit
 
-    monkeypatch.setattr(d, "_run_x", _run_x)
+    monkeypatch.setattr(linux_session, "_run_x", _run_x)
 
 
 def test_x11_clipboard_without_text_reads_as_empty_not_an_error(x11, monkeypatch):
@@ -450,14 +453,14 @@ def test_set_clipboard_uses_discard_output(monkeypatch):
     # Regression guard: xclip forks to stay resident holding the selection, so a
     # captured pipe blocks subprocess.run until timeout. set_clipboard MUST route
     # through _run_x with discard_output=True. (Found live on imag-nb.)
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
     captured: dict = {}
 
-    def _rec(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _rec(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         captured.update(cmd=cmd, discard=discard_output, input=input_bytes)
         return _FakeProc()
 
-    monkeypatch.setattr(d, "_run_x", _rec)
+    monkeypatch.setattr(linux_session, "_run_x", _rec)
     assert d.set_clipboard("hi") == "Clipboard set"
     assert captured["cmd"] == ["xclip", "-selection", "clipboard"]
     assert captured["discard"] is True
@@ -467,14 +470,14 @@ def test_set_clipboard_uses_discard_output(monkeypatch):
 def test_typed_text_never_reaches_the_debug_log(monkeypatch, caplog):
     # --debug turns the remoteos loggers to DEBUG (#31): the x-run line logs the argv,
     # and for `xdotool type -- <text>` that argv carries the typed text (typing.md: never log it).
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
     ran: list[list[str]] = []
 
     def _run(argv, **kwargs):
         ran.append(list(argv))
         return _FakeProc()
 
-    monkeypatch.setattr(d.subprocess, "run", _run)
+    monkeypatch.setattr(linux_session.subprocess, "run", _run)
     with caplog.at_level(logging.DEBUG, logger="remoteos"):
         assert d.type_unicode("tajné heslo") == 11
     assert ran and ran[-1][-1] == "tajné heslo"  # xdotool itself still gets the text
@@ -485,16 +488,16 @@ def test_typed_text_never_reaches_the_debug_log(monkeypatch, caplog):
 
 def test_typed_text_that_is_a_double_dash_is_redacted_too(monkeypatch, caplog):
     # the text comes after the FIRST "--" following "type", even when the text is "--" itself
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
-    monkeypatch.setattr(d.subprocess, "run", lambda argv, **kwargs: _FakeProc())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session.subprocess, "run", lambda argv, **kwargs: _FakeProc())
     with caplog.at_level(logging.DEBUG, logger="remoteos"):
         assert d.type_unicode("--") == 2
     assert "'--', '<2 chars>'" in caplog.text
 
 
 def test_build_invocation_same_user_injects_env(monkeypatch):
-    monkeypatch.setattr(d.os, "geteuid", lambda: 1000)
-    argv, env = d._build_invocation(_x11_session(), ["xdotool", "key", "a"])
+    monkeypatch.setattr(linux_session.os, "geteuid", lambda: 1000)
+    argv, env = linux_session._build_invocation(_x11_session(), ["xdotool", "key", "a"])
     assert argv == ["xdotool", "key", "a"]  # no sudo wrap
     assert env["DISPLAY"] == ":0"
     assert env["XAUTHORITY"] == "/run/user/1000/gdm/Xauthority"
@@ -502,21 +505,21 @@ def test_build_invocation_same_user_injects_env(monkeypatch):
 
 
 def test_build_invocation_root_wraps_sudo(monkeypatch):
-    monkeypatch.setattr(d.os, "geteuid", lambda: 0)
-    argv, _env = d._build_invocation(_x11_session(), ["xdotool", "key", "a"])
+    monkeypatch.setattr(linux_session.os, "geteuid", lambda: 0)
+    argv, _env = linux_session._build_invocation(_x11_session(), ["xdotool", "key", "a"])
     assert argv[:5] == ["sudo", "-n", "-u", "newlevel", "env"]
     assert "DISPLAY=:0" in argv
     assert argv[-3:] == ["xdotool", "key", "a"]
 
 
 def test_unavailable_message_wayland(monkeypatch):
-    monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="wayland"))
+    monkeypatch.setattr(linux_session, "_SESSION", d.SessionInfo(mode="wayland"))
     msg = d._unavailable()
     assert "Wayland" in msg and "separate tier" in msg
 
 
 def test_unavailable_message_headless(monkeypatch):
-    monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
+    monkeypatch.setattr(linux_session, "_SESSION", d.SessionInfo(mode="headless"))
     assert d._unavailable() == _MSG
 
 
@@ -526,7 +529,7 @@ def test_unavailable_message_headless(monkeypatch):
 
 
 def test_ffmpeg_argv_fullscreen():
-    argv = d._ffmpeg_x11grab_argv(":0", "/tmp/out.gif", duration=3, fps=5, region=None, max_width=800)
+    argv = linux_capture._ffmpeg_x11grab_argv(":0", "/tmp/out.gif", duration=3, fps=5, region=None, max_width=800)
     assert argv[:9] == [
         "ffmpeg",
         "-hide_banner",
@@ -547,14 +550,16 @@ def test_ffmpeg_argv_fullscreen():
 
 
 def test_ffmpeg_argv_region_and_no_scale():
-    argv = d._ffmpeg_x11grab_argv(":0", "/tmp/o.gif", duration=2, fps=8, region=(100, 50, 900, 650), max_width=0)
+    argv = linux_capture._ffmpeg_x11grab_argv(
+        ":0", "/tmp/o.gif", duration=2, fps=8, region=(100, 50, 900, 650), max_width=0
+    )
     assert argv[argv.index("-video_size") + 1] == "800x600"
     assert argv[argv.index("-i") + 1] == ":0+100,50"
     assert argv[argv.index("-vf") + 1] == "fps=8"  # max_width=0 → no scale filter
 
 
 def test_ffmpeg_argv_clamps_fps_and_duration():
-    argv = d._ffmpeg_x11grab_argv(":0", "/tmp/o.gif", duration=99, fps=99, region=None, max_width=800)
+    argv = linux_capture._ffmpeg_x11grab_argv(":0", "/tmp/o.gif", duration=99, fps=99, region=None, max_width=800)
     assert argv[argv.index("-framerate") + 1] == "10"  # fps clamped to 10
     assert argv[argv.index("-t") + 1] == "10"  # duration clamped to 10
 
@@ -563,22 +568,22 @@ def test_record_screen_headless_raises_stub_and_never_shells_out(headless, monke
     def _boom(*a, **k):  # pragma: no cover - must not be called
         raise AssertionError("headless record_screen must not run subprocesses")
 
-    monkeypatch.setattr(d, "_run_x", _boom)
+    monkeypatch.setattr(linux_session, "_run_x", _boom)
     with pytest.raises(RuntimeError) as exc:
         headless.record_screen(duration=1)
     assert str(exc.value) == _MSG
 
 
 def test_record_screen_x11_runs_ffmpeg_and_returns_b64(monkeypatch):
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
     calls: list[list[str]] = []
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         calls.append(cmd)
         Path(cmd[-1]).write_bytes(b"GIF89a-fake-frames")  # ffmpeg writes the out file
         return _FakeProc()
 
-    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(linux_session, "_run_x", _fake_run_x)
     b64 = d.record_screen(duration=1, fps=5)
     assert base64.b64decode(b64) == b"GIF89a-fake-frames"
     assert calls and calls[0][0] == "ffmpeg" and "x11grab" in calls[0]
@@ -586,13 +591,13 @@ def test_record_screen_x11_runs_ffmpeg_and_returns_b64(monkeypatch):
 
 
 def test_record_screen_x11_empty_output_raises(monkeypatch):
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         Path(cmd[-1]).write_bytes(b"")  # ffmpeg "succeeded" but produced nothing
         return _FakeProc()
 
-    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(linux_session, "_run_x", _fake_run_x)
     with pytest.raises(RuntimeError) as exc:
         d.record_screen(duration=1)
     assert "empty recording" in str(exc.value)
@@ -646,7 +651,7 @@ def test_collect_actionable_maps_only_actionable_visible_valid():
             )
         ],
     )
-    els = d._collect_actionable(tree, _FakeAdapter())
+    els = linux_windows._collect_actionable(tree, _FakeAdapter())
     assert [e["class"] for e in els] == ["push button", "entry"]
     assert els[0] == {
         "index": 1,
@@ -660,34 +665,34 @@ def test_collect_actionable_maps_only_actionable_visible_valid():
 def test_collect_actionable_respects_max_elements():
     kids = [_node("push button", f"b{i}", (0, 0, 10, 10)) for i in range(10)]
     root = _node("frame", "W", (0, 0, 100, 100), children=kids)
-    els = d._collect_actionable(root, _FakeAdapter(), max_elements=3)
+    els = linux_windows._collect_actionable(root, _FakeAdapter(), max_elements=3)
     assert [e["index"] for e in els] == [1, 2, 3]
 
 
 def test_get_interactive_elements_atspi_unavailable_returns_empty(monkeypatch):
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
 
     def _boom():
         raise RuntimeError("gi/Atspi not importable")
 
-    monkeypatch.setattr(d, "_load_atspi", _boom)
+    monkeypatch.setattr(linux_windows, "_load_atspi", _boom)
     assert d.get_interactive_elements() == []
 
 
 def test_get_interactive_elements_no_frame_returns_empty(monkeypatch):
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
-    monkeypatch.setattr(d, "_load_atspi", lambda: object())
-    monkeypatch.setattr(d, "_atspi_active_frame", lambda atspi: None)
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_windows, "_load_atspi", lambda: object())
+    monkeypatch.setattr(linux_windows, "_atspi_active_frame", lambda atspi: None)
     assert d.get_interactive_elements() == []
 
 
 def test_get_interactive_elements_collects_from_active_frame(monkeypatch):
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
     frame = _node("frame", "W", (0, 0, 800, 600), children=[_node("push button", "Go", (5, 5, 55, 35))])
-    monkeypatch.setattr(d, "_load_atspi", lambda: object())
-    monkeypatch.setattr(d, "_atspi_active_frame", lambda atspi: frame)
-    monkeypatch.setattr(d, "_atspi_coord_strategy", lambda atspi, fr: ("window", (0, 0)))
-    monkeypatch.setattr(d, "_AtspiAdapter", lambda *a, **k: _FakeAdapter())
+    monkeypatch.setattr(linux_windows, "_load_atspi", lambda: object())
+    monkeypatch.setattr(linux_windows, "_atspi_active_frame", lambda atspi: frame)
+    monkeypatch.setattr(linux_windows, "_atspi_coord_strategy", lambda atspi, fr: ("window", (0, 0)))
+    monkeypatch.setattr(linux_windows, "_AtspiAdapter", lambda *a, **k: _FakeAdapter())
     els = d.get_interactive_elements()
     assert len(els) == 1 and els[0]["text"] == "Go" and els[0]["class"] == "push button"
 
@@ -695,12 +700,12 @@ def test_get_interactive_elements_collects_from_active_frame(monkeypatch):
 def test_content_origin_csd_shadow_margin():
     # GTK4 CSD: X toplevel (482x613) wraps a 360x491 content -> 61px shadow each
     # side, so content origin = (5+61, 497+61). (Verified live on imag-nb.)
-    assert d._content_origin((5, 497, 482, 613), 360, 491) == (66, 558)
+    assert linux_windows._content_origin((5, 497, 482, 613), 360, 491) == (66, 558)
 
 
 def test_content_origin_no_decoration_margin():
     # Server-side decorated / no shadow: toplevel == content -> origin is (x, y).
-    assert d._content_origin((100, 200, 800, 600), 800, 600) == (100, 200)
+    assert linux_windows._content_origin((100, 200, 800, 600), 800, 600) == (100, 200)
 
 
 # ---------------------------------------------------------------------------
@@ -713,28 +718,28 @@ def test_run_x_timeout_becomes_runtimeerror(monkeypatch):
     # which is NOT a RuntimeError — so it used to escape _run_x's retry AND every
     # caller's `except RuntimeError`, surfacing only at the outer `except Exception`
     # and losing the tailored message. _run_x must convert it to RuntimeError.
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
-    monkeypatch.setattr(d.os, "geteuid", lambda: 1000)  # no sudo wrap → cmd[0] preserved
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session.os, "geteuid", lambda: 1000)  # no sudo wrap → cmd[0] preserved
 
     def _timeout(*a, **k):
         raise subprocess.TimeoutExpired(cmd="xdotool", timeout=15)
 
-    monkeypatch.setattr(d.subprocess, "run", _timeout)
+    monkeypatch.setattr(linux_session.subprocess, "run", _timeout)
     with pytest.raises(RuntimeError) as exc:
-        d._run_x(["xdotool", "key", "a"], timeout=15)
+        linux_session._run_x(["xdotool", "key", "a"], timeout=15)
     assert "xdotool" in str(exc.value) and "timed out" in str(exc.value)
 
 
 def test_click_surfaces_timeout_via_runtimeerror(monkeypatch):
     # Regression (#10 fix 3): the tailored timeout message must reach the caller's
     # `except RuntimeError` path (here click), not blow past it as TimeoutExpired.
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
-    monkeypatch.setattr(d.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session.os, "geteuid", lambda: 1000)
 
     def _timeout(*a, **k):
         raise subprocess.TimeoutExpired(cmd="xdotool", timeout=15)
 
-    monkeypatch.setattr(d.subprocess, "run", _timeout)
+    monkeypatch.setattr(linux_session.subprocess, "run", _timeout)
     with pytest.raises(RuntimeError) as exc:  # a failed click raises (#32)
         d.click(10, 10)
     msg = str(exc.value)
@@ -746,8 +751,8 @@ def test_detect_root_ignores_env_display_uses_loginctl(monkeypatch):
     # DISPLAY set must NOT be classified as a uid-0 x11 env-session (that would
     # drop the `sudo -n -u <user>` wrapping). A root process's own env is never
     # the real seat — it must resolve the session via loginctl.
-    monkeypatch.setattr(d.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(d.os, "getuid", lambda: 0)
+    monkeypatch.setattr(linux_session.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(linux_session.os, "getuid", lambda: 0)
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
@@ -763,9 +768,9 @@ def test_detect_root_ignores_env_display_uses_loginctl(monkeypatch):
             )
         return 1, "", "unexpected"
 
-    monkeypatch.setattr(d, "_run_capture", _fake_run_capture)
-    monkeypatch.setattr(d, "_scan_proc_for_x_env", lambda uid: (":0", "/run/user/1000/gdm/Xauthority"))
-    info = d._detect()
+    monkeypatch.setattr(linux_session, "_run_capture", _fake_run_capture)
+    monkeypatch.setattr(linux_session, "_scan_proc_for_x_env", lambda uid: (":0", "/run/user/1000/gdm/Xauthority"))
+    info = linux_session._detect()
     assert info.mode == "x11"
     assert info.uid == 1000  # resolved via loginctl, NOT os.getuid()==0
     assert info.user == "newlevel"
@@ -774,8 +779,8 @@ def test_detect_root_ignores_env_display_uses_loginctl(monkeypatch):
 def test_detect_non_root_still_uses_env(monkeypatch):
     # Complement to the above: a NON-root process whose env advertises a display
     # still takes the fast env branch (the session-user service on imag-nb).
-    monkeypatch.setattr(d.os, "geteuid", lambda: 1000)
-    monkeypatch.setattr(d.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(linux_session.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(linux_session.os, "getuid", lambda: 1000)
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
@@ -783,8 +788,8 @@ def test_detect_non_root_still_uses_env(monkeypatch):
     def _boom(*a, **k):  # pragma: no cover - env branch must not consult loginctl
         raise AssertionError("non-root env session must not fall through to loginctl")
 
-    monkeypatch.setattr(d, "_run_capture", _boom)
-    info = d._detect()
+    monkeypatch.setattr(linux_session, "_run_capture", _boom)
+    info = linux_session._detect()
     assert info.mode == "x11"
     assert info.uid == 1000
 
@@ -803,11 +808,11 @@ def test_load_atspi_restores_env(monkeypatch):
         runtime_dir="/run/user/1000",
         dbus_address="unix:path=/run/user/1000/bus",
     )
-    monkeypatch.setattr(d, "_SESSION", sess)
+    monkeypatch.setattr(linux_session, "_SESSION", sess)
     keys = ("DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
     for k in keys:
         monkeypatch.delenv(k, raising=False)
-    before = {k: d.os.environ.get(k) for k in keys}
+    before = {k: linux_session.os.environ.get(k) for k in keys}
 
     # Mock the external gi/Atspi import so no real AT-SPI stack is needed.
     fake_atspi = types.SimpleNamespace(get_desktop=lambda n: object())
@@ -816,9 +821,9 @@ def test_load_atspi_restores_env(monkeypatch):
     monkeypatch.setitem(sys.modules, "gi", fake_gi)
     monkeypatch.setitem(sys.modules, "gi.repository", fake_repo)
 
-    atspi = d._load_atspi()
+    atspi = linux_windows._load_atspi()
     assert atspi is fake_atspi
-    after = {k: d.os.environ.get(k) for k in keys}
+    after = {k: linux_session.os.environ.get(k) for k in keys}
     assert after == before  # env fully restored — no global leak
 
 
@@ -834,11 +839,11 @@ def test_get_interactive_elements_leaves_env_clean(monkeypatch):
         runtime_dir="/run/user/1000",
         dbus_address="unix:path=/run/user/1000/bus",
     )
-    monkeypatch.setattr(d, "_SESSION", sess)
+    monkeypatch.setattr(linux_session, "_SESSION", sess)
     keys = ("DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
     for k in keys:
         monkeypatch.delenv(k, raising=False)
-    before = {k: d.os.environ.get(k) for k in keys}
+    before = {k: linux_session.os.environ.get(k) for k in keys}
 
     fake_atspi = types.SimpleNamespace(get_desktop=lambda n: object())
     fake_gi = types.SimpleNamespace(require_version=lambda *a, **k: None)
@@ -846,13 +851,13 @@ def test_get_interactive_elements_leaves_env_clean(monkeypatch):
     monkeypatch.setitem(sys.modules, "gi", fake_gi)
     monkeypatch.setitem(sys.modules, "gi.repository", fake_repo)
     frame = _node("frame", "W", (0, 0, 800, 600), children=[_node("push button", "Go", (5, 5, 55, 35))])
-    monkeypatch.setattr(d, "_atspi_active_frame", lambda atspi: frame)
-    monkeypatch.setattr(d, "_atspi_coord_strategy", lambda atspi, fr: ("window", (0, 0)))
-    monkeypatch.setattr(d, "_AtspiAdapter", lambda *a, **k: _FakeAdapter())
+    monkeypatch.setattr(linux_windows, "_atspi_active_frame", lambda atspi: frame)
+    monkeypatch.setattr(linux_windows, "_atspi_coord_strategy", lambda atspi, fr: ("window", (0, 0)))
+    monkeypatch.setattr(linux_windows, "_AtspiAdapter", lambda *a, **k: _FakeAdapter())
 
     els = d.get_interactive_elements()
     assert len(els) == 1  # the walk ran end-to-end
-    after = {k: d.os.environ.get(k) for k in keys}
+    after = {k: linux_session.os.environ.get(k) for k in keys}
     assert after == before  # no leak after the snapshot
 
 
@@ -864,7 +869,7 @@ def test_capture_png_uses_private_runtime_dir(monkeypatch, tmp_path):
     runtime = tmp_path / "run-user-1000"
     runtime.mkdir(mode=0o700)
     monkeypatch.setattr(
-        d,
+        linux_session,
         "_SESSION",
         d.SessionInfo(
             mode="x11",
@@ -878,12 +883,12 @@ def test_capture_png_uses_private_runtime_dir(monkeypatch, tmp_path):
     )
     seen: dict = {}
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         seen["target"] = Path(cmd[-1])
         seen["target"].write_bytes(b"\x89PNG\r\n-fake")  # scrot writes the capture
         return _FakeProc()
 
-    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(linux_session, "_run_x", _fake_run_x)
     data = d.capture_png()
     assert data == b"\x89PNG\r\n-fake"
     assert seen["target"].parent == runtime  # inside the private 0700 dir…
@@ -896,18 +901,18 @@ def test_record_screen_uses_private_runtime_dir(monkeypatch, tmp_path):
     runtime = tmp_path / "run"
     runtime.mkdir(mode=0o700)
     monkeypatch.setattr(
-        d,
+        linux_session,
         "_SESSION",
         d.SessionInfo(mode="x11", display=":0", uid=1000, user="newlevel", runtime_dir=str(runtime)),
     )
     seen: dict = {}
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         seen["target"] = Path(cmd[-1])
         seen["target"].write_bytes(b"GIF89a-x")
         return _FakeProc()
 
-    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(linux_session, "_run_x", _fake_run_x)
     b64 = d.record_screen(duration=1, fps=5)
     assert base64.b64decode(b64) == b"GIF89a-x"
     assert seen["target"].parent == runtime
@@ -917,16 +922,16 @@ def test_record_screen_uses_private_runtime_dir(monkeypatch, tmp_path):
 def test_capture_png_empty_import_output_raises(monkeypatch):
     # Regression (#10 fix 4): the ImageMagick `import` fallback must guard against
     # empty stdout (like the scrot path) instead of silently returning b"".
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         if cmd[:1] == ["scrot"]:
             raise RuntimeError("scrot failed (rc=1): (no stderr)")  # force the fallback
         if cmd[:1] == ["import"]:
             return _FakeProc(stdout=b"")  # ImageMagick produced nothing
         return _FakeProc()
 
-    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(linux_session, "_run_x", _fake_run_x)
     with pytest.raises(RuntimeError) as exc:
         d.capture_png()
     assert "empty" in str(exc.value).lower()
@@ -934,16 +939,16 @@ def test_capture_png_empty_import_output_raises(monkeypatch):
 
 def test_capture_png_import_fallback_returns_data(monkeypatch):
     # Complement to the above: a NON-empty ImageMagick fallback still returns bytes.
-    monkeypatch.setattr(d, "_SESSION", _x11_session())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         if cmd[:1] == ["scrot"]:
             raise RuntimeError("scrot failed")
         if cmd[:1] == ["import"]:
             return _FakeProc(stdout=b"\x89PNG-from-imagemagick")
         return _FakeProc()
 
-    monkeypatch.setattr(d, "_run_x", _fake_run_x)
+    monkeypatch.setattr(linux_session, "_run_x", _fake_run_x)
     assert d.capture_png() == b"\x89PNG-from-imagemagick"
 
 
@@ -970,7 +975,7 @@ def test_guess_xauthority_tolerates_unreadable_home(tmp_path, monkeypatch):
     monkeypatch.setattr(pwd_mod, "getpwnam", lambda name: FakeEntry())
 
     # _guess_xauthority must NOT raise — it should return None gracefully
-    result = d._guess_xauthority(99999, "fakepacker")
+    result = linux_session._guess_xauthority(99999, "fakepacker")
     assert result is None
 
     # Cleanup: restore permissions so pytest's tmp_path cleanup succeeds

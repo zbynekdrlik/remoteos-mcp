@@ -103,8 +103,9 @@ def test_it_never_runs_inside_the_server_s_service(tmp_path, caplog):
 
 def test_the_server_does_not_load_the_updater():
     """Only the OS scheduler starts it: the server's module must not reach it."""
-    text = (Path(__file__).parent.parent / "src/remoteos/__main__.py").read_text(encoding="utf-8")
-    assert "updater" not in text
+    src = Path(__file__).parent.parent / "src/remoteos"
+    for path in [src / "__main__.py", src / "app.py", *sorted((src / "tools").glob("*.py"))]:
+        assert "updater" not in path.read_text(encoding="utf-8"), path
 
 
 def test_an_upgrade_that_does_not_start_fails_the_run(tmp_path, caplog):

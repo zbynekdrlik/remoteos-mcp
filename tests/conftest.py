@@ -135,5 +135,6 @@ def _linux_session_detected_at_start_up(monkeypatch):
     leak into later tests.
     """
     from remoteos.platform.linux import desktop
+    from remoteos.platform.linux import session as linux_session
 
-    monkeypatch.setattr(desktop, "_SESSION", desktop.SessionInfo(mode="headless"))
+    monkeypatch.setattr(linux_session, "_SESSION", desktop.SessionInfo(mode="headless"))

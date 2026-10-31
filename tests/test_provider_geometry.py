@@ -151,7 +151,7 @@ def test_windows_non_primary_monitor_grabs_from_all_screens(win):
 @pytest.fixture
 def pyautogui_branch(monkeypatch, win):
     """The non-Linux branch of the input tools, with a recording fake pyautogui."""
-    import remoteos.__main__ as server
+    from tool_surface import server
 
     mod, _ = win
     fake = types.SimpleNamespace(
@@ -525,7 +525,7 @@ def _flaky_grab(monkeypatch, failures: int):
 
 @pytest.fixture
 def windows_tool_layer(monkeypatch, win):
-    import remoteos.__main__ as server
+    from tool_surface import server
 
     mod, _ = win
     monkeypatch.setattr(server, "is_windows", lambda: True)
@@ -584,9 +584,9 @@ def test_session_reconnect_helper_is_defined_once():
     # A second module-level def silently replaced the first, leaving a dead copy (#31).
     import ast
 
-    import remoteos.__main__ as server
+    from remoteos import app
 
-    tree = ast.parse(Path(server.__file__).read_text(encoding="utf-8"))
+    tree = ast.parse(Path(app.__file__).read_text(encoding="utf-8"))
     defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_ensure_session_connected"]
     assert len(defs) == 1
     assert [a.arg for a in defs[0].args.args] == ["force"]  # the effective copy (ReconnectSession's force)
@@ -796,7 +796,7 @@ def test_mac_type_unicode_without_the_posting_permission_is_an_error_and_posts_n
 
 @pytest.fixture
 def mac_tool_layer(monkeypatch, mac):
-    import remoteos.__main__ as server
+    from tool_surface import server
 
     mod, _ = mac
     fake = types.SimpleNamespace(

@@ -23,7 +23,7 @@ _PROCESS_PER_MONITOR_DPI_AWARE = 2  # shcore, Windows 8.1+
 _S_OK = 0
 
 # Mode applied to THIS process (the real ctypes.windll path only), so the second
-# caller (the Windows provider, after __main__) gets the same answer without
+# caller (the Windows provider, after remoteos.app) gets the same answer without
 # re-calling Win32 — a repeat call would be refused and misreport the mode.
 _MODE: str | None = None
 

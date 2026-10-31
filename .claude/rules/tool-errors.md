@@ -1,7 +1,8 @@
 ---
 paths:
   - "src/remoteos/errors.py"
-  - "src/remoteos/__main__.py"
+  - "src/remoteos/app.py"
+  - "src/remoteos/tools/**"
   - "src/remoteos/taskmanager.py"
   - "src/remoteos/text_entry.py"
   - "src/remoteos/platform/**/*.py"
@@ -59,7 +60,7 @@ paths:
     cwd problem, never the cwd; FileUpload logs sizes, never the path.
   - FastMCP itself logs a bad call's pydantic errors WITH their `input` values ("Invalid
     arguments for tool …", WARNING, on its own non-propagating `fastmcp` handler).
-    `errors.RedactInvalidArguments` keeps only loc/type/msg. `__main__` installs it on
+    `errors.RedactInvalidArguments` keeps only loc/type/msg. `app` installs it on
     `fastmcp.server.server`. A test that checks FastMCP's logs must add caplog's handler to
     the `fastmcp` logger.
   - `tests/test_startup_flags.py::test_debug_log_never_carries_tool_arguments_or_replies`
@@ -181,6 +182,9 @@ paths:
   - The helper and tool-error tests fake the stdlib `subprocess.run` / `Popen`, never an
     internal `_run`. `tests/test_helper_failures.py` has one test per raise path; check a
     new one against a mutant that returns the message instead of raising.
+  - `tests/tool_surface.py` gives `server`: the tools and helpers by name across `__main__`, `app` and
+    `tools/*`. `monkeypatch.setattr(server, "is_windows", …)` patches every real module that binds the
+    name, so a fake cannot miss one (#49).
   - `tests/tool_test_support.py` holds `tool_error` (the text of a tool's ToolError) and
     `purge_module` (re-import a provider against the current fakes) for every OS.
   - A macOS input test records the PROVIDER's `pyautogui` too (`_GuiRecorder` in

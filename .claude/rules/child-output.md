@@ -1,7 +1,7 @@
 ---
 paths:
   - "src/remoteos/platform/command.py"
-  - "src/remoteos/__main__.py"
+  - "src/remoteos/tools/shell.py"
   - "src/remoteos/ocr.py"
   - "src/remoteos/network.py"
   - "src/remoteos/platform/win/services.py"

@@ -18,8 +18,8 @@ import time
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from tool_surface import server
 
-import remoteos.__main__ as server
 from remoteos.taskmanager import TaskManager, TaskStatus, ToolCategory
 from remoteos.taskmanager import manager as task_manager
 

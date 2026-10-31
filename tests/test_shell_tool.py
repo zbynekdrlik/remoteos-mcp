@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import pytest
 from fake_console_child import assert_runs_powershell, returned
+from tool_surface import server
 from tool_test_support import tool_error
-
-import remoteos.__main__ as server
 
 
 def test_command_without_cwd_runs_and_returns_its_output():

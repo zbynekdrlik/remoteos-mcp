@@ -93,7 +93,7 @@ def shell_env(base: Optional[Mapping[str, str]] = None) -> dict[str, str]:
 def _snapshot(source: Mapping[str, str]) -> dict[str, str]:
     """A copy of ``source`` that skips a key popped while it is copied (review round 4).
 
-    ``dict(os.environ)`` lists the keys, then reads each one. ``desktop._load_atspi`` pops its
+    ``dict(os.environ)`` lists the keys, then reads each one. ``windows._load_atspi`` pops its
     temporary session keys from ``os.environ`` in another thread, and a key gone in between
     raised KeyError, failing the Shell call. ``Popen(env=None)`` never could.
     """

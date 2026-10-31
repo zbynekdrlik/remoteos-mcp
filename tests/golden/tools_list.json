@@ -1,0 +1,2421 @@
+[
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Snapshot"
+  },
+  "description": "Capture desktop screenshot, window list, and interactive UI elements.\n\nThe text starts with the coordinate contract, e.g. ``Image 1280x800 = screen\n2560x1600 at origin (0,0), scale 2.000; input tools take IMAGE pixels of this\nframe (monitor=0, max_width=1280)``. Every window rect and element center in\nthe text is in IMAGE pixels of the returned image, and Click / Move / Scroll /\nType take IMAGE pixels by default \u2014 read a point off the image (or the list)\nand pass it as-is, with the same monitor/max_width; the server scales it back.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "max_width": {
+     "default": 1280,
+     "description": "Max image width in pixels. 0=native resolution. Default 1280 to keep images compact.",
+     "type": "integer"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "Monitor to capture. 0=all monitors (default; on macOS the main display), 1/2/3=specific monitor.",
+     "type": "integer"
+    },
+    "quality": {
+     "default": 65,
+     "description": "JPEG quality 1-100 (default 65). Lower = smaller.",
+     "type": "integer"
+    },
+    "use_vision": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "string"
+      }
+     ],
+     "default": true,
+     "description": "Include screenshot image (default True)."
+    }
+   },
+   "type": "object"
+  },
+  "name": "Snapshot",
+  "outputSchema": null,
+  "title": "Snapshot"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "Click"
+  },
+  "description": "Mouse click at a point of the Snapshot image.\n\nx/y are IMAGE pixels of the last Snapshot / AnnotatedSnapshot (read them off\nthe image or its element list); the server maps them to the screen\n(screen = origin + round(image * scale), clamped to the frame). Pass the same\nmonitor/max_width the Snapshot used \u2014 the defaults are Snapshot's defaults.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "action": {
+     "default": "click",
+     "description": "'click', 'double', or 'hover'.",
+     "type": "string"
+    },
+    "button": {
+     "default": "left",
+     "description": "'left', 'right', or 'middle'.",
+     "type": "string"
+    },
+    "coords": {
+     "default": "image",
+     "description": "'image' (default) or 'screen' = raw OS coordinates, passed through\nunchanged (physical pixels on Windows/Linux, points on macOS).",
+     "type": "string"
+    },
+    "max_width": {
+     "default": 1280,
+     "description": "max_width of the Snapshot frame (default 1280, as Snapshot).",
+     "type": "integer"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "monitor of the Snapshot frame (default 0, as Snapshot).",
+     "type": "integer"
+    },
+    "x": {
+     "description": "X in Snapshot image pixels (screen coordinates if coords=\"screen\").",
+     "type": "integer"
+    },
+    "y": {
+     "description": "Y in Snapshot image pixels (screen coordinates if coords=\"screen\").",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "x",
+    "y"
+   ],
+   "type": "object"
+  },
+  "name": "Click",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Click"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "Type"
+  },
+  "description": "Type text in any language, optionally clicking a point of the Snapshot image first.\n\nAny Unicode text is typed exactly \u2014 diacritics (e.g. Slovak \"\u017dlt\u00fd k\u00f4\u0148\n\u010fakuje\"), symbols (\u20ac, \u2013) and emoji \u2014 whatever the machine's keyboard layout.\n\"\\n\" (also \"\\r\\n\") presses Enter and \"\\t\" presses Tab. The reply \"Typed N\nchars\" counts the characters handed to the OS. A desktop that cannot take\ninput (a locked Windows/macOS screen, a secure desktop, no display, a missing\npermission) is an error before anything is typed; on Windows, input the OS\nrefuses part-way is an error saying how many got through, never a success.\nx/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = type at the\ncurrent focus without clicking.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "clear": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "string"
+      }
+     ],
+     "default": false,
+     "description": "Clear existing content first (select all, Delete)."
+    },
+    "coords": {
+     "default": "image",
+     "description": "'image' (default) or 'screen' = raw OS coordinates.",
+     "type": "string"
+    },
+    "max_width": {
+     "default": 1280,
+     "description": "max_width of the Snapshot frame (default 1280, as Snapshot).",
+     "type": "integer"
+    },
+    "method": {
+     "default": "keys",
+     "description": "'keys' (default) = Unicode keystrokes, the clipboard is not\ntouched. 'paste' = put the text on the clipboard, press Ctrl+V\n(Command+V on macOS), then restore the previous clipboard text \u2014 only\nfor an app that ignores typed keystrokes (some games, nested remote\ndesktops). Not for secrets: clipboard history keeps a copy. The reply\nmeans the paste keys were pressed, not that the app took the text.",
+     "type": "string"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "monitor of the Snapshot frame (default 0, as Snapshot).",
+     "type": "integer"
+    },
+    "press_enter": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "string"
+      }
+     ],
+     "default": false,
+     "description": "Press Enter after typing."
+    },
+    "text": {
+     "description": "Text to type.",
+     "type": "string"
+    },
+    "x": {
+     "default": 0,
+     "description": "X in Snapshot image pixels. x=0 with y=0 = no click (type at the current\nfocus); x=0 alone is the left column.",
+     "type": "integer"
+    },
+    "y": {
+     "default": 0,
+     "description": "Y in Snapshot image pixels. y=0 alone is the top row.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "text"
+   ],
+   "type": "object"
+  },
+  "name": "Type",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Type"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "Scroll"
+  },
+  "description": "Turn the mouse wheel at a point of the Snapshot image.\n\namount = mouse-wheel CLICKS (notches), the same unit on Windows, macOS and\nLinux; direction = 'up' | 'down' | 'left' | 'right'. Example:\nScroll(amount=3, direction=\"down\") scrolls down by three wheel notches.\nx/y are IMAGE pixels of the last Snapshot (see Click); 0/0 = scroll where the\nmouse already is.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "amount": {
+     "description": "Wheel clicks, clamped to 1..100. Legacy form (no direction): the\nsign picks the direction \u2014 positive = up/right, negative = down/left.",
+     "type": "integer"
+    },
+    "coords": {
+     "default": "image",
+     "description": "'image' (default) or 'screen' = raw OS coordinates.",
+     "type": "string"
+    },
+    "direction": {
+     "default": "",
+     "description": "'up', 'down', 'left' or 'right'. When given it wins over the\nsign of amount and over horizontal.",
+     "type": "string"
+    },
+    "horizontal": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "string"
+      }
+     ],
+     "default": false,
+     "description": "Legacy, only without direction: scroll left/right instead of up/down."
+    },
+    "max_width": {
+     "default": 1280,
+     "description": "max_width of the Snapshot frame (default 1280, as Snapshot).",
+     "type": "integer"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "monitor of the Snapshot frame (default 0, as Snapshot).",
+     "type": "integer"
+    },
+    "x": {
+     "default": 0,
+     "description": "X in Snapshot image pixels. x=0 with y=0 = where the mouse already is;\nx=0 alone is the left column.",
+     "type": "integer"
+    },
+    "y": {
+     "default": 0,
+     "description": "Y in Snapshot image pixels. y=0 alone is the top row.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "amount"
+   ],
+   "type": "object"
+  },
+  "name": "Scroll",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Scroll"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "Move"
+  },
+  "description": "Move the mouse, or drag, to a point of the Snapshot image.\n\nx/y and start_x/start_y are IMAGE pixels of the last Snapshot (see Click).",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "coords": {
+     "default": "image",
+     "description": "'image' (default) or 'screen' = raw OS coordinates.",
+     "type": "string"
+    },
+    "drag": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "string"
+      }
+     ],
+     "default": false,
+     "description": "If true, drag from start position to target."
+    },
+    "duration": {
+     "default": 0.3,
+     "description": "Movement duration in seconds.",
+     "type": "number"
+    },
+    "max_width": {
+     "default": 1280,
+     "description": "max_width of the Snapshot frame (default 1280, as Snapshot).",
+     "type": "integer"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "monitor of the Snapshot frame (default 0, as Snapshot).",
+     "type": "integer"
+    },
+    "start_x": {
+     "default": 0,
+     "description": "Drag start X in image pixels. start_x=0 with start_y=0 = drag from\nthe current position; start_x=0 alone is the left column.",
+     "type": "integer"
+    },
+    "start_y": {
+     "default": 0,
+     "description": "Drag start Y in image pixels. start_y=0 alone is the top row.",
+     "type": "integer"
+    },
+    "x": {
+     "description": "Target X in Snapshot image pixels.",
+     "type": "integer"
+    },
+    "y": {
+     "description": "Target Y in Snapshot image pixels.",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "x",
+    "y"
+   ],
+   "type": "object"
+  },
+  "name": "Move",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Move"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "Shortcut"
+  },
+  "description": "Execute keyboard shortcut.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "keys": {
+     "description": "Shortcut string, e.g. 'ctrl+c', 'alt+tab', 'win+e'.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "keys"
+   ],
+   "type": "object"
+  },
+  "name": "Shortcut",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Shortcut"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Wait"
+  },
+  "description": "Pause execution.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "seconds": {
+     "default": 1.0,
+     "description": "Seconds to wait.",
+     "type": "number"
+    }
+   },
+   "type": "object"
+  },
+  "name": "Wait",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Wait"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "FocusWindow"
+  },
+  "description": "Bring a window to the foreground.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "handle": {
+     "default": 0,
+     "description": "Window handle (exact).",
+     "type": "integer"
+    },
+    "title": {
+     "default": "",
+     "description": "Window title (fuzzy matched).",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "FocusWindow",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "FocusWindow"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "MinimizeAll"
+  },
+  "description": "Minimize all windows (Win+D \u2014 show desktop).",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "MinimizeAll",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "MinimizeAll"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": true,
+   "readOnlyHint": null,
+   "title": "App"
+  },
+  "description": "Launch, switch to, or resize an application.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "action": {
+     "default": "launch",
+     "description": "'launch', 'switch', or 'resize'.",
+     "type": "string"
+    },
+    "args": {
+     "default": "",
+     "description": "Arguments (for launch).",
+     "type": "string"
+    },
+    "handle": {
+     "default": 0,
+     "description": "Window handle (for resize/switch).",
+     "type": "integer"
+    },
+    "height": {
+     "default": 0,
+     "description": "New height (for resize), in the same raw screen units as width.",
+     "type": "integer"
+    },
+    "name": {
+     "default": "",
+     "description": "Application name or path (for launch/switch).",
+     "type": "string"
+    },
+    "width": {
+     "default": 0,
+     "description": "New width (for resize), in raw screen units (the coords=\"screen\" space:\nphysical pixels on Windows/Linux, points on macOS) \u2014 not Snapshot image pixels.",
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "name": "App",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "App"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": true,
+   "readOnlyHint": null,
+   "title": "Shell"
+  },
+  "description": "Execute a shell command (PowerShell on Windows, zsh on macOS, bash on Linux).\n\nOn Windows the command runs unchanged in a console switched to UTF-8 before PowerShell\nstarts, so PowerShell's output comes back as exact Unicode; error records, exit codes and\n``param(...)`` are plain PowerShell's. On macOS/Linux the output is read in the locale's\nencoding. On Linux the command also gets the server user's own session variables the\nservice lacks (XDG_RUNTIME_DIR, the D-Bus session bus, DISPLAY), so ``systemctl --user``\nworks. Start a GUI program detached (``setsid -f prog >/dev/null 2>&1``): a plain\n``prog &`` keeps the output open, so the call runs to its timeout and the program is\nstopped with it. A prompt (ssh, sudo -A, a locked keyring) may open a dialog on the screen\ninstead of failing: run it non-interactively (``ssh -o BatchMode=yes``,\n``env -u DBUS_SESSION_BUS_ADDRESS``).\n\nThe text reply is stdout, ``[STDERR] \u2026`` and ``[Exit code: N]``; the structured content has\nthe exact ``stdout``, ``stderr`` and ``exit_code``, for a client that must not parse text.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "command": {
+     "description": "Command to execute.",
+     "type": "string"
+    },
+    "cwd": {
+     "default": "",
+     "description": "Working directory (spaces and quotes are fine; ~ and $VAR, or %VAR%\non Windows, are expanded). If provided, the command runs inside that\ndirectory; a path that is not an existing directory is an error and\nthe command does not run.",
+     "type": "string"
+    },
+    "timeout": {
+     "default": 30,
+     "description": "Timeout in seconds (default 30).",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "command"
+   ],
+   "type": "object"
+  },
+  "name": "Shell",
+  "outputSchema": {
+   "properties": {
+    "exit_code": {
+     "type": "integer"
+    },
+    "stderr": {
+     "type": "string"
+    },
+    "stdout": {
+     "type": "string"
+    },
+    "task_id": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "stdout",
+    "stderr",
+    "exit_code"
+   ],
+   "type": "object"
+  },
+  "title": "Shell"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "GetClipboard"
+  },
+  "description": "Read the clipboard text content.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "GetClipboard",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "GetClipboard"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "SetClipboard"
+  },
+  "description": "Set the clipboard text content.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "text": {
+     "description": "Text to place on clipboard.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "text"
+   ],
+   "type": "object"
+  },
+  "name": "SetClipboard",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "SetClipboard"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "ListProcesses"
+  },
+  "description": "List running processes with CPU and memory usage.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "filter": {
+     "default": "",
+     "description": "Fuzzy filter by process name.",
+     "type": "string"
+    },
+    "limit": {
+     "default": 30,
+     "description": "Max number of processes to return.",
+     "type": "integer"
+    },
+    "sort_by": {
+     "default": "memory",
+     "description": "Sort by 'cpu', 'memory', or 'name'.",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "ListProcesses",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "ListProcesses"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "KillProcess"
+  },
+  "description": "Kill a process by PID or name.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "name": {
+     "default": "",
+     "description": "Process name (fuzzy matched).",
+     "type": "string"
+    },
+    "pid": {
+     "default": 0,
+     "description": "Process ID.",
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "name": "KillProcess",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "KillProcess"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "GetSystemInfo"
+  },
+  "description": "Get system information: CPU, memory, disk, network, uptime.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "GetSystemInfo",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "GetSystemInfo"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": null,
+   "readOnlyHint": false,
+   "title": "ReconnectSession"
+  },
+  "description": "Reconnect a disconnected Windows desktop session to the console.\n\nThis enables screenshot and UI automation tools to work when no RDP\nclient is actively connected. Runs 'tscon' to attach this server's own\nsession to the console, then checks it worked. This puts the desktop on the\nmachine's physical screen. A session that is already attached (console or\nremote desktop) is left alone.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "force": {
+     "default": false,
+     "description": "Reconnect even if session appears active (default False).",
+     "type": "boolean"
+    }
+   },
+   "type": "object"
+  },
+  "name": "ReconnectSession",
+  "outputSchema": null,
+  "title": "ReconnectSession"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "Notification"
+  },
+  "description": "Show a desktop notification.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "message": {
+     "default": "",
+     "description": "Notification body text.",
+     "type": "string"
+    },
+    "title": {
+     "default": "remoteos-mcp",
+     "description": "Notification title.",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "Notification",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Notification"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "LockScreen"
+  },
+  "description": "Lock the workstation.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "LockScreen",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "LockScreen"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": true,
+   "readOnlyHint": true,
+   "title": "Scrape"
+  },
+  "description": "Fetch an http(s) URL and return its content as markdown (at most 5 MiB read).",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "url": {
+     "description": "URL to fetch.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "url"
+   ],
+   "type": "object"
+  },
+  "name": "Scrape",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Scrape"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "FileRead"
+  },
+  "description": "Read file content. Returns base64 for binary files.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "encoding": {
+     "default": "utf-8",
+     "description": "Text encoding (default utf-8). Use 'binary' for base64 output.",
+     "type": "string"
+    },
+    "path": {
+     "description": "File path.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "type": "object"
+  },
+  "name": "FileRead",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "FileRead"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "FileWrite"
+  },
+  "description": "Write content to a file.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "append": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "string"
+      }
+     ],
+     "default": false,
+     "description": "Append instead of overwrite."
+    },
+    "content": {
+     "description": "Content to write.",
+     "type": "string"
+    },
+    "encoding": {
+     "default": "utf-8",
+     "description": "Text encoding (default utf-8).",
+     "type": "string"
+    },
+    "path": {
+     "description": "File path.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "path",
+    "content"
+   ],
+   "type": "object"
+  },
+  "name": "FileWrite",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "FileWrite"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "FileList"
+  },
+  "description": "List directory contents with size and modification date.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "path": {
+     "default": ".",
+     "description": "Directory path.",
+     "type": "string"
+    },
+    "show_hidden": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "string"
+      }
+     ],
+     "default": false,
+     "description": "Include hidden files/folders."
+    }
+   },
+   "type": "object"
+  },
+  "name": "FileList",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "FileList"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "FileSearch"
+  },
+  "description": "Search files by name pattern.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "limit": {
+     "default": 50,
+     "description": "Max results.",
+     "type": "integer"
+    },
+    "path": {
+     "default": ".",
+     "description": "Root directory to search.",
+     "type": "string"
+    },
+    "pattern": {
+     "description": "Glob pattern (e.g. '*.py', 'report*').",
+     "type": "string"
+    },
+    "recursive": {
+     "anyOf": [
+      {
+       "type": "boolean"
+      },
+      {
+       "type": "string"
+      }
+     ],
+     "default": true,
+     "description": "Search subdirectories."
+    }
+   },
+   "required": [
+    "pattern"
+   ],
+   "type": "object"
+  },
+  "name": "FileSearch",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "FileSearch"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "FileDownload"
+  },
+  "description": "Download a file as base64-encoded content. Use for binary files.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "path": {
+     "description": "File path to download.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "type": "object"
+  },
+  "name": "FileDownload",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "FileDownload"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "FileUpload"
+  },
+  "description": "Upload a file from base64-encoded content. Use for binary files.\n\nOver HTTP one request carries at most 4 MiB, so one call carries about 3 MB of file. Send a\nlarger file in pieces: ``append=False`` first, then ``append=True``, ideally to a temporary\nname, checked with FileHash and moved into place with FileRename (``remoteos-call put`` does\nexactly that).",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "append": {
+     "default": false,
+     "description": "Add to the end of the file instead of replacing it (a missing file is created).",
+     "type": "boolean"
+    },
+    "data_base64": {
+     "description": "Base64-encoded file content, at most 100 MB of base64 text. Line breaks are\nallowed; any other character outside the base64 alphabet is an error and nothing is\nwritten.",
+     "type": "string"
+    },
+    "path": {
+     "description": "Destination file path.",
+     "type": "string"
+    },
+    "permissions_from": {
+     "default": "",
+     "description": "Without append: start a new file with this existing file's permissions,\nso a temporary copy of a private file is private too. A directory here is an error.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "path",
+    "data_base64"
+   ],
+   "type": "object"
+  },
+  "name": "FileUpload",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "FileUpload"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "FileHash"
+  },
+  "description": "The SHA-256 and size of a file: ``sha256:<hex> <size> bytes``. Use it to check a transfer.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "path": {
+     "description": "File path.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "path"
+   ],
+   "type": "object"
+  },
+  "name": "FileHash",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "FileHash"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "FileRename"
+  },
+  "description": "Rename a file, replacing ``new_path`` in one step if it exists.\n\nThe new file takes an existing ``new_path``'s POSIX mode and group (and, when the server runs\nas root, its owner), not its ACLs or extended attributes. A symlink there is written through,\na ``new_path`` this account may not write is refused. Both paths must be on the same filesystem.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "new_path": {
+     "description": "Its new path.",
+     "type": "string"
+    },
+    "path": {
+     "description": "The file to rename.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "path",
+    "new_path"
+   ],
+   "type": "object"
+  },
+  "name": "FileRename",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "FileRename"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "RegRead"
+  },
+  "description": "Read system preferences (Windows registry / macOS defaults).",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "key": {
+     "description": "Registry key path, e.g. \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\".",
+     "type": "string"
+    },
+    "value_name": {
+     "description": "Name of the value to read.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "key",
+    "value_name"
+   ],
+   "type": "object"
+  },
+  "name": "RegRead",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "RegRead"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "RegWrite"
+  },
+  "description": "Write system preferences (Windows registry / macOS defaults).",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "data": {
+     "description": "Value data. For REG_DWORD/REG_QWORD pass as string number. For REG_MULTI_SZ use | separator.",
+     "type": "string"
+    },
+    "key": {
+     "description": "Registry key path, e.g. \"HKCU\\SOFTWARE\\MyApp\".",
+     "type": "string"
+    },
+    "reg_type": {
+     "default": "REG_SZ",
+     "description": "Registry type: REG_SZ, REG_EXPAND_SZ, REG_DWORD, REG_QWORD, REG_BINARY, REG_MULTI_SZ.",
+     "type": "string"
+    },
+    "value_name": {
+     "description": "Name of the value to write.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "key",
+    "value_name",
+    "data"
+   ],
+   "type": "object"
+  },
+  "name": "RegWrite",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "RegWrite"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "ServiceList"
+  },
+  "description": "List system services.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "filter": {
+     "default": "",
+     "description": "Filter by service name or display name (substring match).",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "ServiceList",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "ServiceList"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": true,
+   "readOnlyHint": null,
+   "title": "SelfUpgrade"
+  },
+  "description": "Upgrade this box to a git ref: start the OS's installer detached from this server, return at once.\n\nThe installer proves the new version and rolls back on a failure. It restarts this server,\nso the reply is only \"started\": poll /health for the new version, and read the log the reply\nnames (root-owned on Linux, reachable with sudo).",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "ref": {
+     "default": "",
+     "description": "A commit sha, tag or branch of remoteos-mcp (default main).",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "SelfUpgrade",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "SelfUpgrade"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "ServiceStart"
+  },
+  "description": "Start a system service.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "name": {
+     "description": "Service name.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  },
+  "name": "ServiceStart",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "ServiceStart"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "ServiceStop"
+  },
+  "description": "Stop a system service.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "name": {
+     "description": "Service name.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  },
+  "name": "ServiceStop",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "ServiceStop"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "TaskList"
+  },
+  "description": "List scheduled tasks.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "filter": {
+     "default": "",
+     "description": "Filter by task name (substring match).",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "TaskList",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "TaskList"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "TaskCreate"
+  },
+  "description": "Create a scheduled task.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "command": {
+     "description": "Command to execute.",
+     "type": "string"
+    },
+    "name": {
+     "description": "Task name.",
+     "type": "string"
+    },
+    "schedule": {
+     "description": "Schedule type (ONCE, DAILY, WEEKLY, MONTHLY, ONSTART, ONLOGON, ONIDLE).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "command",
+    "schedule"
+   ],
+   "type": "object"
+  },
+  "name": "TaskCreate",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "TaskCreate"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": true,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "TaskDelete"
+  },
+  "description": "Delete a scheduled task.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "name": {
+     "description": "Task name.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  },
+  "name": "TaskDelete",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "TaskDelete"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": true,
+   "readOnlyHint": true,
+   "title": "Ping"
+  },
+  "description": "Ping a host.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "count": {
+     "default": 4,
+     "description": "Number of ping requests (default 4).",
+     "type": "integer"
+    },
+    "host": {
+     "description": "Hostname or IP address.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "host"
+   ],
+   "type": "object"
+  },
+  "name": "Ping",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Ping"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": true,
+   "readOnlyHint": true,
+   "title": "PortCheck"
+  },
+  "description": "Check if a TCP port is open.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "host": {
+     "description": "Hostname or IP address.",
+     "type": "string"
+    },
+    "port": {
+     "description": "Port number.",
+     "type": "integer"
+    },
+    "timeout": {
+     "default": 5.0,
+     "description": "Connection timeout in seconds (default 5).",
+     "type": "number"
+    }
+   },
+   "required": [
+    "host",
+    "port"
+   ],
+   "type": "object"
+  },
+  "name": "PortCheck",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "PortCheck"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "NetConnections"
+  },
+  "description": "List network connections.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "filter": {
+     "default": "",
+     "description": "Filter connections by local/remote address, status, or PID.",
+     "type": "string"
+    },
+    "limit": {
+     "default": 50,
+     "description": "Maximum number of connections to return (default 50).",
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "name": "NetConnections",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "NetConnections"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "EventLog"
+  },
+  "description": "Read system event log entries.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "count": {
+     "default": 20,
+     "description": "Number of entries to retrieve (default 20).",
+     "type": "integer"
+    },
+    "level": {
+     "default": "",
+     "description": "Filter by level: critical, error, warning, information, verbose.",
+     "type": "string"
+    },
+    "log_name": {
+     "default": "System",
+     "description": "Log name (System, Application, Security, etc.).",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "EventLog",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "EventLog"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "OCR"
+  },
+  "description": "Extract text from screen using OCR. Captures a region or the full screen.\n\nUses pytesseract if available, falls back to platform-specific OCR engine.\n\nThe region is in SCREEN coordinates (physical pixels on Windows/Linux, points\non macOS) \u2014 NOT Snapshot image pixels.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "bottom": {
+     "default": 0,
+     "description": "Bottom edge of region.",
+     "type": "integer"
+    },
+    "lang": {
+     "default": "eng",
+     "description": "OCR language for pytesseract (default 'eng').",
+     "type": "string"
+    },
+    "left": {
+     "default": 0,
+     "description": "Left edge of region (0 = full screen).",
+     "type": "integer"
+    },
+    "right": {
+     "default": 0,
+     "description": "Right edge of region.",
+     "type": "integer"
+    },
+    "top": {
+     "default": 0,
+     "description": "Top edge of region.",
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "name": "OCR",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "OCR"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "ScreenRecord"
+  },
+  "description": "Record the screen and return an animated GIF.\n\nThe region is in SCREEN coordinates (physical pixels on Windows/Linux, points\non macOS) \u2014 NOT Snapshot image pixels.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "bottom": {
+     "default": 0,
+     "description": "Bottom edge of capture region.",
+     "type": "integer"
+    },
+    "duration": {
+     "default": 3.0,
+     "description": "Recording length in seconds (default 3, max 10).",
+     "type": "number"
+    },
+    "fps": {
+     "default": 5,
+     "description": "Frames per second (default 5, max 10).",
+     "type": "integer"
+    },
+    "left": {
+     "default": 0,
+     "description": "Left edge of capture region (0 = full screen).",
+     "type": "integer"
+    },
+    "max_width": {
+     "default": 800,
+     "description": "Max width of output GIF (default 800).",
+     "type": "integer"
+    },
+    "right": {
+     "default": 0,
+     "description": "Right edge of capture region.",
+     "type": "integer"
+    },
+    "top": {
+     "default": 0,
+     "description": "Top edge of capture region.",
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "name": "ScreenRecord",
+  "outputSchema": null,
+  "title": "ScreenRecord"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "AnnotatedSnapshot"
+  },
+  "description": "Take a screenshot with numbered labels on interactive UI elements.\n\nDraws red rectangles and white numbered labels on each interactive element,\nmaking it easy for AI agents to identify click targets visually. Same frame and\ncoordinate contract as Snapshot: the text starts with the contract line, element\ncenters are IMAGE pixels, and Click / Move / Scroll / Type take them as-is.\n\nUses the platform accessibility tree for the foreground window (Win32 child\nwindows on Windows, AT-SPI on Linux X11); returns the plain screenshot with a\nnote when the focused app exposes no elements.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "max_elements": {
+     "default": 30,
+     "description": "Maximum number of elements to annotate (default 30).",
+     "type": "integer"
+    },
+    "max_width": {
+     "default": 1280,
+     "description": "Max image width in pixels. 0=native resolution. Default 1280 (same as Snapshot).",
+     "type": "integer"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "Monitor to capture. 0=all monitors (default; on macOS the main display), 1/2/3=specific monitor.",
+     "type": "integer"
+    },
+    "quality": {
+     "default": 65,
+     "description": "JPEG quality 1-100 (default 65).",
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "name": "AnnotatedSnapshot",
+  "outputSchema": null,
+  "title": "AnnotatedSnapshot"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": null,
+   "readOnlyHint": true,
+   "title": null
+  },
+  "description": "Cancel a running or pending task by its task ID.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "task_id": {
+     "description": "The task ID returned when the tool was invoked (e.g. from [task:abc123]).",
+     "type": "string"
+    }
+   },
+   "required": [
+    "task_id"
+   ],
+   "type": "object"
+  },
+  "name": "CancelTask",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Canceltask"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": null,
+   "readOnlyHint": true,
+   "title": null
+  },
+  "description": "Get status of a specific task or list recent tasks.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "task_id": {
+     "default": "",
+     "description": "If provided, get status of this task. If empty, list recent tasks.",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "GetTaskStatus",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Gettaskstatus"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": null,
+   "readOnlyHint": true,
+   "title": null
+  },
+  "description": "List all currently running and pending tasks.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "GetRunningTasks",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "Getrunningtasks"
+ }
+]

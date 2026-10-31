@@ -16,7 +16,7 @@ log = logging.getLogger("remoteos.platform.win.desktop")
 
 # Per-monitor-v2 DPI awareness MUST be in effect before pyautogui is imported:
 # pyautogui's import calls SetProcessDPIAware() (system-aware), after which the
-# process can no longer become per-monitor aware (#28). __main__ already did this
+# process can no longer become per-monitor aware (#28). remoteos.app already did this
 # before its own pyautogui import; this idempotent call covers any other importer.
 enable_per_monitor_dpi_awareness()
 

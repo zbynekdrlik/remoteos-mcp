@@ -15,7 +15,7 @@ Only the OS boundary is faked:
 - ``loginctl``, at ``subprocess.run``: it lists no session, and counts the detections that reach
   it (a Shell call never forces one, review round 1; only an EMPTY cache is filled by
   ``get_session()``'s own first use);
-- the provider's cached session (``desktop._SESSION``), as the provider's own tests do.
+- the provider's cached session (``linux_session._SESSION``), as the provider's own tests do.
 
 The Shell tests run a real ``/bin/bash``.
 """
@@ -36,11 +36,12 @@ from collections.abc import Mapping
 import psutil
 import pytest
 from fake_console_child import assert_runs_powershell, returned
+from tool_surface import server
 from tool_test_support import tool_error
 
-import remoteos.__main__ as server
 from remoteos.platform import command
 from remoteos.platform.linux import availability, desktop
+from remoteos.platform.linux import session as linux_session
 
 SESSION_VARS = (
     "XDG_RUNTIME_DIR",
@@ -147,7 +148,7 @@ def se():
 @pytest.fixture
 def loginctl(monkeypatch):
     fake = FakeLoginctl()
-    monkeypatch.setattr(desktop.subprocess, "run", fake.run)
+    monkeypatch.setattr(linux_session.subprocess, "run", fake.run)
     yield fake
     assert fake.unexpected == []
 
@@ -163,7 +164,7 @@ def tree(monkeypatch, se, loginctl):
     monkeypatch.setattr(se, "X11_SOCKET_DIR", fake.x11)
     monkeypatch.setattr(se, "_last_added", None)
     monkeypatch.setattr(se, "_warned", set(), raising=False)
-    monkeypatch.setattr(desktop, "_SESSION", desktop.SessionInfo(mode="headless"))
+    monkeypatch.setattr(linux_session, "_SESSION", desktop.SessionInfo(mode="headless"))
     yield fake
     fake.close()
 
@@ -194,7 +195,7 @@ def test_linux_shell_child_gets_the_servers_own_display(tree, monkeypatch):
     tree.runtime_dir(os.geteuid())
     tree.x_display(0)
     xauth = tree.file("Xauthority")
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", xauth))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":0", xauth))
     assert server.Shell('echo "$DISPLAY $XAUTHORITY"') == f":0 {xauth}"
 
 
@@ -204,7 +205,7 @@ def test_linux_shell_child_gets_the_servers_own_display(tree, monkeypatch):
 def test_a_variable_the_server_has_is_never_overridden(tree, se, monkeypatch):
     tree.runtime_dir(os.geteuid())
     tree.x_display(0)
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", tree.file("Xauthority")))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":0", tree.file("Xauthority")))
     base = {
         "XDG_RUNTIME_DIR": "/srv/rt",
         "DBUS_SESSION_BUS_ADDRESS": "unix:path=/srv/bus",
@@ -224,7 +225,7 @@ def test_the_servers_own_xauthority_and_wayland_display_are_kept(tree, se, monke
     tree.x_display(0)
     xauth = tree.file("Xauthority")
     session = desktop.SessionInfo(mode="wayland", display=":0", xauthority=xauth, uid=os.geteuid(), user="someone")
-    monkeypatch.setattr(desktop, "_SESSION", session)
+    monkeypatch.setattr(linux_session, "_SESSION", session)
     base = {**_base(), "XDG_RUNTIME_DIR": runtime, "DISPLAY": ":0", "XAUTHORITY": "/srv/xa", "WAYLAND_DISPLAY": "w-9"}
     env = se.shell_env(base)
     assert (env["XAUTHORITY"], env["WAYLAND_DISPLAY"]) == ("/srv/xa", "w-9")
@@ -254,7 +255,7 @@ def test_shell_env_starts_from_the_servers_environment_and_never_changes_it(tree
 
 class _VanishingEnviron(Mapping):
     """An environment from which another thread pops a key between listing and reading it, as
-    ``desktop._load_atspi``'s ``finally`` does to ``os.environ`` while a Shell call copies it."""
+    ``linux_windows._load_atspi``'s ``finally`` does to ``os.environ`` while a Shell call copies it."""
 
     def __init__(self, data: dict[str, str], vanishing: str) -> None:
         self._data = data
@@ -319,10 +320,10 @@ def test_as_root_nothing_is_added(tree, se, loginctl, monkeypatch, caplog, euid)
     tree.report_owner(runtime, euid)
     tree.report_owner(tree.x_display(0), euid)
     xauth = tree.file("Xauthority")
-    monkeypatch.setattr(desktop, "_SESSION", _x11(euid, ":0", xauth))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(euid, ":0", xauth))
     if euid == 0:
         # review round 5: an EMPTY cache, so consulting the session would run the fake loginctl
-        monkeypatch.setattr(desktop, "_SESSION", None)
+        monkeypatch.setattr(linux_session, "_SESSION", None)
     monkeypatch.setattr(os, "geteuid", lambda: euid)
     caplog.set_level(logging.INFO, logger=LOGGER)
     added = _added(se.shell_env(_base()))
@@ -353,14 +354,14 @@ def test_every_local_display_form_is_given(tree, se, monkeypatch, display, numbe
     # review round 2: `unix:N` is in the contract and was untested. Review round 3: and not only
     # display 0 (a GDM box's Xorg session is often :1); only that display's socket exists here
     tree.x_display(number)
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), display))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), display))
     assert _added(se.shell_env(_base())) == {"DISPLAY": display}
 
 
 def test_a_display_is_checked_against_its_own_socket(tree, se, monkeypatch):
     # review round 3: the session is on :1, and only X0 exists
     tree.x_display(0)
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":1"))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":1"))
     assert _added(se.shell_env(_base())) == {}
 
 
@@ -369,7 +370,7 @@ def test_xauthority_goes_with_the_servers_own_display_when_it_is_the_sessions(tr
     # XAUTHORITY) still gets the session's cookie for it
     tree.x_display(0)
     xauth = tree.file("Xauthority")
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", xauth))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":0", xauth))
     assert _added(se.shell_env({**_base(), "DISPLAY": ":0"})) == {"DISPLAY": ":0", "XAUTHORITY": xauth}
 
 
@@ -378,7 +379,7 @@ def test_no_xauthority_for_a_display_that_is_not_a_checked_local_one(tree, se, m
     # the provider then guesses the gdm cookie file. Handing that file to the forwarded display
     # broke X auth (it used ~/.Xauthority before), and skipped the X socket checks.
     xauth = tree.file("Xauthority")
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), "localhost:10.0", xauth))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), "localhost:10.0", xauth))
     env = se.shell_env({**_base(), "DISPLAY": "localhost:10.0"})
     assert (env["DISPLAY"], "XAUTHORITY" in env) == ("localhost:10.0", False)
 
@@ -388,21 +389,21 @@ def test_a_symlinked_x_socket_is_not_trusted(tree, se, monkeypatch):
     # to a socket of root or the euid passed the owner check
     real = tree.socket(os.path.join(tree.root, "elsewhere"))
     os.symlink(real, os.path.join(tree.x11, "X0"))
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", tree.file("Xauthority")))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":0", tree.file("Xauthority")))
     assert _added(se.shell_env(_base())) == {}
 
 
 def test_the_servers_own_session_gives_display_and_xauthority(tree, se, loginctl, monkeypatch):
     tree.x_display(0)
     xauth = tree.file("Xauthority")
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0.0", xauth))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":0.0", xauth))
     assert _added(se.shell_env(_base())) == {"DISPLAY": ":0.0", "XAUTHORITY": xauth}
 
 
 def test_another_users_session_gives_no_display(tree, se, monkeypatch):
     other = os.geteuid() + 4321
     tree.x_display(0)
-    monkeypatch.setattr(desktop, "_SESSION", _x11(other, ":0", tree.file("Xauthority")))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(other, ":0", tree.file("Xauthority")))
     assert _added(se.shell_env(_base())) == {}
 
 
@@ -414,19 +415,19 @@ def test_an_x_socket_counts_only_when_root_or_the_euid_owns_it(tree, se, monkeyp
     uid = {"euid": os.geteuid(), "root": 0, "another user": os.geteuid() + 4321}[owner]
     tree.report_owner(tree.x_display(0), uid)
     xauth = tree.file("Xauthority")
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", xauth))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":0", xauth))
     assert _added(se.shell_env(_base())) == ({"DISPLAY": ":0", "XAUTHORITY": xauth} if given else {})
 
 
 def test_a_missing_xauthority_file_is_not_given(tree, se, monkeypatch):
     tree.x_display(0)
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", os.path.join(tree.root, "gone")))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":0", os.path.join(tree.root, "gone")))
     assert _added(se.shell_env(_base())) == {"DISPLAY": ":0"}
 
 
 def test_xauthority_goes_only_with_the_sessions_display(tree, se, monkeypatch):
     tree.x_display(0)
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", tree.file("Xauthority")))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":0", tree.file("Xauthority")))
     env = se.shell_env({**_base(), "DISPLAY": ":9"})
     assert (env["DISPLAY"], "XAUTHORITY" in env) == (":9", False)
 
@@ -438,7 +439,7 @@ def test_a_display_that_is_not_a_local_x_socket_is_not_given(tree, se, monkeypat
     tree.x_display(0)
     tree.x_display(10)
     xauth = tree.file("Xauthority")
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), display, xauth))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), display, xauth))
     assert _added(se.shell_env(_base())) == {}
 
 
@@ -449,7 +450,7 @@ def test_a_logout_never_changes_the_providers_session(tree, se, loginctl, monkey
     # until the service restarted. The socket check alone keeps a logout honest.
     xauth = tree.file("Xauthority")
     x0 = tree.x_display(0)
-    monkeypatch.setattr(desktop, "_SESSION", _x11(os.geteuid(), ":0", xauth))
+    monkeypatch.setattr(linux_session, "_SESSION", _x11(os.geteuid(), ":0", xauth))
     tree.unbind(x0)  # the user logs out: the X server and its socket are gone
     assert _added(se.shell_env(_base())) == {}
     tree.x_display(0)  # the user logs in again on :0
@@ -472,7 +473,7 @@ def test_a_logout_never_changes_the_providers_session(tree, se, loginctl, monkey
 def test_a_shell_call_never_detects_the_session(tree, se, loginctl, monkeypatch, session):
     # it reads the provider's start-up cache only: no loginctl, and the cache is left as it was
     tree.x_display(0)
-    monkeypatch.setattr(desktop, "_SESSION", session)
+    monkeypatch.setattr(linux_session, "_SESSION", session)
     for _ in range(3):
         se.shell_env(_base())
     assert loginctl.listed == 0
@@ -501,13 +502,13 @@ def test_a_session_detection_that_raises_never_fails_the_shell_call(tree, se, mo
     # review round 2: not only an import failure. Here the passwd database fails (an OS boundary)
     # while the provider detects its first session, so get_session() itself raises.
     runtime = tree.runtime_dir(os.geteuid())
-    monkeypatch.setattr(desktop, "_SESSION", None)
+    monkeypatch.setattr(linux_session, "_SESSION", None)
     monkeypatch.setenv("DISPLAY", ":0")  # the provider's env branch, which looks up the user name
 
     def _nss_down(uid):
         raise OSError("passwd database unavailable")
 
-    monkeypatch.setattr(desktop.pwd, "getpwuid", _nss_down)
+    monkeypatch.setattr(linux_session.pwd, "getpwuid", _nss_down)
     caplog.set_level(logging.DEBUG, logger=LOGGER)
     for _ in range(2):
         assert _added(se.shell_env(_base())) == {
@@ -525,7 +526,7 @@ def test_a_wayland_session_of_ours_gives_wayland_display(tree, se, monkeypatch):
     runtime = tree.runtime_dir(os.geteuid())
     tree.socket(os.path.join(runtime, "wayland-0"))
     session = desktop.SessionInfo(mode="wayland", display=":0", uid=os.geteuid(), user="someone")
-    monkeypatch.setattr(desktop, "_SESSION", session)
+    monkeypatch.setattr(linux_session, "_SESSION", session)
     env = se.shell_env(_base())
     assert _added(env) == {
         "XDG_RUNTIME_DIR": runtime,
@@ -543,7 +544,7 @@ def test_a_wayland_session_with_xwayland_gives_its_x_display_too(tree, se, monke
     tree.x_display(0)
     xauth = tree.file("Xauthority")
     session = desktop.SessionInfo(mode="wayland", display=":0", xauthority=xauth, uid=os.geteuid(), user="someone")
-    monkeypatch.setattr(desktop, "_SESSION", session)
+    monkeypatch.setattr(linux_session, "_SESSION", session)
     assert _added(se.shell_env(_base())) == {
         "XDG_RUNTIME_DIR": runtime,
         "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus",
@@ -558,7 +559,7 @@ def test_wayland_display_needs_a_wayland_session_and_its_socket(tree, se, monkey
     runtime = tree.runtime_dir(os.geteuid())
     if socket_there:
         tree.socket(os.path.join(runtime, "wayland-0"))
-    monkeypatch.setattr(desktop, "_SESSION", desktop.SessionInfo(mode=mode, uid=os.geteuid(), user="someone"))
+    monkeypatch.setattr(linux_session, "_SESSION", desktop.SessionInfo(mode=mode, uid=os.geteuid(), user="someone"))
     assert "WAYLAND_DISPLAY" not in se.shell_env(_base())
 
 
@@ -567,7 +568,8 @@ def test_wayland_display_needs_the_childs_runtime_dir_to_be_the_one_checked(tree
     # server already has another one, the socket checked under /run/user/<euid> says nothing.
     runtime = tree.runtime_dir(os.geteuid())
     tree.socket(os.path.join(runtime, "wayland-0"))
-    monkeypatch.setattr(desktop, "_SESSION", desktop.SessionInfo(mode="wayland", uid=os.geteuid(), user="someone"))
+    session = desktop.SessionInfo(mode="wayland", uid=os.geteuid(), user="someone")
+    monkeypatch.setattr(linux_session, "_SESSION", session)
     env = se.shell_env({**_base(), "XDG_RUNTIME_DIR": "/srv/rt"})
     assert (env["XDG_RUNTIME_DIR"], "WAYLAND_DISPLAY" in env) == ("/srv/rt", False)
 

@@ -4,7 +4,7 @@ pyautogui's import calls ``SetProcessDPIAware()`` (system-aware). Once that has
 run, the process can no longer become per-monitor aware, so on a mixed-DPI
 setup screenshots (physical pixels), window rects and ``SetCursorPos`` disagree.
 Per-monitor-v2 awareness must therefore be requested BEFORE pyautogui is
-imported — in ``__main__.py`` and in the Windows provider. These checks run on
+imported — in ``app.py`` and in the Windows provider. These checks run on
 any OS: the import order is checked on the source AST, and the fallback chain
 runs against a fake ``windll`` (the Win32 API is the external boundary).
 """
@@ -40,10 +40,19 @@ def _calls_enable_dpi(node: ast.AST) -> bool:
     return name == "enable_per_monitor_dpi_awareness"
 
 
-@pytest.mark.parametrize("rel", ["__main__.py", "platform/win/desktop.py"])
+@pytest.mark.parametrize("rel", ["app.py", "platform/win/desktop.py"])
 def test_dpi_awareness_is_set_before_pyautogui_import(rel):
     tree = ast.parse((_SRC / rel).read_text(encoding="utf-8"))
     assert _first_line(tree, _calls_enable_dpi) < _first_line(tree, _imports_pyautogui)
+
+
+def _imports_remoteos_app(node: ast.AST) -> bool:
+    return isinstance(node, ast.ImportFrom) and node.module == "remoteos.app"
+
+
+def test_the_input_tools_import_pyautogui_only_after_remoteos_app():
+    tree = ast.parse((_SRC / "tools/desktop.py").read_text(encoding="utf-8"))
+    assert _first_line(tree, _imports_remoteos_app) < _first_line(tree, _imports_pyautogui)
 
 
 class _Fn:
