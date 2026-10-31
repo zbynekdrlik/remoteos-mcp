@@ -41,7 +41,8 @@ paths:
     main: input schemas and annotations are identical. Only the Type and ReconnectSession
     descriptions changed, both on purpose.
 - **`DesktopUnavailable` passes through verbatim, with no tool prefix.** The Linux
-  headless/Wayland stub text is a contract (cam1..4) and must stay byte-for-byte. Raise it
+  headless stub text is a contract (cam1..4) and must stay byte-for-byte; the Wayland text is the
+  stated position of #38, and those tools stay registered so they can say it (`tiers.linux_platform_excludes`). Raise it
   as `DesktopUnavailable(_unavailable())`, never `RuntimeError`, or it gains `"Click error: "`.
   - The stub itself is unchanged. The tool-level text of Snapshot, ScreenRecord and OCR
     without X11 did change: it used to be `<Tool> error: <stub>` (OCR: an "OCR failed.
@@ -101,7 +102,7 @@ paths:
   warning.
 - **`diagnose(need: str) -> str | None`** lives in `platform/<os>/availability.py`. Each
   desktop provider re-exports it, so `get_desktop().diagnose` works.
-  - `need` is one of three values:
+  - `need` is one of four values:
     - `"capture"`: read the screen;
     - `"input"`: send events;
     - `"windows"`: only the window list. That means the user's desktop, locked or not:
@@ -110,6 +111,9 @@ paths:
         user switching lists nothing on screen). Without Screen Recording, macOS hides other
         apps' window titles, so the list shows their app names;
       - Linux: the stub.
+    - `"accessibility"`: read other apps' controls (#37). ElementTree, ClickElement and TypeElement
+      ask it in `_elements_provider`, after their `"windows"` / `"input"`: macOS =
+      `AXIsProcessTrusted`, Windows = the same checks as `"windows"`, Linux = the stub.
   - The tools call it through `_desktop_preflight(need)`, the decorator's `preflight=` hook.
   - `@_capture_tool` = AnnotatedSnapshot, Zoom, OCR, ScreenRecord.
   - `@_display_tool` = DisplayInventory, CursorPosition (`"windows"`: both are readable on a locked desktop), ElementTree.
@@ -121,9 +125,8 @@ paths:
   - The clipboard, notification, LockScreen, FocusWindow and App tools have NO preflight. The
     clipboard and notifications work on a locked session. FocusWindow and App switch/resize
     fail there with their own `SetForegroundWindow` error.
-- **A new need** (e.g. #37's AX-tree tools, which need `AXIsProcessTrusted`) is a new `need`
-  value, handled in each `availability.py`. An unknown need passes every session check that
-  applies to all needs.
+- **A new need** is a new `need` value, handled in each `availability.py`. An unknown need passes
+  every session check that applies to all needs.
 - **Never a false positive.** Only a positive finding is a diagnosis. A probe that raises, an
   API that is missing (an older OS) or an unreadable state = "usable". Each `diagnose()`
   wraps its probes, AND `_desktop_preflight` catches a raising `diagnose()`. Both log
@@ -162,12 +165,14 @@ paths:
     usable.
 - **macOS:**
   - Input = `CGPreflightPostEventAccess`, the predicate the event-posting code
-    (`_require_post_event_access`) gates on. Do NOT use `AXIsProcessTrusted`: it is a
-    different TCC service, and it would refuse a process whose events are delivered.
+    (`_require_post_event_access`) gates on. Do NOT use `AXIsProcessTrusted` for input: it is a
+    different TCC service, and it would refuse a process whose events are delivered. It is the
+    check of the AX tree (`"accessibility"`), in `pyobjc-framework-ApplicationServices`' `HIServices`.
+  - `availability.startup_problems()` prints each missing permission once at start (`__main__`).
   - Capture = `CGPreflightScreenCaptureAccess`.
   - Session = `CGSessionCopyCurrentDictionary` (None = no GUI session,
     `kCGSessionOnConsoleKey`, and the undocumented `CGSSessionScreenIsLocked`).
-  - All of these are in pyobjc Quartz. Read them with `getattr(…, None)` (macOS 10.15+), and
+  - The rest are in pyobjc Quartz. Read them with `getattr(…, None)` (macOS 10.15+), and
     import Quartz at call time.
 - **Linux:** `diagnose()` = `_unavailable()` without X11. Nothing else, and no subprocess.
   - A locked X11 screen is NOT refused. The screenshot truthfully shows the locker, and

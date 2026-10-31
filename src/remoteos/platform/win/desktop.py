@@ -48,6 +48,7 @@ from remoteos.scroll import wheel_steps  # noqa: E402
 from remoteos.snapshot import fit_to_frame  # noqa: E402
 from remoteos.text_entry import enter_text  # noqa: E402
 from remoteos.typing_input import ENTER, TAB, Stroke, plan  # noqa: E402
+from remoteos.window_match import best_window  # noqa: E402
 
 # The modifier of the edit shortcuts (select all, paste) that type_text() sends.
 _SHORTCUT_MODIFIER = "ctrl"
@@ -601,16 +602,7 @@ _NO_PYWIN32 = "pywin32 not installed — run `pip install pywin32`"
 
 def _window_by_title(title: str) -> int:
     """The handle of the window whose title best matches ``title``; raises when none does."""
-    from thefuzz import fuzz
-
-    best_score, hwnd = 0, 0
-    for w in enumerate_windows():
-        score = fuzz.partial_ratio(title.lower(), w.title.lower())
-        if score > best_score:
-            best_score, hwnd = score, w.handle
-    if best_score < 50:
-        raise LookupError(f"No window matching '{title}' (best score {best_score})")
-    return hwnd
+    return best_window(title, enumerate_windows()).handle
 
 
 def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> str:

@@ -5,12 +5,31 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from dataclasses import dataclass
-from typing import Optional
+import threading
+import time
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Optional
 
+from remoteos.element_tree import (
+    SNAPSHOT_WALK_S,
+    TREE_WALK_S,
+    ElementFacts,
+    ElementTree,
+    RefTable,
+    Walk,
+    expires_in,
+    gone,
+    listed_elements,
+    marked_from,
+    may_have_happened,
+    one_line,
+    tree_from,
+    walk,
+)
 from remoteos.errors import DesktopUnavailable
-from remoteos.platform.linux import session
+from remoteos.platform.linux import session, x11_input
 from remoteos.platform.linux.session import _build_invocation, _unavailable, _xdotool, get_session
+from remoteos.window_match import best_window
 
 log = logging.getLogger("remoteos.platform.linux.desktop")  # one logger for the whole provider
 
@@ -81,58 +100,83 @@ def enumerate_windows() -> list[WindowInfo]:
 
 
 # ---------------------------------------------------------------------------
-# Interactive elements — AT-SPI2 accessibility tree (issue #7)
+# The element tree: AT-SPI2 (#7, #38)
 # ---------------------------------------------------------------------------
 #
-# On Windows/macOS the interactive-element list comes from the platform
-# accessibility API (UIAutomation / AX). The Linux equivalent is **AT-SPI2**,
-# reached in-process via GObject-Introspection (``gi.repository.Atspi``).
+# The Linux counterpart of UI Automation (platform/win/uia.py) and AX (platform/mac/ax.py),
+# reached in-process via GObject-Introspection (``gi.repository.Atspi``). What is listed, the
+# bounds and the refs are the shared remoteos.element_tree. D-Bus calls have a method timeout, so
+# a walk with a deadline is bounded and there is no worker thread as on Windows.
 #
-# Coverage is app-dependent: GTK apps expose a rich tree; many Qt / Electron /
-# legacy-X apps expose little or nothing. We therefore DEGRADE GRACEFULLY —
-# return whatever AT-SPI exposes (possibly few or zero elements), never crash,
-# never fabricate. An empty list is an honest "the focused app exposed nothing".
+# Coverage is app-dependent: GTK apps expose a rich tree; Qt and Chromium/Electron expose theirs
+# only when asked (see _enable_hint); legacy X apps expose nothing. Snapshot's list degrades to
+# empty; ElementTree reports a failure and says how to enable an app that shows nothing.
 
-# Roles worth surfacing as click/interaction targets. Compared case-folded
-# against ``Atspi.Accessible.get_role_name()``.
-_ACTIONABLE_ROLES = frozenset(
-    {
-        "push button",
-        "toggle button",
-        "check box",
-        "radio button",
-        "menu item",
-        "check menu item",
-        "radio menu item",
-        "menu",
-        "menu bar",
-        "text",
-        "entry",
-        "password text",
-        "combo box",
-        "list item",
-        "table cell",
-        "link",
-        "slider",
-        "spin button",
-        "page tab",
-        "tab",
-        "icon",
-        "list box",
-        "tree item",
-        "button",
-    }
+# AT-SPI role names (never localized) as the shared roles of element_tree.INTERACTIVE_ROLES.
+_ROLES = {
+    "push button": "Button",
+    "toggle button": "Button",
+    "button": "Button",
+    "switch": "CheckBox",
+    "check box": "CheckBox",
+    "radio button": "RadioButton",
+    "menu item": "MenuItem",
+    "check menu item": "MenuItem",
+    "radio menu item": "MenuItem",
+    "menu": "MenuItem",
+    "entry": "Edit",
+    "password text": "Edit",
+    "text box": "Edit",
+    "combo box": "ComboBox",
+    "list item": "ListItem",
+    "table cell": "DataItem",
+    "table column header": "HeaderItem",
+    "column header": "HeaderItem",
+    "link": "Hyperlink",
+    "slider": "Slider",
+    "spin button": "Spinner",
+    "page tab": "TabItem",
+    "tab": "TabItem",
+    "tree item": "TreeItem",
+}
+
+# The action that means "operate it", best first. Never just the first action: Qt's list holds
+# SetFocus and ShowMenu too, and GTK 2's "press" is only half of "click".
+_PRESS_ACTIONS = ("click", "activate", "press", "toggle", "jump")
+# On a text field, read-only ones too, "activate" is Enter: GTK 3's fires the form's default button.
+_FIELD_PRESS_ACTIONS = ("click",)
+_FIELD_ROLES = frozenset({"text", "entry", "password text", "text box"})
+
+_FOCUS_WAIT_S = 1.0  # focus changes reach AT-SPI and the window manager a moment after the call
+_FOCUS_POLL_S = 0.05
+_FOCUS_MAX_CHILDREN = 32  # a wrapper's inner field is near the top: a table's rows are not worth a poll
+
+_UNKNOWN_PIXELS = "the screen positions of these elements are unknown: act by ref, not by their pixels"
+_QT_HINT = "a Qt app shows them when started with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1"
+# Both halves are needed: with the flag alone Chrome never joined the a11y bus (real Chrome, #38).
+_CHROMIUM_HINT = (
+    "a Chromium or Electron app shows them when started with ACCESSIBILITY_ENABLED=1 in its environment and"
+    " --force-renderer-accessibility"
 )
 
 
-class _AtspiAdapter:
-    """Thin adapter over a real ``Atspi.Accessible`` node.
+def _enable_hint(toolkit: str) -> str:
+    """What would make an app that lists nothing show its controls ("" when its toolkit has no switch)."""
+    name = toolkit.lower()
+    if "gtk" in name:
+        return ""
+    if "qt" in name:
+        return f"this app shows no controls to AT-SPI: {_QT_HINT}"
+    if "chrom" in name or "electron" in name:
+        return f"this app shows no controls to AT-SPI: {_CHROMIUM_HINT}"
+    return f"this app shows no controls to AT-SPI: {_QT_HINT}; {_CHROMIUM_HINT}"
 
-    Isolates every call into the EXTERNAL AT-SPI library behind a tiny duck-typed
-    surface (``children`` / ``role_name`` / ``name`` / ``is_showing`` / ``extents``)
-    so the pure walk in :func:`_collect_actionable` can be unit-tested with
-    synthetic nodes and never touches the library. Every method is defensive:
-    one malformed node must not abort the whole walk.
+
+class _AtspiAdapter:
+    """Thin adapter over a real ``Atspi.Accessible`` node, for the shared walk.
+
+    A node that fails under the walk went away: ``facts`` is then ``None``, and the walk
+    skips it. Nothing else of the library is reached outside this class and the actions.
 
     ``coord`` selects how ``extents`` maps to screen pixels. GTK4 apps report
     ``CoordType.SCREEN`` extents as ``(0, 0)`` (a gtk-at-spi limitation), so the
@@ -149,81 +193,44 @@ class _AtspiAdapter:
 
     def children(self, node) -> list:
         try:
-            return [node.get_child_at_index(i) for i in range(node.get_child_count())]
-        except Exception:  # pragma: no cover - defensive (live lib only)
+            return [c for c in (node.get_child_at_index(i) for i in range(node.get_child_count())) if c is not None]
+        except Exception as e:
+            log.debug("a branch vanished during the walk (%s)", type(e).__name__)
             return []
 
-    def role_name(self, node) -> str:
-        try:
-            return (node.get_role_name() or "").strip().lower()
-        except Exception:  # pragma: no cover
-            return ""
-
-    def name(self, node) -> str:
-        try:
-            return (node.get_name() or "").strip()
-        except Exception:  # pragma: no cover
-            return ""
-
-    def is_showing(self, node) -> bool:
-        try:
-            return bool(node.get_state_set().contains(self._a.StateType.SHOWING))
-        except Exception:  # pragma: no cover
-            return True  # don't over-filter when state is unreadable
-
-    def extents(self, node):
+    def extents(self, node) -> tuple[int, int, int, int]:
+        """The screen rect, empty when the node has none (not every node has a Component)."""
         try:
             coord_type = self._a.CoordType.WINDOW if self._coord == "window" else self._a.CoordType.SCREEN
             r = node.get_extents(coord_type)
-            if r is None:
-                return None
-            return (
-                int(r.x) + self._ox,
-                int(r.y) + self._oy,
-                int(r.x + r.width) + self._ox,
-                int(r.y + r.height) + self._oy,
-            )
-        except Exception:  # pragma: no cover
+            left, top = int(r.x) + self._ox, int(r.y) + self._oy
+            return left, top, left + int(r.width), top + int(r.height)
+        except Exception as e:
+            log.debug("an element has no extents (%s)", type(e).__name__)
+            return 0, 0, 0, 0
+
+    def facts(self, node) -> Optional[ElementFacts]:
+        try:
+            states = node.get_state_set()
+            role_name = (node.get_role_name() or "").strip().lower()
+            name = node.get_name() or ""
+        except Exception as e:
+            log.debug("an element vanished during the walk (%s)", type(e).__name__)
             return None
-
-
-def _collect_actionable(root, adapter, *, max_elements: int = 60, max_nodes: int = 4000) -> list[dict]:
-    """Breadth-first walk collecting actionable elements (PURE — no AT-SPI here).
-
-    ``adapter`` supplies ``children`` / ``role_name`` / ``name`` / ``is_showing`` /
-    ``extents``; in production it wraps ``Atspi.Accessible``, in tests it wraps a
-    synthetic tree. Returns element dicts in the SAME shape as the Windows/macOS
-    provider (``index`` / ``class`` / ``text`` / ``rect``) so the shared
-    ``AnnotatedSnapshot`` tool layer treats every platform identically.
-
-    Bounded by ``max_elements`` and ``max_nodes`` so a pathological tree can't
-    hang the walk. Elements with no positive on-screen area are dropped (this also
-    discards the ``(-1,-1)`` application node AT-SPI reports).
-    """
-    from collections import deque
-
-    out: list[dict] = []
-    seen = 0
-    queue = deque([root])
-    while queue and len(out) < max_elements and seen < max_nodes:
-        node = queue.popleft()
-        seen += 1
-        role = adapter.role_name(node)
-        if role in _ACTIONABLE_ROLES and adapter.is_showing(node):
-            ext = adapter.extents(node)
-            if ext and ext[2] > ext[0] and ext[3] > ext[1] and ext[2] > 0 and ext[3] > 0:
-                out.append(
-                    {
-                        "index": len(out) + 1,
-                        "class": role,
-                        "text": adapter.name(node),
-                        "rect": {"left": ext[0], "top": ext[1], "right": ext[2], "bottom": ext[3]},
-                    }
-                )
-        for child in adapter.children(node):
-            if child is not None:
-                queue.append(child)
-    return out
+        state = self._a.StateType
+        if states.contains(state.DEFUNCT):
+            return None
+        role = _ROLES.get(role_name, role_name.title().replace(" ", ""))
+        if role_name == "text" and states.contains(state.EDITABLE):
+            role = "Edit"  # the same role names static text in many toolkits
+        return ElementFacts(
+            role=role,
+            name=name.strip(),
+            enabled=states.contains(state.ENABLED),
+            rect=self.extents(node),
+            focusable=states.contains(state.FOCUSABLE),
+            offscreen=not states.contains(state.SHOWING),
+        )
 
 
 def _load_atspi():
@@ -272,6 +279,28 @@ def _load_atspi():
                 os.environ[k] = v
 
 
+def _frames(app) -> list:
+    """The top-level windows of an AT-SPI application."""
+    try:
+        return [f for f in (app.get_child_at_index(i) for i in range(app.get_child_count())) if f is not None]
+    except Exception as e:
+        log.debug("an application vanished (%s)", type(e).__name__)
+        return []
+
+
+def _apps(atspi) -> list:
+    """The applications on the a11y bus."""
+    return _frames(atspi.get_desktop(0))
+
+
+def _has_state(atspi, node, state) -> bool:
+    try:
+        return bool(node.get_state_set().contains(state))
+    except Exception as e:
+        log.debug("a node has no readable state (%s)", type(e).__name__)
+        return False
+
+
 def _atspi_active_frame(atspi):
     """Return the ACTIVE top-level window (frame), or the first SHOWING one.
 
@@ -279,29 +308,70 @@ def _atspi_active_frame(atspi):
     a frame in the ACTIVE state (the focused window); falls back to the first
     SHOWING frame; returns ``None`` when nothing qualifies.
     """
-    desktop = atspi.get_desktop(0)
     fallback = None
-    for i in range(desktop.get_child_count()):
-        app = desktop.get_child_at_index(i)
-        if app is None:
-            continue
-        try:
-            win_count = app.get_child_count()
-        except Exception:  # pragma: no cover - defensive
-            continue
-        for j in range(win_count):
-            win = app.get_child_at_index(j)
-            if win is None:
-                continue
-            try:
-                states = win.get_state_set()
-            except Exception:  # pragma: no cover
-                continue
-            if states.contains(atspi.StateType.ACTIVE):
+    for app in _apps(atspi):
+        for win in _frames(app):
+            if _has_state(atspi, win, atspi.StateType.ACTIVE):
                 return win
-            if fallback is None and states.contains(atspi.StateType.SHOWING):
+            if fallback is None and _has_state(atspi, win, atspi.StateType.SHOWING):
                 fallback = win
     return fallback
+
+
+def _app_of_pid(atspi, pid: int):
+    """The AT-SPI application of process ``pid``, or ``None``: an app that exposes nothing is not on the bus."""
+    for app in _apps(atspi):
+        try:
+            if app.get_process_id() == pid:
+                return app
+        except Exception as e:
+            log.debug("an application vanished (%s)", type(e).__name__)
+    return None
+
+
+def _frame_titled(frames: list, title: str):
+    """The frame of exactly this title. No title names nothing: any untitled frame would match it."""
+    if not title:
+        return None
+    for frame in frames:
+        try:
+            if (frame.get_name() or "") == title:
+                return frame
+        except Exception as e:
+            log.debug("a window vanished (%s)", type(e).__name__)
+    return None
+
+
+def _atspi_root(atspi, target: Optional[WindowInfo]):
+    """Where to walk for ``target``, or ``None`` when AT-SPI knows nothing of it.
+
+    Application-scoped: the X window's process names the AT-SPI application, because a Qt or
+    Electron frame often never reports ACTIVE or SHOWING. Inside it, the frame of that title, then
+    its only frame, then, for the active X window only, the active or a showing frame: for any
+    other window those are a sibling, listed under this title at this window's offset. An active
+    window's application with several frames that say nothing is walked whole. Without a
+    process id only an exact title can name the window: another app's frame would be the wrong list.
+    """
+    if target is None:
+        return _atspi_active_frame(atspi)
+    if not target.pid:
+        return _frame_titled([f for app in _apps(atspi) for f in _frames(app)], target.title)
+    app = _app_of_pid(atspi, target.pid)
+    if app is None:
+        return None
+    frames = _frames(app)
+    titled = _frame_titled(frames, target.title)
+    if titled is not None:
+        return titled
+    if len(frames) == 1:
+        return frames[0]
+    if _active_handle() != target.handle:
+        raise LookupError("AT-SPI cannot tell this window from its app's others: FocusWindow it first")
+    for state in (atspi.StateType.ACTIVE, atspi.StateType.SHOWING):
+        for frame in frames:
+            if _has_state(atspi, frame, state):
+                return frame
+    return app
 
 
 def _content_origin(win_geo: tuple[int, int, int, int], frame_w: int, frame_h: int) -> tuple[int, int]:
@@ -319,10 +389,22 @@ def _content_origin(win_geo: tuple[int, int, int, int], frame_w: int, frame_h: i
     return x + max(0, (w - frame_w) // 2), y + max(0, (h - frame_h) // 2)
 
 
-def _active_window_geometry() -> Optional[tuple[int, int, int, int]]:
-    """Return the focused window's ``(x, y, w, h)`` via xdotool, or ``None``."""
+Geometry = tuple[int, int, int, int]  # x, y, width, height
+
+
+def _active_handle() -> Optional[int]:
+    """The focused X window, or ``None``."""
     try:
-        out = _xdotool(["getactivewindow", "getwindowgeometry", "--shell"])
+        return int(_xdotool(["getactivewindow"]).strip())
+    except (RuntimeError, ValueError) as e:
+        log.debug("no active window (%s)", type(e).__name__)
+        return None
+
+
+def _window_geometry(handle: int) -> Optional[Geometry]:
+    """Window ``handle``'s ``(x, y, w, h)`` via xdotool, or ``None``."""
+    try:
+        out = _xdotool(["getwindowgeometry", "--shell", str(handle)])
     except RuntimeError:
         return None
     g: dict[str, int] = {}
@@ -336,88 +418,351 @@ def _active_window_geometry() -> Optional[tuple[int, int, int, int]]:
     return None
 
 
-def _atspi_coord_strategy(atspi, frame) -> tuple[str, tuple[int, int]]:
-    """Decide how to map AT-SPI extents to screen pixels for ``frame``.
-
-    Returns ``("window", (ox, oy))`` — read WINDOW-relative extents and add the
-    content origin ``(ox, oy)`` — whenever the focused-window geometry is
-    resolvable (the reliable path; GTK4 reports SCREEN as ``(0,0)``). Falls back
-    to ``("screen", (0, 0))`` when the frame already reports a real (non-origin)
-    SCREEN position, else best-effort raw WINDOW coords.
-    """
-    geo = _active_window_geometry()
+def _extents(node, coord_type):
+    """The node's rect in ``coord_type`` when it has a real size. An application has none: -1 all round."""
     try:
-        fw = frame.get_extents(atspi.CoordType.WINDOW)
-        fs = frame.get_extents(atspi.CoordType.SCREEN)
-    except Exception:  # pragma: no cover - defensive
-        fw = fs = None
-    if geo is not None and fw is not None:
-        return "window", _content_origin(geo, int(fw.width), int(fw.height))
-    if fs is not None and (int(fs.x) > 0 or int(fs.y) > 0):
-        return "screen", (0, 0)  # toolkit reports real SCREEN coords
-    return "window", (0, 0)  # last resort: window-relative positions only
+        rect = node.get_extents(coord_type)
+    except Exception as e:
+        log.debug("no extents (%s)", type(e).__name__)
+        return None
+    return rect if rect is not None and int(rect.width) > 0 and int(rect.height) > 0 else None
+
+
+def _is_application(atspi, node) -> bool:
+    try:
+        return (node.get_role_name() or "").strip().lower() == "application"
+    except Exception as e:
+        log.debug("a node has no role (%s)", type(e).__name__)
+        return False
+
+
+def _atspi_coord_strategy(atspi, root, geo: Optional[Geometry]) -> Optional[tuple[str, tuple[int, int]]]:
+    """How to map AT-SPI extents to screen pixels under ``root``, in the X window at ``geo``.
+
+    ``("window", (ox, oy))`` — read WINDOW-relative extents and add the content origin — when
+    one frame is under ``root`` and the window geometry is known (the reliable path; GTK4 reports
+    SCREEN as ``(0,0)``). ``("screen", (0, 0))`` when a frame reports a real SCREEN position:
+    all an application walked whole can use, its frames being different windows. ``None``
+    when neither holds, or when a frame gave no answer: no pixel here can be trusted.
+    """
+    frames = _frames(root) if _is_application(atspi, root) else [root]
+    sized = [f for f in frames if _extents(f, atspi.CoordType.WINDOW) is not None]
+    if not sized:
+        return None
+    if geo is not None and len(frames) == 1:
+        rect = _extents(sized[0], atspi.CoordType.WINDOW)
+        return "window", _content_origin(geo, int(rect.width), int(rect.height))
+    on_screen = _extents(sized[0], atspi.CoordType.SCREEN)
+    if on_screen is not None and (int(on_screen.x) > 0 or int(on_screen.y) > 0):
+        return "screen", (0, 0)
+    return None
+
+
+@dataclass
+class _Entry:
+    """What a ref keeps: the node, what proves it later, its window for the click, the library."""
+
+    node: Any
+    role_name: str
+    name: str
+    handle: int
+    root: Any
+    atspi: Any
+
+
+@dataclass
+class _Reading:
+    """One walk's place: a window, the node to walk, how its coordinates map."""
+
+    atspi: Any
+    target: Optional[WindowInfo]
+    root: Any
+    adapter: Optional[_AtspiAdapter]
+    pixels_known: bool = True
+
+    def walk(self, expired: Callable[[], bool], **bounds: int) -> Walk:
+        if self.root is None:
+            return Walk([])
+        return walk(self.root, self.adapter.facts, self.adapter.children, expired=expired, **bounds)
+
+    def entry(self, node, facts: ElementFacts) -> _Entry:
+        handle = self.target.handle if self.target else 0
+        try:
+            role_name = (node.get_role_name() or "").strip().lower()
+        except Exception as e:
+            log.debug("a listed element vanished (%s)", type(e).__name__)
+            return None
+        return _Entry(node, role_name, one_line(facts.name), handle, self.root, self.atspi)
+
+    def note(self, listed: bool, cut: str) -> str:
+        """What the reply must add: the pixels of a list nobody can vouch for, or why a whole walk found nothing."""
+        if listed:
+            return "" if self.pixels_known else _UNKNOWN_PIXELS
+        return "" if cut else self.hint()
+
+    def hint(self) -> str:
+        if self.root is None:
+            return _enable_hint("")
+        try:
+            return _enable_hint(self.root.get_toolkit_name() or "")
+        except Exception as e:
+            log.debug("no toolkit name (%s)", type(e).__name__)
+            return _enable_hint("")
+
+
+_refs = RefTable()
+_tree_lock = threading.Lock()  # one reader of the refs and of libatspi: a tool can run beside AnnotatedSnapshot
+
+
+def _target(window: str) -> Optional[WindowInfo]:
+    """The window named by part of a title, or the active one; ``None`` when none can be told."""
+    if window:
+        handle = _window_by_title(window)
+    else:
+        handle = _active_handle()
+        if handle is None:
+            return None
+    for w in enumerate_windows():
+        if w.handle == handle:
+            return w
+    return _unlisted_window(handle)
+
+
+def _unlisted_window(handle: int) -> WindowInfo:
+    """A window the list does not show (no wmctrl, or it just opened), as xdotool knows it."""
+    window = WindowInfo(handle=handle, title="", rect=(0, 0, 0, 0), visible=True)
+    try:
+        window.title = _xdotool(["getwindowname", str(handle)]).strip()
+        window.pid = int(_xdotool(["getwindowpid", str(handle)]).strip())
+    except (RuntimeError, ValueError) as e:  # a window with no _NET_WM_PID still has its title
+        log.debug("an unlisted window (%s)", type(e).__name__)
+    return window
+
+
+def _reading(window: str = "") -> _Reading:
+    atspi = _load_atspi()
+    target = _target(window)
+    root = _atspi_root(atspi, target)
+    if root is None:
+        log.info("AT-SPI: nothing known of the target window")
+        return _Reading(atspi, target, None, None)
+    geo = _window_geometry(target.handle) if target else None
+    strategy = _atspi_coord_strategy(atspi, root, geo)
+    log.debug("AT-SPI coordinates: %s", strategy)
+    coord, offset = strategy or ("window", (0, 0))  # the reply says so, and _center refuses such a click
+    return _Reading(atspi, target, root, _AtspiAdapter(atspi, coord=coord, offset=offset), strategy is not None)
 
 
 def get_interactive_elements(limit: int = 300) -> list[dict]:
-    """Interactive UI elements of the focused app via the AT-SPI accessibility tree.
+    """Up to ``limit`` interactive elements of the focused window for Snapshot; existing refs stay valid.
 
-    ``limit`` bounds the list, as on Windows.
-
-    Returns an empty list on a non-X11 box (headless contract — never shells out /
-    imports gi), when AT-SPI is unavailable, or when the focused app exposes no
-    accessible tree (common for Qt/Electron/legacy apps). Never crashes, never
-    fabricates — a partial-but-honest list beats a failure.
-
-    Coordinates are screen pixels: WINDOW-relative AT-SPI extents plus the focused
-    window's content origin (GTK4 reports SCREEN extents as ``(0,0)``, so the
-    window offset is required — see :func:`_atspi_coord_strategy`).
+    Empty on a non-X11 box (headless contract — never shells out / imports gi), when AT-SPI is
+    unavailable, or when the app exposes nothing: a failure costs the list, never the image.
+    Coordinates are screen pixels (see :func:`_atspi_coord_strategy`).
     """
     if get_session().mode != "x11":
         return []
     try:
-        atspi = _load_atspi()
+        with _tree_lock:
+            reading = _reading()
+            if not reading.pixels_known:  # Snapshot's list is nothing but pixels
+                return []
+            return listed_elements(reading.walk(expires_in(SNAPSHOT_WALK_S), limit=limit))
     except Exception as e:
-        log.warning("AT-SPI unavailable (%s) — no interactive elements", e)
+        log.warning("no AT-SPI element list (%s)", type(e).__name__)
         return []
+
+
+def marked_elements(limit: int = 300) -> tuple[list[dict], str]:
+    """:func:`get_interactive_elements` with a ref on each, and why the list is cut, if it is (#36).
+
+    It starts a new ref tree, so it ends the refs of an earlier ElementTree. A failure costs
+    the list and leaves those refs alone.
+    """
+    if get_session().mode != "x11":
+        return [], ""
     try:
-        frame = _atspi_active_frame(atspi)
-        if frame is None:
-            log.info("AT-SPI: no active/showing frame found")
-            return []
-        coord, offset = _atspi_coord_strategy(atspi, frame)
-        adapter = _AtspiAdapter(atspi, coord=coord, offset=offset)
-        elements = _collect_actionable(frame, adapter, max_elements=limit)
-        log.info(
-            "AT-SPI: collected %d interactive elements (coord=%s, offset=%s)",
-            len(elements),
-            coord,
-            offset,
-        )
-        return elements
+        with _tree_lock:
+            reading = _reading()
+            elements, cut = marked_from(_refs, reading.walk(expires_in(SNAPSHOT_WALK_S), limit=limit), reading.entry)
+            return elements, "; ".join(part for part in (cut, reading.note(bool(elements), cut)) if part)
     except Exception as e:
-        log.warning("AT-SPI walk failed (%s) — returning no elements", e)
+        log.warning("no AT-SPI element list (%s)", type(e).__name__)
+        return [], ""
+
+
+def element_tree(window: str = "") -> ElementTree:
+    """The element tree of the window whose title matches ``window``, or of the focused one, with new refs."""
+    if get_session().mode != "x11":
+        raise DesktopUnavailable(_unavailable())
+    with _tree_lock:
+        reading = _reading(window)
+        result = reading.walk(expires_in(TREE_WALK_S))
+        title = one_line(reading.target.title if reading.target else "")
+        tree = tree_from(_refs, title, result, reading.entry)
+        log.info("AT-SPI: %d elements, truncated=%s", len(tree.items), bool(tree.truncated))
+        return replace(tree, hint=reading.note(bool(tree.items), tree.truncated))
+
+
+def _live(ref: str) -> _Entry:
+    """The entry behind ``ref``, proven to be that same element, still there and enabled."""
+    entry = _refs.lookup(ref)
+    stale = gone(ref, entry.name)
+    state = entry.atspi.StateType
+    try:
+        states = entry.node.get_state_set()
+        role_name = (entry.node.get_role_name() or "").strip().lower()
+        name = one_line((entry.node.get_name() or "").strip())
+    except Exception:
+        raise stale from None
+    if states.contains(state.DEFUNCT) or role_name != entry.role_name or name != entry.name:
+        raise stale  # a list row reused for other content keeps its node and role, not its name
+    listed = enumerate_windows()  # a closed window's node may answer; no wmctrl = no list = no proof either way
+    if entry.handle and listed and all(w.handle != entry.handle for w in listed):
+        raise stale
+    if not states.contains(state.ENABLED):
+        raise RuntimeError(f"Element {ref} ({entry.name!r}) is disabled")
+    return entry
+
+
+def _interfaces(node) -> list:
+    try:
+        return list(node.get_interfaces())
+    except Exception as e:
+        log.debug("a node has no interface list (%s)", type(e).__name__)
         return []
+
+
+def _is_field(atspi, node) -> bool:
+    if _has_state(atspi, node, atspi.StateType.EDITABLE) or "EditableText" in _interfaces(node):
+        return True
+    try:
+        return (node.get_role_name() or "").strip().lower() in _FIELD_ROLES
+    except Exception as e:
+        log.debug("a node has no role (%s)", type(e).__name__)
+        return True  # the mouse is the safe way round: an unknown node gets no action
+
+
+def _press_action(atspi, node) -> Optional[int]:
+    """The index of the action that operates ``node``, or ``None``."""
+    if "Action" not in _interfaces(node):
+        return None
+    wanted_actions = _FIELD_PRESS_ACTIONS if _is_field(atspi, node) else _PRESS_ACTIONS
+    try:
+        names = [(node.get_action_name(i) or "").lower() for i in range(node.get_n_actions())]
+    except Exception as e:
+        log.debug("no action list (%s)", type(e).__name__)
+        return None
+    for wanted in wanted_actions:
+        if wanted in names:
+            return names.index(wanted)
+    return None
+
+
+def _center(atspi, ref: str, entry: _Entry) -> tuple[int, int]:
+    """Where the mouse may click ``entry``, or a failure: a click never lands somewhere else.
+
+    AT-SPI has no reliable hit test across toolkits, so the element's own window must be the
+    active one: that is what rules out a dialog or another window on top of it.
+    """
+    if not _has_state(atspi, entry.node, atspi.StateType.SHOWING):
+        raise RuntimeError(f"Element {ref} ({entry.name!r}) is off-screen: bring it into view first")
+    if _active_handle() != entry.handle:
+        raise RuntimeError(
+            f"Something else is on top of element {ref} ({entry.name!r}): a window or a dialog."
+            " FocusWindow or close it first"
+        )
+    strategy = _atspi_coord_strategy(atspi, entry.root, _window_geometry(entry.handle))  # it may have moved
+    if strategy is None:
+        raise RuntimeError(f"The screen position of element {ref} ({entry.name!r}) is unknown: nothing was clicked")
+    coord, offset = strategy
+    left, top, right, bottom = _AtspiAdapter(atspi, coord=coord, offset=offset).extents(entry.node)
+    if right <= left or bottom <= top:
+        raise RuntimeError(f"Element {ref} ({entry.name!r}) is off-screen: bring it into view first")
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def click_element(ref: str) -> str:
+    """Do the element's own press action, else click its centre with the left button.
+
+    A returned ``False`` is the app's refusal, so the mouse may try. An exception is a call
+    that may have reached the app (a modal dialog blocks it until D-Bus gives up), and only
+    an error saying so is safe: the mouse would press a second time.
+    """
+    with _tree_lock:
+        entry = _live(ref)
+        atspi = entry.atspi
+        action = _press_action(atspi, entry.node)
+        if action is not None:
+            try:
+                if entry.node.do_action(action):
+                    return f"Invoked {ref} ({entry.name!r})"
+            except Exception as e:
+                log.debug("the action did not answer (%s)", type(e).__name__)
+                raise may_have_happened(ref, entry.name) from None
+            log.debug("the action was refused: clicking instead")
+        x, y = _center(atspi, ref, entry)
+    return f"{x11_input.click(x, y)}: {ref} ({entry.name!r}) has no usable action"
+
+
+def _focused_in(atspi, node, depth: int = 3) -> bool:
+    """True when ``node`` or a part of it (a wrapper's inner edit) has the focus."""
+    if _has_state(atspi, node, atspi.StateType.FOCUSED):
+        return True
+    try:
+        if depth == 0 or node.get_child_count() > _FOCUS_MAX_CHILDREN:
+            return False
+    except Exception as e:
+        log.debug("a node vanished (%s)", type(e).__name__)
+        return False
+    return any(_focused_in(atspi, child, depth - 1) for child in _AtspiAdapter(atspi).children(node))
+
+
+def _give_focus(atspi, ref: str, entry: _Entry) -> None:
+    """Make ``entry`` the keyboard's target: its window active and its focus inside it, or raise."""
+    focus_window(handle=entry.handle)
+    try:
+        entry.node.grab_focus()
+    except Exception as e:
+        log.debug("grab_focus failed (%s)", type(e).__name__)
+    deadline = time.monotonic() + _FOCUS_WAIT_S
+    while True:
+        if _active_handle() == entry.handle and _focused_in(atspi, entry.node):
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Element {ref} ({entry.name!r}) did not take the keyboard focus: nothing was typed")
+        time.sleep(_FOCUS_POLL_S)
+
+
+def type_element(ref: str, text: str) -> str:
+    """Replace the element's text through EditableText, else give it the focus and type at its caret."""
+    with _tree_lock:
+        entry = _live(ref)
+        atspi = entry.atspi
+        if "EditableText" in _interfaces(entry.node):
+            if not _has_state(atspi, entry.node, atspi.StateType.EDITABLE):
+                raise RuntimeError(f"Element {ref} ({entry.name!r}) is read-only")
+            try:
+                if entry.node.set_text_contents(text):
+                    return f"Set the value of {ref} ({entry.name!r}) to {len(text)} chars"
+            except Exception as e:
+                log.debug("set_text_contents did not answer (%s)", type(e).__name__)
+                raise may_have_happened(ref, entry.name) from None
+            log.debug("set_text_contents was refused: typing instead")
+        _give_focus(atspi, ref, entry)
+    return f"{x11_input.type_text(text)} into {ref} ({entry.name!r}), at its caret"
+
+
+def _window_by_title(title: str) -> int:
+    """The handle of the window whose title best matches ``title``; raises when none does."""
+    return best_window(title, enumerate_windows()).handle
 
 
 def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> str:
     """Bring a window to the foreground. Fuzzy-match on title if given."""
     if get_session().mode != "x11":
         raise DesktopUnavailable(_unavailable())
-    win_id: Optional[int] = handle
-    if not win_id and title:
-        best_score = 0
-        for w in enumerate_windows():
-            try:
-                from thefuzz import fuzz
-
-                score = fuzz.partial_ratio(title.lower(), w.title.lower())
-            except Exception:
-                score = 100 if title.lower() in w.title.lower() else 0
-            if score > best_score:
-                best_score = score
-                win_id = w.handle
-        if best_score < 50:
-            raise LookupError(f"No window matching '{title}' (best score {best_score})")
+    win_id: Optional[int] = handle or (_window_by_title(title) if title else None)
     if not win_id:
         raise LookupError("No window found")
     try:

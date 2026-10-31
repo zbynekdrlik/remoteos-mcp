@@ -29,7 +29,11 @@ from remoteos.platform.linux import session as linux_session
 
 _TASK = re.compile(r"^\[task:([0-9a-f]{12})\] ")
 _HEADLESS = "Not available on headless Linux (no display)"
-_WAYLAND = "Not available: Wayland session detected (X11 backend only — Wayland support is a separate tier)"
+_WAYLAND = (
+    "Not available: this is a Wayland session, and the desktop tools drive X11 (xdotool, scrot, wmctrl, xclip); "
+    "Wayland support is a separate tier that does not exist yet. Log in to an X11 session instead (\"Ubuntu on "
+    "Xorg\" on the login screen, or WaylandEnable=false in /etc/gdm3/custom.conf), then retry."
+)
 
 
 def _call(name: str, args: dict | None = None):

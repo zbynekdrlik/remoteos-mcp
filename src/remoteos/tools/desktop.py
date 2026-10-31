@@ -603,12 +603,10 @@ def WaitFor(
         time.sleep(min(_POLL_S, timeout - elapsed))
 
 
-def _elements_provider(tool: str):
-    """The provider, when it has an element tree: Windows now; Linux #37, macOS #38."""
-    desktop = get_desktop()
-    if not hasattr(desktop, "element_tree"):
-        raise failure(f"{tool} is not available on this OS yet")
-    return desktop
+def _elements_provider():
+    """The provider, once the OS lets this process read other apps' controls (macOS: #37)."""
+    _desktop_preflight("accessibility")
+    return get_desktop()
 
 
 @mcp.tool(
@@ -628,14 +626,16 @@ def ElementTree(window: str = "", monitor: int = 0, max_width: int = 1280) -> st
     IMAGE pixels of the Snapshot frame (monitor, max_width). Pass a ref to ClickElement
     or TypeElement instead of guessing pixels. Refs belong to the latest tree only: a
     new ElementTree or AnnotatedSnapshot ends them. At most 300 elements are listed, and the reply says when
-    the list is incomplete. Windows only for now.
+    the list is incomplete. UI Automation on Windows, the Accessibility API on macOS (it
+    needs that permission), AT-SPI on Linux X11, where an app that shows nothing gets a hint
+    how to start it so that it does.
 
     Args:
         window: Part of a window title, matched as FocusWindow does. Empty = the foreground window.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
     """
-    desktop = _elements_provider("ElementTree")
+    desktop = _elements_provider()
     frame = _current_frame(monitor, max_width)
     tree = desktop.element_tree(window)
     log.debug("ElementTree: %d elements, truncated=%s", len(tree.items), bool(tree.truncated))
@@ -643,6 +643,8 @@ def ElementTree(window: str = "", monitor: int = 0, max_width: int = 1280) -> st
     lines += tree_lines(frame, tree.items)
     if tree.truncated:
         lines += ["", f"**Incomplete:** {tree.truncated}."]
+    if tree.hint:
+        lines += ["", f"**Hint:** {tree.hint}."]
     return "\n".join(lines)
 
 
@@ -657,14 +659,15 @@ def ElementTree(window: str = "", monitor: int = 0, max_width: int = 1280) -> st
 def ClickElement(ref: str) -> str:
     """Activate an element from the latest ElementTree or AnnotatedSnapshot, by its ref.
 
-    Uses the element's own Invoke action, which needs no mouse. An element without one
-    gets a left click at its centre, unless something else is on top of it there. A ref of
+    Uses the element's own action (Invoke, AXPress, AT-SPI's press), which needs no mouse.
+    An element without one gets a left click at its centre, unless something else is on top
+    of it there. A ref of
     an older tree, or an element that is gone or disabled, is an error, never a click elsewhere.
 
     Args:
         ref: The element's ref from ElementTree, e.g. "4821.12".
     """
-    return _elements_provider("ClickElement").click_element(ref)
+    return _elements_provider().click_element(ref)
 
 
 @mcp.tool(
@@ -690,4 +693,4 @@ def TypeElement(ref: str, text: str) -> str:
         text: Text to enter, in any language.
     """
     log.debug("TypeElement %d chars", len(text))
-    return _elements_provider("TypeElement").type_element(ref, text)
+    return _elements_provider().type_element(ref, text)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import itertools
 import logging
 import secrets
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Optional, Sequence
 
@@ -19,6 +20,8 @@ MAX_ELEMENTS = 300
 MAX_DEPTH = 40
 MAX_VISITED = 5000
 MAX_NAME = 80
+TREE_WALK_S = 10.0  # a big tree ends as a partial list, not as a timeout
+SNAPSHOT_WALK_S = 3.0  # Snapshot's element list is a side dish: it must not hold up the image
 
 # What a user can operate. Anything else counts only when it takes the keyboard focus.
 INTERACTIVE_ROLES = frozenset(
@@ -70,6 +73,7 @@ class ElementTree:
     title: str
     items: tuple[TreeItem, ...]
     truncated: str = ""  # why the list is incomplete, "" when it is complete
+    hint: str = ""  # what would make an app that shows nothing show its controls
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,27 @@ def walk(
     return Walk(found, f"elements deeper than {max_depth} levels are left out" if clipped else "")
 
 
+def expires_in(seconds: float) -> Callable[[], bool]:
+    """A walk's ``expired``: true from ``seconds`` from now."""
+    deadline = time.monotonic() + seconds
+    return lambda: time.monotonic() >= deadline
+
+
+def element_dict(index: int, facts: ElementFacts) -> dict:
+    """``facts`` as the element dict every provider's Snapshot list uses."""
+    return {
+        "index": index,
+        "class": facts.role,
+        "text": facts.name,
+        "rect": dict(zip(("left", "top", "right", "bottom"), facts.rect)),
+    }
+
+
+def listed_elements(result: Walk) -> list[dict]:
+    """Snapshot's list: publishes no refs, so reading it ends none."""
+    return [element_dict(index, facts) for index, (_, facts) in enumerate(result.found, start=1)]
+
+
 _tree_numbers = itertools.count(1000 + secrets.randbelow(9000))
 
 
@@ -169,3 +194,44 @@ class RefTable:
             return self._entries[ref]
         except KeyError:
             raise StaleRef(f"Element {ref} is not in the latest tree: call ElementTree again") from None
+
+
+# ``entry_of(node, facts)`` makes what a ref keeps, or ``None`` when the element cannot have a ref.
+EntryOf = Callable[[Any, ElementFacts], Any]
+
+
+def _published(refs: RefTable, result: Walk, entry_of: EntryOf) -> list[tuple[str, ElementFacts]]:
+    """Start a new ref tree of the found elements that can have a ref: ``(ref, facts)``."""
+    entries, kept = [], []
+    for node, facts in result.found:
+        entry = entry_of(node, facts)
+        if entry is not None:
+            entries.append(entry)
+            kept.append(facts)
+    return list(zip(refs.publish(entries), kept))
+
+
+def tree_from(refs: RefTable, title: str, result: Walk, entry_of: EntryOf) -> ElementTree:
+    """ElementTree's reply data, with new refs."""
+    items = tuple(TreeItem(r, f.role, f.name, f.enabled, f.rect) for r, f in _published(refs, result, entry_of))
+    return ElementTree(title=title, items=items, truncated=result.truncated)
+
+
+def marked_from(refs: RefTable, result: Walk, entry_of: EntryOf) -> tuple[list[dict], str]:
+    """AnnotatedSnapshot's list (#36) and why it is cut: refs in a new tree, so a mark can be acted on."""
+    ref_of = {id(facts): ref for ref, facts in _published(refs, result, entry_of)}
+    found = enumerate((facts for _, facts in result.found), start=1)
+    return [{**element_dict(index, facts), "ref": ref_of.get(id(facts))} for index, facts in found], result.truncated
+
+
+def gone(ref: str, name: str) -> StaleRef:
+    return StaleRef(f"Element {ref} ({name!r}) is gone: call ElementTree again")
+
+
+def may_have_happened(ref: str, name: str) -> RuntimeError:
+    """An action that neither worked nor was plainly refused: repeating it blindly could do it twice."""
+    return RuntimeError(
+        f"The app did not answer the action on element {ref} ({name!r}). It may still have happened (a dialog it"
+        " opened can block the call, a button can close its own window): look before repeating it, then call"
+        " ElementTree again"
+    )

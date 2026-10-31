@@ -92,7 +92,7 @@ def tree_lines(frame: Frame, items: Iterable) -> list[str]:
         state = "enabled" if item.enabled else "disabled"
         marker = "" if in_image(frame, (x1 + x2) // 2, (y1 + y2) // 2) else _OFF_FRAME
         bounds = f"({x2 - x1}x{y2 - y1} at {x1},{y1})"
-        lines.append(f"  [{item.ref}] {item.role} {_quoted(item.name)} {state} {bounds}{marker}")
+        lines.append(f"  [{item.ref}] {one_line(item.role)} {_quoted(item.name)} {state} {bounds}{marker}")
     return lines
 
 
