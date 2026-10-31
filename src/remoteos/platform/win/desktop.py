@@ -157,6 +157,24 @@ def get_interactive_elements(limit: int = 300) -> list[dict]:
         return []
 
 
+def marked_elements(limit: int = 300) -> list[dict]:
+    """:func:`get_interactive_elements` with a ref on each, for AnnotatedSnapshot's marks (#36).
+
+    It starts a new ref tree, so it ends the refs of an earlier ElementTree. A failure costs
+    the list and leaves those refs alone, unless a walk overran, which ends every ref.
+    """
+    if not HAS_WIN32:
+        raise RuntimeError("pywin32 not installed — run `pip install pywin32`")
+    foreground = win32gui.GetForegroundWindow()
+    if not foreground:
+        return []
+    try:
+        return uia.read_marked(foreground, limit)
+    except Exception as e:
+        log.warning("no UI Automation element list (%s)", type(e).__name__)
+        return []
+
+
 def element_tree(window: str = "") -> ElementTree:
     """The element tree of the window whose title matches ``window``, or of the foreground one."""
     if not HAS_WIN32:

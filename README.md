@@ -217,12 +217,46 @@ ElementTree(window="", monitor=0, max_width=1280)
 - `TypeElement(ref, text)` sets the element's value, **replacing** what was there. An element with
   no settable value gets the focus and `text` is typed at its caret. The reply says which it was.
 - A ref belongs to the latest tree. A ref of an older tree, or an element that is gone, is an
-  error asking for a new `ElementTree`, never an action somewhere else. `Snapshot` does not end
-  refs, unless the window stops answering: any UI Automation timeout ends them.
+  error asking for a new `ElementTree`, never an action somewhere else. `AnnotatedSnapshot` starts
+  a new tree too. `Snapshot` does not end refs, unless the window stops answering: any UI Automation
+  timeout ends them.
 - An app that blocks the call (a modal dialog opened by the button) ends in an error saying the
   action may have happened. Look before repeating it.
 
 Linux and macOS report "not available yet".
+
+## Marks on custom-drawn apps (AnnotatedSnapshot)
+
+Ableton, Resolume and other JUCE-style apps draw their own controls, so accessibility sees almost
+nothing there. `AnnotatedSnapshot` adds what OCR reads, as one numbered list on the image:
+
+```
+**Marks:** 3 (1 elements, 2 OCR)
+  [1] element Button "Save" ref 4822.2 at (390,24)
+  [2] ocr text "Sample bank" at (115,210)
+  [3] ocr text "Prehrať" at (496,342)
+```
+
+- A point is an image pixel, so `Click(115, 210)` hits mark 2 as it is. Elements are red, OCR blue.
+- An element wins: a word with more than half of its area on an element adds no mark. Close words
+  on a line are one mark. Numbers run top-left to bottom-right, so a screen keeps its numbers.
+- `max_elements` (1-300, default 300) bounds the marks. Elements go in first, and the reply says
+  how many were left out.
+- On Windows an element's `ref` works with `ClickElement` and `TypeElement`. It starts a new ref
+  tree, so it ends the refs of an earlier `ElementTree`.
+- OCR runs on the full capture, not the image shrunk to `max_width`, and adds seconds to the call.
+  If it fails, the reply says why and keeps the image and the elements.
+- It finds text, not unlabelled icons.
+
+OCR reads Slovak and English by default (`lang="slk+eng"`, for the `OCR` tool too). A language that
+is not installed is left out, and the reply says so:
+
+- **Linux:** Tesseract, with `tesseract-ocr-slk` from the installer.
+- **Windows:** pytesseract if installed, else the Windows engine, which reads one language at a
+  time: the first of Slovak, English that is installed. A language comes from the Windows language
+  settings (its optical character recognition part), else the user profile's languages are used.
+- **macOS:** word boxes need pytesseract. The Shortcuts fallback gives text only, so without
+  pytesseract `AnnotatedSnapshot` has no OCR marks and says so.
 
 ## Screen coordinates (Snapshot → Click)
 

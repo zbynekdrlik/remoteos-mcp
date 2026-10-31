@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import subprocess
@@ -53,6 +54,10 @@ class _Commands:
 # ---------------------------------------------------------------------------
 
 
+def _winrt_reply(text: str) -> str:
+    return json.dumps({"language": "en-US", "missing": [], "text": text, "words": []}, ensure_ascii=False)
+
+
 def _blank_grab(bbox=None, all_screens=False):
     return Image.new("RGB", (8, 8))
 
@@ -73,15 +78,15 @@ def test_windows_ocr_script_that_fails_but_exits_0_is_an_error(windows_ocr):
 
 
 def test_windows_ocr_script_stops_on_its_first_error(windows_ocr):
-    windows_ocr.reply = (0, "Hello", "")
-    assert ocr.ocr_windows_builtin() == "Hello"
+    windows_ocr.reply = (0, _winrt_reply("Hello"), "")
+    assert ocr.ocr_windows_builtin().text == "Hello"
     (argv,) = windows_ocr.calls
     assert argv[-1].lstrip().startswith("$ErrorActionPreference = 'Stop'")  # #48 round 2: nothing before it
 
 
 def test_windows_ocr_with_no_text_is_an_empty_result(windows_ocr):
-    windows_ocr.reply = (0, "", "")
-    assert ocr.ocr_windows_builtin() == ""
+    windows_ocr.reply = (0, _winrt_reply(""), "")
+    assert ocr.ocr_windows_builtin().text == ""
 
 
 # ---------------------------------------------------------------------------
@@ -247,8 +252,8 @@ def test_windows_ocr_reads_its_own_console_losslessly_as_utf8(windows_ocr, windo
     # live "1€–č" -> "1?-č"). #48 round 2: OCR runs under the shared console trampoline in its own
     # console, its script unchanged, and Python decodes the raw bytes as UTF-8: lossless, the
     # server's console untouched.
-    windows_ocr.reply = (0, "12,50 € – Žltý", "")
-    assert ocr.ocr_windows_builtin() == "12,50 € – Žltý"
+    windows_ocr.reply = (0, _winrt_reply("12,50 € – Žltý"), "")
+    assert ocr.ocr_windows_builtin().text == "12,50 € – Žltý"
     (kwargs,) = windows_ocr.kwargs
     assert not any(kwargs.get(key) for key in TEXT_MODE), kwargs  # binary: the bytes are decoded by us
     assert kwargs["creationflags"] == _CREATE_NO_WINDOW

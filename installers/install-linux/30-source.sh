@@ -169,16 +169,17 @@ build_venv() {
 }
 
 # A desktop box gets the desktop tools' backends (headless boxes, the cams, stay stub-only):
-# ffmpeg = ScreenRecord (#8), pyatspi/gir/gi = the AT-SPI tree (#7), xrandr = frames (#28).
+# ffmpeg = ScreenRecord (#8), pyatspi/gir/gi = the AT-SPI tree (#7), xrandr = frames (#28),
+# tesseract-ocr-slk = OCR's default slk+eng (#36).
 install_desktop_tools() {
     if command -v apt-get &>/dev/null; then
         apt-get update -qq || true
-        apt-get install -y -qq xdotool scrot xclip wmctrl tesseract-ocr ffmpeg x11-xserver-utils \
-            python3-pyatspi gir1.2-atspi-2.0 python3-gi \
+        apt-get install -y -qq xdotool scrot xclip wmctrl tesseract-ocr tesseract-ocr-slk ffmpeg \
+            x11-xserver-utils python3-pyatspi gir1.2-atspi-2.0 python3-gi \
             || say "[!] Some desktop tools failed to install; desktop control may be limited"
         say "Desktop tools ready (xdotool scrot xclip wmctrl xrandr tesseract-ocr ffmpeg AT-SPI)"
     else
-        say "[!] Non-apt system — install 'xdotool scrot xclip wmctrl xrandr tesseract ffmpeg python3-pyatspi gir1.2-atspi-2.0' manually"
+        say "[!] Non-apt system — install 'xdotool scrot xclip wmctrl xrandr tesseract (with its Slovak data) ffmpeg python3-pyatspi gir1.2-atspi-2.0' manually"
     fi
 }
 

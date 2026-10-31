@@ -627,7 +627,7 @@ def ElementTree(window: str = "", monitor: int = 0, max_width: int = 1280) -> st
     One line per element: [ref] role "name" enabled|disabled (WxH at X,Y). Bounds are
     IMAGE pixels of the Snapshot frame (monitor, max_width). Pass a ref to ClickElement
     or TypeElement instead of guessing pixels. Refs belong to the latest tree only: a
-    new ElementTree ends them. At most 300 elements are listed, and the reply says when
+    new ElementTree or AnnotatedSnapshot ends them. At most 300 elements are listed, and the reply says when
     the list is incomplete. Windows only for now.
 
     Args:
@@ -655,7 +655,7 @@ def ElementTree(window: str = "", monitor: int = 0, max_width: int = 1280) -> st
 )
 @_input_tool
 def ClickElement(ref: str) -> str:
-    """Activate an element from the latest ElementTree, by its ref.
+    """Activate an element from the latest ElementTree or AnnotatedSnapshot, by its ref.
 
     Uses the element's own Invoke action, which needs no mouse. An element without one
     gets a left click at its centre, unless something else is on top of it there. A ref of
@@ -676,7 +676,7 @@ def ClickElement(ref: str) -> str:
 )
 @_input_tool
 def TypeElement(ref: str, text: str) -> str:
-    """Enter text in an element from the latest ElementTree, by its ref.
+    """Enter text in an element from the latest ElementTree or AnnotatedSnapshot, by its ref.
 
     An element with a settable value (most text fields) gets ``text`` as its whole new
     value, replacing what was there, with no keystrokes. Any other element gets the

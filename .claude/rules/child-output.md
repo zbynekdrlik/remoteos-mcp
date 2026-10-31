@@ -176,7 +176,8 @@ paths:
     `result.stdout or ""` after a text-mode run. Never pass a bare `text=True` to a new
     console call. `tscon` gets no trampoline either: it is read through `run_command`.
   - Windows OCR's script starts with `$ErrorActionPreference = 'Stop'`. A failing step can
-    still exit 0 with empty stdout, so "stderr and no text" is a failure as well.
+    still exit 0 with empty stdout, and since #36 it always answers one JSON object, so an empty
+    stdout is a failure. It waits through `AsTask`, the #36 replacement of a compiled C# helper.
   - **Tests, Linux** (`tests/test_output_encoding.py`, `tests/test_child_timeout.py`) fake only
     the OS boundary, with one exception: the stale-identity test seeds psutil's private
     `process_iter` cache (`psutil._pmap`, `Process._ident`) and asserts the seed really differs,

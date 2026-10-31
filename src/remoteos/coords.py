@@ -169,6 +169,23 @@ def region_to_screen(frame: Frame, x: int, y: int, width: int, height: int, spac
     return bbox
 
 
+def capture_box_to_screen(box: Sequence[float], image_size: Point, bbox: Bbox) -> Bbox:
+    """A box in pixels of a capture of ``bbox`` as screen coordinates.
+
+    The scale comes from the capture itself: OCR reads a macOS Retina capture in pixels,
+    twice the points of ``bbox``.
+    """
+    scale_x = (bbox[2] - bbox[0]) / image_size[0]
+    scale_y = (bbox[3] - bbox[1]) / image_size[1]
+    left, top, right, bottom = box
+    return (
+        bbox[0] + _round_half_up(left * scale_x),
+        bbox[1] + _round_half_up(top * scale_y),
+        bbox[0] + _round_half_up(right * scale_x),
+        bbox[1] + _round_half_up(bottom * scale_y),
+    )
+
+
 def region_geometry(geometry: CaptureGeometry, bbox: Bbox) -> CaptureGeometry:
     """Capture geometry of ``bbox``, a part of ``geometry``: same pixels per screen unit."""
     left, top, right, bottom = bbox
