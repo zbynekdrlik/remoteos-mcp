@@ -40,8 +40,9 @@ paths:
 - **`_live` reads the window list, never xdotool on the handle:** a failing `_run_x` retries through
   `get_session(force=True)`, which can cache `headless` for good.
 - **AT-SPI root: the X window's process names the application** (`_atspi_root`), then the frame of
-  that title, then an ACTIVE or SHOWING frame, then the application. Without a pid only an exact
-  title counts: another app's active frame would be the wrong window's list.
+  that title, then its only frame, then, for the active X window only, an ACTIVE or SHOWING frame, then
+  the whole application. Without a pid only an exact title counts: another app's active frame would
+  be the wrong window's list.
 - **GTK 3's entry has role `text`**, the role of static text too: `EDITABLE` decides. A read-only
   entry stays `Text` and is listed only when focusable. `EditableText` without `EDITABLE` = read-only.
 - **The Linux mouse fallback needs the element's window to be the active one** (`_center`): AT-SPI's

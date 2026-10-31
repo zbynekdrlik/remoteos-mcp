@@ -494,11 +494,11 @@ class _Reading:
             return None
         return _Entry(node, role_name, one_line(facts.name), handle, self.root, self.atspi)
 
-    def note(self, listed: bool) -> str:
-        """What the reply must add: the pixels of a list nobody can vouch for, or why it is empty."""
+    def note(self, listed: bool, cut: str) -> str:
+        """What the reply must add: the pixels of a list nobody can vouch for, or why a whole walk found nothing."""
         if listed:
             return "" if self.pixels_known else _UNKNOWN_PIXELS
-        return self.hint()
+        return "" if cut else self.hint()
 
     def hint(self) -> str:
         if self.root is None:
@@ -585,7 +585,7 @@ def marked_elements(limit: int = 300) -> tuple[list[dict], str]:
         with _tree_lock:
             reading = _reading()
             elements, cut = marked_from(_refs, reading.walk(expires_in(SNAPSHOT_WALK_S), limit=limit), reading.entry)
-            return elements, cut or reading.note(bool(elements))
+            return elements, "; ".join(part for part in (cut, reading.note(bool(elements), cut)) if part)
     except Exception as e:
         log.warning("no AT-SPI element list (%s)", type(e).__name__)
         return [], ""
@@ -601,7 +601,7 @@ def element_tree(window: str = "") -> ElementTree:
         title = one_line(reading.target.title if reading.target else "")
         tree = tree_from(_refs, title, result, reading.entry)
         log.info("AT-SPI: %d elements, truncated=%s", len(tree.items), bool(tree.truncated))
-        return replace(tree, hint="" if tree.truncated and reading.pixels_known else reading.note(bool(tree.items)))
+        return replace(tree, hint=reading.note(bool(tree.items), tree.truncated))
 
 
 def _live(ref: str) -> _Entry:
