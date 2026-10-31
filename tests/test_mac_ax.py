@@ -254,6 +254,15 @@ def test_a_part_that_stops_answering_costs_that_part_and_the_reply_says_so(hi):
     assert tree.truncated == "1 parts of the window did not answer the Accessibility API"
 
 
+def test_a_control_that_answers_but_not_for_its_children_is_kept(hi):
+    group = button("Group")
+    front(hi, group, button("Fine"))
+    hi.AXUIElementCopyAttributeValue = _failing_children(hi, group, CANNOT_COMPLETE)
+    tree = ax.read_tree()
+    assert [i.name for i in tree.items] == ["Group", "Fine"]
+    assert tree.truncated == "1 parts of the window did not answer the Accessibility API"
+
+
 def test_a_window_that_goes_while_it_is_read_has_a_message(hi):
     window = front(hi, button())
     window.invalid = True

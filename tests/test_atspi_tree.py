@@ -253,6 +253,13 @@ def test_a_background_window_is_never_replaced_by_its_app_s_active_frame(x11, mo
     assert tool_error(lambda: server.ElementTree("Editor")).endswith("FocusWindow it first")
 
 
+def test_a_background_app_s_only_frame_is_its_window_whatever_its_title(x11, monkeypatch):
+    app, _ = window_tree(Node("push button", "Mine", (0, 0, 9, 9)), name="AT-SPI's own title")
+    bus(monkeypatch, app)
+    x11.run_x.active = 0x777
+    assert [i.name for i in d.element_tree("Editor").items] == ["Mine"]
+
+
 def test_the_active_window_may_use_its_app_s_active_frame(x11, monkeypatch):
     bus(monkeypatch, _two_frames())
     assert [i.name for i in d.element_tree().items] == ["Alpha's"]
@@ -312,6 +319,33 @@ def test_pixels_nobody_can_vouch_for_are_withheld_or_flagged(x11, monkeypatch):
     assert [e["text"] for e in elements] == ["One", "Two"]
     assert cut.startswith("the screen positions of these elements are unknown")
     assert "**Hint:** the screen positions of these elements are unknown" in server.ElementTree()
+
+
+def test_a_cut_list_keeps_the_flag_on_its_pixels(x11, monkeypatch):
+    _unvouched(monkeypatch)
+    elements, cut = d.marked_elements(limit=1)
+    assert len(elements) == 1
+    assert cut.startswith("only the first 1 elements are listed")
+    assert "the screen positions of these elements are unknown" in cut
+
+
+@pytest.mark.parametrize(
+    ("found", "cut", "pixels_known", "expected"),
+    [
+        (True, "", True, ""),
+        (True, "cut", True, ""),
+        (True, "", False, linux_windows._UNKNOWN_PIXELS),
+        (True, "cut", False, linux_windows._UNKNOWN_PIXELS),
+        (False, "", True, "HINT"),
+        (False, "", False, "HINT"),
+        (False, "cut", True, ""),  # a list that stopped says nothing of whether the app shows controls
+        (False, "cut", False, ""),
+    ],
+)
+def test_what_a_reply_adds(found, cut, pixels_known, expected):
+    reading = linux_windows._Reading(None, None, None, None, pixels_known)
+    hint = linux_windows._enable_hint("")
+    assert reading.note(found, cut) == (hint if expected == "HINT" else expected)
 
 
 def test_a_frame_that_is_not_the_only_one_is_not_taken_for_the_window(x11, monkeypatch):
@@ -538,6 +572,27 @@ def test_activate_on_a_read_only_field_is_enter_too(x11, monkeypatch, interfaces
     assert len(_mouse_clicks(x11)) == 1
 
 
+@pytest.mark.parametrize(
+    ("states", "interfaces"),
+    [(BASE | {"EDITABLE"}, ["Action"]), (BASE, ["Action", "EditableText"])],
+    ids=["editable-state", "editable-interface"],
+)
+def test_a_field_is_known_by_more_than_its_role(x11, monkeypatch, states, interfaces):
+    # real GTK 3: a spin button has only activate, and its role is no text role
+    spin = Node("spin button", "Count", (10, 20, 100, 30), states, actions=["activate"], interfaces=interfaces)
+    bus(monkeypatch, window_tree(spin)[0])
+    d.click_element(_ref("Count"))
+    assert spin.done == []
+    assert len(_mouse_clicks(x11)) == 1
+
+
+def test_a_node_whose_role_stops_answering_gets_no_action(x11, monkeypatch):
+    button = Node("push button", "Go", (10, 20, 100, 30), actions=["activate"])
+    atspi = bus(monkeypatch, window_tree(button)[0])
+    monkeypatch.setattr(button, "get_role_name", lambda: (_ for _ in ()).throw(RuntimeError("busy")))
+    assert linux_windows._is_field(atspi, button) is True
+
+
 def test_a_text_field_s_real_click_action_is_used(x11, monkeypatch):
     field = Node("entry", "Name", (10, 20, 100, 30), BASE | {"EDITABLE"}, actions=["activate", "click"])
     bus(monkeypatch, window_tree(field)[0])
@@ -590,6 +645,15 @@ def test_a_mouse_click_needs_an_element_on_the_screen(x11, monkeypatch, states):
     button.ext = (0, 0, 0, 0) if states == BASE else button.ext
     with pytest.raises(RuntimeError, match="off-screen"):
         d.click_element(ref)
+
+
+def test_a_ref_of_an_unknown_window_is_not_stale_for_it(x11, monkeypatch):
+    # no active X window at the walk: handle 0, which no window list holds
+    atspi = fake_atspi()
+    button = Node("push button", "Go", (0, 0, 9, 9), actions=["click"])
+    entry = linux_windows._Entry(button, "push button", "Go", 0, button, atspi)
+    [ref] = linux_windows._refs.publish([entry])
+    assert d.click_element(ref).startswith("Invoked")
 
 
 def test_a_box_without_wmctrl_can_still_act_on_a_ref(x11, monkeypatch):
