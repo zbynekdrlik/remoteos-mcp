@@ -81,8 +81,8 @@ def _hi():
     return HIServices
 
 
-class _Vanished(Exception):
-    """The element no longer exists."""
+class _Vanished(LookupError):
+    """The element no longer exists. It reaches a client only when the window itself went."""
 
 
 class _NotAnswered(RuntimeError):
@@ -91,7 +91,7 @@ class _NotAnswered(RuntimeError):
 
 def _check(err: int) -> None:
     if err == _INVALID_ELEMENT:
-        raise _Vanished
+        raise _Vanished("The window went away while it was being read: try again")
     if err in _NOT_ANSWERED:
         raise _NotAnswered(f"The app did not answer the Accessibility API (error {err}): try again in a moment")
 
@@ -221,7 +221,26 @@ _tree_lock = threading.Lock()  # one reader of the refs: a tool can run beside A
 
 
 def _walk(hi, window: _Window, expired: Callable[[], bool], **bounds: int) -> Walk:
-    return walk(window.element, lambda e: _facts(hi, e), lambda e: _children(hi, e), expired=expired, **bounds)
+    """The window's elements. A part that stops answering costs that part, and the reply says so;
+    a window that gives nothing at all is an error, never an empty tree."""
+    silent: list[_NotAnswered] = []
+
+    def answered(read: Callable[[Any, Any], Any], fallback: Any) -> Callable[[Any], Any]:
+        def call(element):
+            try:
+                return read(hi, element)
+            except _NotAnswered as e:
+                silent.append(e)
+                return fallback
+
+        return call
+
+    result = walk(window.element, answered(_facts, None), answered(_children, []), expired=expired, **bounds)
+    if silent and not result.found:
+        raise silent[0]
+    if silent and not result.truncated:
+        return Walk(result.found, f"{len(silent)} parts of the window did not answer the Accessibility API")
+    return result
 
 
 def _entry_of(hi) -> Callable[[Any, ElementFacts], Optional[_Entry]]:

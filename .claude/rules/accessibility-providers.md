@@ -21,15 +21,24 @@ paths:
   `_REFUSED`, AT-SPI `do_action` returning False. A modal dialog blocks the call, a button
   closes its own window, and a second press could do it twice. `may_have_happened` says so.
 - **AT-SPI's press is a named action, never index 0.** Qt lists `SetFocus` and `ShowMenu`, and GTK 2's
-  `press` is half of `click`. `get_action_name` is not localized, nor is `get_role_name`. On an
-  EDITABLE node only `click` counts: GTK 3's entry has only `activate`, which is Enter and fires the
-  form's default button (real, review round 1). Such a field gets the mouse.
+  `press` is half of `click`. `get_action_name` is not localized, nor is `get_role_name`. On a text
+  field (`_is_field`: EDITABLE, EditableText or a field role, because a read-only entry lacks the
+  state) only `click` counts: GTK 3's entry has only `activate`, which is Enter
+  and fires the form's default button (real, review rounds 1-2). Such a field gets the mouse.
 - **An AT-SPI application's `get_extents` returns -1 all round and does not raise** (real GTK 3).
   `_extents` treats no size as no answer. `_atspi_coord_strategy` is `None` when no frame answers
-  or an application with several windows has no SCREEN position: the list stays best effort, and
-  `_center` refuses, because those pixels are wrong by half a window.
+  or an application with several windows has no SCREEN position. Those pixels are off by the
+  window's position: Snapshot's list is withheld, ElementTree and AnnotatedSnapshot say so, and
+  `_center` refuses.
+- **A named window is never replaced by a sibling frame.** An ACTIVE or SHOWING frame stands in only
+  for the active X window: for another one it is a different window of that app, listed under the
+  wrong title at the wrong offset (real, review round 2). `_atspi_root` asks for FocusWindow instead.
 - **A ref's proof on AT-SPI and AX is role + name**, no RuntimeId: a recycled table row keeps
-  its node and role. A label that changes makes the ref stale, which is the safe way round.
+  its node and role. A label that changes makes the ref stale, which is the safe way round. An element
+  with an empty name (unnamed fields, macOS rows and cells) is proved by its role alone: a limit, kept
+  because dropping their refs would lose the fields.
+- **`_live` reads the window list, never xdotool on the handle:** a failing `_run_x` retries through
+  `get_session(force=True)`, which can cache `headless` for good.
 - **AT-SPI root: the X window's process names the application** (`_atspi_root`), then the frame of
   that title, then an ACTIVE or SHOWING frame, then the application. Without a pid only an exact
   title counts: another app's active frame would be the wrong window's list.
@@ -43,7 +52,8 @@ paths:
   never joined the a11y bus. On the test bus Qt showed its tree without
   `QT_LINUX_ACCESSIBILITY_ALWAYS_ON`; a desktop's bus state may differ.
 - **A hung Mac app is an error, never an empty tree.** `_copy` raises `_NotAnswered` on CannotComplete
-  and APIDisabled; `None` means only that the attribute is not there.
+  and APIDisabled; `None` means only that the attribute is not there. In a walk it costs that part
+  and the reply says so (`_walk`); a window that gives nothing is the error.
 - **AX never reads `AXValue`:** a field can be a password. `name` = AXTitle, AXDescription, AXPlaceholderValue.
 - **`AXValueGetValue`'s return:** the wheel's docstring says `value`, older code unpacked a pair, so
   `_axvalue` takes both. Check it on the first live run on a Mac.

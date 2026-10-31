@@ -143,13 +143,15 @@ _ROLES = {
 # The action that means "operate it", best first. Never just the first action: Qt's list holds
 # SetFocus and ShowMenu too, and GTK 2's "press" is only half of "click".
 _PRESS_ACTIONS = ("click", "activate", "press", "toggle", "jump")
-# On a text field "activate" is Enter: GTK 3's fires the form's default button. A click is not that.
-_EDITABLE_PRESS_ACTIONS = ("click",)
+# On a text field, read-only ones too, "activate" is Enter: GTK 3's fires the form's default button.
+_FIELD_PRESS_ACTIONS = ("click",)
+_FIELD_ROLES = frozenset({"text", "entry", "password text", "text box"})
 
 _FOCUS_WAIT_S = 1.0  # focus changes reach AT-SPI and the window manager a moment after the call
 _FOCUS_POLL_S = 0.05
 _FOCUS_MAX_CHILDREN = 32  # a wrapper's inner field is near the top: a table's rows are not worth a poll
 
+_UNKNOWN_PIXELS = "the screen positions of these elements are unknown: act by ref, not by their pixels"
 _QT_HINT = "a Qt app shows them when started with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1"
 # Both halves are needed: with the flag alone Chrome never joined the a11y bus (real Chrome, #38).
 _CHROMIUM_HINT = (
@@ -328,6 +330,9 @@ def _app_of_pid(atspi, pid: int):
 
 
 def _frame_titled(frames: list, title: str):
+    """The frame of exactly this title. No title names nothing: any untitled frame would match it."""
+    if not title:
+        return None
     for frame in frames:
         try:
             if (frame.get_name() or "") == title:
@@ -342,15 +347,14 @@ def _atspi_root(atspi, target: Optional[WindowInfo]):
 
     Application-scoped: the X window's process names the AT-SPI application, because a Qt or
     Electron frame often never reports ACTIVE or SHOWING. Inside it, the frame of that title, then
-    the active or a showing frame, then its only frame. An application with several frames none of
-    which say so is walked whole. Without a process id only an exact title can name the window:
-    another app's active frame would be a list of the wrong window.
+    its only frame, then, for the active X window only, the active or a showing frame: for any
+    other window those are a sibling, listed under this title at this window's offset. An active
+    window's application with several frames that say nothing is walked whole. Without a
+    process id only an exact title can name the window: another app's frame would be the wrong list.
     """
     if target is None:
         return _atspi_active_frame(atspi)
     if not target.pid:
-        if not target.title:  # an empty title would match any untitled frame of any app
-            return None
         return _frame_titled([f for app in _apps(atspi) for f in _frames(app)], target.title)
     app = _app_of_pid(atspi, target.pid)
     if app is None:
@@ -359,11 +363,15 @@ def _atspi_root(atspi, target: Optional[WindowInfo]):
     titled = _frame_titled(frames, target.title)
     if titled is not None:
         return titled
+    if len(frames) == 1:
+        return frames[0]
+    if _active_handle() != target.handle:
+        raise LookupError("AT-SPI cannot tell this window from its app's others: FocusWindow it first")
     for state in (atspi.StateType.ACTIVE, atspi.StateType.SHOWING):
         for frame in frames:
             if _has_state(atspi, frame, state):
                 return frame
-    return frames[0] if len(frames) == 1 else app
+    return app
 
 
 def _content_origin(win_geo: tuple[int, int, int, int], frame_w: int, frame_h: int) -> tuple[int, int]:
@@ -437,14 +445,14 @@ def _atspi_coord_strategy(atspi, root, geo: Optional[Geometry]) -> Optional[tupl
     all an application walked whole can use, its frames being different windows. ``None``
     when neither holds, or when a frame gave no answer: no pixel here can be trusted.
     """
-    candidates = _frames(root) if _is_application(atspi, root) else [root]
-    framed = [(f, r) for f, r in ((f, _extents(f, atspi.CoordType.WINDOW)) for f in candidates) if r is not None]
-    if not framed:
+    frames = _frames(root) if _is_application(atspi, root) else [root]
+    sized = [f for f in frames if _extents(f, atspi.CoordType.WINDOW) is not None]
+    if not sized:
         return None
-    if geo is not None and len(framed) == 1:
-        _, rect = framed[0]
+    if geo is not None and len(frames) == 1:
+        rect = _extents(sized[0], atspi.CoordType.WINDOW)
         return "window", _content_origin(geo, int(rect.width), int(rect.height))
-    on_screen = _extents(framed[0][0], atspi.CoordType.SCREEN)
+    on_screen = _extents(sized[0], atspi.CoordType.SCREEN)
     if on_screen is not None and (int(on_screen.x) > 0 or int(on_screen.y) > 0):
         return "screen", (0, 0)
     return None
@@ -470,6 +478,7 @@ class _Reading:
     target: Optional[WindowInfo]
     root: Any
     adapter: Optional[_AtspiAdapter]
+    pixels_known: bool = True
 
     def walk(self, expired: Callable[[], bool], **bounds: int) -> Walk:
         if self.root is None:
@@ -484,6 +493,12 @@ class _Reading:
             log.debug("a listed element vanished (%s)", type(e).__name__)
             return None
         return _Entry(node, role_name, one_line(facts.name), handle, self.root, self.atspi)
+
+    def note(self, listed: bool) -> str:
+        """What the reply must add: the pixels of a list nobody can vouch for, or why it is empty."""
+        if listed:
+            return "" if self.pixels_known else _UNKNOWN_PIXELS
+        return self.hint()
 
     def hint(self) -> str:
         if self.root is None:
@@ -515,13 +530,13 @@ def _target(window: str) -> Optional[WindowInfo]:
 
 def _unlisted_window(handle: int) -> WindowInfo:
     """A window the list does not show (no wmctrl, or it just opened), as xdotool knows it."""
+    window = WindowInfo(handle=handle, title="", rect=(0, 0, 0, 0), visible=True)
     try:
-        title = _xdotool(["getwindowname", str(handle)]).strip()
-        pid = int(_xdotool(["getwindowpid", str(handle)]).strip())
-    except (RuntimeError, ValueError) as e:
+        window.title = _xdotool(["getwindowname", str(handle)]).strip()
+        window.pid = int(_xdotool(["getwindowpid", str(handle)]).strip())
+    except (RuntimeError, ValueError) as e:  # a window with no _NET_WM_PID still has its title
         log.debug("an unlisted window (%s)", type(e).__name__)
-        return WindowInfo(handle=handle, title="", rect=(0, 0, 0, 0), visible=True)
-    return WindowInfo(handle=handle, title=title, rect=(0, 0, 0, 0), visible=True, pid=pid)
+    return window
 
 
 def _reading(window: str = "") -> _Reading:
@@ -534,8 +549,8 @@ def _reading(window: str = "") -> _Reading:
     geo = _window_geometry(target.handle) if target else None
     strategy = _atspi_coord_strategy(atspi, root, geo)
     log.debug("AT-SPI coordinates: %s", strategy)
-    coord, offset = strategy or ("window", (0, 0))  # best effort for the list: _center refuses such a click
-    return _Reading(atspi, target, root, _AtspiAdapter(atspi, coord=coord, offset=offset))
+    coord, offset = strategy or ("window", (0, 0))  # the reply says so, and _center refuses such a click
+    return _Reading(atspi, target, root, _AtspiAdapter(atspi, coord=coord, offset=offset), strategy is not None)
 
 
 def get_interactive_elements(limit: int = 300) -> list[dict]:
@@ -549,8 +564,10 @@ def get_interactive_elements(limit: int = 300) -> list[dict]:
         return []
     try:
         with _tree_lock:
-            result = _reading().walk(expires_in(SNAPSHOT_WALK_S), limit=limit)
-            return listed_elements(result)
+            reading = _reading()
+            if not reading.pixels_known:  # Snapshot's list is nothing but pixels
+                return []
+            return listed_elements(reading.walk(expires_in(SNAPSHOT_WALK_S), limit=limit))
     except Exception as e:
         log.warning("no AT-SPI element list (%s)", type(e).__name__)
         return []
@@ -568,7 +585,7 @@ def marked_elements(limit: int = 300) -> tuple[list[dict], str]:
         with _tree_lock:
             reading = _reading()
             elements, cut = marked_from(_refs, reading.walk(expires_in(SNAPSHOT_WALK_S), limit=limit), reading.entry)
-            return elements, cut or ("" if elements else reading.hint())
+            return elements, cut or reading.note(bool(elements))
     except Exception as e:
         log.warning("no AT-SPI element list (%s)", type(e).__name__)
         return [], ""
@@ -584,7 +601,7 @@ def element_tree(window: str = "") -> ElementTree:
         title = one_line(reading.target.title if reading.target else "")
         tree = tree_from(_refs, title, result, reading.entry)
         log.info("AT-SPI: %d elements, truncated=%s", len(tree.items), bool(tree.truncated))
-        return tree if tree.items or tree.truncated else replace(tree, hint=reading.hint())
+        return replace(tree, hint="" if tree.truncated and reading.pixels_known else reading.note(bool(tree.items)))
 
 
 def _live(ref: str) -> _Entry:
@@ -600,7 +617,8 @@ def _live(ref: str) -> _Entry:
         raise stale from None
     if states.contains(state.DEFUNCT) or role_name != entry.role_name or name != entry.name:
         raise stale  # a list row reused for other content keeps its node and role, not its name
-    if entry.handle and _window_geometry(entry.handle) is None:  # a closed window's node may answer
+    listed = enumerate_windows()  # a closed window's node may answer; no wmctrl = no list = no proof either way
+    if entry.handle and listed and all(w.handle != entry.handle for w in listed):
         raise stale
     if not states.contains(state.ENABLED):
         raise RuntimeError(f"Element {ref} ({entry.name!r}) is disabled")
@@ -615,11 +633,21 @@ def _interfaces(node) -> list:
         return []
 
 
+def _is_field(atspi, node) -> bool:
+    if _has_state(atspi, node, atspi.StateType.EDITABLE) or "EditableText" in _interfaces(node):
+        return True
+    try:
+        return (node.get_role_name() or "").strip().lower() in _FIELD_ROLES
+    except Exception as e:
+        log.debug("a node has no role (%s)", type(e).__name__)
+        return True  # the mouse is the safe way round: an unknown node gets no action
+
+
 def _press_action(atspi, node) -> Optional[int]:
     """The index of the action that operates ``node``, or ``None``."""
     if "Action" not in _interfaces(node):
         return None
-    wanted_actions = _EDITABLE_PRESS_ACTIONS if _has_state(atspi, node, atspi.StateType.EDITABLE) else _PRESS_ACTIONS
+    wanted_actions = _FIELD_PRESS_ACTIONS if _is_field(atspi, node) else _PRESS_ACTIONS
     try:
         names = [(node.get_action_name(i) or "").lower() for i in range(node.get_n_actions())]
     except Exception as e:
