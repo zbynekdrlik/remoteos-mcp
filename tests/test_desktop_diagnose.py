@@ -31,7 +31,11 @@ from remoteos.platform.linux import desktop as linux_desktop
 from remoteos.platform.linux import session as linux_session
 
 _HEADLESS = "Not available on headless Linux (no display)"
-_WAYLAND = "Not available: Wayland session detected (X11 backend only — Wayland support is a separate tier)"
+_WAYLAND = (
+    "Not available: this is a Wayland session, and the desktop tools drive X11 (xdotool, scrot, wmctrl, xclip); "
+    "Wayland support is a separate tier that does not exist yet. Log in to an X11 session instead (\"Ubuntu on "
+    "Xorg\" on the login screen, or WaylandEnable=false in /etc/gdm3/custom.conf), then retry."
+)
 _LOCKED_START = "The screen is locked: screenshots show the lock screen and mouse/keyboard input goes nowhere."
 _DESKTOP_HANDLE = 0x1A4
 
