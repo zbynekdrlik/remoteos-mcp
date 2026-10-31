@@ -7,7 +7,7 @@ import os
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
 from remoteos.element_tree import (
@@ -29,6 +29,7 @@ from remoteos.element_tree import (
 from remoteos.errors import DesktopUnavailable
 from remoteos.platform.linux import session, x11_input
 from remoteos.platform.linux.session import _build_invocation, _unavailable, _xdotool, get_session
+from remoteos.window_match import best_window
 
 log = logging.getLogger("remoteos.platform.linux.desktop")  # one logger for the whole provider
 
@@ -142,9 +143,12 @@ _ROLES = {
 # The action that means "operate it", best first. Never just the first action: Qt's list holds
 # SetFocus and ShowMenu too, and GTK 2's "press" is only half of "click".
 _PRESS_ACTIONS = ("click", "activate", "press", "toggle", "jump")
+# On a text field "activate" is Enter: GTK 3's fires the form's default button. A click is not that.
+_EDITABLE_PRESS_ACTIONS = ("click",)
 
 _FOCUS_WAIT_S = 1.0  # focus changes reach AT-SPI and the window manager a moment after the call
 _FOCUS_POLL_S = 0.05
+_FOCUS_MAX_CHILDREN = 32  # a wrapper's inner field is near the top: a table's rows are not worth a poll
 
 _QT_HINT = "a Qt app shows them when started with QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1"
 # Both halves are needed: with the flag alone Chrome never joined the a11y bus (real Chrome, #38).
@@ -338,13 +342,15 @@ def _atspi_root(atspi, target: Optional[WindowInfo]):
 
     Application-scoped: the X window's process names the AT-SPI application, because a Qt or
     Electron frame often never reports ACTIVE or SHOWING. Inside it, the frame of that title, then
-    the active or a showing frame. An application with frames none of which say so is walked
-    whole. Without a process id only an exact title can name the window: another app's
-    active frame would be a list of the wrong window.
+    the active or a showing frame, then its only frame. An application with several frames none of
+    which say so is walked whole. Without a process id only an exact title can name the window:
+    another app's active frame would be a list of the wrong window.
     """
     if target is None:
         return _atspi_active_frame(atspi)
     if not target.pid:
+        if not target.title:  # an empty title would match any untitled frame of any app
+            return None
         return _frame_titled([f for app in _apps(atspi) for f in _frames(app)], target.title)
     app = _app_of_pid(atspi, target.pid)
     if app is None:
@@ -357,7 +363,7 @@ def _atspi_root(atspi, target: Optional[WindowInfo]):
         for frame in frames:
             if _has_state(atspi, frame, state):
                 return frame
-    return app
+    return frames[0] if len(frames) == 1 else app
 
 
 def _content_origin(win_geo: tuple[int, int, int, int], frame_w: int, frame_h: int) -> tuple[int, int]:
@@ -375,6 +381,9 @@ def _content_origin(win_geo: tuple[int, int, int, int], frame_w: int, frame_h: i
     return x + max(0, (w - frame_w) // 2), y + max(0, (h - frame_h) // 2)
 
 
+Geometry = tuple[int, int, int, int]  # x, y, width, height
+
+
 def _active_handle() -> Optional[int]:
     """The focused X window, or ``None``."""
     try:
@@ -384,7 +393,7 @@ def _active_handle() -> Optional[int]:
         return None
 
 
-def _window_geometry(handle: int) -> Optional[tuple[int, int, int, int]]:
+def _window_geometry(handle: int) -> Optional[Geometry]:
     """Window ``handle``'s ``(x, y, w, h)`` via xdotool, or ``None``."""
     try:
         out = _xdotool(["getwindowgeometry", "--shell", str(handle)])
@@ -401,36 +410,56 @@ def _window_geometry(handle: int) -> Optional[tuple[int, int, int, int]]:
     return None
 
 
-def _atspi_coord_strategy(atspi, frame, geo: Optional[tuple[int, int, int, int]]) -> tuple[str, tuple[int, int]]:
-    """Decide how to map AT-SPI extents to screen pixels for ``frame`` in the X window at ``geo``.
-
-    Returns ``("window", (ox, oy))`` — read WINDOW-relative extents and add the
-    content origin ``(ox, oy)`` — whenever the window geometry is resolvable (the
-    reliable path; GTK4 reports SCREEN as ``(0,0)``). Falls back to ``("screen",
-    (0, 0))`` when the frame already reports a real (non-origin) SCREEN position,
-    else best-effort raw WINDOW coords.
-    """
+def _extents(node, coord_type):
+    """The node's rect in ``coord_type`` when it has a real size. An application has none: -1 all round."""
     try:
-        fw = frame.get_extents(atspi.CoordType.WINDOW)
-        fs = frame.get_extents(atspi.CoordType.SCREEN)
-    except Exception:  # an application root has no Component
-        fw = fs = None
-    if geo is not None and fw is not None:
-        return "window", _content_origin(geo, int(fw.width), int(fw.height))
-    if fs is not None and (int(fs.x) > 0 or int(fs.y) > 0):
-        return "screen", (0, 0)  # toolkit reports real SCREEN coords
-    return "window", (0, 0)  # last resort: window-relative positions only
+        rect = node.get_extents(coord_type)
+    except Exception as e:
+        log.debug("no extents (%s)", type(e).__name__)
+        return None
+    return rect if rect is not None and int(rect.width) > 0 and int(rect.height) > 0 else None
+
+
+def _is_application(atspi, node) -> bool:
+    try:
+        return (node.get_role_name() or "").strip().lower() == "application"
+    except Exception as e:
+        log.debug("a node has no role (%s)", type(e).__name__)
+        return False
+
+
+def _atspi_coord_strategy(atspi, root, geo: Optional[Geometry]) -> Optional[tuple[str, tuple[int, int]]]:
+    """How to map AT-SPI extents to screen pixels under ``root``, in the X window at ``geo``.
+
+    ``("window", (ox, oy))`` — read WINDOW-relative extents and add the content origin — when
+    one frame is under ``root`` and the window geometry is known (the reliable path; GTK4 reports
+    SCREEN as ``(0,0)``). ``("screen", (0, 0))`` when a frame reports a real SCREEN position:
+    all an application walked whole can use, its frames being different windows. ``None``
+    when neither holds, or when a frame gave no answer: no pixel here can be trusted.
+    """
+    candidates = _frames(root) if _is_application(atspi, root) else [root]
+    framed = [(f, r) for f, r in ((f, _extents(f, atspi.CoordType.WINDOW)) for f in candidates) if r is not None]
+    if not framed:
+        return None
+    if geo is not None and len(framed) == 1:
+        _, rect = framed[0]
+        return "window", _content_origin(geo, int(rect.width), int(rect.height))
+    on_screen = _extents(framed[0][0], atspi.CoordType.SCREEN)
+    if on_screen is not None and (int(on_screen.x) > 0 or int(on_screen.y) > 0):
+        return "screen", (0, 0)
+    return None
 
 
 @dataclass
 class _Entry:
-    """What a ref keeps: the node, what proves it later, and its window for the click."""
+    """What a ref keeps: the node, what proves it later, its window for the click, the library."""
 
     node: Any
     role_name: str
     name: str
     handle: int
     root: Any
+    atspi: Any
 
 
 @dataclass
@@ -454,7 +483,7 @@ class _Reading:
         except Exception as e:
             log.debug("a listed element vanished (%s)", type(e).__name__)
             return None
-        return _Entry(node, role_name, one_line(facts.name), handle, self.root)
+        return _Entry(node, role_name, one_line(facts.name), handle, self.root, self.atspi)
 
     def hint(self) -> str:
         if self.root is None:
@@ -478,10 +507,21 @@ def _target(window: str) -> Optional[WindowInfo]:
         handle = _active_handle()
         if handle is None:
             return None
-    for w in list_windows():
+    for w in enumerate_windows():
         if w.handle == handle:
             return w
-    return WindowInfo(handle=handle, title="", rect=(0, 0, 0, 0), visible=True)
+    return _unlisted_window(handle)
+
+
+def _unlisted_window(handle: int) -> WindowInfo:
+    """A window the list does not show (no wmctrl, or it just opened), as xdotool knows it."""
+    try:
+        title = _xdotool(["getwindowname", str(handle)]).strip()
+        pid = int(_xdotool(["getwindowpid", str(handle)]).strip())
+    except (RuntimeError, ValueError) as e:
+        log.debug("an unlisted window (%s)", type(e).__name__)
+        return WindowInfo(handle=handle, title="", rect=(0, 0, 0, 0), visible=True)
+    return WindowInfo(handle=handle, title=title, rect=(0, 0, 0, 0), visible=True, pid=pid)
 
 
 def _reading(window: str = "") -> _Reading:
@@ -492,8 +532,9 @@ def _reading(window: str = "") -> _Reading:
         log.info("AT-SPI: nothing known of the target window")
         return _Reading(atspi, target, None, None)
     geo = _window_geometry(target.handle) if target else None
-    coord, offset = _atspi_coord_strategy(atspi, root, geo)
-    log.debug("AT-SPI coordinates: %s, offset %s", coord, offset)
+    strategy = _atspi_coord_strategy(atspi, root, geo)
+    log.debug("AT-SPI coordinates: %s", strategy)
+    coord, offset = strategy or ("window", (0, 0))  # best effort for the list: _center refuses such a click
     return _Reading(atspi, target, root, _AtspiAdapter(atspi, coord=coord, offset=offset))
 
 
@@ -543,25 +584,25 @@ def element_tree(window: str = "") -> ElementTree:
         title = one_line(reading.target.title if reading.target else "")
         tree = tree_from(_refs, title, result, reading.entry)
         log.info("AT-SPI: %d elements, truncated=%s", len(tree.items), bool(tree.truncated))
-        if not tree.items and not tree.truncated:
-            return ElementTree(title=title, items=(), hint=reading.hint())
-        return tree
+        return tree if tree.items or tree.truncated else replace(tree, hint=reading.hint())
 
 
-def _live(atspi, ref: str) -> _Entry:
+def _live(ref: str) -> _Entry:
     """The entry behind ``ref``, proven to be that same element, still there and enabled."""
     entry = _refs.lookup(ref)
     stale = gone(ref, entry.name)
+    state = entry.atspi.StateType
     try:
         states = entry.node.get_state_set()
         role_name = (entry.node.get_role_name() or "").strip().lower()
+        name = one_line((entry.node.get_name() or "").strip())
     except Exception:
         raise stale from None
-    if states.contains(atspi.StateType.DEFUNCT) or role_name != entry.role_name:
+    if states.contains(state.DEFUNCT) or role_name != entry.role_name or name != entry.name:
+        raise stale  # a list row reused for other content keeps its node and role, not its name
+    if entry.handle and _window_geometry(entry.handle) is None:  # a closed window's node may answer
         raise stale
-    if entry.handle and all(w.handle != entry.handle for w in list_windows()):  # a closed window's node may answer
-        raise stale
-    if not states.contains(atspi.StateType.ENABLED):
+    if not states.contains(state.ENABLED):
         raise RuntimeError(f"Element {ref} ({entry.name!r}) is disabled")
     return entry
 
@@ -574,16 +615,17 @@ def _interfaces(node) -> list:
         return []
 
 
-def _press_action(node) -> Optional[int]:
+def _press_action(atspi, node) -> Optional[int]:
     """The index of the action that operates ``node``, or ``None``."""
     if "Action" not in _interfaces(node):
         return None
+    wanted_actions = _EDITABLE_PRESS_ACTIONS if _has_state(atspi, node, atspi.StateType.EDITABLE) else _PRESS_ACTIONS
     try:
         names = [(node.get_action_name(i) or "").lower() for i in range(node.get_n_actions())]
     except Exception as e:
         log.debug("no action list (%s)", type(e).__name__)
         return None
-    for wanted in _PRESS_ACTIONS:
+    for wanted in wanted_actions:
         if wanted in names:
             return names.index(wanted)
     return None
@@ -602,7 +644,10 @@ def _center(atspi, ref: str, entry: _Entry) -> tuple[int, int]:
             f"Something else is on top of element {ref} ({entry.name!r}): a window or a dialog."
             " FocusWindow or close it first"
         )
-    coord, offset = _atspi_coord_strategy(atspi, entry.root, _window_geometry(entry.handle))  # it may have moved
+    strategy = _atspi_coord_strategy(atspi, entry.root, _window_geometry(entry.handle))  # it may have moved
+    if strategy is None:
+        raise RuntimeError(f"The screen position of element {ref} ({entry.name!r}) is unknown: nothing was clicked")
+    coord, offset = strategy
     left, top, right, bottom = _AtspiAdapter(atspi, coord=coord, offset=offset).extents(entry.node)
     if right <= left or bottom <= top:
         raise RuntimeError(f"Element {ref} ({entry.name!r}) is off-screen: bring it into view first")
@@ -617,9 +662,9 @@ def click_element(ref: str) -> str:
     an error saying so is safe: the mouse would press a second time.
     """
     with _tree_lock:
-        atspi = _load_atspi()
-        entry = _live(atspi, ref)
-        action = _press_action(entry.node)
+        entry = _live(ref)
+        atspi = entry.atspi
+        action = _press_action(atspi, entry.node)
         if action is not None:
             try:
                 if entry.node.do_action(action):
@@ -636,7 +681,11 @@ def _focused_in(atspi, node, depth: int = 3) -> bool:
     """True when ``node`` or a part of it (a wrapper's inner edit) has the focus."""
     if _has_state(atspi, node, atspi.StateType.FOCUSED):
         return True
-    if depth == 0:
+    try:
+        if depth == 0 or node.get_child_count() > _FOCUS_MAX_CHILDREN:
+            return False
+    except Exception as e:
+        log.debug("a node vanished (%s)", type(e).__name__)
         return False
     return any(_focused_in(atspi, child, depth - 1) for child in _AtspiAdapter(atspi).children(node))
 
@@ -660,8 +709,8 @@ def _give_focus(atspi, ref: str, entry: _Entry) -> None:
 def type_element(ref: str, text: str) -> str:
     """Replace the element's text through EditableText, else give it the focus and type at its caret."""
     with _tree_lock:
-        atspi = _load_atspi()
-        entry = _live(atspi, ref)
+        entry = _live(ref)
+        atspi = entry.atspi
         if "EditableText" in _interfaces(entry.node):
             if not _has_state(atspi, entry.node, atspi.StateType.EDITABLE):
                 raise RuntimeError(f"Element {ref} ({entry.name!r}) is read-only")
@@ -678,20 +727,7 @@ def type_element(ref: str, text: str) -> str:
 
 def _window_by_title(title: str) -> int:
     """The handle of the window whose title best matches ``title``; raises when none does."""
-    best_score, win_id = 0, 0
-    for w in enumerate_windows():
-        try:
-            from thefuzz import fuzz
-
-            score = fuzz.partial_ratio(title.lower(), w.title.lower())
-        except Exception:
-            score = 100 if title.lower() in w.title.lower() else 0
-        if score > best_score:
-            best_score = score
-            win_id = w.handle
-    if best_score < 50:
-        raise LookupError(f"No window matching '{title}' (best score {best_score})")
-    return win_id
+    return best_window(title, enumerate_windows()).handle
 
 
 def focus_window(title: Optional[str] = None, handle: Optional[int] = None) -> str:

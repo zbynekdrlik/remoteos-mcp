@@ -5,7 +5,8 @@ Runtime session detection decides behavior:
 * **X11 session** (a graphical seat is active)  → real implementations backed by
   ``xdotool`` / ``scrot`` / ``wmctrl`` / ``xclip`` / ``notify-send`` / ``loginctl``.
 * **Wayland session**                           → no backend (a separate tier, #38); the tools
-  stay registered and every one raises one clear message naming what is missing.
+  stay registered and every one that needs the screen or input raises one clear message
+  naming what is missing. Locking the screen and notifications act on the session and still work.
 * **Headless** (no graphical session, e.g. cam1..4) → the original stub message,
   byte-for-byte unchanged, so headless boxes see zero regression.
 

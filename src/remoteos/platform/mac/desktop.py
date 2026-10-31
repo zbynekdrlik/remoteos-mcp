@@ -22,6 +22,7 @@ from remoteos.scroll import chunks, wheel_steps
 from remoteos.snapshot import fit_to_frame
 from remoteos.text_entry import enter_text
 from remoteos.typing_input import ENTER, TAB, Stroke, plan
+from remoteos.window_match import best_window
 
 log = logging.getLogger("remoteos.platform.mac.desktop")
 
@@ -161,25 +162,11 @@ def marked_elements(limit: int = 300) -> tuple[list[dict], str]:
         return [], ""
 
 
-def _window_by_title(title: str) -> WindowInfo:
-    """The window whose title best matches ``title``; raises when none does."""
-    from thefuzz import fuzz
-
-    best_score, best = 0, None
-    for w in enumerate_windows():
-        score = fuzz.partial_ratio(title.lower(), w.title.lower())
-        if score > best_score:
-            best_score, best = score, w
-    if best is None or best_score < 50:
-        raise LookupError(f"No window matching '{title}' (best score {best_score})")
-    return best
-
-
 def element_tree(window: str = "") -> ElementTree:
     """The element tree of the window whose title matches ``window``, or of the front one."""
     if not window:
         return ax.read_tree()
-    target = _window_by_title(window)
+    target = best_window(window, enumerate_windows())
     return ax.read_tree(target.pid, target.title.split(" — ", 1)[-1])  # enumerate_windows: "app — window"
 
 

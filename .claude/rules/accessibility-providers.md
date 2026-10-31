@@ -21,7 +21,15 @@ paths:
   `_REFUSED`, AT-SPI `do_action` returning False. A modal dialog blocks the call, a button
   closes its own window, and a second press could do it twice. `may_have_happened` says so.
 - **AT-SPI's press is a named action, never index 0.** Qt lists `SetFocus` and `ShowMenu`, and GTK 2's
-  `press` is half of `click`. `get_action_name` is not localized, nor is `get_role_name`.
+  `press` is half of `click`. `get_action_name` is not localized, nor is `get_role_name`. On an
+  EDITABLE node only `click` counts: GTK 3's entry has only `activate`, which is Enter and fires the
+  form's default button (real, review round 1). Such a field gets the mouse.
+- **An AT-SPI application's `get_extents` returns -1 all round and does not raise** (real GTK 3).
+  `_extents` treats no size as no answer. `_atspi_coord_strategy` is `None` when no frame answers
+  or an application with several windows has no SCREEN position: the list stays best effort, and
+  `_center` refuses, because those pixels are wrong by half a window.
+- **A ref's proof on AT-SPI and AX is role + name**, no RuntimeId: a recycled table row keeps
+  its node and role. A label that changes makes the ref stale, which is the safe way round.
 - **AT-SPI root: the X window's process names the application** (`_atspi_root`), then the frame of
   that title, then an ACTIVE or SHOWING frame, then the application. Without a pid only an exact
   title counts: another app's active frame would be the wrong window's list.
@@ -34,15 +42,21 @@ paths:
   `ACCESSIBILITY_ENABLED=1` and `--force-renderer-accessibility`: with the flag alone real Chrome
   never joined the a11y bus. On the test bus Qt showed its tree without
   `QT_LINUX_ACCESSIBILITY_ALWAYS_ON`; a desktop's bus state may differ.
+- **A hung Mac app is an error, never an empty tree.** `_copy` raises `_NotAnswered` on CannotComplete
+  and APIDisabled; `None` means only that the attribute is not there.
 - **AX never reads `AXValue`:** a field can be a password. `name` = AXTitle, AXDescription, AXPlaceholderValue.
 - **`AXValueGetValue`'s return:** the wheel's docstring says `value`, older code unpacked a pair, so
   `_axvalue` takes both. Check it on the first live run on a Mac.
+- **A macOS text role with a non-settable AXValue is refused as read-only.** Terminal's AXTextArea may
+  still take keys. Check it on the first live run: a false refusal beats keys typed into nothing.
 - **`HIServices` is not in Quartz:** `pyobjc-framework-ApplicationServices` (a darwin pin, it brings
   CoreText) has it, and it is imported at call time. Its constants are written as numbers, from `AXError.h`.
 - **`AXIsProcessTrusted` shares a pane with posting events and is another check**: `"accessibility"`.
 - **Electron on macOS** may need `AXManualAccessibility` set on the app. Not done: nothing to test it on.
-- **Tests:** `tests/test_atspi_tree.py` and `tests/test_mac_ax.py` fake only the library, with its real
-  call shapes.
+- **Snapshot's Linux list changed with the shared walk:** `class` is the shared role (`Button`, was
+  `push button`), and icons, list boxes, menu bars and static text show only when focusable.
+- **Tests:** `tests/test_atspi_tree.py` and `tests/test_mac_ax.py` fake only the library, and each
+  fake call was checked against the real one where it can be (AT-SPI on dev1, AX on the wheel's metadata).
 - **A real AT-SPI run needs no fleet box:** under `dbus-run-session`, Xvfb, openbox and
   `/usr/libexec/at-spi-bus-launcher --launch-immediately`, then a GTK, Qt or Chrome window and the
   provider functions. Run on dev1 for #38: GTK 3 (click, disabled, read-only, EditableText with

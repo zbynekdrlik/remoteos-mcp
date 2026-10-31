@@ -211,10 +211,10 @@ def _published(refs: RefTable, result: Walk, entry_of: EntryOf) -> list[tuple[st
     return list(zip(refs.publish(entries), kept))
 
 
-def tree_from(refs: RefTable, title: str, result: Walk, entry_of: EntryOf, hint: str = "") -> ElementTree:
+def tree_from(refs: RefTable, title: str, result: Walk, entry_of: EntryOf) -> ElementTree:
     """ElementTree's reply data, with new refs."""
     items = tuple(TreeItem(r, f.role, f.name, f.enabled, f.rect) for r, f in _published(refs, result, entry_of))
-    return ElementTree(title=title, items=items, truncated=result.truncated, hint=hint)
+    return ElementTree(title=title, items=items, truncated=result.truncated)
 
 
 def marked_from(refs: RefTable, result: Walk, entry_of: EntryOf) -> tuple[list[dict], str]:

@@ -47,8 +47,9 @@ _PARENT_HOPS = 40
 # AXError values (HIServices/AXError.h).
 _OK = 0
 _INVALID_ELEMENT = -25202
-# The app plainly refused: the action or attribute does not exist on this element.
-_REFUSED = frozenset({-25205, -25206, -25207, -25208})
+_NOT_ANSWERED = frozenset({-25204, -25211})  # CannotComplete (the app is busy or hung), APIDisabled
+# The app plainly refused: an illegal argument, or an attribute or action this element lacks.
+_REFUSED = frozenset({-25201, -25205, -25206, -25208})
 
 _POINT_TYPE, _SIZE_TYPE = 1, 2  # kAXValueCGPointType, kAXValueCGSizeType
 
@@ -84,11 +85,21 @@ class _Vanished(Exception):
     """The element no longer exists."""
 
 
-def _copy(hi, element, attribute: str):
-    """``attribute`` of ``element``, ``None`` when it has none; raises when the element is gone."""
-    err, value = hi.AXUIElementCopyAttributeValue(element, attribute, None)
+class _NotAnswered(RuntimeError):
+    """The app did not answer a read. Never "no attribute": a hung app is no empty tree."""
+
+
+def _check(err: int) -> None:
     if err == _INVALID_ELEMENT:
         raise _Vanished
+    if err in _NOT_ANSWERED:
+        raise _NotAnswered(f"The app did not answer the Accessibility API (error {err}): try again in a moment")
+
+
+def _copy(hi, element, attribute: str):
+    """``attribute`` of ``element``, ``None`` when it has none; raises when the element is gone or silent."""
+    err, value = hi.AXUIElementCopyAttributeValue(element, attribute, None)
+    _check(err)
     return value if err == _OK else None
 
 
@@ -118,9 +129,14 @@ def _name(hi, element) -> str:
 
 def _settable(hi, element, attribute: str) -> bool:
     err, settable = hi.AXUIElementIsAttributeSettable(element, attribute, None)
-    if err == _INVALID_ELEMENT:
-        raise _Vanished
+    _check(err)
     return err == _OK and bool(settable)
+
+
+def _enabled(hi, element) -> bool:
+    """AXEnabled; an element without the attribute is enabled."""
+    value = _copy(hi, element, "AXEnabled")
+    return value is None or bool(value)
 
 
 def _facts(hi, element) -> Optional[ElementFacts]:
@@ -135,7 +151,7 @@ def _facts(hi, element) -> Optional[ElementFacts]:
         return ElementFacts(
             role=role,
             name=_name(hi, element),
-            enabled=_copy(hi, element, "AXEnabled") is not False,
+            enabled=_enabled(hi, element),
             rect=_rect(hi, element),
             focusable=_settable(hi, element, "AXFocused"),
         )
@@ -154,7 +170,7 @@ def _children(hi, element) -> list:
 
 @dataclass
 class _Entry:
-    """What a ref keeps: the element, and the role that proves later it is the same one."""
+    """What a ref keeps: the element, and the role and name that prove later it is the same one."""
 
     element: Any
     ax_role: str
@@ -211,7 +227,7 @@ def _walk(hi, window: _Window, expired: Callable[[], bool], **bounds: int) -> Wa
 def _entry_of(hi) -> Callable[[Any, ElementFacts], Optional[_Entry]]:
     def entry(element, facts: ElementFacts) -> Optional[_Entry]:
         try:
-            return _Entry(element, str(_copy(hi, element, "AXRole")), one_line(facts.name))
+            return _Entry(element, str(_copy(hi, element, "AXRole")), one_line(facts.name.strip()))
         except _Vanished:
             log.debug("a listed element vanished")
             return None
@@ -250,12 +266,13 @@ def _live(hi, ref: str) -> _Entry:
     entry = _refs.lookup(ref)
     try:
         role = _copy(hi, entry.element, "AXRole")
-        enabled = _copy(hi, entry.element, "AXEnabled")
+        name = one_line(_name(hi, entry.element).strip())
+        enabled = _enabled(hi, entry.element)
     except _Vanished:
         raise gone(ref, entry.name) from None
-    if str(role) != entry.ax_role:
+    if str(role) != entry.ax_role or name != entry.name:  # a reused table row keeps its element and role
         raise gone(ref, entry.name)
-    if enabled is False:
+    if not enabled:
         raise RuntimeError(f"Element {ref} ({entry.name!r}) is disabled")
     return entry
 

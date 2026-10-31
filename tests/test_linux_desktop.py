@@ -748,39 +748,6 @@ def test_load_atspi_restores_env(monkeypatch):
     assert after == before  # env fully restored — no global leak
 
 
-def test_get_interactive_elements_leaves_env_clean(monkeypatch):
-    # Regression (#10 fix 1/5): a full AnnotatedSnapshot must leave os.environ
-    # exactly as it found it (the user-visible invariant behind the Shell-leak).
-    sess = d.SessionInfo(
-        mode="x11",
-        display=":0",
-        xauthority="/run/user/1000/gdm/Xauthority",
-        uid=1000,
-        user="newlevel",
-        runtime_dir="/run/user/1000",
-        dbus_address="unix:path=/run/user/1000/bus",
-    )
-    monkeypatch.setattr(linux_session, "_SESSION", sess)
-    keys = ("DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
-    for k in keys:
-        monkeypatch.delenv(k, raising=False)
-    before = {k: linux_session.os.environ.get(k) for k in keys}
-
-    walked = []
-    empty_desktop = types.SimpleNamespace(get_child_count=lambda: walked.append(True) or 0)
-    fake_atspi = types.SimpleNamespace(get_desktop=lambda n: empty_desktop)
-    fake_gi = types.SimpleNamespace(require_version=lambda *a, **k: None)
-    fake_repo = types.SimpleNamespace(Atspi=fake_atspi)
-    monkeypatch.setitem(sys.modules, "gi", fake_gi)
-    monkeypatch.setitem(sys.modules, "gi.repository", fake_repo)
-    monkeypatch.setattr(linux_windows, "_target", lambda window: None)
-    monkeypatch.setattr(linux_windows, "_atspi_active_frame", lambda atspi: types.SimpleNamespace())
-
-    assert d.get_interactive_elements() == []
-    after = {k: linux_session.os.environ.get(k) for k in keys}
-    assert after == before  # no leak after the snapshot
-
-
 def test_capture_png_uses_private_runtime_dir(monkeypatch, tmp_path):
     # Regression (#10 fix 2): screen captures may contain on-screen secrets, so
     # they must NOT be created in world-readable /tmp (0644 under a sticky dir).

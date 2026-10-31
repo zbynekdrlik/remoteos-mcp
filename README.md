@@ -238,8 +238,8 @@ none until asked, and then the reply carries a hint:
 - Chromium, Chrome, Electron: start it with `ACCESSIBILITY_ENABLED=1` in the environment **and**
   `--force-renderer-accessibility`. The flag alone leaves it off the accessibility bus.
 
-**Wayland is not supported.** Every desktop tool there fails with one message saying why: the tools
-drive X11 (`xdotool`, `scrot`, `wmctrl`, `xclip`) and there is no portal or `ydotool` backend. Log in
+**Wayland is not supported.** Every tool that needs the screen or input fails there with one message
+saying why (LockScreen and Notification still work): the tools drive X11 (`xdotool`, `scrot`, `wmctrl`, `xclip`) and there is no portal or `ydotool` backend. Log in
 to an X11 session ("Ubuntu on Xorg", or `WaylandEnable=false` in `/etc/gdm3/custom.conf`).
 
 ## Marks on custom-drawn apps (AnnotatedSnapshot)

@@ -20,6 +20,7 @@ from remoteos.element_tree import StaleRef
 from remoteos.platform.mac import availability, ax
 
 OK, INVALID, NO_VALUE, CANNOT_COMPLETE, UNSUPPORTED_ACTION = 0, -25202, -25212, -25204, -25206
+ILLEGAL_ARGUMENT, UNSUPPORTED_ATTRIBUTE, NOT_IMPLEMENTED, API_DISABLED = -25201, -25205, -25208, -25211
 
 
 class Point:
@@ -56,6 +57,7 @@ class Element:
         self.press_result = OK
         self.set_result = OK
         self.invalid = False
+        self.read_error = 0
         self.writes = []
         for child in children:
             child.attributes["AXParent"] = self
@@ -83,6 +85,8 @@ class FakeHI:
     def AXUIElementCopyAttributeValue(self, element, attribute, _):
         if element.invalid:
             return INVALID, None
+        if element.read_error:
+            return element.read_error, None
         if attribute not in element.attributes:
             return NO_VALUE, None
         return OK, element.attributes[attribute]
@@ -222,6 +226,24 @@ def test_a_vanished_element_is_skipped(hi):
     assert [i.name for i in ax.read_tree().items] == ["Here"]
 
 
+@pytest.mark.parametrize("error", [CANNOT_COMPLETE, API_DISABLED])
+def test_a_hung_app_is_an_error_and_never_an_empty_tree(hi, error):
+    window = front(hi, button())
+    window.read_error = error
+    with pytest.raises(RuntimeError, match="did not answer the Accessibility API"):
+        ax.read_tree()
+
+
+def test_a_hung_control_is_an_error_too_and_nothing_is_pressed(hi):
+    save = button()
+    front(hi, save)
+    ref = _ref("Save")
+    save.read_error = CANNOT_COMPLETE
+    with pytest.raises(RuntimeError, match="did not answer the Accessibility API"):
+        ax.click_element(ref, _Clicks())
+    assert save.pressed == 0
+
+
 def test_no_front_app_and_no_window_are_errors(hi):
     with pytest.raises(LookupError, match="No foreground window"):
         ax.read_tree()
@@ -286,9 +308,10 @@ def test_without_axpress_the_mouse_clicks_the_centre_when_the_element_is_on_top(
     assert clicks == [(50, 32)]
 
 
-def test_a_refused_press_falls_back_to_the_mouse(hi):
+@pytest.mark.parametrize("error", [ILLEGAL_ARGUMENT, UNSUPPORTED_ATTRIBUTE, UNSUPPORTED_ACTION, NOT_IMPLEMENTED])
+def test_a_refused_press_falls_back_to_the_mouse(hi, error):
     save = button()
-    save.press_result = UNSUPPORTED_ACTION
+    save.press_result = error
     front(hi, save)
     hi.at_point = save
     clicks = _Clicks()
@@ -339,15 +362,17 @@ def test_a_disabled_element_is_refused(hi):
     assert save.pressed == 0
 
 
-@pytest.mark.parametrize("change", ["invalid", "role"])
+@pytest.mark.parametrize("change", ["invalid", "role", "name"])
 def test_an_element_that_left_is_gone(hi, change):
     save = button()
     front(hi, save)
     ref = _ref("Save")
     if change == "invalid":
         save.invalid = True
-    else:
+    elif change == "role":
         save.attributes["AXRole"] = "AXStaticText"
+    else:
+        save.attributes["AXTitle"] = "Delete"  # a reused table row
     with pytest.raises(StaleRef, match="is gone: call ElementTree again"):
         ax.click_element(ref, _Clicks())
     assert save.pressed == 0
@@ -375,6 +400,26 @@ def test_a_read_only_field_is_refused(hi):
     with pytest.raises(RuntimeError, match="is read-only"):
         ax.type_element(_ref("Name"), "x", lambda t: pytest.fail("typed"))
     assert name.writes == []
+
+
+@pytest.mark.parametrize("error", [ILLEGAL_ARGUMENT, UNSUPPORTED_ATTRIBUTE])
+def test_a_refused_value_is_typed_instead(hi, error):
+    name = field()
+    name.set_result = error
+    front(hi, name)
+    ref = _ref("Name")
+    assert ax.type_element(ref, "Hi", _typed) == f"Typed 2 chars into {ref} ('Name'), at its caret"
+    assert name.writes[0] == ("AXValue", "Hi")
+
+
+def test_the_typed_text_is_never_logged(hi, caplog):
+    marker = "secret" + "-" + "value"
+    name = field()
+    name.set_result = UNSUPPORTED_ACTION
+    front(hi, name)
+    with caplog.at_level("DEBUG", logger="remoteos"):
+        ax.type_element(_ref("Name"), marker, _typed)
+    assert marker not in caplog.text
 
 
 def test_a_value_that_did_not_answer_may_have_happened(hi):
