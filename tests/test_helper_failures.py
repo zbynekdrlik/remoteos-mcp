@@ -55,7 +55,7 @@ class _Commands:
 
 @pytest.fixture
 def windows_ocr(monkeypatch, windows_python):
-    monkeypatch.setattr(ocr, "ImageGrab", types.SimpleNamespace(grab=lambda bbox=None: Image.new("RGB", (8, 8))))
+    monkeypatch.setattr(ocr, "ImageGrab", types.SimpleNamespace(grab=lambda bbox=None, all_screens=False: Image.new("RGB", (8, 8))))
     commands = _Commands()
     monkeypatch.setattr(ocr.subprocess, "Popen", popen_answered_by(commands))
     return commands
