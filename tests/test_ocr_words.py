@@ -343,7 +343,7 @@ def test_marks_of_another_monitor_are_in_its_frame(dual_x11, monkeypatch):
 def test_elements_and_words_share_one_list_and_a_covered_word_adds_nothing(screen_words, monkeypatch):
     rect = {"left": 990, "top": 390, "right": 1110, "bottom": 450}
     element = {"index": 1, "class": "push button", "text": "Play", "rect": rect}
-    monkeypatch.setattr("remoteos.platform.linux.desktop.get_interactive_elements", lambda limit=300: [element])
+    monkeypatch.setattr("remoteos.platform.linux.desktop.marked_elements", lambda limit=300: ([element], ""))
     text = _text(server.AnnotatedSnapshot())
     assert '**Marks:** 1 (1 elements, 0 OCR)\n  [1] element push button "Play" at (525,210)' in text
     assert "ocr text" not in text
@@ -391,30 +391,14 @@ def test_truncation_is_reported(fake_x11, monkeypatch):
     assert "**Incomplete:** 3 more not listed (limit 2)." in text
 
 
-def test_a_full_element_list_says_it_may_have_stopped(fake_x11, monkeypatch):
+def test_a_cut_element_list_says_why(fake_x11, monkeypatch):
     rect = {"left": 0, "top": 0, "right": 10, "bottom": 10}
     element = {"index": 1, "class": "button", "text": "a", "rect": rect}
-    monkeypatch.setattr("remoteos.platform.linux.desktop.get_interactive_elements", lambda limit=300: [element])
+    listing = lambda limit=300: ([element], f"only the first {limit} elements are listed")  # noqa: E731
+    monkeypatch.setattr("remoteos.platform.linux.desktop.marked_elements", listing)
     monkeypatch.setattr(ocr.subprocess, "run", _Tesseract())
     text = _text(server.AnnotatedSnapshot(max_elements=1))
-    assert "**Incomplete:** the element list reached its limit of 1." in text
-
-
-def test_the_linux_walk_takes_the_limit(monkeypatch):
-    seen = {}
-
-    def collect(frame, adapter, *, max_elements):
-        seen["limit"] = max_elements
-        return []
-
-    monkeypatch.setattr(coordinate_tools.linux_session, "_SESSION", coordinate_tools.d.SessionInfo(mode="x11"))
-    windows = coordinate_tools.linux_windows
-    monkeypatch.setattr(windows, "_load_atspi", lambda: object())
-    monkeypatch.setattr(windows, "_atspi_active_frame", lambda atspi: object())
-    monkeypatch.setattr(windows, "_atspi_coord_strategy", lambda atspi, frame: ("screen", (0, 0)))
-    monkeypatch.setattr(windows, "_collect_actionable", collect)
-    assert coordinate_tools.d.get_interactive_elements(limit=250) == []
-    assert seen == {"limit": 250}
+    assert "**Incomplete:** only the first 1 elements are listed." in text
 
 
 @pytest.mark.parametrize("limit", [0, -1, 301])

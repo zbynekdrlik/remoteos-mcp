@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
+import time
 
 from remoteos.errors import DesktopUnavailable
+from remoteos.input_keys import MAX_HOLD_S
 from remoteos.platform.linux import session
 from remoteos.platform.linux.session import _unavailable, _xdotool, get_session
 from remoteos.scroll import wheel_steps
@@ -19,6 +22,7 @@ log = logging.getLogger("remoteos.platform.linux.desktop")  # one logger for the
 # ---------------------------------------------------------------------------
 
 _BUTTONS = {"left": 1, "middle": 2, "right": 3}
+_DRAG_STEPS_PER_S = 30  # a subprocess per step: more would only lengthen the drag
 
 
 def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
@@ -120,12 +124,44 @@ def move(
     if drag:
         if start_x is not None and start_y is not None:
             _xdotool(["mousemove", str(start_x), str(start_y)])
-        _xdotool(["mousedown", "1"])
-        _xdotool(["mousemove", str(x), str(y)])
-        _xdotool(["mouseup", "1"])
+            start = (start_x, start_y)
+        else:
+            start = cursor_position()
+        _drag(start, (x, y), duration)
         return f"Dragged to ({x},{y})"
     _xdotool(["mousemove", str(x), str(y)])
     return f"Moved to ({x},{y})"
+
+
+def _drag_points(start: tuple[int, int], end: tuple[int, int], steps: int) -> list[tuple[int, int]]:
+    """``steps`` evenly spaced points after ``start``, the last one ``end``."""
+    return [
+        tuple(math.floor(a + (b - a) * step / steps + 0.5) for a, b in zip(start, end)) for step in range(1, steps + 1)
+    ]
+
+
+def _drag(start: tuple[int, int], end: tuple[int, int], duration: float) -> None:
+    """Press at the cursor, walk to ``end`` over ``duration`` and release, also on a failure.
+
+    An app sees a drag only in the motion events between press and release: a jump to the
+    target has none, so many apps ignore it. After a failed step that step's error stays the
+    one reported, as with held keys, and a failed release is only logged.
+    """
+    seconds = min(max(duration, 0.0), MAX_HOLD_S)
+    steps = max(1, round(seconds * _DRAG_STEPS_PER_S))
+    _xdotool(["mousedown", "1"])
+    try:
+        for x, y in _drag_points(start, end, steps):
+            _xdotool(["mousemove", str(x), str(y)])
+            if seconds:
+                time.sleep(seconds / steps)
+    except Exception:
+        try:
+            _xdotool(["mouseup", "1"])
+        except Exception as e:
+            log.warning("the mouse button was not released after a failed drag (%s)", type(e).__name__)
+        raise
+    _xdotool(["mouseup", "1"])
 
 
 # Map pyautogui-style key names to the X keysym names xdotool expects.

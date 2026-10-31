@@ -979,13 +979,3 @@ def test_a_failing_uia_costs_snapshot_its_list_only(tool_box, monkeypatch, caplo
 def test_no_foreground_window_is_an_empty_list(win_session):
     mod, _ = win_session
     assert mod.get_interactive_elements() == []
-
-
-@pytest.mark.parametrize(
-    "call",
-    [lambda: server.ElementTree(), lambda: server.ClickElement("1.1"), lambda: server.TypeElement("1.1", "x")],
-    ids=["ElementTree", "ClickElement", "TypeElement"],
-)
-def test_the_other_oses_report_not_available_yet(monkeypatch, call):
-    monkeypatch.setattr(server, "get_desktop", lambda: types.SimpleNamespace(diagnose=lambda need: None))
-    assert "is not available on this OS yet" in tool_error(call)

@@ -118,6 +118,15 @@ LINUX_DISPLAY_TOOLS = {
 LINUX_EXCLUDED_TOOLS = LINUX_ALWAYS_EXCLUDED_TOOLS | LINUX_DISPLAY_TOOLS
 
 
+def linux_platform_excludes(mode: str) -> set[str]:
+    """What a Linux session of ``mode`` leaves out.
+
+    Wayland keeps the display tools: there each one fails with the message naming what is
+    missing (#38), where a tool left out would be only "unknown tool". Headless stays as it was.
+    """
+    return set(LINUX_ALWAYS_EXCLUDED_TOOLS if mode in ("x11", "wayland") else LINUX_EXCLUDED_TOOLS)
+
+
 def parse_tool_csv(raw: str | None) -> list[str]:
     if not raw:
         return []

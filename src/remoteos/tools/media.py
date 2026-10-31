@@ -139,13 +139,13 @@ def AnnotatedSnapshot(
 
     Finds click targets in custom-drawn apps too (Ableton, Resolume, JUCE), which show
     little to accessibility. Elements of the foreground window (UI Automation on Windows,
-    AT-SPI on Linux X11) are red; a line of OCR text (Slovak and English) no element
-    covers is blue. One line per mark: [n] source role "name" at (x,y), numbered top-left
+    the Accessibility API on macOS, AT-SPI on Linux X11) are red; a line of OCR text (Slovak
+    and English) no element covers is blue. One line per mark: [n] source role "name" at (x,y), numbered top-left
     to bottom-right. Same frame and coordinate contract as Snapshot: the text starts with
     the contract line, the points are IMAGE pixels, and Click / Move / Scroll / Type take
-    them as-is. On Windows an element's line also gives its ref for ClickElement and
-    TypeElement; this starts a new ref tree, as ElementTree does. If OCR fails, the
-    reply says so and keeps the image and the elements.
+    them as-is. An element's line also gives its ref for ClickElement and TypeElement;
+    this starts a new ref tree, as ElementTree does. If OCR fails, the reply says so and
+    keeps the image and the elements.
 
     Args:
         max_elements: Maximum number of marks, 1-300 (default 300). The reply says when more were found.
@@ -156,7 +156,7 @@ def AnnotatedSnapshot(
     if not 1 <= max_elements <= MAX_MARKS:
         raise ValueError(f"max_elements must be 1..{MAX_MARKS}, got {max_elements}")
     img, frame = _capture_snapshot_frame(monitor, max_width)
-    elements, cut = _marked_elements(max_elements)
+    elements, cut = get_desktop().marked_elements(limit=max_elements)
     words, notes = _read_words(frame)
     found = merge(elements, words, max_elements)
     lines = draw_marks(img, found.marks, frame)
@@ -178,15 +178,6 @@ def AnnotatedSnapshot(
         ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"),
         TextContent(type="text", text="\n\n".join(parts)),
     ]
-
-
-def _marked_elements(limit: int) -> tuple[list[dict], str]:
-    """The foreground window's elements and why the list is cut: refs where the OS has them (Windows)."""
-    desktop = get_desktop()
-    if hasattr(desktop, "marked_elements"):
-        return desktop.marked_elements(limit=limit)
-    elements = desktop.get_interactive_elements(limit=limit)
-    return elements, f"the element list reached its limit of {limit}" if len(elements) >= limit else ""
 
 
 def _read_words(frame) -> tuple[tuple[Word, ...], list[str]]:

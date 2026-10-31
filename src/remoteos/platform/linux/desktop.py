@@ -4,8 +4,9 @@ Runtime session detection decides behavior:
 
 * **X11 session** (a graphical seat is active)  → real implementations backed by
   ``xdotool`` / ``scrot`` / ``wmctrl`` / ``xclip`` / ``notify-send`` / ``loginctl``.
-* **Wayland session**                           → not yet implemented (separate tier);
-  every function raises an honest "unavailable" message and never crashes.
+* **Wayland session**                           → no backend (a separate tier, #38); the tools
+  stay registered and every one that needs the screen or input raises one clear message
+  naming what is missing. Locking the screen and notifications act on the session and still work.
 * **Headless** (no graphical session, e.g. cam1..4) → the original stub message,
   byte-for-byte unchanged, so headless boxes see zero regression.
 
@@ -39,13 +40,17 @@ from remoteos.platform.linux.session import (  # noqa: F401
 )
 from remoteos.platform.linux.windows import (  # noqa: F401
     WindowInfo,
+    click_element,
+    element_tree,
     enumerate_windows,
     focus_window,
     get_interactive_elements,
     launch_app,
     list_windows,
+    marked_elements,
     minimize_all,
     resize_window,
+    type_element,
 )
 from remoteos.platform.linux.x11_capture import (  # noqa: F401
     MONITOR_ZERO,

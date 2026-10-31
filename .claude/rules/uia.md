@@ -8,10 +8,10 @@ paths:
 
 # UI Automation tree and element refs (#35) — gotchas
 
-- **Split:** `element_tree.py` is pure (what is listed, the walk's bounds, `RefTable`);
-  `snapshot.tree_lines` renders; `platform/win/uia.py` is the `uiautomation` adapter and the worker.
-  #37 / #38 reuse `walk` and `RefTable` with their own `read` and `children`. A provider without
-  `element_tree` gets "not available on this OS yet" from the tools (`hasattr`).
+- **Split:** `element_tree.py` is pure (what is listed, the walk's bounds, `RefTable`, the shared
+  replies `tree_from` / `marked_from` / `listed_elements`); `snapshot.tree_lines` renders;
+  `platform/win/uia.py` is the `uiautomation` adapter and the worker. AX and AT-SPI use the same
+  module with their own `read` and `children`: `.claude/rules/accessibility-providers.md`.
 - **Every UIA object lives on the worker's thread (`UiaWorker`).** UIA objects are apartment-bound.
   `import comtypes` runs `CoInitializeEx` on the IMPORTING thread and the package's
   `_AutomationClient` is a process singleton, so:

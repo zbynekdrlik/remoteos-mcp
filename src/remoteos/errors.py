@@ -38,6 +38,7 @@ __all__ = [
     "ToolError",
     "failure",
     "mac_accessibility",
+    "mac_ax_tree",
     "mac_screen_recording",
     "non_interactive_window_station",
     "redact_fastmcp_argument_logs",
@@ -112,6 +113,14 @@ def mac_accessibility(binary: str) -> str:
     """macOS refuses this process the mouse and keyboard (Privacy & Security › Accessibility)."""
     return (
         "macOS does not let this process control the mouse and keyboard (input would be dropped silently). "
+        f"Allow {binary} in System Settings › Privacy & Security › Accessibility, then restart remoteos-mcp."
+    )
+
+
+def mac_ax_tree(binary: str) -> str:
+    """macOS refuses this process other apps' controls: the same pane, another check (AXIsProcessTrusted)."""
+    return (
+        "macOS does not let this process read other apps' controls (the element tree would be empty). "
         f"Allow {binary} in System Settings › Privacy & Security › Accessibility, then restart remoteos-mcp."
     )
 
