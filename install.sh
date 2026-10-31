@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # RemoteOS MCP - One-line installer for macOS
 # Usage: curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/install.sh | bash
+# REMOTEOS_ENROLL + REMOTEOS_ENROLL_SSH_KEY (the command `remoteos-gateway enroll` prints, #26): after
+# the proof, turn Remote Login on with that key and register the box.
 set -euo pipefail
 
 # Everything runs inside main(), called on the very last line: bash parses the
@@ -16,11 +18,13 @@ PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
 # bash keeps the export flag of a name the caller exported (globals AND locals): unset every
 # name that ever holds the key, so none of them reaches a child's environment (#12).
-unset AUTH_KEY EXPLICIT_KEY CFG_KEY PLIST_KEY KEY_SOURCE k key
+unset AUTH_KEY EXPLICIT_KEY CFG_KEY PLIST_KEY KEY_SOURCE k key ENROLL_URL ENROLL_SSH_KEY
 # The explicit key is read once and dropped from the environment BEFORE the first child
 # (`python3 --version`, a brew fallback): every child inherits it (review round 9).
 EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
-unset REMOTEOS_MCP_AUTH_KEY
+ENROLL_URL="${REMOTEOS_ENROLL:-}"
+ENROLL_SSH_KEY="${REMOTEOS_ENROLL_SSH_KEY:-}"
+unset REMOTEOS_MCP_AUTH_KEY REMOTEOS_ENROLL REMOTEOS_ENROLL_SSH_KEY
 # The source (#64): a commit sha, a tag or a branch (default main, empty = main), resolved below to
 # ONE commit that the install and its constraints both use, like install-linux.sh.
 REF="${REMOTEOS_MCP_REF:-main}"
@@ -57,6 +61,31 @@ python_ok() {
 if [[ ! "$GIVEN_RING" =~ ^(stable|canary)?$ ]]; then
     echo "        [X] REMOTEOS_MCP_RING must be stable or canary — nothing was changed on this box"
     exit 1
+fi
+
+# The one-time URL and one public key line, both judged before anything changes (LC_ALL=C: ASCII ranges).
+enroll_url_ok() {
+    (
+        LC_ALL=C
+        [[ "${1-}" =~ ^https://[a-z0-9.-]+/[A-Za-z0-9_-]+/$ ]] && [[ ${#1} -le 300 ]]
+    )
+}
+ssh_key_ok() {
+    (
+        LC_ALL=C
+        [[ "${1-}" =~ ^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa)\ [A-Za-z0-9+/=]+(\ [A-Za-z0-9@._-]+)?$ ]] \
+            && [[ ${#1} -le 2000 ]]
+    )
+}
+if [[ -n "$ENROLL_URL" ]]; then
+    if ! enroll_url_ok "$ENROLL_URL"; then
+        echo "        [X] REMOTEOS_ENROLL is not an enrollment URL (https://<host>/<token>/) — nothing was changed on this box"
+        exit 1
+    fi
+    if ! ssh_key_ok "$ENROLL_SSH_KEY"; then
+        echo "        [X] REMOTEOS_ENROLL_SSH_KEY must be one ssh public key line — nothing was changed on this box"
+        exit 1
+    fi
 fi
 
 # --- [1/5] Check Python ---
@@ -806,6 +835,66 @@ echo "  [5/5] Getting network info..."
 LOCAL_IP=$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo "MAC_IP")
 HOSTNAME_SHORT=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "mac")
 echo "        $HOSTNAME_SHORT ($LOCAL_IP)"
+
+# --- Enrollment (#26): after the proof, so a failure leaves the proven install up ---
+# dev1's key, added once. Remote Login needs admin: no sudo here = a [!] line, like the sudoers drop-in
+# (the box is still enrolled over MCP, and SSH is the break-glass path).
+enroll_ssh() {
+    local keys="$HOME/.ssh/authorized_keys"
+    mkdir -p "$HOME/.ssh"
+    touch "$keys"
+    if ! grep -qxF "$ENROLL_SSH_KEY" "$keys"; then
+        if [[ -s "$keys" && -n "$(tail -c 1 "$keys")" ]]; then printf '\n' >>"$keys"; fi
+        printf '%s\n' "$ENROLL_SSH_KEY" >>"$keys"
+    fi
+    chmod 700 "$HOME/.ssh"
+    chmod 600 "$keys"
+    echo "        SSH key: in $keys"
+    if admin launchctl load -w /System/Library/LaunchDaemons/ssh.plist; then
+        echo "        Remote Login: on"
+    else
+        echo "        [!] Remote Login could not be turned on (no sudo here): turn it on in System Settings > Sharing"
+    fi
+}
+
+# The registration, key included: printf is a builtin, so it reaches no argv. Names and addresses
+# are filtered and the key is key_ok's: nothing here can break the JSON.
+enrollment_body() {
+    local name ips="" ip
+    name=$(printf '%s' "$HOSTNAME_SHORT" | LC_ALL=C tr -cd 'a-z0-9._-')
+    for ip in $(ifconfig 2>/dev/null | sed -n 's/^[[:space:]]*inet \([0-9.]*\).*/\1/p'); do
+        case "$ip" in
+            127.*) ;;
+            *) ips="${ips:+$ips, }\"$ip\"" ;;
+        esac
+    done
+    printf '{"hostname": "%s", "ips": [%s], "port": %s, "version": "%s", "os": "macos", "account": "%s", "auth_key": "%s"}' \
+        "${name:-unknown}" "$ips" "$PORT" "$PKG_VER" "$(id -un)" "$AUTH_KEY"
+}
+
+# POST it: the URL through a config on fd 5, the body on stdin, neither in curl's argv. -q: no .curlrc.
+# Only the receiver's own `ok` counts: curl -f takes a redirect (the Access 302) as a success.
+post_enrollment() {
+    local try reply
+    for try in 1 2 3; do
+        reply=$(curl -q -fsS --proto =https --max-time 30 -A remoteos-enroll -H 'Content-Type: application/json' \
+            -K /dev/fd/5 --data-binary @- 5<<<"url = \"$ENROLL_URL\"" <<<"$(enrollment_body)") || reply=""
+        if [[ "$reply" == ok ]]; then
+            echo "        Enrolled: dev1 received this box's registration"
+            return 0
+        fi
+        echo "        [!] Registration attempt ${try} failed"
+        if [[ "$try" -lt 3 ]]; then sleep 5; fi
+    done
+    echo "        [X] The registration got no answer from dev1: the install stands, check on dev1 whether the box is enrolled"
+    exit 1
+}
+
+if [[ -n "$ENROLL_URL" ]]; then
+    echo "  Enrolling this box..."
+    post_enrollment
+    enroll_ssh
+fi
 
 # --- Summary ---
 echo ""

@@ -12,6 +12,8 @@
 #                          box has, else stable)
 #   REMOTEOS_MCP_POLICY    restart (default: restart and prove the new install) | enable-only
 #                          (install + enable for the next boot, never start: camera-box's cams)
+#   REMOTEOS_ENROLL, REMOTEOS_ENROLL_SSH_KEY  set by the command `remoteos-gateway enroll` prints:
+#                          after the proof, enable sshd with that key and register the box (#26)
 # A secret never goes on a command line, sudo's included: `sudo REMOTEOS_MCP_AUTH_KEY=… bash`
 # shows it in `ps`. Hand it to sudo's environment only (no export: curl never gets it):
 #   read -rs k

@@ -26,12 +26,16 @@ A project lists at least one machine; to take a project off, remove its table.
 
 from __future__ import annotations
 
+import datetime as _dt
+import os
 import posixpath
 import re
+import stat
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from remoteos.gateway import fileops
 from remoteos.gateway.registry import RegistryError, is_valid_machine_name, validate_consumer_name
 
 DEFAULT_MANIFEST_PATH = Path.home() / ".config" / "remoteos-gateway" / "projects.toml"
@@ -165,3 +169,63 @@ def _parse_project(name: str, raw: object, source: object) -> Project:
     except RegistryError as exc:  # say which manifest entry produced the bad name
         raise ManifestError(f"{where}: {exc}") from exc
     return project
+
+
+def add_machine(path: Path, project: str, machine: str) -> bool:
+    """Add *machine* to *project*'s ``machines`` in the manifest file; False when it is listed.
+
+    The file is the owner's, comments and layout included, so this edits the text, under a lock,
+    through fileops (a backup, an atomic write, a symlink stays one). It is written only when the
+    edited text parses to the same manifest plus that one machine."""
+    with fileops.exclusive_lock(str(path.parent / ".projects.lock")):
+        manifest = load_manifest(path)
+        current = manifest.projects.get(project)
+        if current is None:
+            raise ManifestError(f"{path}: no project {project!r}")
+        if machine in current.machines:
+            return False
+        edited = _insert_machine(path.read_bytes().decode("utf-8"), project, machine)
+        try:
+            after = parse_manifest(tomllib.loads(edited), path)
+        except (tomllib.TOMLDecodeError, ManifestError) as exc:
+            raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: {exc}") from exc
+        expected = {**manifest.projects, project: replace(current, machines=(*current.machines, machine))}
+        if after.projects != expected or after.gateway_url != manifest.gateway_url:
+            raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: edit it by hand")
+        target = fileops.expand(str(path))
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+        fileops.write_with_backup(target, edited.encode("utf-8"), _dt.date.today().isoformat())
+        os.chmod(target, mode)
+    return True
+
+
+def _insert_machine(text: str, project: str, machine: str) -> str:
+    """*text* with ``"machine"`` after the last value of the project's ``machines`` array."""
+    name = re.escape(project)
+    header = re.search(rf"""^[ \t]*\[projects\.(?:{name}|"{name}"|'{name}')\][ \t]*(?:#.*)?\r?$""", text, re.MULTILINE)
+    if header is None:
+        raise ManifestError(f"no [projects.{project}] line found: edit the manifest by hand")
+    following = re.compile(r"^[ \t]*\[", re.MULTILINE).search(text, header.end())
+    end = following.start() if following else len(text)
+    key = re.compile(r"^[ \t]*machines[ \t]*=[ \t]*\[", re.MULTILINE).search(text, header.end(), end)
+    if key is None:
+        raise ManifestError(f"no machines array found in [projects.{project}]: edit the manifest by hand")
+    last_value, trailing_comma, i = -1, False, key.end()
+    while i < len(text) and text[i] != "]":
+        char = text[i]
+        if char == "#":
+            i = text.index("\n", i) if "\n" in text[i:] else len(text)
+        elif char in "\"'":
+            i = text.index(char, i + 1) + 1
+            last_value, trailing_comma = i, False
+        else:
+            trailing_comma = trailing_comma or char == ","
+            i += 1
+    if last_value < 0:
+        raise ManifestError(f"[projects.{project}] has an empty machines array: edit the manifest by hand")
+    if not trailing_comma:
+        return f'{text[:last_value]}, "{machine}"{text[last_value:]}'
+    comma = text.index(",", last_value)
+    line_start = text.rfind("\n", 0, last_value) + 1
+    indent = text[line_start : len(text[line_start:]) - len(text[line_start:].lstrip(" \t")) + line_start]
+    return f'{text[:comma + 1]}\n{indent}"{machine}",{text[comma + 1:]}'

@@ -19,6 +19,7 @@ paths:
   - "tests_windows/test_install_ps1_key.py"
   - "tests_windows/test_install_ps1_wheelhouse.py"
   - "tests_windows/test_install_ps1_upgrade_task.py"
+  - "tests_windows/test_install_ps1_enroll.py"
 ---
 
 # One-liner installers (install-linux.sh / install.sh / install.ps1) — gotchas
@@ -497,6 +498,32 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     `$null` = keep polling; still `$null` at the end = "the session could not be read", not "did
     not respond").
 
+## Enrollment (#26): `REMOTEOS_ENROLL`, `REMOTEOS_ENROLL_SSH_KEY`
+
+- Unset = none of this runs: no sshd, no POST, no machine-wide Python. Tests pin it per OS.
+- **Read and removed from the environment with the other secrets, before the first child.** The URL's
+  token is its receiver's only auth, like a key. Judged before anything changes (`enroll_url_ok`,
+  `ssh_key_ok`, the PowerShell twins): a public key line with options (`command=`) or a second line
+  is refused, and a quote in the URL could rewrite curl's config.
+- **After the proof, last, the registration before SSH** (SSH is break-glass; a box dev1 reaches over MCP
+  can have it repaired). A failure exits 1 and leaves the proven install up, no rollback.
+  Windows: `Exit-RemoteOSEnrollmentFailure`, because `Exit-RemoteOSInstaller` after the stop is
+  reserved for the rollback path (a static test). Linux: `enable-only` is refused, nothing would be proven.
+- **The POST:** bash: the URL through `curl -K /dev/fd/5`, the body on stdin, so neither is in an argv;
+  `-q`, `--proto =https`, a named agent. The box's proxy stays usable. PowerShell: `Invoke-RestMethod`
+  in-process with bytes. Three tries. **Only the body `ok` counts:** `curl -f` takes a 3xx as success, and
+  a 302 is what Cloudflare Access answers. A lost 200 then a retry fails on the box while dev1 goes on, so
+  the message says to check dev1.
+- **The UAC relaunch never carries it:** `-ExplicitKey ([bool]$explicitKey -or [bool]$enrollUrl)`, the same
+  reason as an explicit key: an argv or a file would expose the token. The command says "as Administrator".
+- **Windows Python:** `Install-RemoteOSMachinePython` runs before `Test-RemoteOSPythonReachable`: an
+  all-users Python is reachable by the desktop user. `Start-Process -Wait` (the installer leaves no
+  descendant), exit 0 or 3010, and `python312.dll` must exist, else `[X]`. `$python` is the full path.
+- **`administrators_authorized_keys` is ignored by sshd unless only Administrators and SYSTEM reach it:**
+  `icacls /inheritance:r`. No BOM in either key file.
+- macOS: no sudo = Remote Login stays off with a `[!]`, the box still enrolls.
+- Not proven by CI: the OpenSSH capability, the real Python installers and a fresh Windows box.
+
 ## Tests
 
 - **Linux:** `tests/linux_installer_harness.py` (`linux_box`) + `tests/fake_linux_tools.py`.
@@ -530,3 +557,5 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
 - **Static checks find the first code line** (`_find_first_code_line`). It skips `#` and
   `Write-Host` lines, but NOT bash `echo` lines. Keep `pip install … remoteos-mcp` and
   `pip uninstall … remoteos-mcp` out of `echo` text.
+
+- **A Linux box too old for `SelfUpgrade` (before dev39) upgrades over MCP too, no SSH.** The installer refuses to run inside `remoteos-mcp.service`, but a transient unit is outside it: through `Shell`, `sudo -n systemd-run --unit=remoteos-upgrade --collect --setenv=REMOTEOS_MCP_REF=<sha> --setenv=HOME=/root bash -c 'curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/<sha>/install-linux.sh | bash'`, then poll `/health`. Needs the passwordless sudo of `/etc/sudoers.d/90-remoteos-mcp`. Done on strih-pp and stream-pp, dev20 to dev49.

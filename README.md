@@ -464,6 +464,37 @@ asks a locked keyring for a secret (git's credential helper, `secret-tool`) make
 show its unlock dialog on the screen. Run it with `env -u DBUS_SESSION_BUS_ADDRESS`, or with a
 short `timeout`.
 
+## One-command onboarding (`remoteos-gateway enroll`)
+
+A new box needs one command on dev1 and one on the box. Nobody carries the key.
+
+```bash
+remoteos-gateway enroll win-new-pc --projects songplayer,camera-box
+```
+
+It opens a one-time public URL, prints the command for Windows (run it in PowerShell as Administrator; the
+enrollment URL does not cross a UAC prompt), Linux and macOS, and waits up to an hour. Run the command once on
+the box. With `REMOTEOS_ENROLL` set the installer also:
+
+- installs Python 3.12 for all users when the box has none (Windows; a waiting installer, or the run ends);
+- does the normal install and its proof;
+- enables the OpenSSH server with dev1's public key (`--ssh-key`, default `~/.ssh/id_ed25519.pub`). On Windows
+  the key goes to `administrators_authorized_keys` for an administrator, else to the user's `authorized_keys`;
+  on macOS a run with no sudo leaves Remote Login off with a `[!]` line;
+- posts hostname, addresses, port, version, OS and the auth key to the URL.
+
+dev1 then verifies `initialize` 200 with that key, stores it, adds the machine to the projects in
+`projects.toml`, runs `sync-configs` and `check`. Without `REMOTEOS_ENROLL` an install does none of this.
+
+The key never reaches a screen, an argv, a log or a ticket. If a step on dev1 fails, the registration stays in
+the vault for an hour and `enroll` prints the command that retries it. `--url` names the machine's `/mcp` url
+when the addresses it posts cannot be reached from dev1, and `--replace` overwrites a machine already in the
+key store.
+
+The URL is a Cloudflare quick tunnel to airuleset's one-shot `secret request` endpoint: dev1 needs `cloudflared`
+and tailscale. The public drop lane cannot be used, because Cloudflare Access answers a box with no login with
+a 302.
+
 ## MCP gateway (dev1)
 
 The machines are reachable only from boxes with a LAN route to them. `remoteos-gateway`

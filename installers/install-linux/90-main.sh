@@ -24,12 +24,14 @@ main() {
 
     # bash keeps a caller-exported name's export flag (globals AND locals): unset every name that
     # holds the key or the unit text (a legacy key), so none reaches a child's environment.
-    unset AUTH_KEY EXPLICIT_KEY GH_TOKEN_VALUE KEY_SOURCE OLD_UNIT OLD_DESCRIPTION \
+    unset AUTH_KEY EXPLICIT_KEY GH_TOKEN_VALUE KEY_SOURCE OLD_UNIT OLD_DESCRIPTION ENROLL_URL ENROLL_SSH_KEY \
         unit_key env_key cfg_key k key line rest v
     # The secrets are read once, then dropped from the environment every child inherits.
     EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
     GH_TOKEN_VALUE="${GH_TOKEN:-}"
-    unset REMOTEOS_MCP_AUTH_KEY GH_TOKEN
+    ENROLL_URL="${REMOTEOS_ENROLL:-}"
+    ENROLL_SSH_KEY="${REMOTEOS_ENROLL_SSH_KEY:-}"
+    unset REMOTEOS_MCP_AUTH_KEY GH_TOKEN REMOTEOS_ENROLL REMOTEOS_ENROLL_SSH_KEY
     REF="${REMOTEOS_MCP_REF:-main}"
     GIVEN_MODE="${REMOTEOS_MCP_MODE:-}"
     GIVEN_USER="${REMOTEOS_MCP_USER:-}"
@@ -52,6 +54,7 @@ main() {
         fail "Root filesystem is read-only — nothing was changed on this box. A camera-box cam is read-only by design: update it through camera-box's provisioning (its rw window). Elsewhere: mount -o remount,rw / for this run, then rerun."
     fi
     check_inputs
+    check_enroll_inputs
     ! grep -q "/${SERVICE_NAME}\.service" "$CGROUP_FILE" 2>/dev/null || fail "this run is inside ${SERVICE_NAME}.service (the agent's own Shell): its restart (or a rollback's stop) would kill the run — nothing was changed on this box. Use the SelfUpgrade tool, or SSH."
     # One run at a time: a second run's prune could delete the build this one just swapped in.
     command -v flock &>/dev/null || fail "flock (util-linux) is missing — nothing was changed on this box"
@@ -143,6 +146,7 @@ main() {
     LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "LINUX_IP")
     HOSTNAME_SHORT=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "linux")
     say "$HOSTNAME_SHORT ($LOCAL_IP)"
+    enroll_box
 
     printf '%s\n' "" "  ============================================" "  SETUP COMPLETE" \
         "  ============================================" "" "  Computer:  $HOSTNAME_SHORT ($LOCAL_IP)" \

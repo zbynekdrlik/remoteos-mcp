@@ -12,6 +12,8 @@
 #                          box has, else stable)
 #   REMOTEOS_MCP_POLICY    restart (default: restart and prove the new install) | enable-only
 #                          (install + enable for the next boot, never start: camera-box's cams)
+#   REMOTEOS_ENROLL, REMOTEOS_ENROLL_SSH_KEY  set by the command `remoteos-gateway enroll` prints:
+#                          after the proof, enable sshd with that key and register the box (#26)
 # A secret never goes on a command line, sudo's included: `sudo REMOTEOS_MCP_AUTH_KEY=… bash`
 # shows it in `ps`. Hand it to sudo's environment only (no export: curl never gets it):
 #   read -rs k
@@ -938,6 +940,117 @@ configure_firewall() {
     fi
 }
 
+# --- enrollment (#26): only with REMOTEOS_ENROLL set; a plain run never reaches this ------------
+
+# The one-time URL `remoteos-gateway enroll` prints: https, a host, one token segment.
+enroll_url_ok() {
+    [[ "${1-}" =~ ^https://[a-z0-9.-]+/[A-Za-z0-9_-]+/$ ]] && [[ ${#1} -le 300 ]]
+}
+
+# One public key line: no options (`command=...`), no second line.
+ssh_key_ok() {
+    [[ "${1-}" =~ ^(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa)\ [A-Za-z0-9+/=]+(\ [A-Za-z0-9@._-]+)?$ ]] \
+        && [[ ${#1} -le 2000 ]]
+}
+
+# Before anything changes. A box that is only enabled is never proven, so nothing could be enrolled.
+check_enroll_inputs() {
+    [[ -n "$ENROLL_URL" ]] || return 0
+    enroll_url_ok "$ENROLL_URL" \
+        || fail "REMOTEOS_ENROLL is not an enrollment URL (https://<host>/<token>/) — nothing was changed on this box"
+    ssh_key_ok "$ENROLL_SSH_KEY" \
+        || fail "REMOTEOS_ENROLL_SSH_KEY must be one ssh public key line — nothing was changed on this box"
+    [[ "$POLICY" == restart ]] \
+        || fail "REMOTEOS_ENROLL needs the restart policy: enrollment proves the running server — nothing was changed on this box"
+}
+
+# The OpenSSH server, up at every boot. Debian's unit is ssh, RHEL's sshd.
+enable_ssh_server() {
+    if ! type -P sshd >/dev/null; then
+        say "Installing the OpenSSH server..."
+        if command -v apt-get &>/dev/null; then
+            apt-get install -y openssh-server || true
+        elif command -v dnf &>/dev/null; then
+            dnf install -y openssh-server || true
+        elif command -v yum &>/dev/null; then
+            yum install -y openssh-server || true
+        fi
+        type -P sshd >/dev/null || fail "the OpenSSH server could not be installed"
+    fi
+    systemctl enable --now ssh >/dev/null 2>&1 || systemctl enable --now sshd >/dev/null 2>&1 \
+        || fail "the ssh service could not be enabled"
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow 22/tcp comment "remoteos-mcp enrollment" 2>/dev/null \
+            || say "[!] ufw refused port 22: dev1 may not reach this box's ssh"
+    elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+        { firewall-cmd --permanent --add-service=ssh && firewall-cmd --reload; } 2>/dev/null \
+            || say "[!] firewalld refused ssh: dev1 may not reach this box's ssh"
+    fi
+    say "OpenSSH server: enabled"
+}
+
+# dev1's key for the service account: added once, the file's other lines kept.
+install_ssh_key() {
+    local home keys
+    home=$(getent passwd "$SERVICE_USER" | cut -d: -f6) || fail "the home folder of ${SERVICE_USER} is unknown"
+    [[ -n "$home" ]] || fail "the home folder of ${SERVICE_USER} is unknown"
+    keys="$home/.ssh/authorized_keys"
+    mkdir -p "$home/.ssh"
+    touch "$keys"
+    if ! grep -qxF "$ENROLL_SSH_KEY" "$keys"; then
+        [[ ! -s "$keys" || -z "$(tail -c 1 "$keys")" ]] || printf '\n' >>"$keys"
+        printf '%s\n' "$ENROLL_SSH_KEY" >>"$keys"
+    fi
+    chmod 700 "$home/.ssh"
+    chmod 600 "$keys"
+    chown -R "$SERVICE_USER:" "$home/.ssh"
+    say "SSH key: in ${keys}"
+}
+
+# The registration, key included: printf is a builtin, so it reaches no argv. The name goes through
+# name_ok, the addresses keep digits and dots, the key is key_ok's: nothing here can break the JSON.
+enrollment_body() {
+    local name ip ips=""
+    name=$HOSTNAME_SHORT
+    name_ok "$name" || name="unknown"
+    for ip in $(hostname -I 2>/dev/null || true); do
+        case "$ip" in
+            *[!0-9.]*) ;;
+            *) ips="${ips:+$ips, }\"$ip\"" ;;
+        esac
+    done
+    printf '{"hostname": "%s", "ips": [%s], "port": %s, "version": "%s", "os": "linux", "account": "%s", "auth_key": "%s"}' \
+        "$name" "$ips" "$PORT" "$PKG_VER" "$SERVICE_USER" "$AUTH_KEY"
+}
+
+# POST it. The URL (its token is the receiver's only auth) comes through a config on fd 5 and the
+# body on stdin: neither is in curl's argv. -q: no .curlrc trace. The proxy of the box stays usable.
+# Only the receiver's own `ok` counts: curl -f takes a redirect (the Access 302) as a success.
+post_enrollment() {
+    local try reply
+    for try in 1 2 3; do
+        reply=$(curl -q -fsS --proto =https --max-time 30 -A remoteos-enroll -H 'Content-Type: application/json' \
+            -K /dev/fd/5 --data-binary @- 5<<<"url = \"$ENROLL_URL\"" <<<"$(enrollment_body)") || reply=""
+        if [[ "$reply" == ok ]]; then
+            say "Enrolled: dev1 received this box's registration"
+            return 0
+        fi
+        say "[!] Registration attempt ${try} failed"
+        [[ "$try" -eq 3 ]] || sleep 5
+    done
+    fail "the registration got no answer from dev1: the install stands, check on dev1 whether the box is enrolled"
+}
+
+# After the proof, last: a failure leaves the proven install up, and the run exits 1. The registration
+# goes first: SSH is the break-glass path, and a box dev1 reaches over MCP can have it repaired.
+enroll_box() {
+    [[ -n "$ENROLL_URL" ]] || return 0
+    echo "  Enrolling this box..."
+    post_enrollment
+    enable_ssh_server
+    install_ssh_key
+}
+
 # Everything runs inside main(), called on the last line: a truncated `curl | bash` download
 # fails to parse (or never reaches the call) instead of running half.
 main() {
@@ -964,12 +1077,14 @@ main() {
 
     # bash keeps a caller-exported name's export flag (globals AND locals): unset every name that
     # holds the key or the unit text (a legacy key), so none reaches a child's environment.
-    unset AUTH_KEY EXPLICIT_KEY GH_TOKEN_VALUE KEY_SOURCE OLD_UNIT OLD_DESCRIPTION \
+    unset AUTH_KEY EXPLICIT_KEY GH_TOKEN_VALUE KEY_SOURCE OLD_UNIT OLD_DESCRIPTION ENROLL_URL ENROLL_SSH_KEY \
         unit_key env_key cfg_key k key line rest v
     # The secrets are read once, then dropped from the environment every child inherits.
     EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
     GH_TOKEN_VALUE="${GH_TOKEN:-}"
-    unset REMOTEOS_MCP_AUTH_KEY GH_TOKEN
+    ENROLL_URL="${REMOTEOS_ENROLL:-}"
+    ENROLL_SSH_KEY="${REMOTEOS_ENROLL_SSH_KEY:-}"
+    unset REMOTEOS_MCP_AUTH_KEY GH_TOKEN REMOTEOS_ENROLL REMOTEOS_ENROLL_SSH_KEY
     REF="${REMOTEOS_MCP_REF:-main}"
     GIVEN_MODE="${REMOTEOS_MCP_MODE:-}"
     GIVEN_USER="${REMOTEOS_MCP_USER:-}"
@@ -992,6 +1107,7 @@ main() {
         fail "Root filesystem is read-only — nothing was changed on this box. A camera-box cam is read-only by design: update it through camera-box's provisioning (its rw window). Elsewhere: mount -o remount,rw / for this run, then rerun."
     fi
     check_inputs
+    check_enroll_inputs
     ! grep -q "/${SERVICE_NAME}\.service" "$CGROUP_FILE" 2>/dev/null || fail "this run is inside ${SERVICE_NAME}.service (the agent's own Shell): its restart (or a rollback's stop) would kill the run — nothing was changed on this box. Use the SelfUpgrade tool, or SSH."
     # One run at a time: a second run's prune could delete the build this one just swapped in.
     command -v flock &>/dev/null || fail "flock (util-linux) is missing — nothing was changed on this box"
@@ -1083,6 +1199,7 @@ main() {
     LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "LINUX_IP")
     HOSTNAME_SHORT=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo "linux")
     say "$HOSTNAME_SHORT ($LOCAL_IP)"
+    enroll_box
 
     printf '%s\n' "" "  ============================================" "  SETUP COMPLETE" \
         "  ============================================" "" "  Computer:  $HOSTNAME_SHORT ($LOCAL_IP)" \
