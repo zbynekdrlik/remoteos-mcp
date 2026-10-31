@@ -7,6 +7,7 @@ events each OS really gets are what these tests read. Expected codes are literal
 
 from __future__ import annotations
 
+import collections.abc
 import ctypes
 import struct
 import types
@@ -560,3 +561,28 @@ def test_ocr_of_another_monitor_grabs_from_all_screens(monkeypatch):
     ocr._screenshot_region(-1920, 0, 0, 1080)
     ocr._screenshot_region()
     assert grabs == [((-1920, 0, 0, 1080), True), (None, True)]
+
+
+class _VanishingEnviron(collections.abc.Mapping):
+    """``os.environ`` while ``_load_atspi`` pops a key in another thread: listed, then gone."""
+
+    def __iter__(self):
+        return iter(["PATH", "DISPLAY"])
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, key):
+        if key == "DISPLAY":
+            raise KeyError(key)
+        return "/bin"
+
+
+def test_an_x_command_survives_a_key_popped_while_the_environment_is_copied(monkeypatch):
+    # Wait and WaitFor run outside the desktop lock (#34), next to the AT-SPI window
+    fake_os = types.SimpleNamespace(environ=_VanishingEnviron(), geteuid=lambda: 1000)
+    monkeypatch.setattr(linux_session, "os", fake_os)
+    info = linux_session.SessionInfo(mode="x11", display=":0", uid=1000, user="newlevel", session_id="1")
+    argv, env = linux_session._build_invocation(info, ["wmctrl", "-lpG"])
+    assert argv == ["wmctrl", "-lpG"]
+    assert env["PATH"] == "/bin" and env["DISPLAY"] == ":0"
