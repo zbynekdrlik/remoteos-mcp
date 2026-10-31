@@ -366,6 +366,13 @@ def test_a_long_ocr_failure_keeps_its_real_reason(fake_x11, monkeypatch):
     assert f"**OCR:** no text marks: {reason}" in _text(server.AnnotatedSnapshot())
 
 
+def test_an_over_long_ocr_failure_keeps_its_last_engine_s_reason(fake_x11, monkeypatch):
+    reason = "first engine: " + "y" * 600 + " last engine: the real reason"
+    monkeypatch.setattr(ocr, "read_words", lambda region, capture: (_ for _ in ()).throw(RuntimeError(reason)))
+    text = _text(server.AnnotatedSnapshot())
+    assert text.endswith("last engine: the real reason") and "first engine" not in text
+
+
 def test_a_screen_with_nothing_on_it_says_so(fake_x11, monkeypatch):
     monkeypatch.setattr(ocr.subprocess, "run", _Tesseract())
     assert "No interactive elements or text found." in _text(server.AnnotatedSnapshot())

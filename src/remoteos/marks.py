@@ -26,7 +26,7 @@ _SURFACE = 100
 _SAME_LINE = 0.5
 # ...and the gap is at most this many heights: wider than a space, narrower than two buttons.
 _WORD_GAP = 0.8
-_ROW = 16  # tops this close to a row's first top are that row: OCR's 1 px jitter must not reorder it
+_ROW = 16  # tops this close to a row's first top are that row, so OCR's 1 px jitter stays inside it
 
 
 @dataclass(frozen=True)

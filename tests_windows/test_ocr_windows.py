@@ -21,6 +21,15 @@ def _picture() -> Image.Image:
     return img
 
 
+def test_a_full_language_tag_matches_an_installed_language_by_its_first_part():
+    try:
+        _, note = ocr._words_winrt(_picture(), "en-GB")
+    except RuntimeError as e:
+        assert "no OCR language is installed on this Windows" in str(e)
+        return
+    assert note == ""  # the runner is en-US: en-GB finds it by the part before the dash
+
+
 def test_the_real_script_reads_a_word_or_names_what_is_missing():
     try:
         words, note = ocr._words_winrt(_picture(), ocr.DEFAULT_LANG)

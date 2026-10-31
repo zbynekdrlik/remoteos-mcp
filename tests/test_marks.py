@@ -142,7 +142,7 @@ def test_a_row_with_uneven_tops_reads_left_to_right():
     assert [m.name for m in found.marks] == ["a", "b"]
 
 
-def test_one_pixel_of_jitter_never_reorders_a_row():
+def test_one_pixel_of_jitter_inside_a_row_does_not_reorder_it():
     found = merge([], [word(300, 31, 340, 47, "b"), word(100, 32, 140, 48, "a")])
     assert [m.name for m in found.marks] == ["a", "b"]
 

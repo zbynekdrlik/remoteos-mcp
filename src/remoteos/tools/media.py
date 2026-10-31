@@ -197,5 +197,6 @@ def _read_words(frame) -> tuple[tuple[Word, ...], list[str]]:
         reading = ocr.read_words(region, lambda bbox: _capture_with_retry(lambda: capture(bbox)))
     except Exception as e:
         log.warning("no OCR marks (%s)", type(e).__name__)
-        return (), ["no text marks: " + " ".join(str(e).split())[:_MAX_REASON]]
+        reason = " ".join(str(e).split())
+        return (), ["no text marks: " + (f"…{reason[-_MAX_REASON:]}" if len(reason) > _MAX_REASON else reason)]
     return reading.words, [reading.note] if reading.note else []

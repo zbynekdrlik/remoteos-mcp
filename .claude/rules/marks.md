@@ -21,7 +21,13 @@ paths:
 - **An element over 100 times a word's area is a surface and covers nothing (`_SURFACE`).** `listed()`
   takes any focusable element, so one pane over a custom-drawn app would hide all of its labels.
 - **Numbers are by rows from each row's first top (`_reading_order`)**, not a fixed grid: on a grid
-  tops 31 and 32 are two rows, and OCR jitter would renumber a screen.
+  tops 31 and 32 are two rows. A row's edge still exists: tops exactly 16 and 17 below its first top
+  fall on either side, so numbers are stable away from an edge, not in every case. A mark is a
+  point to click now, never an id to keep.
+- **`_SURFACE` scales with the word**, so a very short word on a wide button can pass as free: a
+  stray mark whose point is still on that button. Accepted: comparing to the frame misses panes.
+- **Linux walks up to the limit with `max_nodes` and no time budget**, and a stop at `max_nodes`
+  is not reported. Check its time in the live run on a big AT-SPI app.
 - **Elements go in first at the limit**, then numbering sorts all of them. Cutting after the sort
   would lose elements at the bottom of the screen to words at the top.
 - **`max_elements` bounds marks** (default 300, was 30 elements) and is the elements' limit too. A
