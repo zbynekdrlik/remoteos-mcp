@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from remoteos.errors import DesktopUnavailable
+from remoteos.platform.linux.shell_env import _snapshot
 
 log = logging.getLogger("remoteos.platform.linux.desktop")  # one logger for the whole provider
 
@@ -292,7 +293,7 @@ def _unavailable() -> str:
 
 
 def _session_env(s: SessionInfo) -> dict[str, str]:
-    env = dict(os.environ)
+    env = _snapshot(os.environ)
     if s.display:
         env["DISPLAY"] = s.display
     if s.xauthority:
@@ -324,7 +325,7 @@ def _build_invocation(s: SessionInfo, cmd: list[str]) -> tuple[list[str], dict[s
             f"XDG_RUNTIME_DIR={s.runtime_dir or f'/run/user/{s.uid}'}",
             f"DBUS_SESSION_BUS_ADDRESS={s.dbus_address or f'unix:path=/run/user/{s.uid}/bus'}",
         ]
-        return prefix + cmd, dict(os.environ)
+        return prefix + cmd, _snapshot(os.environ)
     return cmd, _session_env(s)
 
 
@@ -350,7 +351,7 @@ def _subprocess_run(argv, env, input_bytes, timeout, discard_output):
 
 
 def _loggable(argv: list[str]) -> list[str]:
-    """``argv`` for a log line: the text of ``xdotool type … -- <text>`` becomes ``<N chars>``.
+    """``argv`` for a log line: the text of ``xdotool type … -- <text>`` becomes ``<N chars>``, a held key ``<key>``.
 
     The typed text can be a password; it is never logged (typing.md), and ``--debug``
     makes these DEBUG lines visible (#31).
@@ -360,6 +361,8 @@ def _loggable(argv: list[str]) -> list[str]:
         if argv[x + 1 : x + 2] == ["type"] and "--" in argv[x + 2 :]:
             cut = argv.index("--", x + 2) + 1  # the text follows the FIRST "--" after "type"
             return [*argv[:cut], *(f"<{len(a)} chars>" for a in argv[cut:])]
+        if argv[x + 1 : x + 2] in (["keydown"], ["keyup"]):  # HoldKey: a key per call can spell a text
+            return [*argv[: x + 2], "<key>"]
     return argv
 
 

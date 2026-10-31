@@ -60,6 +60,12 @@ class _FakeInput:
         self.inserted: int | None = None  # None = all events accepted
         self.accepted_calls: int | None = None  # N = every SendInput call after the N-th inserts 0
         self.cursor_ok = True
+        self.cursor = (320, 798)
+
+    def GetCursorPos(self, point):
+        if self.cursor_ok:
+            point._obj.x, point._obj.y = self.cursor
+        return 1 if self.cursor_ok else 0
 
     def SetCursorPos(self, x, y):
         self.log.append(("SetCursorPos", x, y))
@@ -84,6 +90,7 @@ def win(monkeypatch):
             SetProcessDpiAwarenessContext=lambda ctx: 1,
             SetProcessDPIAware=lambda: 1,
             SetCursorPos=user_input.SetCursorPos,
+            GetCursorPos=user_input.GetCursorPos,
             SendInput=user_input.SendInput,
         ),
         shcore=types.SimpleNamespace(SetProcessDpiAwareness=lambda v: 0),
@@ -157,6 +164,7 @@ def pyautogui_branch(monkeypatch, win):
     fake = types.SimpleNamespace(
         click=_Recorder(),
         doubleClick=_Recorder(),
+        tripleClick=_Recorder(),
         moveTo=_Recorder(),
         drag=_Recorder(),
         position=lambda: (100, 100),
@@ -626,6 +634,10 @@ def mac(monkeypatch):
     }
     quartz.CGEventCreateMouseEvent = lambda src, kind, point, button: {"mouse": (kind, tuple(point), button)}
     quartz.CGEventSetLocation = lambda event, point: event.update(location=tuple(point))
+    quartz.CGEventSetFlags = lambda event, flags: event.update(flags=flags)
+    quartz.CGEventSetIntegerValueField = lambda event, field, value: event.update({f"field{field}": value})
+    quartz.CGEventCreate = lambda src: {}
+    quartz.CGEventGetLocation = lambda event: types.SimpleNamespace(x=720.0, y=450.0)
     # Keyboard events (#30): (keycode, key down?) and the Unicode string set on the event.
     quartz.CGEventCreateKeyboardEvent = lambda src, keycode, down: {"key": (keycode, down), "unicode": None}
     quartz.CGEventKeyboardSetUnicodeString = lambda event, length, text: event.update(unicode=(length, text))
@@ -804,6 +816,8 @@ def mac_tool_layer(monkeypatch, mac):
         hscroll=_Recorder(),
         moveTo=_Recorder(),
         click=_Recorder(),
+        doubleClick=_Recorder(),
+        tripleClick=_Recorder(),
         hotkey=_Recorder(),
         press=_Recorder(),
         typewrite=_Recorder(),

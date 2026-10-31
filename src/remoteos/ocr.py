@@ -17,6 +17,15 @@ except ImportError:
     ImageGrab = None  # type: ignore[assignment,misc]
 
 
+def _grab(left: int | None, top: int | None, right: int | None, bottom: int | None):
+    """The region (or every screen) as a PIL image.
+
+    all_screens=True: without it the grab is primary-only and a region on another monitor is black.
+    """
+    bbox = None if None in (left, top, right, bottom) else (left, top, right, bottom)
+    return ImageGrab.grab(bbox=bbox, all_screens=True)
+
+
 def _screenshot_region(
     left: int | None = None,
     top: int | None = None,
@@ -24,10 +33,7 @@ def _screenshot_region(
     bottom: int | None = None,
 ) -> bytes:
     """Capture a region (or full screen) and return PNG bytes."""
-    if left is not None and top is not None and right is not None and bottom is not None:
-        img = ImageGrab.grab(bbox=(left, top, right, bottom))
-    else:
-        img = ImageGrab.grab()
+    img = _grab(left, top, right, bottom)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -52,10 +58,7 @@ def ocr_pytesseract(
             "  Then set TESSERACT_CMD or add to PATH."
         )
 
-    if left is not None and top is not None and right is not None and bottom is not None:
-        img = ImageGrab.grab(bbox=(left, top, right, bottom))
-    else:
-        img = ImageGrab.grab()
+    img = _grab(left, top, right, bottom)
 
     text: str = pytesseract.image_to_string(img, lang=lang)
     return text.strip()
@@ -177,10 +180,7 @@ def ocr_macos_shortcuts(
     bottom: int | None = None,
 ) -> str:
     """Use macOS Shortcuts for basic text recognition."""
-    bbox = None
-    if all(v is not None for v in (left, top, right, bottom)):
-        bbox = (left, top, right, bottom)
-    img = ImageGrab.grab(bbox=bbox)
+    img = _grab(left, top, right, bottom)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         img.save(tmp, format="PNG")
         tmp_path = tmp.name

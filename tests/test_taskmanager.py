@@ -299,12 +299,12 @@ def test_the_mcp_client_path_declares_waits_seconds_as_its_runtime(monkeypatch):
 
     async def _go():
         async with Client(server.mcp) as client:
-            return await client.call_tool("Wait", {"seconds": 400})
+            return await client.call_tool("Wait", {"seconds": 250})
 
     (block,) = asyncio.run(_go()).content
-    match = re.match(r"^\[task:([0-9a-f]{12})\] Waited 400\.0s$", block.text)
+    match = re.match(r"^\[task:([0-9a-f]{12})\] Waited 250\.0s$", block.text)
     assert match, block.text
-    assert task_manager._tasks[match.group(1)].max_runtime == 460
+    assert task_manager._tasks[match.group(1)].max_runtime == 310
 
 
 def test_a_wait_past_its_own_seconds_and_the_stale_limit_is_auto_cancelled():

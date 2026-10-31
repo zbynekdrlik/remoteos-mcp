@@ -371,6 +371,7 @@ def windows_tools(monkeypatch, win_session):
         hotkey=lambda *a: clicks.append(("hotkey", a)),
     )
     monkeypatch.setattr(server, "pyautogui", fake_gui, raising=False)
+    monkeypatch.setattr(mod, "pyautogui", fake_gui, raising=False)  # Click goes through the provider (#34)
     monkeypatch.setattr(server, "is_windows", lambda: True)
     monkeypatch.setattr(server, "is_linux", lambda: False)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
