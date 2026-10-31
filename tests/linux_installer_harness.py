@@ -445,6 +445,9 @@ exec "{real_py}" "$@"
     _shim(shims / "git", f'if [[ "$1" == "ls-remote" ]]; then {ls_remote}; fi\nexit 0\n', records)
     _shim(shims / "apt-get", "exit 0\n", records)
     _shim(shims / "visudo", "exit 0\n", records)
+    _shim(shims / "sshd", "exit 0\n", records)
+    _shim(shims / "chown", "exit 0\n", records)  # the account does not exist on the test runner
+    _shim(shims / "getent", f'echo "$2:x:1000:1000::{tmp_path}/home/$2:/bin/bash"\n', records)
     _shim(shims / "findmnt", 'echo "rw,relatime"\n', records)
     _shim(shims / "hostname", 'case "$1" in -I) echo "192.168.1.100" ;; *) echo "testhost" ;; esac\n', records)
     for name in ("ufw", "firewall-cmd"):

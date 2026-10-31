@@ -9,13 +9,16 @@ $interactive = Test-RemoteOSInteractiveSession -SshConnection $env:SSH_CONNECTIO
     -SessionId (Get-Process -Id $PID).SessionId -InputRedirected ([Console]::IsInputRedirected)
 # A piped run in a person's console pauses before it exits ($PSCommandPath is empty for irm | iex)
 $pauseOnExit = $interactive -and -not $PSCommandPath -and -not $relaunched
-$elevation = Get-RemoteOSElevationAction -IsAdmin $isAdmin -Interactive $interactive -ExplicitKey ([bool]$explicitKey) `
+$elevation = Get-RemoteOSElevationAction -IsAdmin $isAdmin -Interactive $interactive -ExplicitKey ([bool]$explicitKey -or [bool]$enrollUrl) `
     -Relaunched $relaunched
 if ($elevation -eq 'fail') {
     Write-Host "  [X] The RemoteOS MCP installer needs an elevated (Administrator) PowerShell -- nothing was changed on this box" -ForegroundColor Red
     if ($relaunched) {
         Write-Host "      The elevated relaunch is still not elevated (is UAC turned off for a standard user?):" -ForegroundColor Yellow
         Write-Host "      run the installer from an administrator account." -ForegroundColor Yellow
+    } elseif ($enrollUrl) {
+        Write-Host "      The enrollment URL does not cross the UAC elevation: open PowerShell as Administrator" -ForegroundColor Yellow
+        Write-Host "      (right-click > Run as Administrator) and run the printed command there." -ForegroundColor Yellow
     } elseif ($interactive) {
         Write-Host "      REMOTEOS_MCP_AUTH_KEY cannot cross the UAC elevation: open PowerShell as Administrator" -ForegroundColor Yellow
         Write-Host "      (right-click > Run as Administrator), set REMOTEOS_MCP_AUTH_KEY there and run the installer again." -ForegroundColor Yellow
@@ -28,6 +31,15 @@ if ($elevation -eq 'fail') {
 
 if (-not (Test-RemoteOSRing $Ring)) {
     Write-Host "  [X] REMOTEOS_MCP_RING must be stable or canary -- nothing was changed on this box" -ForegroundColor Red
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+}
+
+if ($enrollUrl -and -not (Test-RemoteOSEnrollUrl $enrollUrl)) {
+    Write-Host "  [X] REMOTEOS_ENROLL is not an enrollment URL (https://<host>/<token>/) -- nothing was changed on this box" -ForegroundColor Red
+    Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+}
+if ($enrollUrl -and -not (Test-RemoteOSSshPublicKey $enrollSshKey)) {
+    Write-Host "  [X] REMOTEOS_ENROLL_SSH_KEY must be one ssh public key line -- nothing was changed on this box" -ForegroundColor Red
     Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
 }
 
@@ -100,6 +112,18 @@ foreach ($cmd in @("python", "python3", "py")) {
             break
         }
     } catch {}
+}
+
+# Enrollment (#26): a fresh box gets Python for all users, from an installer that waits, or the run ends
+if ($enrollUrl -and -not $python) {
+    Write-Host "        Python 3.11+ not found. Installing Python 3.12 for all users..." -ForegroundColor Yellow
+    try {
+        $python = Install-RemoteOSMachinePython (Join-Path $env:ProgramFiles 'Python312')
+    } catch {
+        Write-Host "        [X] Could not install Python: $_ -- nothing else was changed on this box" -ForegroundColor Red
+        Exit-RemoteOSInstaller -Code 1 -Pause $pauseOnExit
+    }
+    Write-Host "        Python installed: $python" -ForegroundColor Green
 }
 
 # Elevated as another account: the desktop user's task must reach this Python (checked before any change)
@@ -424,6 +448,33 @@ $pruned = @(Remove-RemoteOSStaleWheelhouses -Root $wheelhouseRoot -Keep @($sourc
 if ($pruned.Count -gt 0) { Write-Host "        Removed old wheelhouses: $($pruned -join ', ')" -ForegroundColor Gray }
 if (Test-Path -LiteralPath $legacyWheelhouseRoot) {
     try { Remove-RemoteOSTree $legacyWheelhouseRoot } catch { Write-Host "        [!] Could not remove ${legacyWheelhouseRoot}: $_" -ForegroundColor Yellow }
+}
+
+# --- Enrollment (#26): after the proof, so a failure leaves the proven install up ---
+# The registration first: SSH is the break-glass path, and a box dev1 reaches over MCP can have it repaired
+if ($enrollUrl) {
+    Write-Host "  Enrolling this box..." -ForegroundColor Cyan
+    try {
+        $enrollAddresses = @(Get-NetIPAddress -AddressFamily IPv4 |
+            Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
+            ForEach-Object { $_.IPAddress })
+        $enrollBody = Get-RemoteOSEnrollmentBody -HostName $hostName -Addresses $enrollAddresses -ServerPort $Port `
+            -Version $preflight.Version -Account $desktopUser -AuthKey $AuthKey
+    } catch {
+        Exit-RemoteOSEnrollmentFailure -Reason "Could not build the registration: $_" -Pause $pauseOnExit
+    }
+    $enrollError = Send-RemoteOSEnrollment -Url $enrollUrl -Body $enrollBody
+    Remove-Variable enrollBody
+    if ($enrollError) {
+        Exit-RemoteOSEnrollmentFailure -Reason "The registration got no answer from dev1 ($enrollError): check on dev1 whether the box is enrolled" -Pause $pauseOnExit
+    }
+    Write-Host "        Enrolled: dev1 received this box's registration" -ForegroundColor Green
+    try {
+        $sshKeyPath = Enable-RemoteOSSsh -Key $enrollSshKey -User $desktopUser -UserProfile $desktopProfile
+    } catch {
+        Exit-RemoteOSEnrollmentFailure -Reason "The box is enrolled, but SSH could not be set up: $_" -Pause $pauseOnExit
+    }
+    Write-Host "        OpenSSH server: enabled, key in $sshKeyPath" -ForegroundColor Green
 }
 
 # --- Summary ---

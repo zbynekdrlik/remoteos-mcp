@@ -30,6 +30,8 @@ Config keys (JSON):
   state, unit_path, system_site, records, curl_log, venv_pip_log, venv_pip_calls, tests_dir
   tarballs      {ref: path of a .tar.gz}
   fetch_fail    the tarball download fails (curl 22)
+  enroll_fail   the enrollment POST fails (curl 22)
+  enroll_reply  what the enrollment POST answers (default ok; a 302 page is no failure to curl -f)
   venv_pip      fake_pip.py options for installs into a venv (install_fail, install_broken, ...)
   venv_fail     `python3 -m venv` fails until apt-get installed python3-venv
   service       {"start_fails": bool, "serve_version": str, "initialize_code": int,
@@ -310,7 +312,8 @@ def systemctl(cfg: dict, args: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 _CURL_VALUE_OPTS = {"-o", "--output", "-w", "--write-out", "-H", "--header", "-X", "--request",
-                    "-d", "--data", "--data-raw", "-m", "--max-time", "--connect-timeout", "--noproxy"}
+                    "-d", "--data", "--data-raw", "-m", "--max-time", "--connect-timeout", "--noproxy",
+                    "-A", "--proto", "-K", "--data-binary"}
 _PROXY_VARS = ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY")
 
 
@@ -331,6 +334,15 @@ def curl(cfg: dict, args: list[str]) -> int:
     headers: list[str] = []
     for h in opts.get("-H", []) + opts.get("--header", []):
         headers += [line for line in sys.stdin.read().splitlines() if line] if h == "@-" else [h]
+    if "-K" in opts:  # the enrollment POST: the URL from the config file, the body from stdin
+        target = re.search(r'url = "(.*)"', Path(opts["-K"][-1]).read_text()).group(1)
+        _append(cfg["curl_log"], {"enroll_url": target, "agent": opts["-A"][-1], "body": sys.stdin.read(),
+                                  "proto": opts["--proto"][-1]})
+        if cfg.get("enroll_fail"):
+            print("curl: (22) The requested URL returned error: 404", file=sys.stderr)
+            return 22
+        sys.stdout.write(cfg.get("enroll_reply", "ok"))
+        return 0
     data = (opts.get("-d") or opts.get("--data") or opts.get("--data-raw") or [""])[-1]
     method = (opts.get("-X") or opts.get("--request") or ["POST" if data else "GET"])[-1]
     out = (opts.get("-o") or opts.get("--output") or [None])[-1]
