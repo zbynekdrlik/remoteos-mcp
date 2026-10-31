@@ -65,16 +65,19 @@ logger = logging.getLogger("remoteos.gateway.fleet")
 
 FLEET_MCP_PATH = f"/{FLEET_SERVER}/mcp"
 _INTERNAL_BASE = "http://gateway.internal"  # never dialled: the transport is in-process
+_RESERVATION_KEY = "remoteos.fleet.reservation"  # in the ASGI scope of a /fleet/mcp request
 
 # ListMachines must answer even when half the fleet is down: probes run in parallel, and each is
 # cut off here. A box that answers later reads as unreachable for this one listing.
 PROBE_BOUND_SECONDS = 4.0
 _PROBE_TIMEOUT = httpx2.Timeout(connect=3.0, read=3.0, write=3.0, pool=3.0)
-# A reply costs about 11 times its size at peak (the transport's buffer, the parsed model, the
-# serialised copy, base64 on top; measured in the #51 review), against MemoryMax=512M with ~85 MB
-# at rest: 32 MB in flight is the most that stays under it.
+# A reply costs about 10 times its size on the wire at peak (the transport's buffer, the parsed
+# model, the serialised copy; measured in the #51 review), against MemoryMax=512M with ~95 MB at
+# rest. The budget holds a reply's bytes until the consumer has it, so these are real bounds.
 MAX_REPLY_BYTES = 20 * 1024 * 1024
 MAX_BUFFERED_BYTES = 32 * 1024 * 1024
+# A consumer that stops reading must not hold its share of the budget for good.
+SEND_TIMEOUT_SECONDS = 60.0
 # MachineTools is a quick question; a box that goes silent after initialize gets no hour.
 _TOOLS_TIMEOUT_SECONDS = 30.0
 # A session to a machine that accepts the connection and then says nothing.
@@ -114,13 +117,23 @@ class _ReplyBudget:
     used: int = 0
 
 
+@dataclass
+class _Reservation:
+    """What one consumer request took from the budget. ``FleetEndpoint.__call__`` gives it back
+    when that request's response has gone out: the buffer, the parsed result and the serialised
+    copy all live until then, long after the machine's reply has ended."""
+
+    held: int = 0
+
+
 class _ReplyCap:
     """ASGI wrapper: stops a reply at ``MAX_REPLY_BYTES``, or when all replies together would pass
     ``MAX_BUFFERED_BYTES``, instead of buffering it to the end."""
 
-    def __init__(self, app: ASGIApp, budget: _ReplyBudget) -> None:
+    def __init__(self, app: ASGIApp, budget: _ReplyBudget, reservation: _Reservation) -> None:
         self.app = app
         self.budget = budget
+        self.reservation = reservation
         self.refused: str | None = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -137,12 +150,10 @@ class _ReplyCap:
                 raise _ReplyTooLarge
             size += chunk
             self.budget.used += chunk
+            self.reservation.held += chunk
             await send(message)
 
-        try:
-            await self.app(scope, receive, capped_send)
-        finally:
-            self.budget.used -= size
+        await self.app(scope, receive, capped_send)
 
 
 def _failure_text(machine: str, exc: Exception, statuses: list[int], cap: _ReplyCap) -> str:
@@ -193,16 +204,19 @@ class FleetEndpoint:
             return replay.pop() if replay else await receive()
 
         status: int | None = None
+        reservation = _Reservation()
+        scope[_RESERVATION_KEY] = reservation
 
         async def tracked_send(message: Message) -> None:
             nonlocal status
             if message["type"] == "http.response.start":
                 status = message["status"]
-            await send(message)
+            await asyncio.wait_for(send(message), SEND_TIMEOUT_SECONDS)
 
         try:
             await self.http(scope, replay_receive, tracked_send)
         finally:
+            self.budget.used -= reservation.held
             gateway.finish(entry, status, _outcome(status))
 
     # -- the tools --------------------------------------------------------------------------
@@ -290,7 +304,7 @@ class FleetEndpoint:
     @asynccontextmanager
     async def _session(self, machine: str, authorization: str) -> AsyncIterator[Client]:
         statuses: list[int] = []
-        cap = _ReplyCap(self.machine_app, self.budget)
+        cap = _ReplyCap(self.machine_app, self.budget, get_http_request().scope[_RESERVATION_KEY])
         transport = StreamableHttpTransport(
             f"{_INTERNAL_BASE}/{machine}/mcp",
             headers={"Authorization": authorization},

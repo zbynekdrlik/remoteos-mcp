@@ -672,9 +672,11 @@ mcp__fleet__Call  machine="win-new-box"  tool="Shell"  arguments={"command": "ho
 - **The per-machine entries stay.** They have typed tools, so use them when they exist. `fleet` is
   the way to a box that has no server of its own in this session yet.
 - **Direct projects get no `fleet` entry:** remoteos-mcp stays independent of the gateway.
-- **Limits.** A `Call` reply is at most 20 MB, and 32 MB across all calls in flight (over that it
-  is an error, so a big FileDownload goes through `remoteos-call get` or the machine's own
-  server, which stream). Progress messages of a running tool do not reach the caller.
+- **Limits.** A `Call` reply is at most 20 MB on the wire, and 32 MB across all calls in flight; over
+  that it is an error ("try again" when only the second limit was hit). A text result counts twice
+  (`content` + `structuredContent`), so that is about 9 MB of text, or a FileDownload of about
+  7 MB. Bigger files go through `remoteos-call get` or the machine's own server, which stream.
+  Progress messages of a running tool do not reach the caller.
 - **Names.** `fleet` is reserved, so no machine can have it. A `fleet` entry with another url is
   kept, with a warning, and that project gets no fleet server.
 - **Rollout order.** Upgrade the gateway FIRST, then `sync-configs`: the old gateway treats

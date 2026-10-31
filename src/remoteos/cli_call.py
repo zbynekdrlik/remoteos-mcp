@@ -50,7 +50,7 @@ import click
 
 from remoteos import __version__
 from remoteos.gateway.registry import MachineSourceError, authorization_header, is_http_url, read_json_file
-from remoteos.mcp_sse import MAX_REPLY_EVENT_BYTES, allow_large_replies  # noqa: F401
+from remoteos.mcp_sse import allow_large_replies
 from remoteos.taskmanager import declared_runtime
 
 log = logging.getLogger("remoteos.cli_call")

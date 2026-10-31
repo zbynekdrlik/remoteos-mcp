@@ -232,9 +232,14 @@ paths:
   - The token is re-read per tool call (`get_http_request`), so a stateless session never
     outlives a revocation. Refused machines: "not allowed" for an unknown one too (no probing),
     `record_refusal` writes the access-log line a fleet 200 would otherwise hide.
-  - `ASGITransport` buffers, and a reply peaks at ~11x its size (measured), so `_ReplyBudget` caps
-    one reply (`MAX_REPLY_BYTES`, 20 MB) and all in flight (`MAX_BUFFERED_BYTES`, 32 MB) against the
-    unit's `MemoryMax=512M`. FileDownload has no cap of its own. `/<machine>/mcp` still streams.
+  - `ASGITransport` buffers, and a reply peaks at ~10x its wire size (measured), so `_ReplyBudget`
+    caps one reply (`MAX_REPLY_BYTES`, 20 MB) and all in flight (`MAX_BUFFERED_BYTES`, 32 MB) against
+    `MemoryMax=512M`. FileDownload has no cap of its own. `/<machine>/mcp` still streams.
+    - A reply's bytes stay reserved until the OUTER response has gone out (`_Reservation`, via the
+      ASGI scope): the parsed and re-serialised copies outlive the machine's reply. Releasing when
+      the inner app returned let stalled readers reach 815 MB.
+    - `SEND_TIMEOUT_SECONDS` drops a consumer that stops reading, so it cannot pin the budget.
+    - Simultaneous big replies can all be refused (each holds a part): safe, and "try again" works.
   - `allow_large_replies` (`mcp_sse.py`, shared with `remoteos-call`) is needed by every in-repo
     MCP client: the SDK refuses an SSE event over 1 MiB, and its error reads like a dying box
     ("SSE stream ended without a response"). A test must use a REAL reply over 1 MiB.

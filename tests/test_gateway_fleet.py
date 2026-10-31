@@ -7,6 +7,7 @@ import asyncio
 import base64
 import json
 import logging
+import socket
 import time
 from pathlib import Path
 
@@ -97,6 +98,14 @@ def stack(tmp_path):
     s = Stack(tmp_path)
     yield s
     s.stop()
+
+
+def _budget_returns_to(stack: Stack, expected: int) -> None:
+    """It is given back when the response has gone out, a moment after the client read it."""
+    deadline = time.monotonic() + 10
+    while stack.app.state.fleet.budget.used != expected and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert stack.app.state.fleet.budget.used == expected
 
 
 async def _list(client: Client) -> dict[str, dict]:
@@ -416,7 +425,7 @@ def test_a_reply_over_one_mebibyte_arrives_whole(stack):
             return await client.call_tool("Call", {"machine": BOX, "tool": "Blob", "arguments": {"size": size}})
 
     assert asyncio.run(go()).content[0].text == "x" * size
-    assert stack.app.state.fleet.budget.used == 0
+    _budget_returns_to(stack, 0)
 
 
 def test_a_reply_over_the_cap_is_a_clear_error_not_an_out_of_memory(stack):
@@ -431,7 +440,7 @@ def test_a_reply_over_the_cap_is_a_clear_error_not_an_out_of_memory(stack):
     big, small = asyncio.run(go())
     assert big.is_error and "too large" in big.content[0].text
     assert not small.is_error
-    assert stack.app.state.fleet.budget.used == 0  # the refused reply gave its bytes back
+    _budget_returns_to(stack, 0)  # the refused reply gave its bytes back
 
 
 def test_replies_together_cannot_pass_the_budget(stack):
@@ -444,7 +453,54 @@ def test_replies_together_cannot_pass_the_budget(stack):
 
     result = asyncio.run(go())
     assert result.is_error and "try again" in result.content[0].text
-    assert stack.app.state.fleet.budget.used == held
+    _budget_returns_to(stack, held)
+
+
+def test_the_budget_is_held_until_the_consumer_has_the_reply(stack):
+    """The parsed and re-serialised copies outlive the machine's reply: they are what costs memory."""
+    fleet = stack.app.state.fleet
+    seen: list[int] = []
+    real_send = fleet.http
+
+    async def watch_the_outer_response(scope, receive, send):
+        async def watching(message):
+            if message["type"] == "http.response.body" and b"xxxx" in message.get("body", b""):
+                seen.append(fleet.budget.used)
+            await send(message)
+
+        await real_send(scope, receive, watching)
+
+    fleet.http = watch_the_outer_response
+
+    async def go():
+        async with stack.client() as client:
+            arguments = {"machine": BOX, "tool": "Blob", "arguments": {"size": 2_000_000}}
+            await client.call_tool("Call", arguments)
+
+    asyncio.run(go())
+    assert seen and min(seen) >= 4_000_000  # the text is in the reply twice
+    _budget_returns_to(stack, 0)
+
+
+def test_a_consumer_that_stops_reading_gives_the_budget_back(stack, monkeypatch):
+    monkeypatch.setattr(fleet_module, "SEND_TIMEOUT_SECONDS", 0.5)
+    arguments = {"machine": BOX, "tool": "Blob", "arguments": {"size": 8_000_000}}
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "Call", "arguments": arguments}}
+    ).encode()
+    head = (
+        f"POST /fleet/mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {stack.token}\r\n"
+        "Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n"
+        f"Mcp-Protocol-Version: 2025-06-18\r\nContent-Length: {len(body)}\r\n\r\n"
+    ).encode()
+    with socket.create_connection(("127.0.0.1", stack.gateway.port)) as stalled:
+        stalled.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        stalled.sendall(head + body)  # and never reads the answer
+        deadline = time.monotonic() + 5
+        while stack.app.state.fleet.budget.used == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert stack.app.state.fleet.budget.used > 0
+        _budget_returns_to(stack, 0)
 
 
 def test_a_call_never_lists_the_tools_after_the_tool_ran(stack):
@@ -478,7 +534,7 @@ def test_a_machine_silent_after_initialize_cannot_hold_machine_tools(stack, monk
         async def go():
             async with stack.client() as client:
                 started = time.monotonic()
-                result = await client.call_tool_mcp("MachineTools", {"machine": OTHER_BOX})
+                result = await asyncio.wait_for(client.call_tool_mcp("MachineTools", {"machine": OTHER_BOX}), 20)
                 return result, time.monotonic() - started
 
         result, elapsed = asyncio.run(go())
