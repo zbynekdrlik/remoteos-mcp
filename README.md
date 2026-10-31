@@ -176,6 +176,26 @@ Create `.mcp.json` in your project directory:
 
 Claude Code only loads MCP servers from the current project's `.mcp.json`, so different projects = different Windows machines.
 
+## Computer-use actions
+
+| Action | Call |
+|---|---|
+| Triple click | `Click(x, y, action="triple")` |
+| Click or scroll with modifiers | `Click(x, y, modifiers="ctrl+shift")`, `Scroll(3, "up", modifiers="ctrl")` |
+| Press and release a button apart | `Click(x, y, action="down")`, `Move(...)`, `Click(x, y, action="up")` |
+| Repeat a key | `Shortcut("down", repeat=5)` (1..100) |
+| Hold keys | `HoldKey("shift+w", seconds=2)` (capped at 30 s) |
+| Read the cursor | `CursorPosition(monitor=0, max_width=1280)`: image pixels of that frame and screen coordinates |
+| Pause | `Wait(seconds)`: capped at 300 s, takes no desktop lock |
+| Wait for the screen | `WaitFor(text="Saved", timeout=30)` or `WaitFor(window="Notepad")` |
+
+Modifier keys and HoldKey keys are always released, also when the action fails. A button pressed
+with `action="down"` stays down until its `action="up"`.
+
+`WaitFor` checks every 0.5 s without the desktop lock, so other tools keep working. It replies
+with what matched and where: the monitor and the OCR line for `text`, the window's rectangle in
+image pixels for `window`. Not found within `timeout` (0..300 s) is an error.
+
 ## Screen coordinates (Snapshot → Click)
 
 Snapshot and AnnotatedSnapshot shrink the screenshot to `max_width` (default 1280 px). The
@@ -277,7 +297,7 @@ wrong, and for a tool call it keeps the task id, e.g.
 Before a desktop tool touches the screen, it checks that the desktop can be used:
 
 - **Screen tools** (Snapshot, AnnotatedSnapshot, Zoom, OCR, ScreenRecord) and **input tools**
-  (Click, Move, Type, Scroll, Shortcut, MinimizeAll).
+  (Click, Move, Type, Scroll, Shortcut, HoldKey, MinimizeAll).
 - **Windows:**
   - the server runs in session 0: start it with `schtasks /Run /TN RemoteOSMCP`;
   - the server runs in a non-interactive window station;
@@ -701,7 +721,7 @@ temp file in the same directory, so never a half-written file. A `get` reply may
 **Any tool.** `--json` passes the tool's arguments as a JSON object; the reply's text goes to
 stdout. A non-text block is named, never dumped: a Snapshot prints `[image block: image/jpeg]`
 and then its text. A call
-that declares its runtime (Shell's `timeout`, Wait's `seconds`) is waited for that long plus
+that declares its runtime (Shell's `timeout`, Wait's `seconds`, WaitFor's `timeout`) is waited for that long plus
 60 s, unless `--timeout` says otherwise.
 
 ## Uninstall

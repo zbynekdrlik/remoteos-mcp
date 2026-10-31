@@ -190,7 +190,8 @@ def test_windows_ocr_path_is_a_single_quoted_literal(monkeypatch, windows_python
     folder = tmp_path / "it's $(x)"
     folder.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(folder))
-    monkeypatch.setattr(ocr, "ImageGrab", types.SimpleNamespace(grab=lambda bbox=None, all_screens=False: Image.new("RGB", (8, 8))))
+    blank = Image.new("RGB", (8, 8))
+    monkeypatch.setattr(ocr, "ImageGrab", types.SimpleNamespace(grab=lambda bbox=None, all_screens=False: blank))
     calls = _recording_popen(monkeypatch)
     assert ocr.ocr_windows_builtin() == ""
     [(argv, _)] = calls

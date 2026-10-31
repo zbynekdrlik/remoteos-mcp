@@ -13,6 +13,7 @@ import pyautogui
 
 from remoteos.coords import Bbox, CaptureGeometry, frame_for
 from remoteos.displays import DisplayInfo
+from remoteos.input_keys import canonical
 from remoteos.platform.mac.availability import diagnose  # noqa: F401  (the provider's diagnose(), #32)
 from remoteos.scroll import chunks, wheel_steps
 from remoteos.snapshot import fit_to_frame
@@ -270,6 +271,7 @@ def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = No
         events.append(_created(event, "CGEventCreateScrollWheelEvent"))
         if point is not None:
             Quartz.CGEventSetLocation(event, point)
+        _apply_held_flags(event)
     for event in events:
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
     return steps.summary()
@@ -280,6 +282,160 @@ def _created(event, factory: str):
     if event is None:
         raise RuntimeError(f"{factory} returned no event")
     return event
+
+
+def _require_post_event_access() -> None:
+    """Raise unless this process may post events: without it macOS drops them SILENTLY."""
+    preflight = getattr(Quartz, "CGPreflightPostEventAccess", None)  # macOS 10.15+
+    if preflight is not None and not preflight():
+        raise RuntimeError(
+            "macOS does not let this process post keyboard events — allow it in System Settings › "
+            "Privacy & Security › Accessibility (nothing was clicked, typed or pasted)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Mouse buttons, held keys, the cursor (#34)
+# ---------------------------------------------------------------------------
+
+_MOUSE_MOVED = 5  # kCGEventMouseMoved
+_BUTTONS = {"left": (1, 2, 6, 0), "right": (3, 4, 7, 1), "middle": (25, 26, 27, 2)}  # down, up, dragged, CGMouseButton
+_CLICK_STATE_FIELD = 1  # kCGMouseEventClickState: 2 makes the app see a double click
+_CLICKS = {"click": (1, "Clicked"), "double": (2, "Double-clicked"), "triple": (3, "Triple-clicked")}
+
+# kVK_* virtual key codes by `input_keys.canonical` name, on the ANSI layout.
+_KEY_CODES = {
+    **dict(zip("asdfhgzxcv", range(10))),
+    **dict(zip("bqweryt123465", (11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23))),
+    **dict(zip("978", (25, 26, 28))),
+    **dict(zip("0ouipljknm", (29, 31, 32, 34, 35, 37, 38, 40, 45, 46))),
+    "enter": 0x24, "tab": 0x30, "space": 0x31, "backspace": 0x33, "esc": 0x35,
+    "super": 0x37, "shift": 0x38, "alt": 0x3A, "ctrl": 0x3B,
+    "home": 0x73, "pageup": 0x74, "delete": 0x75, "end": 0x77, "pagedown": 0x79,
+    "left": 0x7B, "right": 0x7C, "down": 0x7D, "up": 0x7E,
+    "f1": 0x7A, "f2": 0x78, "f3": 0x63, "f4": 0x76, "f5": 0x60, "f6": 0x61,
+    "f7": 0x62, "f8": 0x64, "f9": 0x65, "f10": 0x6D, "f11": 0x67, "f12": 0x6F,
+}  # fmt: skip
+# kCGEventFlagMask* per modifier: a posted mouse or wheel event does not pick up a posted
+# modifier key by itself, so the flags go on every event while a modifier is held.
+_MODIFIER_FLAGS = {"shift": 0x20000, "ctrl": 0x40000, "alt": 0x80000, "super": 0x100000}
+
+_held: list[str] = []  # the keys down now; the desktop lock runs one input tool at a time
+_held_button: str | None = None  # the button Click(action="down") left pressed
+
+
+def _held_flags() -> int:
+    flags = 0
+    for key in _held:
+        flags |= _MODIFIER_FLAGS.get(key, 0)
+    return flags
+
+
+def _apply_held_flags(event) -> None:
+    flags = _held_flags()
+    if flags:
+        Quartz.CGEventSetFlags(event, flags)
+
+
+def _post_key(key: str, down: bool) -> None:
+    if not HAS_QUARTZ:
+        raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
+    _require_post_event_access()
+    name = canonical(key)
+    if name not in _KEY_CODES:
+        raise ValueError(f"Unknown key: {key}")
+    event = _created(Quartz.CGEventCreateKeyboardEvent(None, _KEY_CODES[name], down), "CGEventCreateKeyboardEvent")
+    if down:
+        _held.append(name)
+    elif name in _held:
+        _held.remove(name)
+    _apply_held_flags(event)
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+
+def key_down(key: str) -> None:
+    """Press ``key`` and leave it down; a modifier also marks every mouse and wheel event until released."""
+    _post_key(key, True)
+
+
+def key_up(key: str) -> None:
+    """Release a key pressed by :func:`key_down`."""
+    _post_key(key, False)
+
+
+def _mouse_event(kind: int, point: tuple[float, float], button: int, clicks: int = 0):
+    event = _created(Quartz.CGEventCreateMouseEvent(None, kind, point, button), "CGEventCreateMouseEvent")
+    if clicks:
+        Quartz.CGEventSetIntegerValueField(event, _CLICK_STATE_FIELD, clicks)
+    _apply_held_flags(event)
+    return event
+
+
+def _post_mouse(x: int, y: int, button: str, presses: list[bool]) -> None:
+    """Move to (x, y), then one press or release per ``presses`` entry: all built, then all posted.
+
+    Quartz, not pyautogui: pyautogui's events carry no modifier flags. The click state
+    counts the presses, so ``[True, False] * 3`` is a triple click.
+    """
+    if not HAS_QUARTZ:
+        raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
+    _require_post_event_access()
+    point = (float(x), float(y))
+    down, up, _dragged, code = _BUTTONS[button]
+    events = [_mouse_event(_MOUSE_MOVED, point, code)]
+    count = 0
+    for pressed in presses:
+        count += pressed
+        events.append(_mouse_event(down if pressed else up, point, code, max(count, 1)))
+    for event in events:
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+
+def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
+    """Mouse click / double / triple / hover / button down / button up at screen coordinates (points).
+
+    A plain click stays pyautogui's. Under a held modifier and for a button down or up it is Quartz.
+    """
+    global _held_button
+    if action == "down":
+        _post_mouse(x, y, button, [True])
+        _held_button = button
+        return f"Pressed {button} at ({x},{y})"
+    if action == "up":
+        _post_mouse(x, y, button, [False])
+        _held_button = None
+        return f"Released {button} at ({x},{y})"
+    if action == "hover":
+        pyautogui.moveTo(x, y)
+        return f"Hovered at ({x},{y})"
+    count, word = _CLICKS[action]
+    if _held_flags():
+        _post_mouse(x, y, button, [True, False] * count)
+    elif action == "double":
+        pyautogui.doubleClick(x, y, button=button)
+    elif action == "triple":
+        pyautogui.tripleClick(x, y, button=button)
+    else:
+        pyautogui.click(x, y, button=button)
+    return f"{word} {button} at ({x},{y})"
+
+
+def move_held(x: int, y: int) -> bool:
+    """With a button held, post the move as a drag and return True: apps ignore a plain move then."""
+    if _held_button is None:
+        return False
+    _require_post_event_access()
+    dragged, code = _BUTTONS[_held_button][2:]
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, _mouse_event(dragged, (float(x), float(y)), code))
+    return True
+
+
+def cursor_position() -> tuple[int, int]:
+    """The cursor in points, the ``CGDisplayBounds`` space the input tools use (top-left origin)."""
+    if not HAS_QUARTZ:
+        raise RuntimeError("Quartz not available — requires macOS with pyobjc-framework-Quartz")
+    location = Quartz.CGEventGetLocation(_created(Quartz.CGEventCreate(None), "CGEventCreate"))
+    return int(location.x), int(location.y)
 
 
 # ---------------------------------------------------------------------------
@@ -304,16 +460,6 @@ def _key_pair(stroke: Stroke) -> list:
             Quartz.CGEventKeyboardSetUnicodeString(event, len(stroke.units), stroke.source)
         events.append(event)
     return events
-
-
-def _require_post_event_access() -> None:
-    """Raise unless this process may post events: without it macOS drops them SILENTLY."""
-    preflight = getattr(Quartz, "CGPreflightPostEventAccess", None)  # macOS 10.15+
-    if preflight is not None and not preflight():
-        raise RuntimeError(
-            "macOS does not let this process post keyboard events — allow it in System Settings › "
-            "Privacy & Security › Accessibility (nothing was clicked, typed or pasted)"
-        )
 
 
 def type_unicode(text: str) -> int:

@@ -38,6 +38,7 @@ from PIL import ImageGrab  # noqa: E402
 
 from remoteos.coords import Bbox, CaptureGeometry, frame_for  # noqa: E402
 from remoteos.displays import DisplayInfo  # noqa: E402
+from remoteos.input_keys import canonical  # noqa: E402
 from remoteos.platform.command import powershell_argv, run_command  # noqa: E402
 from remoteos.platform.win.availability import diagnose, reconnect_to_console  # noqa: E402,F401  (#32)
 from remoteos.platform.win.psquote import ps_literal  # noqa: E402
@@ -287,6 +288,8 @@ def capture_region(bbox: Bbox):
 # ---------------------------------------------------------------------------
 
 _INPUT_MOUSE = 0
+_INPUT_KEYBOARD = 1
+_KEYEVENTF_KEYUP = 0x0002
 _MOUSEEVENTF_WHEEL = 0x0800
 _MOUSEEVENTF_HWHEEL = 0x1000
 
@@ -327,6 +330,122 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", ctypes.c_uint32), ("u", _INPUTUNION)]
 
 
+# ---------------------------------------------------------------------------
+# Mouse buttons, held keys, the cursor (#34)
+# ---------------------------------------------------------------------------
+
+_SM_SWAPBUTTON = 23
+_BUTTON_EVENTS = {"left": (0x0002, 0x0004), "right": (0x0008, 0x0010), "middle": (0x0020, 0x0040)}  # down, up
+
+
+def _send_one(event: _INPUT, what: str) -> None:
+    """``SendInput`` of one event; 0 inserted (a locked or disconnected session) raises."""
+    sent = ctypes.windll.user32.SendInput(1, (_INPUT * 1)(event), ctypes.sizeof(_INPUT))
+    if sent != 1:
+        raise RuntimeError(f"SendInput refused the {what} — input is blocked (locked or disconnected session?)")
+
+
+def _mouse_button(x: int, y: int, button: str, pressed: bool) -> None:
+    """Press or release ``button`` at screen point (x, y), honouring swapped mouse buttons.
+
+    SendInput speaks of physical buttons: with SwapMouseButton on, "left" (the logical one
+    pyautogui's click means) is the physical right one.
+    """
+    user32 = ctypes.windll.user32
+    if button != "middle" and user32.GetSystemMetrics(_SM_SWAPBUTTON):
+        button = "right" if button == "left" else "left"
+    if not user32.SetCursorPos(int(x), int(y)):
+        raise RuntimeError(f"SetCursorPos({x},{y}) failed — no interactive desktop (locked or disconnected session?)")
+    event = _INPUT(type=_INPUT_MOUSE)
+    event.u.mi.dwFlags = _BUTTON_EVENTS[button][0 if pressed else 1]
+    _send_one(event, "mouse button")
+
+
+def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
+    """Mouse click / double / triple / hover / button down / button up at screen coordinates."""
+    if action == "hover":
+        pyautogui.moveTo(x, y)
+        return f"Hovered at ({x},{y})"
+    if action == "double":
+        pyautogui.doubleClick(x, y, button=button)
+        return f"Double-clicked {button} at ({x},{y})"
+    if action == "triple":
+        pyautogui.tripleClick(x, y, button=button)
+        return f"Triple-clicked {button} at ({x},{y})"
+    if action == "down":
+        _mouse_button(x, y, button, True)
+        return f"Pressed {button} at ({x},{y})"
+    if action == "up":
+        _mouse_button(x, y, button, False)
+        return f"Released {button} at ({x},{y})"
+    pyautogui.click(x, y, button=button)
+    return f"Clicked {button} at ({x},{y})"
+
+
+_KEYEVENTF_EXTENDEDKEY = 0x0001
+# Virtual keys by `input_keys.canonical` name, with the extended flag where the key has one.
+_NAMED_KEYS = {
+    "ctrl": (0x11, False),
+    "shift": (0x10, False),
+    "alt": (0x12, False),
+    "super": (0x5B, True),
+    "enter": (0x0D, False),
+    "tab": (0x09, False),
+    "space": (0x20, False),
+    "backspace": (0x08, False),
+    "esc": (0x1B, False),
+    "insert": (0x2D, True),
+    "delete": (0x2E, True),
+    "home": (0x24, True),
+    "end": (0x23, True),
+    "pageup": (0x21, True),
+    "pagedown": (0x22, True),
+    "left": (0x25, True),
+    "up": (0x26, True),
+    "right": (0x27, True),
+    "down": (0x28, True),
+    **{f"f{n}": (0x6F + n, False) for n in range(1, 25)},
+}
+
+
+def _virtual_key(key: str) -> tuple[int, bool]:
+    if key in _NAMED_KEYS:
+        return _NAMED_KEYS[key]
+    if len(key) == 1 and key.isascii() and key.isalnum():
+        return ord(key.upper()), False  # VK_A..VK_Z and VK_0..VK_9 are their ASCII codes
+    raise ValueError(f"Unknown key: {key}")
+
+
+def _send_key(key: str, up: int) -> None:
+    vk, extended = _virtual_key(canonical(key))
+    event = _INPUT(type=_INPUT_KEYBOARD)
+    event.u.ki.wVk = vk
+    event.u.ki.dwFlags = up | (_KEYEVENTF_EXTENDEDKEY if extended else 0)
+    _send_one(event, "key event")
+
+
+def key_down(key: str) -> None:
+    """Press ``key`` and leave it down."""
+    _send_key(key, 0)
+
+
+def key_up(key: str) -> None:
+    """Release a key pressed by :func:`key_down`."""
+    _send_key(key, _KEYEVENTF_KEYUP)
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_int32), ("y", ctypes.c_int32)]
+
+
+def cursor_position() -> tuple[int, int]:
+    """The cursor in screen coordinates (physical pixels under per-monitor-v2)."""
+    point = _POINT()
+    if not ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+        raise RuntimeError("GetCursorPos failed — no interactive desktop (locked or disconnected session?)")
+    return point.x, point.y
+
+
 def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = None) -> str:
     """Turn the wheel ``clicks`` notches toward ``direction``, at screen point (x, y) if given.
 
@@ -359,8 +478,6 @@ def scroll(direction: str, clicks: int, x: int | None = None, y: int | None = No
 # Unicode typing (#30)
 # ---------------------------------------------------------------------------
 
-_INPUT_KEYBOARD = 1
-_KEYEVENTF_KEYUP = 0x0002
 _KEYEVENTF_UNICODE = 0x0004
 _VIRTUAL_KEYS = {ENTER: 0x0D, TAB: 0x09}  # VK_RETURN, VK_TAB
 _KEY_INTERVAL_S = 0.01  # between characters: apps that drain input slowly keep up

@@ -57,7 +57,10 @@ from remoteos.platform.linux.x11_capture import (  # noqa: F401
 )
 from remoteos.platform.linux.x11_input import (  # noqa: F401
     click,
+    cursor_position,
     get_clipboard,
+    key_down,
+    key_up,
     move,
     scroll,
     set_clipboard,

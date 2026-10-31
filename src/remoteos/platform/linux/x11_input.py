@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from remoteos.errors import DesktopUnavailable
 from remoteos.platform.linux import session
@@ -21,7 +22,7 @@ _BUTTONS = {"left": 1, "middle": 2, "right": 3}
 
 
 def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
-    """Mouse click / double-click / hover at screen coordinates."""
+    """Mouse click / double / triple / hover / button down / button up at screen coordinates."""
     if get_session().mode != "x11":
         raise DesktopUnavailable(_unavailable())
     btn = _BUTTONS.get(button, 1)
@@ -31,6 +32,15 @@ def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
     if action == "double":
         _xdotool(["mousemove", str(x), str(y), "click", "--repeat", "2", "--delay", "120", str(btn)])
         return f"Double-clicked {button} at ({x},{y})"
+    if action == "triple":
+        _xdotool(["mousemove", str(x), str(y), "click", "--repeat", "3", "--delay", "120", str(btn)])
+        return f"Triple-clicked {button} at ({x},{y})"
+    if action == "down":
+        _xdotool(["mousemove", str(x), str(y), "mousedown", str(btn)])
+        return f"Pressed {button} at ({x},{y})"
+    if action == "up":
+        _xdotool(["mousemove", str(x), str(y), "mouseup", str(btn)])
+        return f"Released {button} at ({x},{y})"
     _xdotool(["mousemove", str(x), str(y), "click", str(btn)])
     return f"Clicked {button} at ({x},{y})"
 
@@ -136,6 +146,8 @@ _KEY_ALIASES = {
     "del": "Delete",
     "delete": "Delete",
     "ins": "Insert",
+    "insert": "Insert",
+    **{f"f{n}": f"F{n}" for n in range(1, 25)},  # keysyms are case-sensitive
     "tab": "Tab",
     "space": "space",
     "backspace": "BackSpace",
@@ -155,13 +167,43 @@ def _map_key(part: str) -> str:
     return _KEY_ALIASES.get(p, part.strip())
 
 
-def shortcut(keys: str) -> str:
-    """Execute a keyboard shortcut, e.g. ``ctrl+c`` / ``alt+Tab`` / ``super+e``."""
+def key_down(key: str) -> None:
+    """Press ``key`` and leave it down: xdotool's XTEST press outlives the xdotool process (#34)."""
+    if get_session().mode != "x11":
+        raise DesktopUnavailable(_unavailable())
+    _xdotool(["keydown", _map_key(key)])
+
+
+def key_up(key: str) -> None:
+    """Release a key pressed by :func:`key_down`."""
+    if get_session().mode != "x11":
+        raise DesktopUnavailable(_unavailable())
+    _xdotool(["keyup", _map_key(key)])
+
+
+_LOCATION = re.compile(r"^(X|Y)=(-?\d+)$", re.MULTILINE)
+
+
+def cursor_position() -> tuple[int, int]:
+    """The pointer in screen pixels, from ``xdotool getmouselocation --shell``."""
+    if get_session().mode != "x11":
+        raise DesktopUnavailable(_unavailable())
+    found = dict(_LOCATION.findall(_xdotool(["getmouselocation", "--shell"])))
+    if "X" not in found or "Y" not in found:
+        raise RuntimeError("xdotool getmouselocation gave no position")
+    return int(found["X"]), int(found["Y"])
+
+
+def shortcut(keys: str, repeat: int = 1) -> str:
+    """Execute a keyboard shortcut ``repeat`` times, e.g. ``ctrl+c`` / ``alt+Tab`` / ``super+e``."""
     if get_session().mode != "x11":
         raise DesktopUnavailable(_unavailable())
     combo = "+".join(_map_key(k) for k in keys.split("+") if k.strip())
     if not combo:
         raise ValueError("No keys given")
+    if repeat > 1:
+        _xdotool(["key", "--repeat", str(repeat), combo])
+        return f"Executed shortcut: {keys} x{repeat}"
     _xdotool(["key", combo])
     return f"Executed shortcut: {keys}"
 
