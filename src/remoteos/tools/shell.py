@@ -7,13 +7,8 @@ import subprocess
 
 from mcp.types import TextContent
 
-try:
-    from mcp.types import ToolAnnotations
-except ImportError:
-    from fastmcp.tools import ToolAnnotations
-
 from remoteos import process_mgr
-from remoteos.app import _ensure_session_connected, _require_win32, log, mcp
+from remoteos.app import ToolAnnotations, _ensure_session_connected, _require_win32, log, mcp
 from remoteos.errors import failure, reports_errors
 from remoteos.identity import LINUX_SHELL, MACOS_SHELL
 from remoteos.platform import get_desktop, is_macos, is_windows

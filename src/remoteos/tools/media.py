@@ -4,13 +4,8 @@ from __future__ import annotations
 
 from mcp.types import ImageContent, TextContent
 
-try:
-    from mcp.types import ToolAnnotations
-except ImportError:
-    from fastmcp.tools import ToolAnnotations
-
 from remoteos import ocr, recording
-from remoteos.app import _capture_snapshot_frame, _capture_tool, mcp
+from remoteos.app import ToolAnnotations, _capture_snapshot_frame, _capture_tool, mcp
 from remoteos.coords import contract_line
 from remoteos.platform import get_desktop, is_linux
 from remoteos.snapshot import draw_annotations, encode_jpeg

@@ -7,12 +7,8 @@ import time
 
 from mcp.types import ImageContent, TextContent
 
-try:
-    from mcp.types import ToolAnnotations
-except ImportError:
-    from fastmcp.tools import ToolAnnotations
-
 from remoteos.app import (
+    ToolAnnotations,
     _capture_snapshot_frame,
     _current_frame,
     _desktop_preflight,

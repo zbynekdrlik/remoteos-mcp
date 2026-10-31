@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-try:
-    from mcp.types import ToolAnnotations
-except ImportError:
-    from fastmcp.tools import ToolAnnotations
-
-from remoteos.app import _input_tool, _require_win32, mcp
+from remoteos.app import ToolAnnotations, _input_tool, _require_win32, mcp
 from remoteos.errors import failure, reports_errors
 from remoteos.platform import get_desktop
 

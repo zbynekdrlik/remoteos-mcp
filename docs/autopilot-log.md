@@ -568,4 +568,4 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - Pure moves, proved two ways: `tests/test_tools_list_golden.py` (snapshotted before the first move) and a multiset line diff of old vs new files (only imports, section banners, `session._run_x(` and `app._WIN_DPI_MODE` differ).
 - `app.py` + `tools/{desktop,windows,shell,files,system,network,media,tasks}.py`; `__main__.py` keeps the CLI and the task-wrapping pass. EventLog stays in `tools/network.py`: moving it to `system.py` would change the `tools/list` order.
 - `platform/linux/`: `session.py`, `windows.py`, `x11_capture.py`, `x11_input.py`; `desktop.py` is the facade.
-- Tests read and patch the real modules through `tests/tool_surface.py` (`server`); test bodies are otherwise unchanged.
+- Tests read and patch the real modules through `tests/tool_surface.py` (`server`). The test bodies are unchanged, except `test_updater` (scans every server module), `test_win_dpi` (one new order test) and `test_session_reconnect_helper_is_defined_once` (reads `app.py`).

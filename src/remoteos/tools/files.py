@@ -6,12 +6,7 @@ import base64
 from datetime import datetime
 from pathlib import Path
 
-try:
-    from mcp.types import ToolAnnotations
-except ImportError:
-    from fastmcp.tools import ToolAnnotations
-
-from remoteos.app import _tobool, log, mcp
+from remoteos.app import ToolAnnotations, _tobool, log, mcp
 from remoteos.errors import failure, reports_errors
 from remoteos.file_transfer import hash_file, replace_file, start_file_like
 

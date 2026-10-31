@@ -27,8 +27,11 @@ class _ToolSurface:
         raise AttributeError(name)
 
     def __setattr__(self, name: str, value) -> None:
-        # pyautogui is not imported on Linux: a fake of it goes where the input tools read it
-        for module in self._binding(name) or [tools.desktop]:
+        bound = self._binding(name)
+        if name == "pyautogui":  # not imported on Linux: a fake of it goes where the input tools read it
+            bound = bound or [tools.desktop]
+        assert bound, f"no tool module binds {name}"
+        for module in bound:
             setattr(module, name, value)
 
     def __delattr__(self, name: str) -> None:

@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-try:
-    from mcp.types import ToolAnnotations
-except ImportError:
-    from fastmcp.tools import ToolAnnotations
-
-from remoteos.app import mcp
+from remoteos.app import ToolAnnotations, mcp
 from remoteos.errors import failure, reports_errors
 from remoteos.taskmanager import manager as task_manager
 

@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-try:
-    from mcp.types import ToolAnnotations
-except ImportError:
-    from fastmcp.tools import ToolAnnotations
-
 from remoteos import selfupgrade
-from remoteos.app import mcp
+from remoteos.app import ToolAnnotations, mcp
 from remoteos.errors import reports_errors
 from remoteos.platform import get_services, get_system
 

@@ -26,6 +26,12 @@ if _sys.platform != "linux":
     pyautogui.PAUSE = 0.05
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+
+try:
+    from mcp.types import ToolAnnotations  # noqa: F401  (for the tool modules)
+except ImportError:
+    from fastmcp.tools import ToolAnnotations  # noqa: F401
+
 from starlette.responses import JSONResponse
 
 from remoteos import __version__, desktop
