@@ -110,7 +110,7 @@ def test_parse_xrandr_monitors():
         " 0: +*eDP-1 2560/344x1600/215+0+0  eDP-1\n"
         " 1: +HDMI-1 1920/527x1080/296+2560+0  HDMI-1\n"
     )
-    assert parse_xrandr_monitors(text) == [(0, 0, 2560, 1600), (2560, 0, 1920, 1080)]
+    assert [m[:4] for m in parse_xrandr_monitors(text)] == [(0, 0, 2560, 1600), (2560, 0, 1920, 1080)]
 
 
 def test_parse_xrandr_monitors_empty():

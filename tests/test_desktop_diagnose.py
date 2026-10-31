@@ -269,6 +269,7 @@ def test_linux_x11_session_is_no_diagnosis_even_when_a_locker_runs(monkeypatch, 
 _CAPTURE_TOOLS = {
     "Snapshot": {},
     "AnnotatedSnapshot": {},
+    "Zoom": {"x": 0, "y": 0, "width": 10, "height": 10},
     "OCR": {},
     "ScreenRecord": {"duration": 0.1},
 }

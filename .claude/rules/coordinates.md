@@ -4,6 +4,7 @@ paths:
   - "src/remoteos/tools/desktop.py"
   - "src/remoteos/tools/media.py"
   - "src/remoteos/coords.py"
+  - "src/remoteos/displays.py"
   - "src/remoteos/snapshot.py"
   - "src/remoteos/platform/*/desktop.py"
   - "src/remoteos/platform/win/dpi.py"
@@ -15,6 +16,7 @@ paths:
   - "tests/test_snapshot_render.py"
   - "tests/test_provider_geometry.py"
   - "tests/test_win_dpi.py"
+  - "tests/test_zoom_display_inventory.py"
 ---
 
 # Coordinate contract (Snapshot image ↔ screen, #28) — gotchas
@@ -61,6 +63,22 @@ paths:
     targeted by these three; that is the documented trade-off.
   - Never write `if x and y`. Below the tool, a provider gets `None` for "no point" and
     checks `is not None`.
+- **Zoom is view-only (#33), so the frame contract stays stateless.** Its rectangle maps through
+  the parent frame `(monitor, max_width)` (`coords.region_to_screen`, right/bottom exclusive) and
+  `region_geometry` keeps the pixels per screen unit, so `frame_for` + `fit_to_frame` size it like
+  any capture. The reply gives the region in screen coordinates. No input tool takes zoom pixels:
+  a `region` argument on them, or a server-side "current frame", was rejected on #33.
+  - Providers: `capture_region(bbox)` returns a PIL image. macOS `screencapture -R` takes POINTS and
+    writes pixels; the bbox is global, so `-D` is not passed with it.
+  - The capture goes through `app._capture_with_retry`, the Windows retry Snapshot uses. Only the
+    grab: a bad rectangle must not trigger a reconnect check.
+  - `region_to_screen` raises when nothing is inside the frame. Clamping that to an empty capture
+    would look like a black screen.
+- **`DisplayInventory` (#33) = `remoteos/displays.py`.** Providers: `list_displays()` plus
+  `MONITOR_ZERO`. The index MUST be the tools' `monitor=N`: `EnumDisplayMonitors` order on Windows,
+  `xrandr --listmonitors` on Linux, `CGGetActiveDisplayList` on macOS. `scale` is `None` on X11:
+  xrandr's millimetres give a physical DPI, not a UI scale. It needs only the `"windows"` preflight
+  (it works locked) and is a QUERY-category tool, so it never waits behind a capture or `Wait`.
 - **Tests:**
   - Tool-level tests run the real MCP tool functions on a fake X11 display, stubbing only
     `_run_x` and `_load_atspi`.

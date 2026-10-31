@@ -17,7 +17,10 @@ from remoteos.coords import (
     image_size_for,
     image_to_screen,
     mapping_note,
+    region_geometry,
+    region_to_screen,
     screen_to_image,
+    zoom_line,
 )
 
 
@@ -173,3 +176,79 @@ def test_mapping_note_lists_every_point():
     frame = frame_for(0, 1280, _geo(0, 0, 2560, 1600))
     note = mapping_note(frame, [(10, 20), (640, 400)], [(20, 40), (1280, 800)])
     assert note == " [image (10,20) → screen (20,40), image (640,400) → screen (1280,800); scale 2.000]"
+
+
+# ---------------------------------------------------------------------------
+# region_to_screen / region_geometry / zoom_line — Zoom's rectangle (#33)
+# ---------------------------------------------------------------------------
+
+
+def test_region_in_image_pixels_scales_to_screen():
+    frame = frame_for(0, 1280, _geo(0, 0, 2560, 1600))
+    assert region_to_screen(frame, 100, 50, 320, 200, "image") == (200, 100, 840, 500)
+
+
+def test_region_keeps_the_frame_origin():
+    frame = frame_for(0, 1280, _geo(-1920, -180, 3840, 2160))  # scale 3.0
+    assert region_to_screen(frame, 10, 20, 100, 50, "image") == (-1890, -120, -1590, 30)
+
+
+def test_region_rounds_half_up_like_the_rest_of_the_contract():
+    frame = frame_for(0, 1280, _geo(0, 0, 1440, 900, 2880, 1800))  # scale 1.125
+    assert region_to_screen(frame, 100, 100, 200, 100, "image") == (113, 113, 338, 225)
+
+
+def test_region_in_screen_coordinates_is_taken_as_it_is():
+    frame = frame_for(0, 1280, _geo(0, 0, 2560, 1600))
+    assert region_to_screen(frame, 7, 9, 11, 13, "screen") == (7, 9, 18, 22)
+
+
+@pytest.mark.parametrize(
+    ("rect", "expected"),
+    [
+        ((1200, 700, 400, 400), (2400, 1400, 2560, 1600)),  # past the far edges: right/bottom are exclusive
+        ((-10, -10, 20, 20), (0, 0, 20, 20)),  # past the near edges
+        ((0, 0, 5000, 5000), (0, 0, 2560, 1600)),
+    ],
+)
+def test_region_is_cut_to_the_frame(rect, expected):
+    frame = frame_for(0, 1280, _geo(0, 0, 2560, 1600))
+    assert region_to_screen(frame, *rect, "image") == expected
+
+
+def test_region_below_one_screen_unit_keeps_one():
+    frame = frame_for(0, 0, _geo(0, 0, 1440, 900, 2880, 1800))  # native Retina: scale 0.5
+    assert region_to_screen(frame, 11, 11, 1, 1, "image") == (6, 6, 7, 7)
+
+
+@pytest.mark.parametrize("size", [(0, 10), (10, 0), (-5, 10), (10, -5)])
+def test_region_needs_a_positive_size(size):
+    frame = frame_for(0, 1280, _geo(0, 0, 2560, 1600))
+    with pytest.raises(ValueError, match="must be positive"):
+        region_to_screen(frame, 0, 0, *size, "image")
+
+
+@pytest.mark.parametrize("rect", [(1280, 0, 10, 10), (0, 800, 10, 10), (-20, 0, 10, 10), (0, -20, 10, 10)])
+def test_region_outside_the_frame_is_an_error(rect):
+    frame = frame_for(0, 1280, _geo(0, 0, 2560, 1600))
+    with pytest.raises(ValueError, match="outside the frame"):
+        region_to_screen(frame, *rect, "image")
+
+
+def test_region_geometry_keeps_the_pixels_per_screen_unit():
+    region = region_geometry(_geo(0, 0, 1440, 900, 2880, 1800), (113, 113, 338, 225))
+    assert region == CaptureGeometry(x=113, y=113, width=225, height=112, pixel_width=450, pixel_height=224)
+
+
+def test_zoom_frame_is_native_up_to_max_width_and_downscaled_above_it():
+    geometry = _geo(0, 0, 2560, 1600)
+    native = frame_for(0, 1280, region_geometry(geometry, (200, 100, 840, 500)))
+    assert native.image_size == (640, 400) and native.scale == 1.0
+    wide = frame_for(0, 1280, region_geometry(geometry, (0, 0, 2000, 1000)))
+    assert wide.image_size == (1280, 640) and wide.scale == pytest.approx(1.5625)
+
+
+def test_zoom_line_gives_the_screen_region_and_says_it_is_view_only():
+    line = zoom_line(frame_for(0, 1280, region_geometry(_geo(0, 0, 2560, 1600), (200, 100, 840, 500))))
+    assert line.startswith("Zoom image 640x400 = screen 640x400 at origin (200,100), scale 1.000; view only")
+    assert 'screen = origin + round(image * scale) with coords="screen"' in line

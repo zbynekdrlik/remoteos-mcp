@@ -209,6 +209,23 @@ passed straight to Click / Move / Scroll / Type.
   window rects and the cursor all use physical pixels. The startup log prints
   `Windows DPI awareness: …`.
 - **OCR and ScreenRecord regions are still in screen coordinates.**
+- **`Zoom(x, y, width, height)` reads small text.** The rectangle is in pixels of the Snapshot
+  image (same `monitor` / `max_width`), or raw OS coordinates with `coords="screen"`. It is cut
+  to the frame, captured at native resolution and downscaled only above `max_width`.
+  - Zoom is **view only**: input tools never take pixels of the zoomed image. The reply gives
+    the region's screen origin and scale:
+
+    ```
+    **Coordinates:** Zoom image 640x400 = screen 640x400 at origin (200,100), scale 1.000; view only: ...
+    ```
+
+    To click a point of the zoom, pass `origin + round(image × scale)` with `coords="screen"`.
+  - `max_width` also limits the reply: use `max_width=0` with `coords="screen"` for a native
+    capture wider than 1280 px.
+- **`DisplayInventory()` says what each `monitor` value is on this machine:** what `monitor=0`
+  covers, then per display its `monitor=N` index, name, bounds, origin, scale and the primary
+  flag. Scale is Windows effective DPI / 96 and macOS pixels per point. It is `n/a` on X11, which
+  has no per-monitor scale, and on Windows when `GetDpiForMonitor` gives no answer.
 
 ## Scroll units
 

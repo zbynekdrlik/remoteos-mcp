@@ -245,6 +245,8 @@ def test_get_task_status_with_an_unknown_id_is_an_mcp_error():
 _DESKTOP_CALLS = [
     ("Snapshot", {}),
     ("AnnotatedSnapshot", {}),
+    ("Zoom", {"x": 0, "y": 0, "width": 10, "height": 10}),
+    ("DisplayInventory", {}),
     ("ScreenRecord", {"duration": 0.1}),
     ("Click", {"x": 10, "y": 10}),
     ("Type", {"text": "x"}),

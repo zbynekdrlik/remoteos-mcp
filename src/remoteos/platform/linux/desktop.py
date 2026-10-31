@@ -47,9 +47,12 @@ from remoteos.platform.linux.windows import (  # noqa: F401
     resize_window,
 )
 from remoteos.platform.linux.x11_capture import (  # noqa: F401
+    MONITOR_ZERO,
     capture_frame,
     capture_geometry,
     capture_png,
+    capture_region,
+    list_displays,
     record_screen,
 )
 from remoteos.platform.linux.x11_input import (  # noqa: F401

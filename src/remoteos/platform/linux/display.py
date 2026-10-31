@@ -14,14 +14,24 @@ this module stays free of session handling and is testable with a fake runner.
 from __future__ import annotations
 
 import re
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from remoteos.coords import CaptureGeometry
+from remoteos.displays import DisplayInfo
 
 # "Screen 0: minimum 8 x 8, current 2560 x 1600, maximum 32767 x 32767"
 _SCREEN_RE = re.compile(r"\bcurrent\s+(\d+)\s*x\s*(\d+)")
-# " 1: +HDMI-1 1920/527x1080/296+2560+0  HDMI-1" → width, height, x, y
-_MONITOR_RE = re.compile(r"^\s*\d+:\s+\S+\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)")
+# " 0: +*HDMI-1 1920/527x1080/296+2560+0  HDMI-1" → primary marker, name, width, height, x, y
+_MONITOR_RE = re.compile(r"^\s*\d+:\s+\+?(\*?)(\S+)\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)")
+
+
+class XrandrMonitor(NamedTuple):
+    x: int
+    y: int
+    width: int
+    height: int
+    name: str
+    primary: bool
 
 
 def parse_xrandr_screen_size(text: str) -> tuple[int, int]:
@@ -35,8 +45,8 @@ def parse_xrandr_screen_size(text: str) -> tuple[int, int]:
     return width, height
 
 
-def parse_xrandr_monitors(text: str) -> list[tuple[int, int, int, int]]:
-    """``xrandr --listmonitors`` → ``[(x, y, width, height), ...]`` in listing order.
+def parse_xrandr_monitors(text: str) -> list[XrandrMonitor]:
+    """``xrandr --listmonitors`` → one :class:`XrandrMonitor` per line, in listing order.
 
     Entry ``N-1`` is ``monitor=N`` for Snapshot and the input tools.
     """
@@ -44,8 +54,9 @@ def parse_xrandr_monitors(text: str) -> list[tuple[int, int, int, int]]:
     for line in text.splitlines():
         m = _MONITOR_RE.match(line)
         if m:
-            width, height, x, y = (int(v) for v in m.groups())
-            monitors.append((x, y, width, height))
+            primary, name = m.group(1), m.group(2)
+            width, height, x, y = (int(v) for v in m.groups()[2:])
+            monitors.append(XrandrMonitor(x, y, width, height, name, bool(primary)))
     return monitors
 
 
@@ -62,5 +73,13 @@ def query_geometry(monitor: int, run: Callable[[list[str]], str]) -> CaptureGeom
     monitors = parse_xrandr_monitors(run(["xrandr", "--listmonitors"]))
     if monitor > len(monitors):
         raise IndexError(f"Monitor {monitor} not found (have {len(monitors)})")
-    x, y, width, height = monitors[monitor - 1]
-    return CaptureGeometry(x=x, y=y, width=width, height=height, pixel_width=width, pixel_height=height)
+    m = monitors[monitor - 1]
+    return CaptureGeometry(x=m.x, y=m.y, width=m.width, height=m.height, pixel_width=m.width, pixel_height=m.height)
+
+
+def query_displays(run: Callable[[list[str]], str]) -> list[DisplayInfo]:
+    """The ``monitor=N`` displays. X11 has no per-monitor scale, so ``scale`` is ``None``."""
+    return [
+        DisplayInfo(index, m.x, m.y, m.width, m.height, None, m.primary, m.name)
+        for index, m in enumerate(parse_xrandr_monitors(run(["xrandr", "--listmonitors"])), start=1)
+    ]
