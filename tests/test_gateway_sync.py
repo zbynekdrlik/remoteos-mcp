@@ -20,8 +20,12 @@ from pathlib import Path
 import httpx2
 import pytest
 from click.testing import CliRunner
+from fastmcp import Client
+from fastmcp.client.auth import BearerAuth
 from fleet_harness import (
     FakeFleetMachine,
+    LoopbackServer,
+    RealMachine,
     fresh_secret,
     install_fake_remote_tools,
     remote_calls,
@@ -31,7 +35,14 @@ from fleet_harness import (
 from remoteos.gateway import cli as gateway_cli
 from remoteos.gateway.accesslog import AccessLog
 from remoteos.gateway.app import create_app
-from remoteos.gateway.registry import LiveConfig, load_registry, token_sha256
+from remoteos.gateway.registry import (
+    LiveConfig,
+    RegistryError,
+    is_valid_machine_name,
+    load_registry,
+    token_sha256,
+    validate_machine_name,
+)
 
 GATEWAY = "http://100.104.8.125:8796"
 ME = pwd.getpwuid(os.getuid()).pw_name
@@ -193,8 +204,16 @@ def test_sync_rewrites_only_fleet_entries_and_every_other_entry_stays_byte_equal
     text = path.read_text(encoding="utf-8")
     token = fleet.token_of(path, "linux-cam1")
     servers = fleet.servers(path)
-    assert list(servers) == ["win-stream-snv", "reaperiem", "linux-cam1", "n8n-mcp", "linux-presenter", "linux-cam2"]
-    for name in ("win-stream-snv", "linux-cam1", "linux-cam2"):
+    assert list(servers) == [
+        "win-stream-snv",
+        "reaperiem",
+        "linux-cam1",
+        "n8n-mcp",
+        "linux-presenter",
+        "linux-cam2",
+        "fleet",
+    ]
+    for name in ("win-stream-snv", "linux-cam1", "linux-cam2", "fleet"):
         assert servers[name] == _gateway_entry(name, token)  # same names, one project token
     for fragment in fleet.non_fleet_fragments():
         assert fragment in text  # byte-equal, formatting included
@@ -248,7 +267,7 @@ def test_a_machine_removed_from_the_manifest_leaves_the_allow_list_and_the_confi
     assert result.exit_code == 0, result.output
     servers = fleet.servers(path)
     assert "linux-cam1" not in servers
-    assert list(servers) == ["win-stream-snv", "reaperiem", "n8n-mcp", "linux-presenter", "linux-cam2"]
+    assert list(servers) == ["win-stream-snv", "reaperiem", "n8n-mcp", "linux-presenter", "linux-cam2", "fleet"]
     assert fleet.token_of(path, "linux-cam2") == token  # the token is stable
     consumer = load_registry(fleet.registry).consumers["camera-box@dev1"]
     assert consumer.machines == ["win-stream-snv", "linux-cam2"]
@@ -306,6 +325,127 @@ def test_the_generated_config_reaches_exactly_the_manifest_machines_through_the_
         assert entry["url"] == f"{GATEWAY}/linux-cam1/mcp"
         assert asyncio.run(go()) == (200, 403)  # never broader than the manifest
         assert token not in box.seen_authorization[0]  # the machine got ITS key, never the token
+
+
+# -- the fleet entry (#51 Phase 2) ----------------------------------------------------------
+
+
+def test_every_gateway_project_gets_one_fleet_entry_and_a_rerun_changes_nothing(fleet):
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+
+    assert fleet.run().exit_code == 0
+    written = path.read_bytes()
+    token = fleet.token_of(path, "linux-cam1")
+    assert fleet.servers(path)["fleet"] == _gateway_entry("fleet", token)
+    assert load_registry(fleet.registry).consumers["camera-box@dev1"].machines == list(
+        fleet.camera_box_project()["machines"]
+    )  # "fleet" is an entry, never an allowed machine
+
+    again = fleet.run()
+    assert again.exit_code == 0 and "camera-box: unchanged" in again.output
+    assert path.read_bytes() == written
+
+
+def test_a_config_from_phase_1_gets_the_fleet_entry_and_keeps_its_token(fleet):
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    token = fleet.token_of(path, "linux-cam1")
+    servers = fleet.servers(path)
+    del servers["fleet"]
+    path.write_text(json.dumps({"mcpServers": servers}, indent=2), encoding="utf-8")
+
+    result = fleet.run()
+
+    assert result.exit_code == 0, result.output
+    assert fleet.token_of(path, "fleet") == token == fleet.token_of(path, "linux-cam1")  # running sessions stay valid
+
+
+def test_a_direct_project_gets_no_fleet_entry(fleet):
+    path = fleet.write_config("remoteos-mcp", fleet.camera_box_text())
+    fleet.write_manifest({"remoteos-mcp": {**fleet.camera_box_project(), "config": str(path), "mode": "direct"}})
+
+    assert fleet.run().exit_code == 0
+
+    assert "fleet" not in fleet.servers(path)
+
+
+def test_a_project_turned_direct_loses_its_fleet_entry(fleet):
+    path = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    assert "fleet" in fleet.servers(path)
+
+    fleet.write_manifest({"camera-box": {**fleet.camera_box_project(), "mode": "direct"}})
+
+    assert fleet.run().exit_code == 0
+    assert "fleet" not in fleet.servers(path)
+
+
+def test_a_foreign_fleet_entry_stays_byte_equal_with_a_warning(fleet):
+    foreign = '"fleet" : {"type": "http", "url": "https://other.example.test/mcp"}'
+    text = '{\n  "mcpServers": {\n    ' + foreign + "\n  }\n}\n"
+    path = fleet.write_config("camera-box", text)
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+
+    result = fleet.run()
+
+    assert result.exit_code == 0, result.output
+    assert foreign in path.read_text(encoding="utf-8")
+    assert "'fleet' in this config is not sync's" in result.output
+
+
+def test_a_machine_cannot_be_named_fleet(fleet):
+    fleet.write_manifest({"camera-box": fleet.camera_box_project(machines=("fleet",))})
+    assert fleet.run().exit_code != 0
+    assert not is_valid_machine_name("fleet")
+    with pytest.raises(RegistryError, match="not 'fleet'"):
+        validate_machine_name("fleet")
+
+
+def test_a_manifest_line_plus_sync_reaches_a_session_that_never_restarted(fleet, tmp_path):
+    """The whole point of Phase 2, end to end: sync-configs on real files, a real gateway, real
+    machines, one MCP session of the project across the change."""
+    with (
+        RealMachine(fleet.keys["linux-cam1"]) as first,
+        RealMachine(fleet.keys["linux-cam2"], version="7.7.7") as added,
+    ):
+        write_private_json(
+            fleet.keystore,
+            {
+                "linux-cam1": {"url": first.url, "key": fleet.keys["linux-cam1"]},
+                "linux-cam2": {"url": added.url, "key": fleet.keys["linux-cam2"]},
+            },
+        )
+        path = fleet.write_config("restreamer", '{\n  "mcpServers": {}\n}\n')
+        project = {"host": "dev1", "account": ME, "config": str(path)}
+        fleet.write_manifest({"restreamer": {**project, "machines": ["linux-cam1"]}})
+        assert fleet.run().exit_code == 0
+        token = fleet.token_of(path, "fleet")
+        app = create_app(LiveConfig(fleet.registry, fleet.keystore), AccessLog(tmp_path / "access.jsonl"))
+
+        with LoopbackServer(app) as gateway:
+
+            async def go():
+                url = f"{gateway.base_url}/fleet/mcp"
+                async with Client(url, auth=BearerAuth(token), mode="legacy") as client:
+                    before = await client.call_tool("ListMachines")
+                    fleet.write_manifest({"restreamer": {**project, "machines": ["linux-cam1", "linux-cam2"]}})
+                    result = await asyncio.to_thread(fleet.run)
+                    assert result.exit_code == 0, result.output
+                    after = await client.call_tool("ListMachines")
+                    call = {"machine": "linux-cam2", "tool": "Echo", "arguments": {"text": "ahoj"}}
+                    return before, after, await client.call_tool("Call", call)
+
+            before, after, called = asyncio.run(go())
+
+    assert [m["machine"] for m in before.structured_content["result"]] == ["linux-cam1"]
+    listed = {m["machine"]: m for m in after.structured_content["result"]}
+    assert set(listed) == {"linux-cam1", "linux-cam2"}
+    assert listed["linux-cam2"]["version"] == "7.7.7"
+    assert called.content[0].text == "echo: ahoj"
+    assert fleet.token_of(path, "fleet") == token  # the session's token never changed
 
 
 # -- direct projects (remoteos-mcp), other hosts, other accounts --------------------------
@@ -373,7 +513,10 @@ def test_other_hosts_go_over_ssh_and_other_accounts_over_sudo_with_secrets_only_
     assert result.exit_code == 0, result.output
     p_token, f_token = fleet.token_of(presenter, "linux-cam1"), fleet.token_of(fohmixer, "linux-cam2")
     assert p_token != f_token
-    assert fleet.servers(fohmixer) == {"linux-cam2": _gateway_entry("linux-cam2", f_token)}
+    assert fleet.servers(fohmixer) == {
+        "linux-cam2": _gateway_entry("linux-cam2", f_token),
+        "fleet": _gateway_entry("fleet", f_token),
+    }
     assert any(p.name.startswith(".backup-") for p in presenter.parent.iterdir())
     calls = remote_calls(log)
     ssh = [c["argv"] for c in calls if c["tool"] == "ssh"]
@@ -658,7 +801,8 @@ def test_a_token_change_on_an_existing_consumer_keeps_both_hashes_until_the_file
     fleet.write_manifest({"camera-box": fleet.camera_box_project()})
     assert fleet.run().exit_code == 0
     old = fleet.token_of(path, "linux-cam1")
-    _plant_token(path, ("win-stream-snv", "linux-cam1", "linux-cam2"), fresh_secret("lostcopy"))  # forces a new one
+    # forces a new one
+    _plant_token(path, ("win-stream-snv", "linux-cam1", "linux-cam2", "fleet"), fresh_secret("lostcopy"))
     original = targets.Target.write
 
     def landed_then_lost(self, config, text, tag):
@@ -792,7 +936,7 @@ def test_a_new_project_gets_its_config_created_locally_and_over_ssh(fleet, monke
     assert first.exit_code == 0, first.output
     assert first.output.count("backup: none — new file") == 2
     for path, name in ((local, "linux-cam1"), (remote, "linux-cam2")):
-        assert list(fleet.servers(path)) == [name]
+        assert list(fleet.servers(path)) == [name, "fleet"]
         assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
         assert stat.S_IMODE(os.stat(path.parent).st_mode) == 0o700
     assert second.exit_code == 0 and "fresh: unchanged" in second.output and "fresh2: unchanged" in second.output

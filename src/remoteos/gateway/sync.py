@@ -6,7 +6,9 @@ For each ``[projects.<name>]`` of ``projects.toml``:
   stable token (minted once, kept in the generated file) and an allow-list EXACTLY equal to
   the manifest's machines. Each manifest machine's entry becomes
   ``{"type": "http", "url": "<gateway>/<machine>/mcp", "headers": {"Authorization": "Bearer <token>"}}``
-  under the SAME server name, so every tool name (``mcp__<machine>__Shell``) stays.
+  under the SAME server name, so every tool name (``mcp__<machine>__Shell``) stays. One more
+  entry, ``fleet`` (``<gateway>/fleet/mcp``, same token), reaches a machine added later without
+  a session restart. A ``fleet`` entry sync did not write is kept, with a warning.
 - **direct mode** (remoteos-mcp; only the gateway's own account on its own host): the entries
   carry the key store's url + key, so the project can debug a machine when the gateway is down.
 
@@ -46,6 +48,7 @@ from remoteos.gateway.keystore import bearer_value, mask_secret
 from remoteos.gateway.live_sessions import notify_restarts
 from remoteos.gateway.manifest import MODE_DIRECT, MODE_GATEWAY, Manifest, Project
 from remoteos.gateway.registry import (
+    FLEET_SERVER,
     SYNC_MANAGER,
     Consumer,
     MachineEntry,
@@ -286,6 +289,14 @@ def plan_project(
             if (token := bearer_value(authorization_header(entry.value) or "")) is not None
         )
         desired = {m: gateway_entry(manifest.machine_url(m), plan.token) for m in project.machines}
+        foreign = next((e for e in parsed.entries if e.name == FLEET_SERVER and not owned(e.name, e.value)), None)
+        if foreign is None:
+            desired[FLEET_SERVER] = gateway_entry(manifest.machine_url(FLEET_SERVER), plan.token)
+        else:
+            plan.notes.append(
+                f"  ! '{FLEET_SERVER}' in this config is not sync's — left as it is, so this project gets no"
+                " fleet server (rename that entry to get it)"
+            )
     else:
         desired = {m: direct_entry(keystore[m]) for m in project.machines}
 
@@ -311,7 +322,7 @@ def plan_project(
                     " (add it to the project's machines to route it through the gateway)"
                 )
     present = {entry.name for entry in parsed.entries}
-    for machine in project.machines:
+    for machine in desired:
         if machine not in present:
             out.append((machine, render_entry(desired[machine], indent)))
             plan.lines.append(f"  + {_describe(machine, desired[machine], plan)}")

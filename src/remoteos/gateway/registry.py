@@ -56,6 +56,7 @@ DEFAULT_REPAIR_KEY_FILE = "/etc/remoteos-mcp/config.json"  # the Linux installer
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
 _CONSUMER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,127}")
 _MACHINE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+FLEET_SERVER = "fleet"  # the gateway's own server (``/fleet/mcp``), so never a machine's name
 # RFC 7235 token68: what can follow "Bearer " in a header. Machine keys are letters and digits
 # (the installers) or token_urlsafe output (win-stream-snv); a space or "Bearer " is refused.
 _KEY_RE = re.compile(r"[A-Za-z0-9._~+/=-]{1,256}")
@@ -98,13 +99,14 @@ def validate_consumer_name(name: str) -> str:
 
 
 def is_valid_machine_name(name: str) -> bool:
-    """Letters, digits and ``. _ -`` only — so a machine name is always safe to log and route."""
-    return _MACHINE_RE.fullmatch(name) is not None
+    """Letters, digits and ``. _ -`` only — so a machine name is always safe to log and route.
+    ``fleet`` is the gateway's own server: a machine with that name could never be reached."""
+    return _MACHINE_RE.fullmatch(name) is not None and name != FLEET_SERVER
 
 
 def validate_machine_name(name: str) -> str:
     if not is_valid_machine_name(name):
-        raise RegistryError(f"invalid machine name {name!r}: use letters, digits and . _ -")
+        raise RegistryError(f"invalid machine name {name!r}: use letters, digits and . _ - (and not {FLEET_SERVER!r})")
     return name
 
 

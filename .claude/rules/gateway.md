@@ -220,6 +220,30 @@ paths:
   - A failed scan or notify is echoed and never counts as a failed project.
   - Real-process test: a shebang script named `claude` has comm `claude`
     (`tests/test_gateway_live_sessions.py`).
+- **Fleet server (`fleet.py`, #51 Phase 2):** `/fleet/mcp`, tools `ListMachines` / `MachineTools` /
+  `Call`, FastMCP mounted by `Route(FLEET_MCP_PATH, FleetEndpoint)` before the machine route.
+  - `FLEET_SERVER` is reserved: `is_valid_machine_name("fleet")` is False, so a key store or
+    manifest with it is refused, and `fleet` is never in an allow-list.
+  - **No second access path:** `Call` / `MachineTools` are a fastmcp `Client` over
+    `httpx2.ASGITransport` to `Gateway.handle`, with the consumer's own `Authorization`. Never
+    give it a client of its own to the machines: that would be a second place for the allow-list,
+    key swap, retry and audit. `_admit` only gives a clear error + an audit line.
+    `FleetEndpoint.__call__` reuses `authenticate` and `read_rpc`, so 401 and 413 are the same.
+  - The token is re-read per tool call (`get_http_request`), so a stateless session never
+    outlives a revocation. Refused machines: "not allowed" for an unknown one too (no probing),
+    `record_refusal` writes the access-log line a fleet 200 would otherwise hide.
+  - `ASGITransport` buffers, so `MAX_REPLY_BYTES` (64 MB) caps a reply: FileDownload has no cap of
+    its own and the unit's `MemoryMax` is 512 MB. A proxied `/<machine>/mcp` reply still streams.
+  - **`--log-level debug` prints payloads:** `mcp`, `fastmcp`, `httpcore2` and `sse_starlette` log
+    whole messages (arguments, results, for the plain proxy too). `_PAYLOAD_LOGGERS` holds them at
+    INFO; a new dependency that logs bodies goes there, the sentinel test catches it.
+  - `ListMachines` reads the public `/health` only (no key) in parallel, each cut off at
+    `PROBE_BOUND_SECONDS`. Any HTTP answer is `reachable`; a stale key shows on `Call`.
+  - sync: `fleet` joins `desired` in gateway mode only, so a direct project gets none and `owned()`
+    removes it when a project turns direct. An entry named `fleet` sync did not write stays.
+  - Tests: `RealMachine` + `LoopbackServer` (`fleet_harness.py`) are real FastMCP / uvicorn on
+    loopback, in-process so caplog sees them. uvicorn keeps a connection open through
+    `force_exit`, so a dying box is simulated by raising after the headers (`die_at_tool_answer`).
 - **Dry run = one choke point:** `sync._Saver(dry_run=True).commit()` never writes. Registry
   edits of a dry run (narrowing, withdrawing, `--prune`) happen in memory only. Never add a
   second save path around it.

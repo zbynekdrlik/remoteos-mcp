@@ -30,10 +30,12 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from fastmcp import Client
+from fastmcp.client.auth import BearerAuth
 from fleet_harness import SRC_DIR, closed_port_url, free_port, fresh_secret, hermetic_child_env
 from mcp.types import TextContent
 
-from remoteos import cli_call
+from remoteos import __version__, cli_call
 from remoteos.cli_call import main
 from remoteos.gateway.registry import token_sha256
 
@@ -118,6 +120,31 @@ class Stack:
         path.write_text(json.dumps({"mcpServers": servers}, indent=2), encoding="utf-8")
         os.chmod(path, 0o600)
         return path
+
+
+def test_fleet_server_reaches_a_real_remoteos_server_through_a_real_gateway(stack):
+    """#51 Phase 2 on the deployed shapes: `remoteos-gateway serve` and `remoteos`, both as processes."""
+
+    async def go():
+        client = Client(f"{stack.gateway_base}/fleet/mcp", auth=BearerAuth(stack.token), mode="legacy")
+        async with client:
+            listed = await client.call_tool("ListMachines")
+            tools = await client.call_tool("MachineTools", {"machine": MACHINE})
+            shell = await client.call_tool(
+                "Call", {"machine": MACHINE, "tool": "Shell", "arguments": {"command": "echo fleet-ok"}}
+            )
+            refused = await client.call_tool_mcp(
+                "Call", {"machine": OTHER_MACHINE, "tool": "Shell", "arguments": {"command": "echo no"}}
+            )
+            return listed.structured_content["result"], tools.structured_content["result"], shell, refused
+
+    listed, tools, shell, refused = asyncio.run(go())
+    assert [m["machine"] for m in listed] == [MACHINE]
+    assert listed[0]["reachable"] is True and listed[0]["version"] == __version__
+    assert listed[0]["hostname"] and listed[0]["os"]
+    assert "Shell" in {tool["name"] for tool in tools}
+    assert "fleet-ok" in shell.content[0].text
+    assert refused.is_error and "not allowed" in refused.content[0].text
 
 
 @pytest.fixture(scope="module")

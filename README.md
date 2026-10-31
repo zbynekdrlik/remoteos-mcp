@@ -585,7 +585,7 @@ owner reconnected it. Now:
 | Task | Do this |
 |---|---|
 | A machine's key changed | `remoteos-gateway machine set-key <machine>` with the key on stdin. Every project routed through the gateway gets it on its next call: no config change, no reconnect. The direct remoteos-mcp copy is refreshed by `remoteos-gateway sync-configs`. |
-| Add a machine to a project | Add it to the project's `machines` in `projects.toml`, then `remoteos-gateway sync-configs`. |
+| Add a machine to a project | Add it to the project's `machines` in `projects.toml`, then `remoteos-gateway sync-configs`. Running sessions reach it at once through the `fleet` server; its typed `mcp__<machine>__*` tools arrive with the next restart. |
 | Add a NEW machine | `remoteos-gateway machine set-key <machine> --url http://<box>:8092/mcp` (key on stdin), then the step above. |
 | Add a project | One `[projects.<name>]` table in `projects.toml`, then `remoteos-gateway sync-configs`. |
 | See what would change | `remoteos-gateway sync-configs --dry-run` (every key and token masked). |
@@ -648,6 +648,33 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
   the whole run before anything changes. An unparseable config is never overwritten.
 - After a project's config changed, its RUNNING sessions need ONE restart (Claude Code reads
   `.mcp.json` only at start). After that, a key change never reaches a session again.
+
+**The `fleet` server: a new box without a restart.** Every gateway project also gets one entry
+`fleet` (`<gateway>/fleet/mcp`, the project's token). Its three tools never change, so a machine
+added later works in a session that is already running:
+
+| Tool | What it does |
+|---|---|
+| `ListMachines()` | The machines this token may use, with `reachable`, `os`, `hostname`, `version`. A box that is down is listed as unreachable within a few seconds: the probes run in parallel and each has a bound. |
+| `MachineTools(machine)` | That machine's tools with their schemas. |
+| `Call(machine, tool, arguments)` | One tool call. Images and multi-content results pass through, and a tool's failure stays a tool error. |
+
+```text
+mcp__fleet__Call  machine="win-new-box"  tool="Shell"  arguments={"command": "hostname"}
+```
+
+- **Same access.** `Call` goes through the same code as `/<machine>/mcp`, with the project's token:
+  same allow-list, same `unexpose` kill switch, same access log. A machine outside the allow-list
+  is refused and is absent from `ListMachines`. An audit line shows the machine and tool, never
+  the arguments.
+- **Live.** A line in `projects.toml` + `sync-configs`, a `machine set-key`, an `unexpose`: each
+  takes effect on the next call of a running session.
+- **The per-machine entries stay.** They have typed tools, so use them when they exist. `fleet` is
+  the way to a box that has no server of its own in this session yet.
+- **Direct projects get no `fleet` entry:** remoteos-mcp stays independent of the gateway.
+- **Limits.** A `Call` reply is at most 64 MB (a bigger FileDownload is an error), and progress
+  messages of a running tool do not reach the caller. `fleet` is a reserved name, so no machine
+  can have it. A `fleet` entry sync did not write is kept with a warning.
 
 **Releases (stable and canary):** CI creates GitHub release `v<version>` on every merge to `main`,
 after all test jobs passed (`scripts/create-release.sh`, a no-op when it exists).

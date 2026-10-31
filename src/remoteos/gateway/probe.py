@@ -46,6 +46,8 @@ class ProbeResult:
     status: int | None = None
     detail: str = ""
     admin: bool | None = None  # /health's, when the server reports it
+    os: str | None = None  # /health's, when the server reports it (#59)
+    hostname: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -65,6 +67,11 @@ def _initialize_body() -> bytes:
             },
         }
     ).encode()
+
+
+def _identity_text(value: object) -> str | None:
+    """A /health text fit to pass on: it comes from the machine and ends up with a consumer."""
+    return value if isinstance(value, str) and value.isprintable() and 0 < len(value) <= 128 else None
 
 
 def _classify(status: int) -> ProbeResult:
@@ -133,11 +140,19 @@ async def probe_version(client: httpx2.AsyncClient, mcp_url: str) -> ProbeResult
     try:
         payload = response.json()
         version, admin = payload.get("version"), payload.get("admin")
+        os_name, hostname = payload.get("os"), payload.get("hostname")
     except (ValueError, AttributeError):
-        version, admin = None, None
+        version, admin, os_name, hostname = None, None, None, None
     if not isinstance(version, str) or _VERSION_TEXT.fullmatch(version) is None:
         return ProbeResult(STATE_ERROR, 200, "no version in /health")
-    return ProbeResult(STATE_OK, 200, version, admin if isinstance(admin, bool) else None)
+    return ProbeResult(
+        STATE_OK,
+        200,
+        version,
+        admin if isinstance(admin, bool) else None,
+        _identity_text(os_name),
+        _identity_text(hostname),
+    )
 
 
 async def gather_probes(probes: Iterable[Awaitable[ProbeResult]]) -> list[ProbeResult]:
