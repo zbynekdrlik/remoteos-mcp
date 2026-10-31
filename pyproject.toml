@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "remoteos-mcp"
-version = "0.7.0.dev46"
+version = "0.7.0.dev47"
 description = "Remote OS MCP Server - control Windows, macOS, and Linux machines via MCP protocol"
 readme = "README.md"
 license = "MIT"
@@ -30,6 +30,8 @@ dependencies = [
     "psutil==7.2.2",
     "pywin32==312; sys_platform == 'win32'",
     "pyobjc-framework-Quartz==12.2.2; sys_platform == 'darwin'",
+    # The Windows UI Automation tree (#35). Its only dependency is comtypes, also pure Python.
+    "uiautomation==2.0.29; sys_platform == 'win32'",
     # Pillow 13, the fixed release of its 2026 CVEs (#39), needs Python 3.11: the floor since #64.
     "Pillow==13.0.0",
     "click==8.5.0",

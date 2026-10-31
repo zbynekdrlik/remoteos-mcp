@@ -17,6 +17,7 @@ from typing import Iterable, Optional
 from PIL import Image, ImageDraw, ImageFont
 
 from remoteos.coords import CaptureGeometry, Frame, in_image, screen_to_image
+from remoteos.element_tree import one_line
 
 log = logging.getLogger("remoteos.snapshot")
 
@@ -71,9 +72,13 @@ def _element_center(frame: Frame, el: dict) -> tuple[int, int]:
     return screen_to_image(frame, (r["left"] + r["right"]) // 2, (r["top"] + r["bottom"]) // 2)
 
 
+def _quoted(name: str) -> str:
+    return '"' + one_line(name).replace('"', '\\"') + '"'
+
+
 def _element_line(frame: Frame, el: dict) -> str:
     cx, cy = _element_center(frame, el)
-    label = el["text"] or el["class"]
+    label = one_line(el["text"] or el["class"])
     marker = "" if in_image(frame, cx, cy) else _OFF_FRAME
     return f"  [{el['index']}] {label} — center ({cx},{cy}){marker}"
 
@@ -81,6 +86,18 @@ def _element_line(frame: Frame, el: dict) -> str:
 def element_lines(frame: Frame, elements: Iterable[dict]) -> list[str]:
     """``[index] label — center (x,y)`` per element, centers in image pixels."""
     return [_element_line(frame, el) for el in elements]
+
+
+def tree_lines(frame: Frame, items: Iterable) -> list[str]:
+    """``[ref] role "name" enabled (WxH at X,Y)`` per element of a tree, bounds in image pixels (#35)."""
+    lines = []
+    for item in items:
+        x1, y1, x2, y2 = _rect_to_image(frame, *item.rect)
+        state = "enabled" if item.enabled else "disabled"
+        marker = "" if in_image(frame, (x1 + x2) // 2, (y1 + y2) // 2) else _OFF_FRAME
+        bounds = f"({x2 - x1}x{y2 - y1} at {x1},{y1})"
+        lines.append(f"  [{item.ref}] {item.role} {_quoted(item.name)} {state} {bounds}{marker}")
+    return lines
 
 
 def window_lines(frame: Frame, windows: Iterable) -> list[str]:

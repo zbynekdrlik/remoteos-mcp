@@ -127,8 +127,8 @@ def enumerate_windows() -> list[WindowInfo]:
     return results
 
 
-def get_interactive_elements() -> list[dict]:
-    """Stub — macOS Accessibility API integration deferred."""
+def get_interactive_elements(limit: int = 300) -> list[dict]:
+    """Stub — macOS Accessibility API integration deferred (#38)."""
     return []
 
 

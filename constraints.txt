@@ -38,6 +38,8 @@ click==8.5.0
     # via
     #   remoteos-mcp (pyproject.toml)
     #   uvicorn
+comtypes==1.4.17 ; sys_platform == 'win32'
+    # via uiautomation
 cryptography==50.0.1
     # via
     #   authlib
@@ -270,6 +272,8 @@ typing-inspection==0.4.4
     #   mcp
     #   pydantic
     #   pydantic-settings
+uiautomation==2.0.29 ; sys_platform == 'win32'
+    # via remoteos-mcp (pyproject.toml)
 uncalled-for==0.4.0
     # via fastmcp-slim
 uvicorn==0.52.4
