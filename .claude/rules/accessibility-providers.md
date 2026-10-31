@@ -49,8 +49,8 @@ paths:
   the active window and a FOCUSED state alone can be in the background.
 - **A hint is reported when an app shows nothing** (`_enable_hint`), by toolkit. Chromium needs BOTH
   `ACCESSIBILITY_ENABLED=1` and `--force-renderer-accessibility`: with the flag alone real Chrome
-  never joined the a11y bus. On the test bus Qt showed its tree without
-  `QT_LINUX_ACCESSIBILITY_ALWAYS_ON`; a desktop's bus state may differ.
+  never joined the a11y bus. Qt without `QT_LINUX_ACCESSIBILITY_ALWAYS_ON` joined the test bus in one
+  run and not in the next, and always with it: do not read one run without it as proof.
 - **A hung Mac app is an error, never an empty tree.** `_copy` raises `_NotAnswered` on CannotComplete
   and APIDisabled; `None` means only that the attribute is not there. In a walk it costs that part
   and the reply says so (`_walk`); a window that gives nothing is the error.
