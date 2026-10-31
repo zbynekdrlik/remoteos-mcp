@@ -28,15 +28,25 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from remoteos.element_tree import ElementFacts, ElementTree, RefTable, StaleRef, TreeItem, one_line, walk
+from remoteos.element_tree import (
+    SNAPSHOT_WALK_S,
+    TREE_WALK_S,
+    ElementFacts,
+    ElementTree,
+    RefTable,
+    gone,
+    listed_elements,
+    marked_from,
+    one_line,
+    tree_from,
+    walk,
+)
 
 log = logging.getLogger("remoteos.platform.win.uia")
 
 TREE_TIMEOUT_S = 15.0
-TREE_WALK_S = 10.0  # inside TREE_TIMEOUT_S: a big tree ends as a partial list, not as a timeout
 WALK_MARGIN_S = 2.0  # a walk's reading of its results, after its deadline
-SNAPSHOT_TIMEOUT_S = 6.0  # Snapshot's element list is a side dish: it must not hold up the image
-SNAPSHOT_WALK_S = 3.0
+SNAPSHOT_TIMEOUT_S = 6.0
 ACTION_TIMEOUT_S = 10.0
 ACTION_NEEDS_S = 5.0
 START_TIMEOUT_S = 60.0  # the first start ever generates comtypes' wrappers, which takes seconds
@@ -179,16 +189,6 @@ class Activation:
     point: Optional[tuple[int, int]] = None
 
 
-def _listed(index: int, facts: ElementFacts) -> dict:
-    """``facts`` as the element dict every provider's list uses."""
-    return {
-        "index": index,
-        "class": facts.role,
-        "text": facts.name,
-        "rect": dict(zip(("left", "top", "right", "bottom"), facts.rect)),
-    }
-
-
 class Session:
     """UI Automation on its own thread: every method runs there, through :class:`UiaWorker`."""
 
@@ -230,54 +230,45 @@ class Session:
         expired = lambda: self.abandoned.is_set() or time.monotonic() >= deadline  # noqa: E731
         return root, walk(root, self._facts, self._children, expired=expired, **bounds)
 
-    def _publish(self, hwnd: int, found: Any) -> list[tuple[str, ElementFacts]]:
-        """Start a new ref tree of the elements in ``found`` that can be proven later: ``(ref, facts)``."""
-        entries, kept = [], []
-        for control, facts in found:
-            try:
-                runtime_id = list(control.GetRuntimeId())
-            except self.com_error as e:
-                log.debug("a listed element vanished (%s)", type(e).__name__)
-                continue
-            if runtime_id:  # without one, nothing could prove later that it is the same element
-                entries.append(_Entry(control, runtime_id, hwnd, one_line(facts.name)))
-                kept.append(facts)
-        return list(zip(self.refs.publish(entries), kept))
+    def _entry(self, hwnd: int, control: Any, facts: ElementFacts) -> Optional[_Entry]:
+        """What a ref keeps, or ``None``: without a RuntimeId nothing could prove later that it is the same element."""
+        try:
+            runtime_id = list(control.GetRuntimeId())
+        except self.com_error as e:
+            log.debug("a listed element vanished (%s)", type(e).__name__)
+            return None
+        return _Entry(control, runtime_id, hwnd, one_line(facts.name)) if runtime_id else None
 
     def tree(self, hwnd: int) -> ElementTree:
         """Walk ``hwnd``'s window and start a new generation of refs."""
         root, result = self._walk(hwnd, TREE_WALK_S)
-        items = tuple(TreeItem(r, f.role, f.name, f.enabled, f.rect) for r, f in self._publish(hwnd, result.found))
         try:
             title = one_line(root.Name or "")
         except self.com_error:
             title = ""
-        return ElementTree(title=title, items=items, truncated=result.truncated)
+        return tree_from(self.refs, title, result, lambda control, facts: self._entry(hwnd, control, facts))
 
     def elements(self, hwnd: int, limit: int) -> list[dict]:
         """Snapshot's list: publishes no refs, so reading it ends none (a timeout ends them, as any)."""
-        _, result = self._walk(hwnd, SNAPSHOT_WALK_S, limit=limit)
-        return [_listed(index, facts) for index, (_, facts) in enumerate(result.found, start=1)]
+        return listed_elements(self._walk(hwnd, SNAPSHOT_WALK_S, limit=limit)[1])
 
     def marked(self, hwnd: int, limit: int) -> tuple[list[dict], str]:
         """AnnotatedSnapshot's list (#36) and why it is cut: refs in a new tree, so a mark can be acted on."""
         _, result = self._walk(hwnd, SNAPSHOT_WALK_S, limit=limit)
-        refs = {id(facts): ref for ref, facts in self._publish(hwnd, result.found)}
-        listed = [(index, facts) for index, (_, facts) in enumerate(result.found, start=1)]
-        return [{**_listed(index, facts), "ref": refs.get(id(facts))} for index, facts in listed], result.truncated
+        return marked_from(self.refs, result, lambda control, facts: self._entry(hwnd, control, facts))
 
     def _live(self, ref: str) -> _Entry:
         """The entry behind ``ref``, proven to be that same element, still there and enabled."""
         entry = self.refs.lookup(ref)
-        gone = StaleRef(f"Element {ref} ({entry.name!r}) is gone: call ElementTree again")
+        stale = gone(ref, entry.name)
         if not self.auto.IsWindowVisible(entry.hwnd):  # a closed window's element may still answer
-            raise gone
+            raise stale
         try:
             if list(entry.control.GetRuntimeId()) != entry.runtime_id:
-                raise gone
+                raise stale
             enabled = entry.control.IsEnabled
         except self.com_error:
-            raise gone from None
+            raise stale from None
         if not enabled:
             raise RuntimeError(f"Element {ref} ({entry.name!r}) is disabled")
         return entry
@@ -288,7 +279,7 @@ class Session:
             rect = entry.control.BoundingRectangle
             offscreen = entry.control.IsOffscreen
         except self.com_error:
-            raise StaleRef(f"Element {ref} ({entry.name!r}) is gone: call ElementTree again") from None
+            raise gone(ref, entry.name) from None
         if offscreen or rect.isempty():
             raise RuntimeError(f"Element {ref} ({entry.name!r}) is off-screen: bring it into view first")
         x, y = rect.xcenter(), rect.ycenter()
@@ -355,7 +346,7 @@ class Session:
             try:
                 read_only = pattern.IsReadOnly
             except self.com_error:
-                raise StaleRef(f"Element {ref} ({entry.name!r}) is gone: call ElementTree again") from None
+                raise gone(ref, entry.name) from None
             if read_only:
                 raise RuntimeError(f"Element {ref} ({entry.name!r}) is read-only")
             try:

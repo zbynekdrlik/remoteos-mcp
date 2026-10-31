@@ -127,7 +127,7 @@ def _diagnose(need: str) -> Optional[str]:
     station = _object_name(user32.GetProcessWindowStation())
     if station is not None and station.lower() != "winsta0":
         return errors.non_interactive_window_station(station)
-    if need == "windows":
+    if need in ("windows", "accessibility"):  # UI Automation reads a locked desktop, as the window list does
         return None
     if _disconnected(session):
         return errors.DISCONNECTED
