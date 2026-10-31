@@ -18,6 +18,7 @@ log = logging.getLogger("remoteos.element_tree")
 MAX_ELEMENTS = 300
 MAX_DEPTH = 40
 MAX_VISITED = 5000
+MAX_NAME = 80
 
 # What a user can operate. Anything else counts only when it takes the keyboard focus.
 INTERACTIVE_ROLES = frozenset(
@@ -75,6 +76,12 @@ class ElementTree:
 class Walk:
     found: list[tuple[Any, ElementFacts]]
     truncated: str = ""
+
+
+def one_line(name: str) -> str:
+    """An element's name on one short line: apps put whole documents in it, and a reply line is ours."""
+    text = " ".join(name.split())
+    return text[: MAX_NAME - 1] + "…" if len(text) > MAX_NAME else text
 
 
 def listed(facts: ElementFacts) -> bool:

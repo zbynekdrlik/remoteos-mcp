@@ -196,33 +196,28 @@ def test_a_hung_call_times_out_and_the_next_call_gets_a_new_worker():
     threads: list = []
     worker = worker_of(threads)
     release = threading.Event()
-    with pytest.raises(uia.UiaTimeout):
-        worker.call(lambda s: release.wait(10), 0.05)
+    stick_one(worker, release)
     assert worker.call(lambda s: s, 5) == 2  # a new session: new client, new ref table
     release.set()
     threads[0].join(5)
     assert not threads[0].is_alive(), "an abandoned worker must end when its call returns"
 
 
-def test_the_stuck_error_says_nothing_was_asked():
-    assert issubclass(uia.UiaNotAsked, uia.UiaTimeout)
+def stick_one(worker: uia.UiaWorker, release: threading.Event) -> None:
+    """Hang a call on a READY worker, so that the timeout is the job's, never the start's."""
+    worker.call(lambda s: s, 5)
+    with pytest.raises(uia.UiaTimeout) as caught:
+        worker.call(lambda s: release.wait(10), 0.2)
+    assert not isinstance(caught.value, uia.UiaNotAsked)
+
+
+def test_stuck_workers_are_bounded_and_the_error_says_nothing_was_asked(monkeypatch):
+    monkeypatch.setattr(uia, "MAX_STUCK_WORKERS", 2)
     worker = worker_of()
     release = threading.Event()
-    for _ in range(uia.MAX_STUCK_WORKERS):
-        with pytest.raises(uia.UiaTimeout):
-            worker.call(lambda s: release.wait(10), 0.01)
+    stick_one(worker, release)
+    stick_one(worker, release)
     with pytest.raises(uia.UiaNotAsked, match="stuck"):
-        worker.call(lambda s: s, 5)
-    release.set()
-
-
-def test_stuck_workers_are_bounded():
-    worker = worker_of()
-    release = threading.Event()
-    for _ in range(uia.MAX_STUCK_WORKERS):
-        with pytest.raises(uia.UiaTimeout):
-            worker.call(lambda s: release.wait(10), 0.01)
-    with pytest.raises(uia.UiaTimeout, match="stuck"):
         worker.call(lambda s: s, 5)
     release.set()
     deadline = time.monotonic() + 5
@@ -230,7 +225,7 @@ def test_stuck_workers_are_bounded():
         try:
             assert worker.call(lambda s: s, 5)
             return
-        except uia.UiaTimeout:
+        except uia.UiaNotAsked:
             time.sleep(0.01)
     pytest.fail("the worker never came back after the stuck calls returned")
 
@@ -267,18 +262,25 @@ def test_a_slow_start_is_not_a_hung_worker():
     assert len(started) == 1, "still starting must keep the worker that is starting"
 
 
-def test_the_timeout_is_one_budget_for_the_whole_call():
-    release = threading.Event()
+def test_a_call_left_less_than_its_job_needs_is_not_begun():
+    ran = []
+    worker = worker_of()
+    with pytest.raises(uia.UiaNotAsked, match="not free in time"):
+        worker.call(ran.append, 30, needs=30)  # any moment spent waiting leaves less than that
+    assert ran == []
+    assert worker.call(lambda s: s, 5, needs=1) == 1, "the healthy worker was kept"
 
-    def open_session(abandoned):
-        release.wait(0.3)
-        return "session"
 
-    worker = uia.UiaWorker(open_session)
-    threading.Timer(0.3, release.set).start()
-    with pytest.raises(uia.UiaNotAsked, match="just started"):
-        worker.call(lambda s: s, 0.4)  # the start ate more than half: a job would be cut short
-    assert worker.call(lambda s: s, 5) == "session", "the healthy worker was kept"
+def test_the_timeout_is_one_budget_for_the_lock_and_the_start():
+    never = threading.Event()
+    worker = uia.UiaWorker(lambda abandoned: never.wait(10))
+    worker._lock.acquire()
+    threading.Timer(1.0, worker._lock.release).start()
+    started = time.monotonic()
+    with pytest.raises(uia.UiaNotAsked, match="still starting"):
+        worker.call(lambda s: s, 1.5)
+    assert time.monotonic() - started < 2.3, "the start's wait must get what the lock left, not 1.5 s more"
+    never.set()
 
 
 def test_a_call_that_waits_for_another_call_is_not_asked():
@@ -538,6 +540,28 @@ def test_no_invoke_pattern_means_a_click_at_the_centre():
     assert session.activate(ref) == uia.Activation("OK", (150, 120))
 
 
+def test_a_late_refusal_after_the_caller_gave_up_does_nothing_more():
+    button = Control()
+    button.patterns["invoke"] = Invoke(error=FakeCom("nope"))
+    session, ref = session_with(button)
+    session.abandoned.set()
+    with pytest.raises(uia.UiaTimeout):
+        session.activate(ref)
+
+    field = Control(name="Name", kind="EditControl")
+    field.patterns["value"] = Value(error=FakeCom("nope"))
+    session, ref = session_with(field, focused=field)
+    session.abandoned.set()
+    with pytest.raises(uia.UiaTimeout):
+        session.set_text(ref, "x")
+    assert field.focus_sets == 0
+
+
+def test_a_document_sized_name_stays_short_in_replies():
+    session, ref = session_with(Control(name="word\n" * 100))
+    assert len(session.activate(ref).name) == 80
+
+
 def test_a_refused_invoke_falls_back_to_the_click():
     button = Control()
     button.patterns["invoke"] = Invoke(error=FakeCom("nope"))
@@ -552,7 +576,7 @@ def test_an_invoke_that_returned_false_was_accepted_and_is_not_clicked_as_well()
     assert session.activate(ref) == uia.Activation("OK")
 
 
-@pytest.mark.parametrize("hresult", [-2147220991, 0x80040201, 0x80010108, 0x800706BA, 0x80131505])
+@pytest.mark.parametrize("hresult", [v - 2**32 for v in (0x80040201, 0x80010108, 0x800706BA, 0x80131505)])
 def test_a_button_that_closes_its_window_may_have_worked(hresult):
     button = Control()
     error = FakeCom("element not available")
@@ -724,7 +748,7 @@ class Raises:
     def __init__(self, error):
         self.error = error
 
-    def call(self, fn, timeout):
+    def call(self, fn, timeout, needs=0):
         raise self.error
 
 
@@ -889,7 +913,7 @@ def test_a_long_or_multi_line_name_stays_one_short_snapshot_line():
 
 
 def test_a_failing_uia_costs_snapshot_its_list_only(tool_box, monkeypatch, caplog):
-    def down(fn, timeout):
+    def down(fn, timeout, needs=0):
         raise uia.UiaTimeout("the window did not answer")
 
     monkeypatch.setattr(uia._worker, "call", down)

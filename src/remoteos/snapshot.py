@@ -17,11 +17,11 @@ from typing import Iterable, Optional
 from PIL import Image, ImageDraw, ImageFont
 
 from remoteos.coords import CaptureGeometry, Frame, in_image, screen_to_image
+from remoteos.element_tree import one_line
 
 log = logging.getLogger("remoteos.snapshot")
 
 _OFF_FRAME = " (off-frame)"
-_MAX_NAME = 80
 
 
 def fit_to_frame(img: Image.Image, frame: Frame, geometry: Optional[CaptureGeometry] = None) -> Image.Image:
@@ -72,19 +72,13 @@ def _element_center(frame: Frame, el: dict) -> tuple[int, int]:
     return screen_to_image(frame, (r["left"] + r["right"]) // 2, (r["top"] + r["bottom"]) // 2)
 
 
-def _one_line(name: str) -> str:
-    """An element's name on one short line: apps put whole documents in it, and a reply line is ours."""
-    text = " ".join(name.split())
-    return text[: _MAX_NAME - 1] + "…" if len(text) > _MAX_NAME else text
-
-
 def _quoted(name: str) -> str:
-    return '"' + _one_line(name).replace('"', '\\"') + '"'
+    return '"' + one_line(name).replace('"', '\\"') + '"'
 
 
 def _element_line(frame: Frame, el: dict) -> str:
     cx, cy = _element_center(frame, el)
-    label = _one_line(el["text"] or el["class"])
+    label = one_line(el["text"] or el["class"])
     marker = "" if in_image(frame, cx, cy) else _OFF_FRAME
     return f"  [{el['index']}] {label} — center ({cx},{cy}){marker}"
 

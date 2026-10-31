@@ -20,8 +20,9 @@ paths:
   - a new worker replaces the singleton in ONE assignment (`client()`, never `_instance = None` then
     `instance()`), under `_client_lock`. The old client goes to `_retired_clients` and is never
     released: its apartment may belong to a hung thread;
-  - the package's walker functions read that singleton, so a late job must end: `Session.abandoned`
-    stops a walk at its next element, and a start abandoned at `START_TIMEOUT_S` leaves the client alone;
+  - the package's functions read that singleton, so a late job must end: `Session.abandoned` stops a
+    walk at its next element and an action after the call that hung (`_refused`), and a start
+    abandoned at `START_TIMEOUT_S` leaves the client alone;
   - an exception leaves the worker `_detached`: its traceback's frames hold controls;
   - `import uiautomation.uiautomation`, the module: the package's `*` leaves out `_AutomationClient`;
   - nothing a job returns may hold a control. Results are plain data, and the ref table is on the
@@ -33,7 +34,8 @@ paths:
   start ever generates comtypes' wrappers, which takes seconds (into `comtypes/gen`, or
   `%APPDATA%\Python\…\comtypes_cache` when that is not writable). It keeps the starting worker. An
   action reports it as it is, never as "may have happened". `timeout` is one budget for the whole
-  call, and a call left under half of it is not begun: it would abandon a healthy worker.
+  call (lock, start, job). `needs` is what the job may legitimately take: a call left less than
+  that is not begun, because overrunning abandons a healthy worker and ends every ref.
 - **The package's `Logger.Write` writes to `sys.stdout`** (the JSON-RPC stream under stdio) and to
   `@AutomationLog.txt` in the cwd. `open_session` replaces it. Its `print`s are in the bitmap DLL
   loader and behind `debug=True`, neither of which we reach.
@@ -49,8 +51,8 @@ paths:
   empty RuntimeId gets no ref: nothing could prove later that it is the same one.
 - **`Snapshot`/`AnnotatedSnapshot` read through `Session.elements`, which publishes no refs**, with
   a shorter budget and only the `limit` they show (`get_interactive_elements(limit=)`). A UIA failure
-  there costs the list, never the image; ElementTree reports it. Their labels go through
-  `snapshot._one_line`: a name can be a whole document, and text of an app must not forge a reply line.
+  there costs the list, never the image; ElementTree reports it. Every name in a reply goes through
+  `element_tree.one_line`: a name can be a whole document, and text of an app must not forge a reply line.
 - **ClickElement order:** `_live` (ref, identity, enabled), Invoke. A failed HRESULT raises
   `COMError`, so `Invoke()` returning at all means accepted, whatever it returns (`False` is only
   `S_FALSE`): never act a second time on it. A COM refusal falls back to the mouse. A TIMEOUT never
