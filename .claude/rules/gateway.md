@@ -311,3 +311,5 @@ paths:
   symlink stays one), and writes only when the result parses to the same manifest plus that machine.
 - Tests: the child of the fake `secret exec` is a real process, so a monkeypatch does not reach
   `enroll-finish`: machines on 127.0.0.1 go through `--url`.
+
+- **Enroll a box behind the sites' NAT with `--url`.** A box posts the addresses it sees: strih-pp is 10.77.8.202 on its own NIC and 10.76.8.202 from dev1, so the posted address is unreachable and the finish fails (live, #26). The registration stays in the vault for an hour: rerun the printed finish command with `--url http://<name>.lan:8092/mcp`. A name must start with `win-`, `linux-` or `mac-`.

@@ -51,11 +51,15 @@ def _project_list(projects: str) -> list[str]:
         raise click.UsageError("--projects names no project")
     return list(dict.fromkeys(names))
 
+MACHINE_PREFIXES = ("win-", "linux-", "mac-")
+
 
 def _check_request(paths, name: str, projects: list[str], replace: bool, url: str | None) -> None:
     """Everything dev1 can refuse before a box is touched."""
     if not is_valid_machine_name(name):
         raise click.ClickException(f"invalid machine name {name!r}: use letters, digits and . _ -")
+    if not name.startswith(MACHINE_PREFIXES):  # the names remoteos-call knows, and that say the OS (#59)
+        raise click.ClickException(f"invalid machine name {name!r}: it must start with win-, linux- or mac-")
     try:
         if url is not None:
             validate_http_url(url, what="--url")
