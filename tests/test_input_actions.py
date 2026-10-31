@@ -218,6 +218,21 @@ def test_linux_hold_key_keeps_a_keysyms_case(fake_x11, monkeypatch):
     assert _xdotool(fake_x11) == [["keydown", "Page_Up"], ["keyup", "Page_Up"]]
 
 
+def test_linux_hold_key_of_a_capital_adds_no_shift(fake_x11, monkeypatch):
+    # `xdotool keydown A` holds Shift too; Windows and macOS hold only the letter
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    server.HoldKey("ctrl+W", seconds=1)
+    assert _xdotool(fake_x11) == [["keydown", "ctrl"], ["keydown", "w"], ["keyup", "w"], ["keyup", "ctrl"]]
+
+
+@pytest.mark.parametrize(("key", "keysym"), [("pgup", "Prior"), ("pgdn", "Next"), ("enter", "Return"), ("f5", "F5")])
+def test_linux_a_key_name_means_the_same_in_shortcut_and_hold_key(fake_x11, monkeypatch, key, keysym):
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    server.Shortcut(key)
+    server.HoldKey(key, seconds=1)
+    assert _xdotool(fake_x11) == [["key", keysym], ["keydown", keysym], ["keyup", keysym]]
+
+
 def test_linux_held_keys_are_not_logged():
     assert linux_session._loggable(["xdotool", "keydown", "p"]) == ["xdotool", "keydown", "<key>"]
     assert linux_session._loggable(["sudo", "xdotool", "keyup", "p"]) == ["sudo", "xdotool", "keyup", "<key>"]
@@ -467,6 +482,23 @@ def test_mac_up_elsewhere_and_hover_drag_while_a_button_is_held(mac_tool_layer):
     assert fake.moveTo.calls == []
 
 
+def test_mac_a_single_click_while_a_button_is_held_drags_there(mac_tool_layer):
+    server_, fake, *_ = mac_tool_layer
+    server_.Click(10, 20, action="down", coords="screen")
+    server_.Click(30, 40, button="right", coords="screen")
+    assert fake.click.calls == []
+    assert [e["mouse"][0] for e in _posted_mouse()] == [5, 1, 6, 3, 4]
+
+
+def test_mac_releasing_another_button_keeps_the_held_one(mac_tool_layer):
+    server_, fake, *_ = mac_tool_layer
+    server_.Click(10, 20, action="down", coords="screen")
+    server_.Click(10, 20, button="right", action="up", coords="screen")
+    server_.Move(30, 40, coords="screen")
+    assert _posted_mouse()[-1]["mouse"][0] == 6  # the left button is still down: a drag
+    assert fake.moveTo.calls == []
+
+
 def test_mac_unknown_key_in_a_combination_posts_nothing(mac_tool_layer):
     server_, *_ = mac_tool_layer
     assert "Unknown key: ?" in tool_error(lambda: server_.HoldKey("ctrl+?"))
@@ -598,6 +630,14 @@ def test_wait_for_a_failing_window_list_is_an_error_at_once(screen, monkeypatch)
 def test_wait_for_a_monitor_that_does_not_exist_fails_before_waiting(screen, monitor):
     assert tool_error(lambda: server.WaitFor(window="edit", monitor=monitor)).startswith("WaitFor error:")
     assert screen.sleeps == []
+
+
+def test_wait_for_window_rect_uses_the_frame_at_the_match(screen, monkeypatch):
+    frames = []
+    real = server._current_frame
+    monkeypatch.setattr(server, "_current_frame", lambda *a: frames.append(a) or real(*a))
+    server.WaitFor(window="edit", max_width=640, timeout=0)
+    assert frames == [(0, 640), (0, 640)]  # the early check, then the frame of the reply
 
 
 def test_wait_for_window_timeout(screen):

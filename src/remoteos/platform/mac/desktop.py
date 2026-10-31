@@ -423,14 +423,15 @@ def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
         return f"Pressed {button} at ({x},{y})"
     if action == "up":
         _post_mouse(x, y, button, [False])
-        _held_button = None
+        if button == _held_button:
+            _held_button = None
         return f"Released {button} at ({x},{y})"
     if action == "hover":
         if not move_held(x, y):
             pyautogui.moveTo(x, y)
         return f"Hovered at ({x},{y})"
     count, word = _CLICKS[action]
-    if count > 1 or _held_flags():
+    if count > 1 or _held_flags() or _held_button is not None:
         _post_mouse(x, y, button, [True, False] * count)
     else:
         pyautogui.click(x, y, button=button)

@@ -28,7 +28,6 @@ if _sys.platform != "linux":
     import pyautogui  # remoteos.app imported it first: DPI awareness set, FAILSAFE and PAUSE configured
 
 from remoteos.coords import (
-    Frame,
     check_space,
     contract_line,
     frame_for,
@@ -540,13 +539,13 @@ def _find_text(needle: str, monitor: int) -> str | None:
     return f"text on monitor {monitor}" + (f", line: {lines[0]}" if lines else "")
 
 
-def _find_window(needle: str, frame: Frame) -> str | None:
+def _find_window(needle: str, monitor: int, max_width: int) -> str | None:
     """A reply when a window title contains ``needle``, else None. A failing window list raises."""
     wanted = needle.strip().casefold()
     hits = [w for w in get_desktop().list_windows() if wanted in w.title.casefold()]
     if not hits:
         return None
-    return "\n".join(["window (image pixels):", *window_lines(frame, hits)])
+    return "\n".join(["window (image pixels):", *window_lines(_current_frame(monitor, max_width), hits)])
 
 
 @mcp.tool(
@@ -585,10 +584,10 @@ def WaitFor(
     if monitor < 0:
         raise ValueError(f"No monitor {monitor}")
     _desktop_preflight("capture" if by_text else "windows")
-    frame = _current_frame(monitor, max_width)  # a monitor that does not exist fails now, not after the wait
+    _current_frame(monitor, max_width)  # a monitor that does not exist fails now, not after the wait
     started = time.monotonic()
     while True:
-        found = _find_text(text, monitor) if by_text else _find_window(window, frame)
+        found = _find_text(text, monitor) if by_text else _find_window(window, monitor, max_width)
         elapsed = time.monotonic() - started
         if found:
             log.debug("WaitFor matched after %.1fs", elapsed)

@@ -41,7 +41,7 @@ paths:
     `_post_mouse` starts with the dragged event (6/7/27). `move_held` is one event: it ignores
     `Move`'s `duration`.
   - Key codes are the ANSI layout's `kVK_*`.
-- **Linux:** `xdotool keydown` / `mousedown` outlive the xdotool process, so a press and its release
+- **Linux:** `keydown A` holds Shift too, so a held letter is lower-cased (`_held_key`). `xdotool keydown` / `mousedown` outlive the xdotool process, so a press and its release
   are separate calls. `xdotool key --repeat N` is the repeat.
 - **Wait and WaitFor are `ToolCategory.WAIT`:** no desktop lock, 10 slots of their own, so a wait
   starves neither input nor queries. `HoldKey` is DESKTOP: it is input.

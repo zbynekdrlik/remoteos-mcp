@@ -159,6 +159,8 @@ _KEY_ALIASES = {
     "end": "End",
     "pageup": "Prior",
     "pagedown": "Next",
+    "pgup": "Prior",
+    "pgdn": "Next",
 }
 
 
@@ -180,14 +182,19 @@ def _key_command(args: list[str], keys: str) -> None:
         raise ValueError(f"Unknown key: {keys}")
 
 
+def _held_key(key: str) -> str:
+    """The keysym to hold: one letter in lower case, ``keydown A`` would hold Shift with it."""
+    return key.lower() if len(key) == 1 else _map_key(key)
+
+
 def key_down(key: str) -> None:
     """Press ``key`` and leave it down: xdotool's XTEST press outlives the xdotool process (#34)."""
-    _key_command(["keydown", _map_key(key)], key)
+    _key_command(["keydown", _held_key(key)], key)
 
 
 def key_up(key: str) -> None:
     """Release a key pressed by :func:`key_down`."""
-    _key_command(["keyup", _map_key(key)], key)
+    _key_command(["keyup", _held_key(key)], key)
 
 
 _LOCATION = re.compile(r"^(X|Y)=(-?\d+)$", re.MULTILINE)
