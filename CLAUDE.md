@@ -15,6 +15,7 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 | `.mcp.json` setup, restore after clone, add new machine | `/remoteos-mcp-config` skill |
 | Linux X11 desktop provider (session detection, xdotool/scrot backends, deploy/test) | `.claude/skills/linux-desktop` |
 | MCP gateway on dev1 (`remoteos-gateway`, per-consumer tokens, streaming proxy, rollout; #51 key store, `projects.toml`, `sync-configs`, `check` watchdog) | `.claude/rules/gateway.md` (auto-loads on its `paths:`) + README "MCP gateway (dev1)" |
+| One-command onboarding: `remoteos-gateway enroll`, the quick tunnel, `REMOTEOS_ENROLL` in the installers | `.claude/rules/gateway.md` + `.claude/rules/installers.md` + README "One-command onboarding" |
 | Releases: the CI release job, stable/canary resolver (`release_channel.py`), the hold switch, version drift in `check` | `.claude/rules/gateway.md` + README "MCP gateway (dev1)" |
 | Script client `remoteos-call` (config resolution, Shell reply parsing, exit codes 125/126, HTTP status hook, the real-stack tests) | `.claude/rules/cli-call.md` (auto-loads on its `paths:`) + README "Scripts: `remoteos-call`" |
 | ElementTree on macOS (AX) and Linux (AT-SPI): shared walk and refs, press and text rules, the Qt/Chromium hints, the real Xvfb run; Windows UIA is `.claude/rules/uia.md` | `.claude/rules/accessibility-providers.md` (auto-loads on its `paths:`) + README "UI elements instead of pixels" |

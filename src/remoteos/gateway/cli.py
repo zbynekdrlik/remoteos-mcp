@@ -13,7 +13,8 @@ Every edit is written atomically to the registry; a running gateway picks it up 
 request (file change) or on SIGHUP — no restart needed.
 
 The fleet commands (#51) — ``machine set-key|list|import|repair-recipe``, ``sync-configs``
-and ``check`` — live in ``cli_fleet.py`` and are registered on this group.
+and ``check`` — live in ``cli_fleet.py`` and are registered on this group, like ``enroll`` (#26,
+``cli_enroll.py``).
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from pathlib import Path
 import click
 
 from remoteos import __version__
-from remoteos.gateway import cli_fleet
+from remoteos.gateway import cli_enroll, cli_fleet
 from remoteos.gateway.accesslog import DEFAULT_ACCESS_LOG_PATH, read_access_log
 from remoteos.gateway.manifest import DEFAULT_MANIFEST_PATH
 from remoteos.gateway.registry import (
@@ -379,6 +380,8 @@ def _printable(value: object) -> str:
 main.add_command(cli_fleet.machine)
 main.add_command(cli_fleet.sync_configs_command)
 main.add_command(cli_fleet.check_command)
+main.add_command(cli_enroll.enroll_command)
+main.add_command(cli_enroll.enroll_finish_command)
 
 if __name__ == "__main__":  # pragma: no cover
     main()

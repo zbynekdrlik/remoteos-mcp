@@ -497,6 +497,29 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
     `$null` = keep polling; still `$null` at the end = "the session could not be read", not "did
     not respond").
 
+## Enrollment (#26): `REMOTEOS_ENROLL`, `REMOTEOS_ENROLL_SSH_KEY`
+
+- Unset = none of this runs: no sshd, no POST, no machine-wide Python. Tests pin it per OS.
+- **Read and removed from the environment with the other secrets, before the first child.** The URL's
+  token is its receiver's only auth, like a key. Judged before anything changes (`enroll_url_ok`,
+  `ssh_key_ok`, the PowerShell twins): a public key line with options (`command=`) or a second line
+  is refused, and a quote in the URL could rewrite curl's config.
+- **After the proof, last.** A failure exits 1 and leaves the proven install up, no rollback.
+  Windows: `Exit-RemoteOSEnrollmentFailure`, because `Exit-RemoteOSInstaller` after the stop is
+  reserved for the rollback path (a static test). Linux: `enable-only` is refused, nothing would be proven.
+- **The POST:** bash: the URL through `curl -K /dev/fd/5`, the body on stdin, so neither is in an argv;
+  `-q`, `--proto =https`, a named agent. The box's proxy stays usable. PowerShell: `Invoke-RestMethod`
+  in-process with bytes. Three tries.
+- **The UAC relaunch never carries it:** `-ExplicitKey ([bool]$explicitKey -or [bool]$enrollUrl)`, the same
+  reason as an explicit key: an argv or a file would expose the token. The command says "as Administrator".
+- **Windows Python:** `Install-RemoteOSMachinePython` runs before `Test-RemoteOSPythonReachable`: an
+  all-users Python is reachable by the desktop user. `Start-Process -Wait` (the installer leaves no
+  descendant), exit 0 or 3010, and `python312.dll` must exist, else `[X]`. `$python` is the full path.
+- **`administrators_authorized_keys` is ignored by sshd unless only Administrators and SYSTEM reach it:**
+  `icacls /inheritance:r`. No BOM in either key file.
+- macOS: no sudo = Remote Login stays off with a `[!]`, the box still enrolls.
+- Not proven by CI: the OpenSSH capability, the real Python installers and a fresh Windows box.
+
 ## Tests
 
 - **Linux:** `tests/linux_installer_harness.py` (`linux_box`) + `tests/fake_linux_tools.py`.

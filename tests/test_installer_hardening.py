@@ -98,7 +98,8 @@ class TestLoopbackCurlsGoDirect:
             lines = installer.read_text().splitlines()
             calls = [(n, line) for n, line in enumerate(lines, 1)
                      if "curl " in line and not line.lstrip().startswith(("#", "echo", '"'))
-                     and "-o \"$tgz\"" not in line]  # the source download goes through any proxy
+                     and "-o \"$tgz\"" not in line  # the source download goes through any proxy
+                     and "--proto =https" not in line]  # so does the enrollment POST: never loopback
             assert calls, installer
             bad = [(n, line.strip()) for n, line in calls if "curl -q --noproxy '*' " not in line]
             assert bad == [], f"{installer.name}: a loopback curl may use a proxy or a .curlrc: {bad}"

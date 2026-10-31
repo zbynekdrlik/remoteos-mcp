@@ -248,3 +248,27 @@ paths:
     argvs: that is the "contents on stdin only" proof.
   - A CLI call from inside a running loop (the live-reload test) goes through
     `asyncio.to_thread`.
+
+## Enrollment (#26): `enroll.py`, `cli_enroll.py`, `manifest.add_machine`
+
+- **The public drop lane cannot take a box's POST.** `drop-dev1` sits behind Cloudflare Access: only
+  `/healthz` has a bypass, so `POST /<token>/` gets a 302 from the edge, valid token or not (measured
+  2026-10-31). Hence `secret request --private` (binds tailscale) + a quick tunnel. Python's default
+  user agent also gets 403 from Cloudflare: name one (`USER_AGENT`).
+- **`cloudflared tunnel --config <empty file>`, always:** with `~/.cloudflared/config.yml` present (dev1
+  has spinbike's) a quick tunnel answers 404 to everything, from that file's catch-all.
+- **A quick tunnel's name resolves ~10 s after the log prints it, and an earlier lookup is cached
+  negative:** `Tunnel.wait_for_host` sleeps `DNS_SETTLE_S` before its first probe, and a URL is printed
+  only after `/healthz` answered 204 through it. `GET /` is 501 there: not a route.
+- **The endpoint is airuleset's `vault_server.py`, never a receiver here:** a third credential endpoint
+  would need its hardening. It stores the raw body, so the installer's JSON is one vault value and
+  reaches `enroll-finish` on stdin through `secret exec --stdin` (the key is in no argv and no env).
+- **Whoever holds the URL can post first** (the vault's stated threat model): the name and projects
+  come from dev1's command line, the body picks neither. The key goes only to private/tailscale IPv4
+  literals (`_private_ipv4`), never a public or loopback one; `--url` is the operator's override.
+- `enroll-finish` stores the key before it edits the manifest, so a retry needs `--replace`: the
+  printed retry line carries it.
+- `add_machine` edits TEXT (comments are the owner's) and writes only when the result parses to the
+  same manifest plus that machine.
+- Tests: the child of the fake `secret exec` is a real process, so a monkeypatch does not reach
+  `enroll-finish`: machines on 127.0.0.1 go through `--url`.

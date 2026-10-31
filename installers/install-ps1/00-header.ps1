@@ -15,6 +15,11 @@ Remove-Item Env:REMOTEOS_MCP_RELAUNCHED -ErrorAction SilentlyContinue
 # The explicit key leaves the environment BEFORE the first child: a child inherits $env: (#12 round 9)
 $explicitKey = $env:REMOTEOS_MCP_AUTH_KEY
 Remove-Item Env:REMOTEOS_MCP_AUTH_KEY -ErrorAction SilentlyContinue
+# Enrollment (#26): set by the command `remoteos-gateway enroll` prints; the URL's token is its only auth
+$enrollUrl = $env:REMOTEOS_ENROLL
+$enrollSshKey = $env:REMOTEOS_ENROLL_SSH_KEY
+Remove-Item Env:REMOTEOS_ENROLL -ErrorAction SilentlyContinue
+Remove-Item Env:REMOTEOS_ENROLL_SSH_KEY -ErrorAction SilentlyContinue
 # An older installer's PIP_CONSTRAINT URL would make the offline install reach the network (#64)
 Remove-Item Env:PIP_CONSTRAINT -ErrorAction SilentlyContinue
 
