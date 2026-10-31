@@ -27,6 +27,7 @@ from remoteos.gateway import enroll
 from remoteos.gateway.cli_enroll import _exit_on_signals
 from remoteos.gateway.enroll import EnrollError, Registration
 from remoteos.gateway.manifest import ManifestError, add_machine, load_manifest
+from remoteos.gateway.targets import current_account
 
 SSH_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTests dev1"
 TOKEN = "EnrollTok_en-123456789012345678901234"
@@ -38,13 +39,13 @@ url = "{gateway}"
 # the camera project
 [projects.camera-box]  # kept
 host = "dev1"
-account = "newlevel"
+account = "{account}"
 config = "{config}"
 machines = ["linux-cam2"]  # the first cam
 
 [projects."song.player"]
 host = "dev1"
-account = "newlevel"
+account = "{account}"
 config = "{config2}"
 machines = [
     "linux-cam2",  # shared
@@ -122,8 +123,8 @@ class Fleet:
         self.manifest = tmp_path / "projects.toml"
         self.gateway = FakeFleetMachine(healthz=True)
         self.gateway.__enter__()
-        self.manifest.write_text(MANIFEST.format(gateway=self.gateway.base_url, config=self.config,
-                                                 config2=self.config2))
+        self.manifest.write_text(MANIFEST.format(account=current_account(), gateway=self.gateway.base_url,
+                                                 config=self.config, config2=self.config2))
         self.airuleset = tmp_path / "airuleset.py"
         self.airuleset.write_text(FAKE_AIRULESET.format(python=sys.executable, token=TOKEN))
         bin_dir = tmp_path / "bin"
