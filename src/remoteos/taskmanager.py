@@ -17,6 +17,21 @@ from remoteos.errors import ToolError, stack_frames
 logger = logging.getLogger("remoteos.taskmanager")
 
 
+class StructuredText(str):
+    """A tool's text reply that also carries structured content for the MCP result.
+
+    A plain ``str`` to whoever calls the tool function; ``wrap_sync_tool`` turns it into a
+    ``ToolResult`` with the task prefix on the text (#67).
+    """
+
+    structured: dict[str, Any]
+
+    def __new__(cls, text: str, structured: dict[str, Any]) -> StructuredText:
+        self = super().__new__(cls, text)
+        self.structured = structured
+        return self
+
+
 class TaskStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -64,6 +79,8 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
     "FileSearch": ToolCategory.FILE,
     "FileDownload": ToolCategory.FILE,
     "FileUpload": ToolCategory.FILE,
+    "FileHash": ToolCategory.FILE,
+    "FileRename": ToolCategory.FILE,
     # System queries — concurrent
     "GetSystemInfo": ToolCategory.QUERY,
     "GetClipboard": ToolCategory.QUERY,
@@ -326,6 +343,11 @@ class TaskManager:
                     raise ToolError(f"{prefix} Cancelled during execution", log_level=logging.WARNING)
 
                 # Prepend task_id to text results
+                if isinstance(result, StructuredText):
+                    from fastmcp.tools import ToolResult
+
+                    fields = {**result.structured, "task_id": task.task_id}  # some clients show only these
+                    return ToolResult(content=f"{prefix} {result}", structured_content=fields)
                 if isinstance(result, str):
                     return f"{prefix} {result}"
                 if isinstance(result, list):

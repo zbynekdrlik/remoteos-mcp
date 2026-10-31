@@ -44,6 +44,8 @@ TOOL_TIERS = {
         "FileWrite",
         "FileDownload",
         "FileUpload",
+        "FileHash",
+        "FileRename",
         "KillProcess",
         "RegWrite",
         "ServiceStart",
