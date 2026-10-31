@@ -772,7 +772,7 @@
    "readOnlyHint": true,
    "title": "ElementTree"
   },
-  "description": "List a window's interactive UI elements from the OS accessibility tree, each with a ref.\n\nUnlike a screenshot this sees real controls: buttons, fields and links in browsers\nand in Electron, WPF and UWP apps too, each with its role, name, state and bounds.\nOne line per element: [ref] role \"name\" enabled|disabled (WxH at X,Y). Bounds are\nIMAGE pixels of the Snapshot frame (monitor, max_width). Pass a ref to ClickElement\nor TypeElement instead of guessing pixels. Refs belong to the latest tree only: a\nnew ElementTree or AnnotatedSnapshot ends them. At most 300 elements are listed, and the reply says when\nthe list is incomplete. Windows only for now.",
+  "description": "List a window's interactive UI elements from the OS accessibility tree, each with a ref.\n\nUnlike a screenshot this sees real controls: buttons, fields and links in browsers\nand in Electron, WPF and UWP apps too, each with its role, name, state and bounds.\nOne line per element: [ref] role \"name\" enabled|disabled (WxH at X,Y). Bounds are\nIMAGE pixels of the Snapshot frame (monitor, max_width). Pass a ref to ClickElement\nor TypeElement instead of guessing pixels. Refs belong to the latest tree only: a\nnew ElementTree or AnnotatedSnapshot ends them. At most 300 elements are listed, and the reply says when\nthe list is incomplete. UI Automation on Windows, the Accessibility API on macOS (it\nneeds that permission), AT-SPI on Linux X11, where an app that shows nothing gets a hint\nhow to start it so that it does.",
   "execution": null,
   "icons": null,
   "inputSchema": {
@@ -824,7 +824,7 @@
    "readOnlyHint": null,
    "title": "ClickElement"
   },
-  "description": "Activate an element from the latest ElementTree or AnnotatedSnapshot, by its ref.\n\nUses the element's own Invoke action, which needs no mouse. An element without one\ngets a left click at its centre, unless something else is on top of it there. A ref of\nan older tree, or an element that is gone or disabled, is an error, never a click elsewhere.",
+  "description": "Activate an element from the latest ElementTree or AnnotatedSnapshot, by its ref.\n\nUses the element's own action (Invoke, AXPress, AT-SPI's press), which needs no mouse.\nAn element without one gets a left click at its centre, unless something else is on top\nof it there. A ref of\nan older tree, or an element that is gone or disabled, is an error, never a click elsewhere.",
   "execution": null,
   "icons": null,
   "inputSchema": {
@@ -2680,7 +2680,7 @@
    "readOnlyHint": true,
    "title": "AnnotatedSnapshot"
   },
-  "description": "Take a screenshot with one numbered set of marks: UI elements plus the text OCR read.\n\nFinds click targets in custom-drawn apps too (Ableton, Resolume, JUCE), which show\nlittle to accessibility. Elements of the foreground window (UI Automation on Windows,\nAT-SPI on Linux X11) are red; a line of OCR text (Slovak and English) no element\ncovers is blue. One line per mark: [n] source role \"name\" at (x,y), numbered top-left\nto bottom-right. Same frame and coordinate contract as Snapshot: the text starts with\nthe contract line, the points are IMAGE pixels, and Click / Move / Scroll / Type take\nthem as-is. On Windows an element's line also gives its ref for ClickElement and\nTypeElement; this starts a new ref tree, as ElementTree does. If OCR fails, the\nreply says so and keeps the image and the elements.",
+  "description": "Take a screenshot with one numbered set of marks: UI elements plus the text OCR read.\n\nFinds click targets in custom-drawn apps too (Ableton, Resolume, JUCE), which show\nlittle to accessibility. Elements of the foreground window (UI Automation on Windows,\nthe Accessibility API on macOS, AT-SPI on Linux X11) are red; a line of OCR text (Slovak\nand English) no element covers is blue. One line per mark: [n] source role \"name\" at (x,y), numbered top-left\nto bottom-right. Same frame and coordinate contract as Snapshot: the text starts with\nthe contract line, the points are IMAGE pixels, and Click / Move / Scroll / Type take\nthem as-is. An element's line also gives its ref for ClickElement and TypeElement;\nthis starts a new ref tree, as ElementTree does. If OCR fails, the reply says so and\nkeeps the image and the elements.",
   "execution": null,
   "icons": null,
   "inputSchema": {
