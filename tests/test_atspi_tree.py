@@ -147,8 +147,6 @@ def x11(fake_x11, monkeypatch):  # noqa: F811
             return types.SimpleNamespace(stdout=str(run_x.active).encode(), returncode=0, stderr=b"")
         if cmd[:2] == ["xdotool", "getwindowgeometry"]:
             calls.append(list(cmd))
-            if run_x.closed:
-                raise RuntimeError("xdotool failed (rc=1): no such window")
             return types.SimpleNamespace(stdout=b"X=100\nY=50\nWIDTH=800\nHEIGHT=600\n", returncode=0, stderr=b"")
         if cmd[:2] == ["xdotool", "getwindowname"]:
             return types.SimpleNamespace(stdout=run_x.name, returncode=0, stderr=b"")
@@ -156,7 +154,7 @@ def x11(fake_x11, monkeypatch):  # noqa: F811
             return types.SimpleNamespace(stdout=run_x.pid, returncode=0, stderr=b"")
         return real(cmd, **kwargs)
 
-    run_x.active, run_x.closed, run_x.name, run_x.pid = WID, False, b"", b"0"
+    run_x.active, run_x.name, run_x.pid = WID, b"", b"0"
     monkeypatch.setattr(linux_session, "_run_x", run_x)
     monkeypatch.setattr(time, "sleep", lambda s: None)
     return types.SimpleNamespace(calls=calls, run_x=run_x)
@@ -240,6 +238,26 @@ def test_an_application_with_two_windows_gives_the_one_with_the_title(x11, monke
     assert [i.name for i in d.element_tree("Editor").items] == ["Second"]
 
 
+def _two_frames():
+    first = Node("frame", "Alpha", (0, 0, 800, 600), {"ENABLED", "SHOWING", "ACTIVE"})
+    first.kids = [Node("push button", "Alpha's", (0, 0, 9, 9))]
+    second = Node("frame", "Beta as AT-SPI says", (0, 0, 800, 600), {"ENABLED", "SHOWING"})
+    second.kids = [Node("push button", "Beta's", (0, 0, 9, 9))]
+    return Node("application", "app", children=[first, second])
+
+
+def test_a_background_window_is_never_replaced_by_its_app_s_active_frame(x11, monkeypatch):
+    # real GTK 3: "Beta" was listed with Alpha's elements, under Beta's title and at Beta's offset
+    bus(monkeypatch, _two_frames())
+    x11.run_x.active = 0x777
+    assert tool_error(lambda: server.ElementTree("Editor")).endswith("FocusWindow it first")
+
+
+def test_the_active_window_may_use_its_app_s_active_frame(x11, monkeypatch):
+    bus(monkeypatch, _two_frames())
+    assert [i.name for i in d.element_tree().items] == ["Alpha's"]
+
+
 def test_a_window_with_no_process_is_found_by_its_exact_title_only(x11, monkeypatch):
     monkeypatch.setattr(linux_windows, "list_windows", lambda: [d.WindowInfo(WID, "Editor", (0, 0, 9, 9), True, 0)])
     other, _ = window_tree(Node("push button", "Wrong", (0, 0, 9, 9)), name="Something else")
@@ -281,6 +299,29 @@ def test_pixels_nobody_can_vouch_for_are_never_clicked(x11, monkeypatch):
     assert _mouse_clicks(x11) == []
 
 
+def _unvouched(monkeypatch):
+    frames = [_silent_frame("Not the title", Node("push button", "One", (10, 20, 100, 30)))]
+    frames.append(_silent_frame("Nor this", Node("push button", "Two", (10, 60, 100, 30))))
+    bus(monkeypatch, Node("application", "app", children=frames))
+
+
+def test_pixels_nobody_can_vouch_for_are_withheld_or_flagged(x11, monkeypatch):
+    _unvouched(monkeypatch)
+    assert d.get_interactive_elements() == []
+    elements, cut = d.marked_elements()
+    assert [e["text"] for e in elements] == ["One", "Two"]
+    assert cut.startswith("the screen positions of these elements are unknown")
+    assert "**Hint:** the screen positions of these elements are unknown" in server.ElementTree()
+
+
+def test_a_frame_that_is_not_the_only_one_is_not_taken_for_the_window(x11, monkeypatch):
+    # one sized frame among several: its size says nothing about the target's X window
+    sized = _silent_frame("Hidden", Node("push button", "One", (10, 20, 100, 30)))
+    empty = _silent_frame("Target", Node("push button", "Two", (10, 60, 100, 30)), ext=(0, 0, 0, 0))
+    atspi = bus(monkeypatch, Node("application", "app", children=[sized, empty]))
+    assert linux_windows._atspi_coord_strategy(atspi, atspi.get_desktop(0).kids[0], (100, 50, 800, 600)) is None
+
+
 def test_a_frame_that_stops_answering_stops_the_mouse_too(x11, monkeypatch):
     button = Node("push button", "Go", (10, 20, 100, 30))
     app, frame = window_tree(button)
@@ -307,6 +348,21 @@ def test_an_unlisted_window_with_no_title_never_names_another_app_s_untitled_fra
     other = Node("application", "app", children=[untitled])
     bus(monkeypatch, other)
     assert d.element_tree().items == ()
+
+
+def test_an_untitled_window_names_no_untitled_frame_of_its_own_app_either(x11, monkeypatch):
+    monkeypatch.setattr(linux_windows, "list_windows", lambda: [d.WindowInfo(WID, "", (0, 0, 9, 9), True, PID)])
+    monkeypatch.setattr(linux_windows, "enumerate_windows", linux_windows.list_windows)
+    app, frame = window_tree(Node("push button", "Mine", (0, 0, 9, 9)), name="")
+    bus(monkeypatch, app)
+    assert [i.name for i in d.element_tree().items] == ["Mine"]  # its only frame, not by the empty title
+    assert linux_windows._frame_titled([frame], "") is None
+
+
+def test_a_window_with_no_pid_keeps_the_title_xdotool_gave(x11, monkeypatch):
+    x11.run_x.name, x11.run_x.pid = b"Editor\n", b"\n"
+    window = linux_windows._unlisted_window(WID)
+    assert (window.title, window.pid) == ("Editor", 0)
 
 
 def test_a_box_without_wmctrl_still_finds_the_active_window(x11, monkeypatch):
@@ -472,6 +528,16 @@ def test_activate_on_a_text_field_is_enter_so_the_mouse_clicks_it(x11, monkeypat
     assert _mouse_clicks(x11) == [["xdotool", "mousemove", "160", "85", "click", "1"]]
 
 
+@pytest.mark.parametrize("interfaces", [["Action"], ["Action", "EditableText"]])
+def test_activate_on_a_read_only_field_is_enter_too(x11, monkeypatch, interfaces):
+    # real GTK 3: no EDITABLE state, the same single action, the same default button
+    field = Node("text", "Name", (10, 20, 100, 30), BASE | {"FOCUSABLE"}, actions=["activate"], interfaces=interfaces)
+    bus(monkeypatch, window_tree(field)[0])
+    d.click_element(_ref("Name"))
+    assert field.done == []
+    assert len(_mouse_clicks(x11)) == 1
+
+
 def test_a_text_field_s_real_click_action_is_used(x11, monkeypatch):
     field = Node("entry", "Name", (10, 20, 100, 30), BASE | {"EDITABLE"}, actions=["activate", "click"])
     bus(monkeypatch, window_tree(field)[0])
@@ -526,6 +592,14 @@ def test_a_mouse_click_needs_an_element_on_the_screen(x11, monkeypatch, states):
         d.click_element(ref)
 
 
+def test_a_box_without_wmctrl_can_still_act_on_a_ref(x11, monkeypatch):
+    button = Node("push button", "Go", (10, 20, 100, 30), actions=["click"])
+    bus(monkeypatch, window_tree(button)[0])
+    ref = _ref("Go")
+    monkeypatch.setattr(linux_windows, "enumerate_windows", lambda: [])
+    assert d.click_element(ref).startswith("Invoked")
+
+
 def test_a_disabled_element_is_refused(x11, monkeypatch):
     button = Node("push button", "Go", (10, 20, 100, 30), actions=["click"])
     bus(monkeypatch, window_tree(button)[0])
@@ -550,7 +624,7 @@ def test_an_element_that_left_is_gone_and_nothing_happens(x11, monkeypatch, chan
     elif change == "name":
         button.name = "Delete"  # a list row reused for other content
     else:
-        x11.run_x.closed = True
+        monkeypatch.setattr(linux_windows, "enumerate_windows", lambda: [d.WindowInfo(1, "Other", (0, 0, 9, 9), True)])
     with pytest.raises(StaleRef, match="is gone: call ElementTree again"):
         d.click_element(ref)
     assert button.done == []

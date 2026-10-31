@@ -118,6 +118,17 @@ class FakeHI:
         return OK, 42
 
 
+def _failing_children(fake, window, error):
+    real = fake.AXUIElementCopyAttributeValue
+
+    def copy(element, attribute, _):
+        if element is window and attribute == "AXChildren":
+            return error, None
+        return real(element, attribute, _)
+
+    return copy
+
+
 def button(title="Save", rect=(10, 20, 80, 24), **attributes):
     element = Element("AXButton", title, rect, **attributes)
     element.actions = ["AXPress"]
@@ -228,9 +239,25 @@ def test_a_vanished_element_is_skipped(hi):
 
 @pytest.mark.parametrize("error", [CANNOT_COMPLETE, API_DISABLED])
 def test_a_hung_app_is_an_error_and_never_an_empty_tree(hi, error):
-    window = front(hi, button())
-    window.read_error = error
+    window = front(hi)
+    hi.AXUIElementCopyAttributeValue = _failing_children(hi, window, error)
     with pytest.raises(RuntimeError, match="did not answer the Accessibility API"):
+        ax.read_tree()
+
+
+def test_a_part_that_stops_answering_costs_that_part_and_the_reply_says_so(hi):
+    stuck = button("Stuck")
+    stuck.read_error = CANNOT_COMPLETE
+    front(hi, button("Fine"), stuck, button("Also fine"))
+    tree = ax.read_tree()
+    assert [i.name for i in tree.items] == ["Fine", "Also fine"]
+    assert tree.truncated == "1 parts of the window did not answer the Accessibility API"
+
+
+def test_a_window_that_goes_while_it_is_read_has_a_message(hi):
+    window = front(hi, button())
+    window.invalid = True
+    with pytest.raises(LookupError, match="went away while it was being read"):
         ax.read_tree()
 
 
