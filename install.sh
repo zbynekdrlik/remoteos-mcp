@@ -18,7 +18,7 @@ PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
 # bash keeps the export flag of a name the caller exported (globals AND locals): unset every
 # name that ever holds the key, so none of them reaches a child's environment (#12).
-unset AUTH_KEY EXPLICIT_KEY CFG_KEY PLIST_KEY KEY_SOURCE k key
+unset AUTH_KEY EXPLICIT_KEY CFG_KEY PLIST_KEY KEY_SOURCE k key ENROLL_URL ENROLL_SSH_KEY
 # The explicit key is read once and dropped from the environment BEFORE the first child
 # (`python3 --version`, a brew fallback): every child inherits it (review round 9).
 EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"
@@ -868,30 +868,32 @@ enrollment_body() {
             *) ips="${ips:+$ips, }\"$ip\"" ;;
         esac
     done
-    printf '{"hostname": "%s", "ips": [%s], "port": %s, "version": "%s", "os": "macos", "auth_key": "%s"}' \
-        "${name:-unknown}" "$ips" "$PORT" "$PKG_VER" "$AUTH_KEY"
+    printf '{"hostname": "%s", "ips": [%s], "port": %s, "version": "%s", "os": "macos", "account": "%s", "auth_key": "%s"}' \
+        "${name:-unknown}" "$ips" "$PORT" "$PKG_VER" "$(id -un)" "$AUTH_KEY"
 }
 
 # POST it: the URL through a config on fd 5, the body on stdin, neither in curl's argv. -q: no .curlrc.
+# Only the receiver's own `ok` counts: curl -f takes a redirect (the Access 302) as a success.
 post_enrollment() {
-    local try
+    local try reply
     for try in 1 2 3; do
-        if curl -q -fsS --proto =https --max-time 30 -A remoteos-enroll -H 'Content-Type: application/json' \
-            -K /dev/fd/5 --data-binary @- -o /dev/null 5<<<"url = \"$ENROLL_URL\"" <<<"$(enrollment_body)"; then
+        reply=$(curl -q -fsS --proto =https --max-time 30 -A remoteos-enroll -H 'Content-Type: application/json' \
+            -K /dev/fd/5 --data-binary @- 5<<<"url = \"$ENROLL_URL\"" <<<"$(enrollment_body)") || reply=""
+        if [[ "$reply" == ok ]]; then
             echo "        Enrolled: dev1 received this box's registration"
             return 0
         fi
         echo "        [!] Registration attempt ${try} failed"
         if [[ "$try" -lt 3 ]]; then sleep 5; fi
     done
-    echo "        [X] The registration did not reach dev1: the install stands, the box is not enrolled"
+    echo "        [X] The registration got no answer from dev1: the install stands, check on dev1 whether the box is enrolled"
     exit 1
 }
 
 if [[ -n "$ENROLL_URL" ]]; then
     echo "  Enrolling this box..."
-    enroll_ssh
     post_enrollment
+    enroll_ssh
 fi
 
 # --- Summary ---

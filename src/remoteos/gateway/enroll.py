@@ -47,6 +47,7 @@ _SSH_KEY = re.compile(r"(ssh-ed25519|ecdsa-sha2-nistp256|ssh-rsa) [A-Za-z0-9+/=]
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")  # tailscale; is_private does not cover it
 _HOSTNAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}")
+_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,99}")  # it goes into a command a person runs as admin
 RAW_URL = "https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp"
 
 
@@ -63,6 +64,7 @@ class Registration:
     port: int
     version: str
     os: str
+    account: str
     key: str = field(repr=False)
 
 
@@ -95,6 +97,9 @@ def parse_registration(raw: bytes) -> Registration:
         raise EnrollError("the registration has no valid hostname")
     if not isinstance(version, str) or not _VERSION.fullmatch(version):
         raise EnrollError("the registration has no valid version")
+    account = data.get("account")
+    if not isinstance(account, str) or not _HOSTNAME.fullmatch(account):
+        raise EnrollError("the registration has no valid account")
     if type(port) is not int or not 1 <= port <= 65535:
         raise EnrollError("the registration has no valid port")
     if data.get("os") not in ("windows", "linux", "macos"):
@@ -108,7 +113,7 @@ def parse_registration(raw: bytes) -> Registration:
     if not isinstance(ips, list) or len(ips) > MAX_ADDRESSES:
         raise EnrollError("the registration has no valid ips")
     addresses = tuple(ip for ip in ips if isinstance(ip, str) and _private_ipv4(ip))
-    return Registration(hostname, addresses, port, version, data["os"], key)
+    return Registration(hostname, addresses, port, version, data["os"], account, key)
 
 
 def candidate_urls(registration: Registration) -> list[str]:
@@ -117,6 +122,10 @@ def candidate_urls(registration: Registration) -> list[str]:
     tailnet = [ip for ip in registration.addresses if ipaddress.IPv4Address(ip) in _CGNAT]
     others = [ip for ip in registration.addresses if ip not in tailnet]
     return [f"http://{ip}:{registration.port}/mcp" for ip in dict.fromkeys(tailnet + others)]
+
+
+def ref_ok(ref: str) -> bool:
+    return _REF.fullmatch(ref) is not None and ".." not in ref
 
 
 def read_ssh_key(path: Path | None) -> str:
@@ -181,9 +190,10 @@ class Airuleset:
         return result.stdout
 
     def state(self, name: str) -> str:
-        """``ready`` | ``pending`` | ``absent``."""
-        words = self._run("status", name).stdout.split()  # "<name> ready expires=<time>"
-        return words[1] if len(words) > 1 else "absent"
+        """``ready`` | ``pending`` | ``absent``, or ``unknown`` when ``secret status`` failed."""
+        result = self._run("status", name)
+        words = result.stdout.split()  # "<name> ready  expires=<time>"
+        return words[1] if result.returncode == 0 and len(words) > 1 else "unknown"
 
     def forget(self, name: str) -> None:
         result = self._run("forget", name)
@@ -191,7 +201,8 @@ class Airuleset:
             logger.warning("secret forget %s failed (exit %s)", name, result.returncode)
 
     def exec_stdin(self, name: str, command: list[str]) -> subprocess.CompletedProcess:
-        """Run *command* with the stored value on its stdin; airuleset filters its output."""
+        """Run *command* with the stored value on its stdin. airuleset redacts the WHOLE value from
+        the output, never the key inside it: *command* must not print the key."""
         return self._run("exec", name, "--stdin", "--", *command)
 
 
@@ -265,7 +276,7 @@ def wait_for_registration(airuleset: Airuleset, name: str, tunnel: Tunnel, timeo
         state = airuleset.state(name)
         if state == "ready":
             return
-        if state != "pending":
+        if state not in ("pending", "unknown"):  # a failed status read is no answer: ask again
             raise EnrollError(f"the enrollment request is gone (state {state})")
         if not tunnel.alive():
             raise EnrollError("the tunnel died while waiting for the box")

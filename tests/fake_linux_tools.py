@@ -31,6 +31,7 @@ Config keys (JSON):
   tarballs      {ref: path of a .tar.gz}
   fetch_fail    the tarball download fails (curl 22)
   enroll_fail   the enrollment POST fails (curl 22)
+  enroll_reply  what the enrollment POST answers (default ok; a 302 page is no failure to curl -f)
   venv_pip      fake_pip.py options for installs into a venv (install_fail, install_broken, ...)
   venv_fail     `python3 -m venv` fails until apt-get installed python3-venv
   service       {"start_fails": bool, "serve_version": str, "initialize_code": int,
@@ -340,6 +341,7 @@ def curl(cfg: dict, args: list[str]) -> int:
         if cfg.get("enroll_fail"):
             print("curl: (22) The requested URL returned error: 404", file=sys.stderr)
             return 22
+        sys.stdout.write(cfg.get("enroll_reply", "ok"))
         return 0
     data = (opts.get("-d") or opts.get("--data") or opts.get("--data-raw") or [""])[-1]
     method = (opts.get("-X") or opts.get("--request") or ["POST" if data else "GET"])[-1]

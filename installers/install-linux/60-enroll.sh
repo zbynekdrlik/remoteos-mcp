@@ -38,10 +38,11 @@ enable_ssh_server() {
     systemctl enable --now ssh >/dev/null 2>&1 || systemctl enable --now sshd >/dev/null 2>&1 \
         || fail "the ssh service could not be enabled"
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-        ufw allow 22/tcp comment "remoteos-mcp enrollment" 2>/dev/null || true
+        ufw allow 22/tcp comment "remoteos-mcp enrollment" 2>/dev/null \
+            || say "[!] ufw refused port 22: dev1 may not reach this box's ssh"
     elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
-        firewall-cmd --permanent --add-service=ssh 2>/dev/null || true
-        firewall-cmd --reload 2>/dev/null || true
+        { firewall-cmd --permanent --add-service=ssh && firewall-cmd --reload; } 2>/dev/null \
+            || say "[!] firewalld refused ssh: dev1 may not reach this box's ssh"
     fi
     say "OpenSSH server: enabled"
 }
@@ -49,7 +50,7 @@ enable_ssh_server() {
 # dev1's key for the service account: added once, the file's other lines kept.
 install_ssh_key() {
     local home keys
-    home=$(getent passwd "$SERVICE_USER" | cut -d: -f6)
+    home=$(getent passwd "$SERVICE_USER" | cut -d: -f6) || fail "the home folder of ${SERVICE_USER} is unknown"
     [[ -n "$home" ]] || fail "the home folder of ${SERVICE_USER} is unknown"
     keys="$home/.ssh/authorized_keys"
     mkdir -p "$home/.ssh"
@@ -76,32 +77,35 @@ enrollment_body() {
             *) ips="${ips:+$ips, }\"$ip\"" ;;
         esac
     done
-    printf '{"hostname": "%s", "ips": [%s], "port": %s, "version": "%s", "os": "linux", "auth_key": "%s"}' \
-        "$name" "$ips" "$PORT" "$PKG_VER" "$AUTH_KEY"
+    printf '{"hostname": "%s", "ips": [%s], "port": %s, "version": "%s", "os": "linux", "account": "%s", "auth_key": "%s"}' \
+        "$name" "$ips" "$PORT" "$PKG_VER" "$SERVICE_USER" "$AUTH_KEY"
 }
 
 # POST it. The URL (its token is the receiver's only auth) comes through a config on fd 5 and the
 # body on stdin: neither is in curl's argv. -q: no .curlrc trace. The proxy of the box stays usable.
+# Only the receiver's own `ok` counts: curl -f takes a redirect (the Access 302) as a success.
 post_enrollment() {
-    local try
+    local try reply
     for try in 1 2 3; do
-        if curl -q -fsS --proto =https --max-time 30 -A remoteos-enroll -H 'Content-Type: application/json' \
-            -K /dev/fd/5 --data-binary @- -o /dev/null 5<<<"url = \"$ENROLL_URL\"" <<<"$(enrollment_body)"; then
+        reply=$(curl -q -fsS --proto =https --max-time 30 -A remoteos-enroll -H 'Content-Type: application/json' \
+            -K /dev/fd/5 --data-binary @- 5<<<"url = \"$ENROLL_URL\"" <<<"$(enrollment_body)") || reply=""
+        if [[ "$reply" == ok ]]; then
             say "Enrolled: dev1 received this box's registration"
             return 0
         fi
         say "[!] Registration attempt ${try} failed"
         [[ "$try" -eq 3 ]] || sleep 5
     done
-    fail "the registration did not reach dev1: the install stands, the box is not enrolled"
+    fail "the registration got no answer from dev1: the install stands, check on dev1 whether the box is enrolled"
 }
 
-# After the proof, last: a failure leaves the proven install up, and the run exits 1.
+# After the proof, last: a failure leaves the proven install up, and the run exits 1. The registration
+# goes first: SSH is the break-glass path, and a box dev1 reaches over MCP can have it repaired.
 enroll_box() {
     [[ -n "$ENROLL_URL" ]] || return 0
     echo "  Enrolling this box..."
+    post_enrollment
     enable_ssh_server
     install_ssh_key
-    post_enrollment
 }
 

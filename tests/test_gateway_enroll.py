@@ -8,8 +8,13 @@ The real endpoint, the real tunnel and a real box are the supervisor's live run.
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import signal
 import stat
+import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -19,6 +24,7 @@ from fleet_harness import FakeFleetMachine, closed_port_url, fresh_secret, write
 
 from remoteos.gateway import cli as gateway_cli
 from remoteos.gateway import enroll
+from remoteos.gateway.cli_enroll import _exit_on_signals
 from remoteos.gateway.enroll import EnrollError, Registration
 from remoteos.gateway.manifest import ManifestError, add_machine, load_manifest
 
@@ -68,6 +74,9 @@ if action == "request":
         with open(value, "w") as f:
             f.write(posted)
 elif action == "status":
+    if os.environ.get("FAKE_STATUS_FAILS_ONCE") and not os.path.exists(os.path.join(vault, "failed-once")):
+        open(os.path.join(vault, "failed-once"), "w").close()
+        sys.exit(1)
     state = "ready expires=2026-10-31T08:48:00+0100" if os.path.exists(value) else None
     print(name, state or ("pending" if os.path.exists(pending) else "absent"))
 elif action == "forget":
@@ -142,7 +151,7 @@ class Fleet:
     def post(self, url: str, **overrides: object) -> None:
         host, port = url.removeprefix("http://").removesuffix("/mcp").split(":")
         body = {"hostname": "new-pc", "ips": [host], "port": int(port), "version": "0.7.0.dev50",
-                "os": "windows", "auth_key": self.key, **overrides}
+                "os": "windows", "account": "marek", "auth_key": self.key, **overrides}
         self.monkeypatch.setenv("FAKE_POSTED", json.dumps(body))
 
     def base(self) -> list[str]:
@@ -244,6 +253,61 @@ def test_a_dead_tunnel_prints_no_url(fleet, monkeypatch):
     assert any(argv[1] == "forget" for argv in fleet.calls())
 
 
+def test_a_tunnel_that_never_answers_prints_no_url(fleet, monkeypatch):
+    monkeypatch.setattr(enroll, "public_health", lambda url: 530)
+    monkeypatch.setattr(enroll, "TUNNEL_TIMEOUT_S", 0.5)
+    result = fleet.enroll("--projects", "camera-box")
+    assert result.exit_code == 1 and "did not answer" in result.output
+    assert "REMOTEOS_ENROLL=" not in result.output and TOKEN not in result.output
+    assert any(argv[1] == "forget" for argv in fleet.calls())
+
+
+def test_a_failed_status_read_is_no_answer(fleet, monkeypatch):
+    monkeypatch.setenv("FAKE_STATUS_FAILS_ONCE", "1")
+    with FakeFleetMachine(accept_keys=(fleet.key,), version="0.7.0.dev50") as machine:
+        fleet.post(machine.url)
+        monkeypatch.setattr("remoteos.gateway.cli_enroll._discard_earlier", lambda *args: None)
+        result = fleet.enroll("--projects", "camera-box", "--url", machine.url)
+    assert result.exit_code == 0, result.output
+
+
+def test_a_signal_runs_the_cleanup():
+    """TERM's default ends python with no finally: the public tunnel outlived the run."""
+    with pytest.raises(SystemExit) as caught, _exit_on_signals():
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)
+    assert caught.value.code == 128 + signal.SIGTERM
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+
+
+def test_a_retry_after_a_manifest_failure_leaves_the_machine_exposed(fleet):
+    """The key was stored and the manifest edit failed: the printed retry must end usable."""
+    with FakeFleetMachine(accept_keys=(fleet.key,), version="0.7.0.dev50") as machine:
+        fleet.post(machine.url)
+        plain, spaced = '[projects."song.player"]', '[ projects."song.player" ]'
+        fleet.manifest.write_text(fleet.manifest.read_text().replace(plain, spaced))
+        result = fleet.enroll("--projects", "song.player", "--url", machine.url)
+        assert result.exit_code == 1 and "stays in the vault" in result.output
+        fleet.manifest.write_text(fleet.manifest.read_text().replace(spaced, plain))
+        retry = shlex.split(result.output[result.output.index("then run: ") + 10:].replace("\n", " "))
+        done = subprocess.run(retry, capture_output=True, text=True, check=False)
+        assert done.returncode == 0, done.stderr
+    assert "win-new-pc" in json.loads(fleet.registry.read_text())["exposed"]
+
+
+@pytest.mark.parametrize("ref", ["a b", "x;rm -rf /", "$(id)", "..", "-x", "a..b"])
+def test_a_ref_a_person_would_paste_as_admin_is_checked(fleet, ref):
+    result = fleet.enroll("--projects", "camera-box", "--ref", ref)
+    assert result.exit_code == 1 and "--ref must be" in result.output
+    assert fleet.calls() == []
+
+
+def test_a_bad_url_is_refused_before_any_endpoint(fleet):
+    result = fleet.enroll("--projects", "camera-box", "--url", "not-a-url")
+    assert result.exit_code == 1
+    assert fleet.calls() == []
+
+
 def test_a_failed_request_prints_no_url(fleet, monkeypatch):
     monkeypatch.setenv("FAKE_REQUEST_FAILS", "1")
     result = fleet.enroll("--projects", "camera-box")
@@ -260,13 +324,13 @@ def test_no_box_within_the_time_stops_and_forgets(fleet, monkeypatch):
 
 def _registration(**overrides: object) -> bytes:
     body = {"hostname": "pc", "ips": ["10.0.0.5"], "port": 8092, "version": "1.0", "os": "linux",
-            "auth_key": "abc123", **overrides}
+            "account": "marek", "auth_key": "abc123", **overrides}
     return json.dumps(body).encode()
 
 
 @pytest.mark.parametrize("overrides", [
     {"hostname": "a b"}, {"hostname": None}, {"version": "x;y"}, {"port": 0}, {"port": "8092"}, {"port": True},
-    {"os": "beos"}, {"auth_key": ""}, {"auth_key": None}, {"auth_key": "a\nb"}, {"ips": "10.0.0.5"},
+    {"os": "beos"}, {"account": "a;b"}, {"auth_key": ""}, {"auth_key": None}, {"auth_key": "a\nb"}, {"ips": "10.0.0.5"},
     {"ips": ["10.0.0.5"] * 17},
 ])
 def test_a_bad_registration_is_refused_without_repeating_a_value(overrides):
@@ -300,7 +364,7 @@ def test_the_key_goes_only_to_private_addresses_tailscale_first():
 
 
 def test_the_key_stays_out_of_the_registrations_repr():
-    registration = Registration("pc", (), 8092, "1.0", "linux", "TopSecretKey")
+    registration = Registration("pc", (), 8092, "1.0", "linux", "marek", "TopSecretKey")
     assert "TopSecretKey" not in repr(registration)
 
 
@@ -353,6 +417,25 @@ def test_add_machine_keeps_the_files_mode(fleet):
     add_machine(fleet.manifest, "camera-box", "win-x")
     assert stat.S_IMODE(fleet.manifest.stat().st_mode) == 0o640
     assert [p.name for p in fleet.tmp.glob("projects.toml*")] == ["projects.toml"]
+
+
+def test_add_machine_writes_through_a_symlink_and_keeps_a_backup(fleet):
+    real = fleet.tmp / "real" / "projects.toml"
+    real.parent.mkdir()
+    fleet.manifest.rename(real)
+    fleet.manifest.symlink_to(real)
+    add_machine(fleet.manifest, "camera-box", "win-x")
+    assert fleet.manifest.is_symlink()
+    assert "win-x" in real.read_text()
+    assert list(real.parent.glob(".backup-*/projects.toml"))
+
+
+def test_add_machine_keeps_windows_line_ends(tmp_path):
+    path = tmp_path / "p.toml"
+    lines = ['[projects.a]', 'host = "dev1"', 'account = "n"', 'config = "~/a.json"', 'machines = ["m1"]', '']
+    path.write_bytes("\r\n".join(lines).encode())
+    add_machine(path, "a", "win-x")
+    assert b'machines = ["m1", "win-x"]\r\n' in path.read_bytes()
 
 
 def test_add_machine_refuses_an_unknown_project(fleet):

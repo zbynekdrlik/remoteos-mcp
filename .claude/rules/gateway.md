@@ -266,9 +266,11 @@ paths:
 - **Whoever holds the URL can post first** (the vault's stated threat model): the name and projects
   come from dev1's command line, the body picks neither. The key goes only to private/tailscale IPv4
   literals (`_private_ipv4`), never a public or loopback one; `--url` is the operator's override.
-- `enroll-finish` stores the key before it edits the manifest, so a retry needs `--replace`: the
-  printed retry line carries it.
-- `add_machine` edits TEXT (comments are the owner's) and writes only when the result parses to the
-  same manifest plus that machine.
+- `enroll-finish` stores the key and exposes a new machine before it edits the manifest, so a retry
+  needs `--replace` (the printed line carries it) and still finds the machine exposed.
+- TERM and HUP raise `SystemExit` while the tunnel is up (`_exit_on_signals`): python's default skips
+  `finally`, and the public tunnel outlived the run.
+- `add_machine` edits TEXT (comments are the owner's), through `fileops` (lock, dated backup, a
+  symlink stays one), and writes only when the result parses to the same manifest plus that machine.
 - Tests: the child of the fake `secret exec` is a real process, so a monkeypatch does not reach
   `enroll-finish`: machines on 127.0.0.1 go through `--url`.

@@ -24,7 +24,7 @@ main() {
 
     # bash keeps a caller-exported name's export flag (globals AND locals): unset every name that
     # holds the key or the unit text (a legacy key), so none reaches a child's environment.
-    unset AUTH_KEY EXPLICIT_KEY GH_TOKEN_VALUE KEY_SOURCE OLD_UNIT OLD_DESCRIPTION \
+    unset AUTH_KEY EXPLICIT_KEY GH_TOKEN_VALUE KEY_SOURCE OLD_UNIT OLD_DESCRIPTION ENROLL_URL ENROLL_SSH_KEY \
         unit_key env_key cfg_key k key line rest v
     # The secrets are read once, then dropped from the environment every child inherits.
     EXPLICIT_KEY="${REMOTEOS_MCP_AUTH_KEY:-}"

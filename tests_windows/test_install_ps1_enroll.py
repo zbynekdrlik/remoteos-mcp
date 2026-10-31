@@ -76,14 +76,15 @@ def test_machine_python_needs_both_files(tmp_path):
 
 def test_body_keeps_one_address_a_list(tmp_path):
     body = _ps(tmp_path, """
-Get-RemoteOSEnrollmentBody -HostName 'pc' -Addresses @('10.0.0.5') -ServerPort 8092 -Version '1.0' -AuthKey 'abc'
+Get-RemoteOSEnrollmentBody -HostName 'pc' -Addresses @('10.0.0.5') -ServerPort 8092 -Version '1.0' `
+    -Account 'marek' -AuthKey 'abc'
 """)
     assert body == {"hostname": "pc", "ips": ["10.0.0.5"], "port": 8092, "version": "1.0", "os": "windows",
-                    "auth_key": "abc"}
+                    "account": "marek", "auth_key": "abc"}
 
 
 class _Receiver:
-    def __init__(self, statuses: list[int]) -> None:
+    def __init__(self, statuses: list[int], reply: bytes = b"ok") -> None:
         self.statuses, self.seen = statuses, []
         receiver = self
 
@@ -95,9 +96,9 @@ class _Receiver:
                 length = int(self.headers["content-length"])
                 receiver.seen.append((self.path, self.headers["user-agent"], self.rfile.read(length)))
                 self.send_response(receiver.statuses.pop(0))
-                self.send_header("content-length", "2")
+                self.send_header("content-length", str(len(reply)))
                 self.end_headers()
-                self.wfile.write(b"ok")
+                self.wfile.write(reply)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -116,6 +117,17 @@ $e = Send-RemoteOSEnrollment -Url {_q(receiver.url)} -Body '{{"auth_key":"abc"}}
     path, agent, body = receiver.seen[-1]
     assert path == "/tok/" and "remoteos-enroll" in agent
     assert json.loads(body) == {"auth_key": "abc"}
+
+
+@pytest.mark.parametrize(("status", "reply"), [(200, b"<html>login</html>"), (302, b"")])
+def test_only_the_receivers_ok_counts(tmp_path, status, reply):
+    receiver = _Receiver([status], reply)
+    result = _ps(tmp_path, f"""
+$e = Send-RemoteOSEnrollment -Url {_q(receiver.url)} -Body '{{}}' -Tries 1 -DelaySeconds 0
+@{{ error = $e }} | ConvertTo-Json -Compress
+""")
+    receiver.server.shutdown()
+    assert result["error"]
 
 
 def test_send_reports_a_failure_without_the_body(tmp_path):

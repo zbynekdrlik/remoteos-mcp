@@ -451,25 +451,30 @@ if (Test-Path -LiteralPath $legacyWheelhouseRoot) {
 }
 
 # --- Enrollment (#26): after the proof, so a failure leaves the proven install up ---
+# The registration first: SSH is the break-glass path, and a box dev1 reaches over MCP can have it repaired
 if ($enrollUrl) {
     Write-Host "  Enrolling this box..." -ForegroundColor Cyan
     try {
-        $sshKeyPath = Enable-RemoteOSSsh -Key $enrollSshKey -User $desktopUser -UserProfile $desktopProfile
+        $enrollAddresses = @(Get-NetIPAddress -AddressFamily IPv4 |
+            Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
+            ForEach-Object { $_.IPAddress })
+        $enrollBody = Get-RemoteOSEnrollmentBody -HostName $hostName -Addresses $enrollAddresses -ServerPort $Port `
+            -Version $preflight.Version -Account $desktopUser -AuthKey $AuthKey
     } catch {
-        Exit-RemoteOSEnrollmentFailure -Reason "Could not set up SSH: $_" -Pause $pauseOnExit
+        Exit-RemoteOSEnrollmentFailure -Reason "Could not build the registration: $_" -Pause $pauseOnExit
     }
-    Write-Host "        OpenSSH server: enabled, key in $sshKeyPath" -ForegroundColor Green
-    $enrollAddresses = @(Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
-        ForEach-Object { $_.IPAddress })
-    $enrollBody = Get-RemoteOSEnrollmentBody -HostName $hostName -Addresses $enrollAddresses -ServerPort $Port `
-        -Version $preflight.Version -AuthKey $AuthKey
     $enrollError = Send-RemoteOSEnrollment -Url $enrollUrl -Body $enrollBody
     Remove-Variable enrollBody
     if ($enrollError) {
-        Exit-RemoteOSEnrollmentFailure -Reason "The registration did not reach dev1: $enrollError" -Pause $pauseOnExit
+        Exit-RemoteOSEnrollmentFailure -Reason "The registration got no answer from dev1 ($enrollError): check on dev1 whether the box is enrolled" -Pause $pauseOnExit
     }
     Write-Host "        Enrolled: dev1 received this box's registration" -ForegroundColor Green
+    try {
+        $sshKeyPath = Enable-RemoteOSSsh -Key $enrollSshKey -User $desktopUser -UserProfile $desktopProfile
+    } catch {
+        Exit-RemoteOSEnrollmentFailure -Reason "The box is enrolled, but SSH could not be set up: $_" -Pause $pauseOnExit
+    }
+    Write-Host "        OpenSSH server: enabled, key in $sshKeyPath" -ForegroundColor Green
 }
 
 # --- Summary ---

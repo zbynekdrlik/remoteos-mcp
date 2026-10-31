@@ -10,9 +10,13 @@ machine to the projects, ``sync-configs``, ``check``. The how and why: ``enroll.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import shlex
+import signal
 import socket
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import click
@@ -30,13 +34,14 @@ from remoteos.gateway.enroll import (
     install_commands,
     parse_registration,
     read_ssh_key,
+    ref_ok,
     secret_name,
     wait_for_registration,
 )
 from remoteos.gateway.keystore import load_keystore, mask_secret, set_key
 from remoteos.gateway.manifest import ManifestError, add_machine, load_manifest
 from remoteos.gateway.probe import STATE_OK, probe_one
-from remoteos.gateway.registry import MachineSourceError, is_valid_machine_name
+from remoteos.gateway.registry import MachineSourceError, is_valid_machine_name, validate_http_url
 from remoteos.release_channel import RELEASES_URL
 
 
@@ -47,11 +52,13 @@ def _project_list(projects: str) -> list[str]:
     return list(dict.fromkeys(names))
 
 
-def _check_request(paths, name: str, projects: list[str], replace: bool) -> None:
+def _check_request(paths, name: str, projects: list[str], replace: bool, url: str | None) -> None:
     """Everything dev1 can refuse before a box is touched."""
     if not is_valid_machine_name(name):
         raise click.ClickException(f"invalid machine name {name!r}: use letters, digits and . _ -")
     try:
+        if url is not None:
+            validate_http_url(url, what="--url")
         manifest = load_manifest(paths.manifest)
         known = load_keystore(paths.machines, missing_ok=True)
     except (ManifestError, MachineSourceError) as exc:
@@ -63,11 +70,28 @@ def _check_request(paths, name: str, projects: list[str], replace: bool) -> None
         raise click.ClickException(f"{name} is in the key store already: --replace overwrites its url and key")
 
 
-def _finish_command(paths, name: str, projects: list[str], url: str | None, replace: bool) -> list[str]:
+@contextlib.contextmanager
+def _exit_on_signals() -> Iterator[None]:
+    """A TERM or a lost terminal runs the cleanup too: python's default ends the process with no
+    ``finally``, and the public tunnel would stay up."""
+    def leave(signum, frame):  # noqa: ANN001 - signal handler signature
+        raise SystemExit(128 + signum)
+
+    previous = {number: signal.signal(number, leave) for number in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+def _finish_command(paths, airuleset: Path, name: str, projects: list[str], url: str | None,
+                    replace: bool) -> list[str]:
     """``enroll-finish`` with this run's paths, for ``secret exec``."""
     command = [sys.executable, "-m", "remoteos.gateway.cli", "--registry", str(paths.registry),
                "--machines", str(paths.machines), "--access-log", str(paths.access_log),
-               "--manifest", str(paths.manifest), "enroll-finish", name, "--projects", ",".join(projects)]
+               "--manifest", str(paths.manifest), "enroll-finish", name, "--projects", ",".join(projects),
+               "--airuleset", str(airuleset)]
     return command + (["--url", url] if url else []) + (["--replace"] if replace else [])
 
 
@@ -111,14 +135,17 @@ def enroll_command(paths, name: str, projects: str, url: str | None, ref: str, r
                    ssh_key: Path | None, timeout: int, airuleset_path: Path) -> None:
     """Start a one-time enrollment of machine NAME and finish it when the box posts."""
     wanted = _project_list(projects)
-    _check_request(paths, name, wanted, replace)
+    _check_request(paths, name, wanted, replace, url)
+    if not ref_ok(ref):
+        raise click.ClickException("--ref must be a commit sha, a tag or a branch name")
     airuleset = Airuleset(airuleset_path.expanduser())
     secret = secret_name(name)
-    finish = _finish_command(paths, name, wanted, url, replace)
+    finish = _finish_command(paths, airuleset.path, name, wanted, url, replace)
     try:
         key_line = read_ssh_key(ssh_key)
         _discard_earlier(airuleset, secret)
-        _receive(airuleset, secret, key_line, ref, timeout)
+        with _exit_on_signals():
+            _receive(airuleset, secret, key_line, ref, timeout)
     except EnrollError as exc:
         airuleset.forget(secret)
         raise click.ClickException(f"{exc} — enrollment stopped") from exc
@@ -130,10 +157,11 @@ def enroll_command(paths, name: str, projects: str, url: str | None, ref: str, r
     click.echo(result.stdout, nl=False)
     click.echo(result.stderr, nl=False, err=True)
     if result.returncode != 0:
-        retry = " ".join(_finish_command(paths, name, wanted, url, True))  # it may have stored the key already
+        retry = _finish_command(paths, airuleset.path, name, wanted, url, True)  # the key may be stored already
         raise click.ClickException(
             f"enroll-finish failed (exit {result.returncode}). The registration stays in the vault for an hour:"
-            f" fix the cause, then run: python3 {airuleset.path} secret exec {secret} --stdin -- {retry}"
+            " fix the cause, then run: "
+            + shlex.join(["python3", str(airuleset.path), "secret", "exec", secret, "--stdin", "--", *retry])
         )
     airuleset.forget(secret)
     click.echo(f"{name} is enrolled")
@@ -167,20 +195,21 @@ def enroll_finish_command(ctx: click.Context, name: str, projects: str, url: str
     """Internal, run by ``enroll``: the registration comes on STDIN."""
     paths = ctx.obj
     wanted = _project_list(projects)
-    _check_request(paths, name, wanted, replace)
+    _check_request(paths, name, wanted, replace, url)
     try:
         registration = parse_registration(sys.stdin.buffer.read())
-        click.echo(f"registration: {registration.hostname} ({registration.os}), v{registration.version}")
+        click.echo(f"registration: {registration.hostname} ({registration.os}), v{registration.version},"
+                   f" ssh account {registration.account}")
         target = _choose_url(registration, url)
         outcome = set_key(paths.machines, name, registration.key, url=target)
+        if outcome.created:
+            cli_fleet._expose_new(paths, [name])  # before the manifest: a retry finds the machine known
         for project in wanted:
             added = add_machine(paths.manifest, project, name)
             click.echo(f"  {project}: {'added' if added else 'already lists it'}")
     except (EnrollError, MachineSourceError, ManifestError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"{name}: key {mask_secret(registration.key)}, url {outcome.url}")
-    if outcome.created:
-        cli_fleet._expose_new(paths, [name])
     ctx.invoke(cli_fleet.sync_configs_command, dry_run=False, local_host=local_host, prune=False,
                airuleset_path=airuleset_path, notify_owner=notify_owner)
     ctx.invoke(cli_fleet.check_command, status_file=status_file, gateway_url=None, airuleset_path=airuleset_path,

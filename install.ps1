@@ -866,11 +866,16 @@ function Test-RemoteOSMachinePython([string]$Root) {
 function Install-RemoteOSMachinePython([string]$Root) {
     # Python 3.12 for all users, with installers that wait. -> the path of python.exe, or throws.
     if (Get-Command winget -ErrorAction SilentlyContinue) {
-        $r = Invoke-RemoteOSNative 'winget' @('install', '--id', 'Python.Python.3.12', '--exact', '--scope', 'machine',
-            '--silent', '--accept-package-agreements', '--accept-source-agreements')
-        if ($r.Exit -eq 0 -and (Test-RemoteOSMachinePython $Root)) { return (Join-Path $Root 'python.exe') }
-        Write-Host "        [!] winget did not install it (exit $($r.Exit)):" -ForegroundColor Yellow
-        Write-Host $r.Output
+        try {
+            $r = Invoke-RemoteOSNative 'winget' @('install', '--id', 'Python.Python.3.12', '--exact', '--scope', 'machine',
+                '--silent', '--accept-package-agreements', '--accept-source-agreements')
+            if ($r.Exit -eq 0 -and (Test-RemoteOSMachinePython $Root)) { return (Join-Path $Root 'python.exe') }
+            Write-Host "        [!] winget did not install it (exit $($r.Exit)):" -ForegroundColor Yellow
+            Write-Host $r.Output
+        } catch {
+            # The app alias does not start outside a desktop session
+            Write-Host "        [!] winget could not run: $_" -ForegroundColor Yellow
+        }
     }
     $installer = Join-Path $env:TEMP 'python-3.12.10-amd64.exe'
     Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' -OutFile $installer -UseBasicParsing
@@ -919,7 +924,8 @@ function Enable-RemoteOSSsh([string]$Key, [string]$User, [string]$UserProfile) {
     if (-not (Get-NetFirewallRule -Name 'RemoteOS-SSH' -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -Name 'RemoteOS-SSH' -DisplayName 'RemoteOS SSH' -Direction Inbound -LocalPort 22 -Protocol TCP -Action Allow -Profile Any | Out-Null
     }
-    $admin = Test-RemoteOSAccountAdmin $User
+    # This run is elevated (the gate): the same account is an administrator, however it became one
+    $admin = ($env:USERNAME -ieq $User) -or (Test-RemoteOSAccountAdmin $User)
     $path = Get-RemoteOSAuthorizedKeysPath -Admin $admin -DataRoot $env:ProgramData -UserProfile $UserProfile
     Add-RemoteOSAuthorizedKey -Path $path -Key $Key
     if ($admin) {
@@ -932,35 +938,38 @@ function Enable-RemoteOSSsh([string]$Key, [string]$User, [string]$UserProfile) {
     return $path
 }
 
-function Get-RemoteOSEnrollmentBody([string]$HostName, [string[]]$Addresses, [int]$ServerPort, [string]$Version, [string]$AuthKey) {
+function Get-RemoteOSEnrollmentBody([string]$HostName, [string[]]$Addresses, [int]$ServerPort, [string]$Version,
+                                    [string]$Account, [string]$AuthKey) {
     # The registration. @() + [string[]]: a single address must stay a JSON list
     return ([ordered]@{
-        hostname = $HostName; ips = @($Addresses); port = $ServerPort; version = $Version; os = 'windows'; auth_key = $AuthKey
+        hostname = $HostName; ips = @($Addresses); port = $ServerPort; version = $Version; os = 'windows'
+        account = $Account; auth_key = $AuthKey
     } | ConvertTo-Json -Compress)
 }
 
 function Send-RemoteOSEnrollment([string]$Url, [string]$Body, [int]$Tries = 3, [int]$DelaySeconds = 5) {
-    # POST in this process (no argv). A named user agent: Cloudflare answers 403 to a default one.
-    # -> $null, or the last error, which holds no body.
+    # POST in this process (no argv). A named user agent: Cloudflare answers 403 to a default one. Only
+    # the receiver's own ok counts, never a redirect. -> $null, or the last error, which holds no body.
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
     $lastError = 'no attempt'
     for ($try = 1; $try -le $Tries; $try++) {
         try {
-            Invoke-RestMethod -Method Post -Uri $Url -Body $bytes -ContentType 'application/json' `
-                -UserAgent 'remoteos-enroll' -TimeoutSec 30 -ErrorAction Stop | Out-Null
-            return $null
+            $reply = Invoke-RestMethod -Method Post -Uri $Url -Body $bytes -ContentType 'application/json' `
+                -UserAgent 'remoteos-enroll' -TimeoutSec 30 -MaximumRedirection 0 -ErrorAction Stop
+            if ("$reply".Trim() -ceq 'ok') { return $null }
+            $lastError = 'the receiver did not answer ok'
         } catch {
             $lastError = $_.Exception.Message
-            Write-Host "        [!] Registration attempt $try failed" -ForegroundColor Yellow
         }
+        Write-Host "        [!] Registration attempt $try failed" -ForegroundColor Yellow
         if ($try -lt $Tries) { Start-Sleep -Seconds $DelaySeconds }
     }
     return $lastError
 }
 
 function Exit-RemoteOSEnrollmentFailure([string]$Reason, [bool]$Pause) {
-    # Past the proof: the install stands and nothing rolls back, only the enrollment failed
-    Write-Host "  [X] $Reason -- the install stands, this box is not enrolled" -ForegroundColor Red
+    # Past the proof: the install stands and nothing rolls back
+    Write-Host "  [X] $Reason -- the install stands" -ForegroundColor Red
     Exit-RemoteOSInstaller -Code 1 -Pause $Pause
 }
 
@@ -1417,25 +1426,30 @@ if (Test-Path -LiteralPath $legacyWheelhouseRoot) {
 }
 
 # --- Enrollment (#26): after the proof, so a failure leaves the proven install up ---
+# The registration first: SSH is the break-glass path, and a box dev1 reaches over MCP can have it repaired
 if ($enrollUrl) {
     Write-Host "  Enrolling this box..." -ForegroundColor Cyan
     try {
-        $sshKeyPath = Enable-RemoteOSSsh -Key $enrollSshKey -User $desktopUser -UserProfile $desktopProfile
+        $enrollAddresses = @(Get-NetIPAddress -AddressFamily IPv4 |
+            Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
+            ForEach-Object { $_.IPAddress })
+        $enrollBody = Get-RemoteOSEnrollmentBody -HostName $hostName -Addresses $enrollAddresses -ServerPort $Port `
+            -Version $preflight.Version -Account $desktopUser -AuthKey $AuthKey
     } catch {
-        Exit-RemoteOSEnrollmentFailure -Reason "Could not set up SSH: $_" -Pause $pauseOnExit
+        Exit-RemoteOSEnrollmentFailure -Reason "Could not build the registration: $_" -Pause $pauseOnExit
     }
-    Write-Host "        OpenSSH server: enabled, key in $sshKeyPath" -ForegroundColor Green
-    $enrollAddresses = @(Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } |
-        ForEach-Object { $_.IPAddress })
-    $enrollBody = Get-RemoteOSEnrollmentBody -HostName $hostName -Addresses $enrollAddresses -ServerPort $Port `
-        -Version $preflight.Version -AuthKey $AuthKey
     $enrollError = Send-RemoteOSEnrollment -Url $enrollUrl -Body $enrollBody
     Remove-Variable enrollBody
     if ($enrollError) {
-        Exit-RemoteOSEnrollmentFailure -Reason "The registration did not reach dev1: $enrollError" -Pause $pauseOnExit
+        Exit-RemoteOSEnrollmentFailure -Reason "The registration got no answer from dev1 ($enrollError): check on dev1 whether the box is enrolled" -Pause $pauseOnExit
     }
     Write-Host "        Enrolled: dev1 received this box's registration" -ForegroundColor Green
+    try {
+        $sshKeyPath = Enable-RemoteOSSsh -Key $enrollSshKey -User $desktopUser -UserProfile $desktopProfile
+    } catch {
+        Exit-RemoteOSEnrollmentFailure -Reason "The box is enrolled, but SSH could not be set up: $_" -Pause $pauseOnExit
+    }
+    Write-Host "        OpenSSH server: enabled, key in $sshKeyPath" -ForegroundColor Green
 }
 
 # --- Summary ---

@@ -26,6 +26,7 @@ A project lists at least one machine; to take a project off, remove its table.
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import posixpath
 import re
@@ -34,6 +35,7 @@ import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from remoteos.gateway import fileops
 from remoteos.gateway.registry import RegistryError, is_valid_machine_name, validate_consumer_name
 
 DEFAULT_MANIFEST_PATH = Path.home() / ".config" / "remoteos-gateway" / "projects.toml"
@@ -172,37 +174,35 @@ def _parse_project(name: str, raw: object, source: object) -> Project:
 def add_machine(path: Path, project: str, machine: str) -> bool:
     """Add *machine* to *project*'s ``machines`` in the manifest file; False when it is listed.
 
-    The file is the owner's, comments and layout included, so this edits the text. It is written
-    only when the edited text parses to the same manifest plus that one machine."""
-    manifest = load_manifest(path)
-    current = manifest.projects.get(project)
-    if current is None:
-        raise ManifestError(f"{path}: no project {project!r}")
-    if machine in current.machines:
-        return False
-    text = path.read_text(encoding="utf-8")
-    edited = _insert_machine(text, project, machine)
-    try:
-        after = parse_manifest(tomllib.loads(edited), path)
-    except (tomllib.TOMLDecodeError, ManifestError) as exc:
-        raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: {exc}") from exc
-    expected = {**manifest.projects, project: replace(current, machines=(*current.machines, machine))}
-    if after.projects != expected or after.gateway_url != manifest.gateway_url:
-        raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: edit it by hand")
-    temp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        temp.write_text(edited, encoding="utf-8")
-        temp.chmod(stat.S_IMODE(path.stat().st_mode))
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
+    The file is the owner's, comments and layout included, so this edits the text, under a lock,
+    through fileops (a backup, an atomic write, a symlink stays one). It is written only when the
+    edited text parses to the same manifest plus that one machine."""
+    with fileops.exclusive_lock(str(path.parent / ".projects.lock")):
+        manifest = load_manifest(path)
+        current = manifest.projects.get(project)
+        if current is None:
+            raise ManifestError(f"{path}: no project {project!r}")
+        if machine in current.machines:
+            return False
+        edited = _insert_machine(path.read_bytes().decode("utf-8"), project, machine)
+        try:
+            after = parse_manifest(tomllib.loads(edited), path)
+        except (tomllib.TOMLDecodeError, ManifestError) as exc:
+            raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: {exc}") from exc
+        expected = {**manifest.projects, project: replace(current, machines=(*current.machines, machine))}
+        if after.projects != expected or after.gateway_url != manifest.gateway_url:
+            raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: edit it by hand")
+        target = fileops.expand(str(path))
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+        fileops.write_with_backup(target, edited.encode("utf-8"), _dt.date.today().isoformat())
+        os.chmod(target, mode)
     return True
 
 
 def _insert_machine(text: str, project: str, machine: str) -> str:
     """*text* with ``"machine"`` after the last value of the project's ``machines`` array."""
     name = re.escape(project)
-    header = re.search(rf"""^[ \t]*\[projects\.(?:{name}|"{name}"|'{name}')\][ \t]*(?:#.*)?$""", text, re.MULTILINE)
+    header = re.search(rf"""^[ \t]*\[projects\.(?:{name}|"{name}"|'{name}')\][ \t]*(?:#.*)?\r?$""", text, re.MULTILINE)
     if header is None:
         raise ManifestError(f"no [projects.{project}] line found: edit the manifest by hand")
     following = re.compile(r"^[ \t]*\[", re.MULTILINE).search(text, header.end())
