@@ -24,6 +24,13 @@ log = logging.getLogger("remoteos.platform.linux.desktop")  # one logger for the
 # the headless regression contract (cam1..4) never changes.
 _MSG = "Not available on headless Linux (no display)"
 
+# The stated position on Wayland (#38): nothing here works there, and this says why and what to do.
+_WAYLAND_MSG = (
+    "Not available: this is a Wayland session, and the desktop tools drive X11 (xdotool, scrot, wmctrl, xclip); "
+    "Wayland support is a separate tier that does not exist yet. Log in to an X11 session instead (\"Ubuntu on "
+    "Xorg\" on the login screen, or WaylandEnable=false in /etc/gdm3/custom.conf), then retry."
+)
+
 # Default per-command timeout for the little X helper subprocesses.
 _TIMEOUT = 15
 
@@ -283,7 +290,7 @@ def _unavailable() -> str:
     """The honest 'not available' message for the current non-X11 mode."""
     s = get_session()
     if s.mode == "wayland":
-        return "Not available: Wayland session detected (X11 backend only — Wayland support is a separate tier)"
+        return _WAYLAND_MSG
     return _MSG
 
 

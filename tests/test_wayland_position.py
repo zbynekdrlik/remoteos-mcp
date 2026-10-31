@@ -12,7 +12,12 @@ from tool_test_support import tool_error
 
 from remoteos.platform.linux import desktop as linux_desktop
 from remoteos.platform.linux import session as linux_session
-from remoteos.tiers import LINUX_ALWAYS_EXCLUDED_TOOLS, LINUX_DISPLAY_TOOLS, LINUX_EXCLUDED_TOOLS, linux_platform_excludes
+from remoteos.tiers import (
+    LINUX_ALWAYS_EXCLUDED_TOOLS,
+    LINUX_DISPLAY_TOOLS,
+    LINUX_EXCLUDED_TOOLS,
+    linux_platform_excludes,
+)
 
 
 @pytest.fixture

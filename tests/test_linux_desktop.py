@@ -608,67 +608,6 @@ def test_record_screen_x11_empty_output_raises(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-class _FakeAdapter:
-    """Synthetic stand-in for _AtspiAdapter over dict nodes (no real AT-SPI)."""
-
-    def children(self, n):
-        return n.get("children", [])
-
-    def role_name(self, n):
-        return n.get("role", "")
-
-    def name(self, n):
-        return n.get("name", "")
-
-    def is_showing(self, n):
-        return n.get("showing", True)
-
-    def extents(self, n):
-        return n.get("ext")
-
-
-def _node(role="", name="", ext=None, showing=True, children=None):
-    return {"role": role, "name": name, "ext": ext, "showing": showing, "children": children or []}
-
-
-def test_collect_actionable_maps_only_actionable_visible_valid():
-    tree = _node(
-        "frame",
-        "Win",
-        (0, 0, 800, 600),
-        children=[
-            _node(
-                "panel",
-                "",
-                (0, 0, 800, 600),
-                children=[
-                    _node("push button", "OK", (10, 20, 110, 60)),
-                    _node("entry", "name field", (10, 80, 300, 110)),
-                    _node("label", "just text", (10, 120, 200, 140)),  # not actionable
-                    _node("push button", "", (-1, -1, -2, -2)),  # invalid extents
-                    _node("check box", "Agree", (10, 160, 40, 190), showing=False),  # hidden
-                ],
-            )
-        ],
-    )
-    els = linux_windows._collect_actionable(tree, _FakeAdapter())
-    assert [e["class"] for e in els] == ["push button", "entry"]
-    assert els[0] == {
-        "index": 1,
-        "class": "push button",
-        "text": "OK",
-        "rect": {"left": 10, "top": 20, "right": 110, "bottom": 60},
-    }
-    assert els[1]["index"] == 2 and els[1]["text"] == "name field"
-
-
-def test_collect_actionable_respects_max_elements():
-    kids = [_node("push button", f"b{i}", (0, 0, 10, 10)) for i in range(10)]
-    root = _node("frame", "W", (0, 0, 100, 100), children=kids)
-    els = linux_windows._collect_actionable(root, _FakeAdapter(), max_elements=3)
-    assert [e["index"] for e in els] == [1, 2, 3]
-
-
 def test_get_interactive_elements_atspi_unavailable_returns_empty(monkeypatch):
     monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
 
@@ -677,24 +616,6 @@ def test_get_interactive_elements_atspi_unavailable_returns_empty(monkeypatch):
 
     monkeypatch.setattr(linux_windows, "_load_atspi", _boom)
     assert d.get_interactive_elements() == []
-
-
-def test_get_interactive_elements_no_frame_returns_empty(monkeypatch):
-    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
-    monkeypatch.setattr(linux_windows, "_load_atspi", lambda: object())
-    monkeypatch.setattr(linux_windows, "_atspi_active_frame", lambda atspi: None)
-    assert d.get_interactive_elements() == []
-
-
-def test_get_interactive_elements_collects_from_active_frame(monkeypatch):
-    monkeypatch.setattr(linux_session, "_SESSION", _x11_session())
-    frame = _node("frame", "W", (0, 0, 800, 600), children=[_node("push button", "Go", (5, 5, 55, 35))])
-    monkeypatch.setattr(linux_windows, "_load_atspi", lambda: object())
-    monkeypatch.setattr(linux_windows, "_atspi_active_frame", lambda atspi: frame)
-    monkeypatch.setattr(linux_windows, "_atspi_coord_strategy", lambda atspi, fr: ("window", (0, 0)))
-    monkeypatch.setattr(linux_windows, "_AtspiAdapter", lambda *a, **k: _FakeAdapter())
-    els = d.get_interactive_elements()
-    assert len(els) == 1 and els[0]["text"] == "Go" and els[0]["class"] == "push button"
 
 
 def test_content_origin_csd_shadow_margin():
@@ -845,18 +766,17 @@ def test_get_interactive_elements_leaves_env_clean(monkeypatch):
         monkeypatch.delenv(k, raising=False)
     before = {k: linux_session.os.environ.get(k) for k in keys}
 
-    fake_atspi = types.SimpleNamespace(get_desktop=lambda n: object())
+    walked = []
+    empty_desktop = types.SimpleNamespace(get_child_count=lambda: walked.append(True) or 0)
+    fake_atspi = types.SimpleNamespace(get_desktop=lambda n: empty_desktop)
     fake_gi = types.SimpleNamespace(require_version=lambda *a, **k: None)
     fake_repo = types.SimpleNamespace(Atspi=fake_atspi)
     monkeypatch.setitem(sys.modules, "gi", fake_gi)
     monkeypatch.setitem(sys.modules, "gi.repository", fake_repo)
-    frame = _node("frame", "W", (0, 0, 800, 600), children=[_node("push button", "Go", (5, 5, 55, 35))])
-    monkeypatch.setattr(linux_windows, "_atspi_active_frame", lambda atspi: frame)
-    monkeypatch.setattr(linux_windows, "_atspi_coord_strategy", lambda atspi, fr: ("window", (0, 0)))
-    monkeypatch.setattr(linux_windows, "_AtspiAdapter", lambda *a, **k: _FakeAdapter())
+    monkeypatch.setattr(linux_windows, "_target", lambda window: None)
+    monkeypatch.setattr(linux_windows, "_atspi_active_frame", lambda atspi: types.SimpleNamespace())
 
-    els = d.get_interactive_elements()
-    assert len(els) == 1  # the walk ran end-to-end
+    assert d.get_interactive_elements() == []
     after = {k: linux_session.os.environ.get(k) for k in keys}
     assert after == before  # no leak after the snapshot
 

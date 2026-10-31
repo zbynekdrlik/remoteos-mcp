@@ -22,9 +22,9 @@ from remoteos.taskmanager import manager as task_manager
 from remoteos.tiers import (
     ALL_TOOLS,
     LINUX_ALWAYS_EXCLUDED_TOOLS,
-    LINUX_DISPLAY_TOOLS,
     LINUX_EXCLUDED_TOOLS,
     get_tier_names,
+    linux_platform_excludes,
     parse_tool_csv,
     resolve_enabled_tools,
 )
@@ -262,7 +262,8 @@ def cli(
 
     # On Linux, gate the display-dependent tools on a runtime session check:
     # a machine with an active X11 session (e.g. imag-nb) gets the full desktop
-    # tool set; a headless box (cam1..4) keeps them excluded — zero regression.
+    # tool set; a headless box (cam1..4) keeps them excluded — zero regression;
+    # on Wayland they stay and say what is missing (#38).
     # Status lines go to stderr: in stdio mode stdout is the JSON-RPC stream (#31 review).
     platform_excludes = None
     if is_windows():
@@ -273,8 +274,7 @@ def cli(
             from remoteos.platform.linux import desktop as _linux_desktop
 
             session = _linux_desktop.get_session()
-            if session.mode != "x11":
-                platform_excludes |= LINUX_DISPLAY_TOOLS
+            platform_excludes = linux_platform_excludes(session.mode)
             click.echo(
                 f"  Linux session: {session.mode}" + (f" (display={session.display})" if session.mode == "x11" else ""),
                 err=True,
