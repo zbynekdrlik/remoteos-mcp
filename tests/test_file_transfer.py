@@ -9,9 +9,9 @@ import os
 
 import pytest
 from fastmcp import Client
+from tool_surface import server
 from tool_test_support import tool_error
 
-import remoteos.__main__ as server
 from remoteos import file_transfer
 from remoteos.tiers import TOOL_TIERS
 

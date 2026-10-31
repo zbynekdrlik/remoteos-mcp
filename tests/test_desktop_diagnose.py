@@ -24,10 +24,11 @@ import pytest
 from fake_console_child import popen_answered_by
 from fake_windows_session import LOCK, UNLOCK, WTS_ACTIVE, WTS_DISCONNECTED
 from fastmcp.exceptions import ToolError
+from tool_surface import server
 from tool_test_support import purge_module
 
-import remoteos.__main__ as server
 from remoteos.platform.linux import desktop as linux_desktop
+from remoteos.platform.linux import session as linux_session
 
 _HEADLESS = "Not available on headless Linux (no display)"
 _WAYLAND = "Not available: Wayland session detected (X11 backend only — Wayland support is a separate tier)"
@@ -242,21 +243,21 @@ def no_subprocess(monkeypatch):
     def _boom(*args, **kwargs):  # pragma: no cover - must not be called
         raise AssertionError("the Linux diagnosis must not run a subprocess")
 
-    monkeypatch.setattr(linux_desktop, "_run_capture", _boom)
-    monkeypatch.setattr(linux_desktop, "_run_x", _boom)
+    monkeypatch.setattr(linux_session, "_run_capture", _boom)
+    monkeypatch.setattr(linux_session, "_run_x", _boom)
 
 
 def test_linux_headless_and_wayland_diagnoses_are_the_unchanged_stubs(monkeypatch, no_subprocess):
-    monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="headless"))
+    monkeypatch.setattr(linux_session, "_SESSION", linux_desktop.SessionInfo(mode="headless"))
     assert linux_desktop.diagnose("capture") == _HEADLESS
-    monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="wayland"))
+    monkeypatch.setattr(linux_session, "_SESSION", linux_desktop.SessionInfo(mode="wayland"))
     assert linux_desktop.diagnose("input") == _WAYLAND
 
 
 def test_linux_x11_session_is_no_diagnosis_even_when_a_locker_runs(monkeypatch, no_subprocess):
     # review round 1: a locked X11 screen is no silent failure. The screenshot shows the locker
     # and xdotool input reaches it (the only remote way to unlock), so it is never refused.
-    monkeypatch.setattr(linux_desktop, "_SESSION", _x11())
+    monkeypatch.setattr(linux_session, "_SESSION", _x11())
     assert linux_desktop.diagnose("capture") is None
     assert linux_desktop.diagnose("input") is None
 
@@ -537,7 +538,7 @@ def test_mac_type_text_still_refuses_without_the_posting_permission_when_the_pre
 
 
 def test_linux_ocr_without_a_display_is_the_unchanged_stub(monkeypatch, no_subprocess):
-    monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="headless"))
+    monkeypatch.setattr(linux_session, "_SESSION", linux_desktop.SessionInfo(mode="headless"))
     with pytest.raises(ToolError) as exc:
         server.OCR()
     assert str(exc.value) == _HEADLESS

@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 from fake_console_child import assert_runs_powershell, returned
+from tool_surface import server
 
-import remoteos.__main__ as server
 from remoteos import identity
 
 CAPABILITIES = (

@@ -17,10 +17,12 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
+from tool_surface import server
 from tool_test_support import tool_error
 
-import remoteos.__main__ as server
 from remoteos.platform.linux import desktop as d
+from remoteos.platform.linux import session as linux_session
+from remoteos.platform.linux import windows as linux_windows
 
 
 class _Proc:
@@ -41,7 +43,7 @@ def _install_fake_x11(monkeypatch, root, heads, capture_size=None, xrandr_instal
     missing binary.
     """
     monkeypatch.setattr(
-        d,
+        linux_session,
         "_SESSION",
         d.SessionInfo(mode="x11", display=":0", uid=1000, user="newlevel", session_id="1"),
     )
@@ -50,7 +52,7 @@ def _install_fake_x11(monkeypatch, root, heads, capture_size=None, xrandr_instal
         f" {i}: +HEAD-{i} {w}/500x{h}/300+{x}+{y}  HEAD-{i}\n" for i, (x, y, w, h) in enumerate(heads)
     )
 
-    def _fake_run_x(cmd, *, input_bytes=None, timeout=d._TIMEOUT, discard_output=False):
+    def _fake_run_x(cmd, *, input_bytes=None, timeout=linux_session._TIMEOUT, discard_output=False):
         calls.append(list(cmd))
         if cmd[:1] == ["xrandr"] and not xrandr_installed:
             raise RuntimeError("xrandr not installed: [Errno 2] No such file or directory: 'xrandr'")
@@ -81,9 +83,9 @@ def _install_fake_x11(monkeypatch, root, heads, capture_size=None, xrandr_instal
         # the desktop tools' preflight (#32) runs no helper command on an X11 session
         raise AssertionError(f"unexpected helper command {cmd}")
 
-    monkeypatch.setattr(d, "_run_x", _fake_run_x)
-    monkeypatch.setattr(d, "_run_capture", _fake_run_capture)
-    monkeypatch.setattr(d, "_load_atspi", _no_atspi)
+    monkeypatch.setattr(linux_session, "_run_x", _fake_run_x)
+    monkeypatch.setattr(linux_session, "_run_capture", _fake_run_capture)
+    monkeypatch.setattr(linux_windows, "_load_atspi", _no_atspi)
     return calls
 
 
@@ -311,7 +313,7 @@ def test_unknown_monitor_index_is_an_error(dual_x11):
 
 def test_headless_input_tool_raises_the_exact_provider_stub(monkeypatch):
     # the stub TEXT is the cam1..4 contract and stays byte-for-byte; it now arrives as an error (#32)
-    monkeypatch.setattr(d, "_SESSION", d.SessionInfo(mode="headless"))
+    monkeypatch.setattr(linux_session, "_SESSION", d.SessionInfo(mode="headless"))
     stub = "Not available on headless Linux (no display)"
     assert tool_error(lambda: server.Click(10, 10)) == stub
     assert tool_error(lambda: server.Move(10, 10)) == stub

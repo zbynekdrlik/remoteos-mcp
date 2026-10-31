@@ -2,8 +2,9 @@
 paths:
   - "src/remoteos/typing_input.py"
   - "src/remoteos/text_entry.py"
-  - "src/remoteos/__main__.py"
+  - "src/remoteos/tools/desktop.py"
   - "src/remoteos/platform/*/desktop.py"
+  - "src/remoteos/platform/linux/x11_input.py"
   - "tests/test_typing_input.py"
   - "tests/test_provider_geometry.py"
   - "tests/test_linux_desktop.py"

@@ -1,6 +1,8 @@
 ---
 paths:
   - "src/remoteos/__main__.py"
+  - "src/remoteos/app.py"
+  - "src/remoteos/tools/**"
   - "src/remoteos/taskmanager.py"
   - "src/remoteos/platform/linux/shell_env.py"
   - "src/remoteos/identity.py"
@@ -13,6 +15,16 @@ paths:
 
 # Server start, logging, Shell/FileUpload, task states (#31) — gotchas
 
+- **Where the server lives (#49).** `app.py` = the `mcp` instance, `/health`, the identity, the
+  helpers several tool modules share, and the Windows DPI + pyautogui set-up. `tools/*.py` = the
+  tools by area, registered on `mcp` when `tools/__init__.py` imports them. `__main__.py` = the CLI,
+  the start-up and the task-wrapping pass; only importing `remoteos.__main__` wraps the tools.
+  - **`tools/list` order = registration order = the import order in `tools/__init__.py`, then the
+    order inside each module.** That is why EventLog stays at the end of `tools/network.py`.
+    `tests/test_tools_list_golden.py` pins names, schemas, annotations, descriptions and order.
+    A deliberate tool change regenerates `tests/golden/tools_list.json` (see that test's docstring).
+  - The Linux provider follows the same split: `platform/linux/desktop.py` is the facade over
+    `session.py`, `windows.py`, `x11_capture.py` and `x11_input.py`.
 - **FastMCP 4.x (4.1.2 since #39) `run_http_async` takes `uvicorn_config`, never `uvicorn_args`.** A wrong
   keyword is a TypeError at start, before the port binds. Check the real signature in
   `fastmcp/server/mixins/transport.py` when you add a run kwarg.
@@ -27,7 +39,7 @@ paths:
   import-string app via `uvicorn.run`. The flag only prints a warning.
 - **stdio: stdout IS the JSON-RPC stream.** Every CLI status line goes to stderr
   (`click.echo(..., err=True)`). `test_stdio_stdout_carries_only_json_rpc` locks this.
-- **The server names its machine: `remoteos/identity.py` (#59).** `__main__` reads
+- **The server names its machine: `remoteos/identity.py` (#59).** `app` reads
   `machine_identity()` ONCE at import (`_IDENTITY`) and passes `server_instructions(**_IDENTITY)`
   to `FastMCP(instructions=)`, which goes out in every `initialize` result; `/health` adds `os` +
   `hostname`. Why: a box's MCP name is only a label (stream-snv kept `win-stream-snv` after its
@@ -86,7 +98,7 @@ paths:
       server's `localhost:10.0` got the provider's guessed gdm cookie);
     - `WAYLAND_DISPLAY=wayland-0`: a Wayland session of the euid whose `wayland-0` socket is in
       the child's runtime dir. `SessionInfo` has no Wayland name; `wayland-0` is libwayland's own
-      default. Do not grow `desktop.py` for it (#49).
+      default. Do not grow the provider for it (#49).
   - As root (euid 0) NOTHING is added and the session is never read: never another user's bus or
     display (the X tools' `sudo -u` wrap exists for that).
   - **Shell never forces a re-detection of the provider's cache** (review round 1). The design's
@@ -112,13 +124,13 @@ paths:
     outside, two threads could write their lines in swapped order and the last line would name a
     stale set; a stalled stderr already blocks every thread on the logging handler's own lock.
   - **Copy `os.environ` key by key, never `dict(os.environ)`** (`_snapshot`, review round 4).
-    `dict()` lists the keys, then reads each; `desktop._load_atspi`'s `finally` pops keys in
+    `dict()` lists the keys, then reads each; `windows._load_atspi`'s `finally` pops keys in
     another thread, and a key gone in between raised KeyError and failed the Shell call.
     `Popen(env=None)` copied the C environ and never could.
-  - Known exception to "never another user's session" (it predates #52): `desktop._load_atspi`
+  - Known exception to "never another user's session" (it predates #52): `windows._load_atspi`
     writes the session user's `DBUS_SESSION_BUS_ADDRESS` / `DISPLAY` / `XAUTHORITY` into
     `os.environ` for a moment. A Shell call that copies `os.environ` in that window (a root
-    service included) passes them on. Closing it needs a lock shared with `desktop.py`.
+    service included) passes them on. Closing it needs a lock shared with `platform/linux/windows.py`.
   - With DISPLAY set, a command that would prompt (`ssh` host key / passphrase, `sudo -A`) may
     open `ssh-askpass` on the session's screen and wait there until the Shell timeout, where it
     used to fail at once (review round 4). The README and the Shell description tell clients to
@@ -129,7 +141,7 @@ paths:
       `env -u DBUS_SESSION_BUS_ADDRESS` or a short `timeout`.
   - The provider's `/proc` scan can now find a detached Shell-started program's STALE
     `DISPLAY` / `XAUTHORITY` after a re-login on another display (it takes the first euid
-    process with both; a resident `xclip` already could). Fixing it belongs in `desktop.py`
+    process with both; a resident `xclip` already could). Fixing it belongs in `platform/linux/session.py`
     (match `/proc/<pid>/sessionid`), a follow-up candidate of #52 (see the linux-desktop skill).
   - **A GUI program started from Shell must be detached**: `setsid -f obs >/dev/null 2>&1` (or
     `systemd-run --user obs`, which works now that the bus is set). A plain `obs &` keeps the

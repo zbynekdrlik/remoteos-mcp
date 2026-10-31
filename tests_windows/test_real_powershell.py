@@ -21,8 +21,8 @@ from pathlib import Path
 import psutil
 import pytest
 
-import remoteos.__main__ as server
 from remoteos.platform.command import powershell_argv, run_command
+from remoteos.tools import shell as server
 
 SLOVAK = "Žltý kôň ďakuje – €"
 

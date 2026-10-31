@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import base64
 
+from tool_surface import server
 from tool_test_support import tool_error
-
-import remoteos.__main__ as server
 
 _CAP = 100 * 1024 * 1024  # 100 MB of base64 text, as upstream winremote c3a675174c
 

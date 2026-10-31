@@ -333,11 +333,12 @@ def test_mac_task_delete_removes_the_plist_when_launchd_no_longer_has_it_loaded(
 @pytest.fixture
 def linux_x11(monkeypatch):
     from remoteos.platform.linux import desktop as linux_desktop
+    from remoteos.platform.linux import session as linux_session
 
     session = linux_desktop.SessionInfo(
         mode="x11", display=":0", xauthority="/run/user/1000/gdm/Xauthority", uid=1000, user="u", session_id="7"
     )
-    monkeypatch.setattr(linux_desktop, "_SESSION", session)
+    monkeypatch.setattr(linux_session, "_SESSION", session)
     return linux_desktop
 
 

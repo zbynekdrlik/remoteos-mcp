@@ -1,8 +1,9 @@
 ---
 paths:
   - "src/remoteos/scroll.py"
-  - "src/remoteos/__main__.py"
+  - "src/remoteos/tools/desktop.py"
   - "src/remoteos/platform/*/desktop.py"
+  - "src/remoteos/platform/linux/x11_input.py"
   - "tests/test_scroll.py"
   - "tests/test_provider_geometry.py"
 ---

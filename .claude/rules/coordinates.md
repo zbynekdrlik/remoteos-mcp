@@ -1,11 +1,15 @@
 ---
 paths:
-  - "src/remoteos/__main__.py"
+  - "src/remoteos/app.py"
+  - "src/remoteos/tools/desktop.py"
+  - "src/remoteos/tools/media.py"
   - "src/remoteos/coords.py"
   - "src/remoteos/snapshot.py"
   - "src/remoteos/platform/*/desktop.py"
   - "src/remoteos/platform/win/dpi.py"
   - "src/remoteos/platform/linux/display.py"
+  - "src/remoteos/platform/linux/x11_capture.py"
+  - "src/remoteos/platform/linux/x11_input.py"
   - "tests/test_coords.py"
   - "tests/test_coordinate_contract_tools.py"
   - "tests/test_snapshot_render.py"
@@ -37,9 +41,9 @@ paths:
 - **Clamp only in `image_to_screen`.** `screen_to_image` is unclamped on purpose: listings mark
   points outside the frame `(off-frame)` instead of moving them.
 - **Windows DPI:** pyautogui's import calls `SetProcessDPIAware()`. After that, per-monitor
-  awareness is refused. So `__main__.py` and `platform/win/desktop.py` call
-  `enable_per_monitor_dpi_awareness()` BEFORE `import pyautogui`. `tests/test_win_dpi.py`
-  locks that order on the AST.
+  awareness is refused. So `app.py` and `platform/win/desktop.py` call
+  `enable_per_monitor_dpi_awareness()` BEFORE `import pyautogui`, and `tools/desktop.py` imports
+  `remoteos.app` before its own `import pyautogui`. `tests/test_win_dpi.py` locks that order on the AST.
 - **Linux `monitor=0` = the X ROOT, sized by `xrandr --current` (`current W x H`).** NEVER size
   it with `xdotool getdisplaygeometry`. libxdo answers that from `XineramaQueryScreens()[0]`,
   which is only the FIRST head. On Xorg, Xinerama is always on through RandR emulation, so on a
