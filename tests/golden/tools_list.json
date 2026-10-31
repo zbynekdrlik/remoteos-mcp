@@ -824,7 +824,7 @@
    "readOnlyHint": null,
    "title": "ClickElement"
   },
-  "description": "Activate an element from the latest ElementTree, by its ref.\n\nUses the element's own Invoke action, which needs no mouse. An element without one\ngets a left click at its centre, unless another window covers it. A ref of an older\ntree, an element that is gone or disabled, is an error, never a click elsewhere.",
+  "description": "Activate an element from the latest ElementTree, by its ref.\n\nUses the element's own Invoke action, which needs no mouse. An element without one\ngets a left click at its centre, unless something else is on top of it there. A ref of\nan older tree, or an element that is gone or disabled, is an error, never a click elsewhere.",
   "execution": null,
   "icons": null,
   "inputSchema": {

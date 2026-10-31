@@ -213,11 +213,12 @@ ElementTree(window="", monitor=0, max_width=1280)
 - Bounds are image pixels of the Snapshot frame `(monitor, max_width)`. Only interactive, visible
   elements are listed, at most 300, and the reply says when the list is incomplete.
 - `ClickElement(ref)` uses the element's Invoke action, which needs no mouse. Without one, it
-  clicks the element's centre, and refuses when another window covers it.
+  clicks the element's centre, and refuses when anything else is on top of it there.
 - `TypeElement(ref, text)` sets the element's value, **replacing** what was there. An element with
   no settable value gets the focus and `text` is typed at its caret. The reply says which it was.
 - A ref belongs to the latest tree. A ref of an older tree, or an element that is gone, is an
-  error asking for a new `ElementTree`, never an action somewhere else. `Snapshot` does not end refs.
+  error asking for a new `ElementTree`, never an action somewhere else. `Snapshot` does not end
+  refs, unless the window stops answering: any UI Automation timeout ends them.
 - An app that blocks the call (a modal dialog opened by the button) ends in an error saying the
   action may have happened. Look before repeating it.
 

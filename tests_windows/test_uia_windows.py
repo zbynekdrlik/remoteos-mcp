@@ -25,6 +25,7 @@ Add-Type -AssemblyName System.Windows.Forms
 $form = New-Object Windows.Forms.Form
 $form.Text = {title}
 $form.TopMost = $true
+$form.Add_Shown({{ $form.Activate() }})
 $form.Width = 400
 $form.Height = 200
 $field = New-Object Windows.Forms.TextBox
@@ -72,7 +73,7 @@ def tree_of(title: str):
     while True:
         try:
             tree = desktop.element_tree(title)
-        except uia.UiaStarting:
+        except uia.UiaNotAsked:
             tree = None
         if tree is not None and len(tree.items) >= 2:
             return tree
@@ -136,7 +137,7 @@ def test_a_snapshot_list_reads_the_window_and_ends_no_ref(window):
     title, marker = window
     tree = tree_of(title)
     hwnd = next(w.handle for w in desktop.enumerate_windows() if w.title == title)
-    assert "Save" in [e["text"] for e in uia.read_elements(hwnd)]
+    assert "Save" in [e["text"] for e in uia.read_elements(hwnd, 50)]
     desktop.type_element(item(tree, "Field").ref, "x")
     desktop.click_element(item(tree, "Save").ref)
     assert saved(marker) == "x"

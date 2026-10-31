@@ -72,9 +72,19 @@ def _element_center(frame: Frame, el: dict) -> tuple[int, int]:
     return screen_to_image(frame, (r["left"] + r["right"]) // 2, (r["top"] + r["bottom"]) // 2)
 
 
+def _one_line(name: str) -> str:
+    """An element's name on one short line: apps put whole documents in it, and a reply line is ours."""
+    text = " ".join(name.split())
+    return text[: _MAX_NAME - 1] + "…" if len(text) > _MAX_NAME else text
+
+
+def _quoted(name: str) -> str:
+    return '"' + _one_line(name).replace('"', '\\"') + '"'
+
+
 def _element_line(frame: Frame, el: dict) -> str:
     cx, cy = _element_center(frame, el)
-    label = el["text"] or el["class"]
+    label = _one_line(el["text"] or el["class"])
     marker = "" if in_image(frame, cx, cy) else _OFF_FRAME
     return f"  [{el['index']}] {label} — center ({cx},{cy}){marker}"
 
@@ -82,14 +92,6 @@ def _element_line(frame: Frame, el: dict) -> str:
 def element_lines(frame: Frame, elements: Iterable[dict]) -> list[str]:
     """``[index] label — center (x,y)`` per element, centers in image pixels."""
     return [_element_line(frame, el) for el in elements]
-
-
-def _quoted(name: str) -> str:
-    """A name on one line, cut to a readable length: some apps put whole documents in it."""
-    text = " ".join(name.split())
-    if len(text) > _MAX_NAME:
-        text = text[: _MAX_NAME - 1] + "…"
-    return '"' + text.replace('"', '\\"') + '"'
 
 
 def tree_lines(frame: Frame, items: Iterable) -> list[str]:

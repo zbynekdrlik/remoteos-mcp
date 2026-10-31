@@ -18,7 +18,7 @@ from tool_test_support import tool_error
 from remoteos.coords import CaptureGeometry, frame_for
 from remoteos.element_tree import ElementFacts, RefTable, StaleRef, TreeItem, Walk, listed, walk
 from remoteos.platform.win import uia
-from remoteos.snapshot import tree_lines
+from remoteos.snapshot import element_lines, tree_lines
 
 BUTTON = dict(role="Button", name="OK", enabled=True, rect=(10, 10, 110, 40))
 
@@ -116,9 +116,9 @@ def test_a_ref_of_an_older_tree_never_names_an_element_of_the_new_one():
         table.lookup(old[0])
 
 
-def test_a_ref_from_before_a_restart_does_not_match_the_new_server():
-    first_trees = {RefTable().publish(["x"])[0] for _ in range(50)}
-    assert len(first_trees) > 1
+def test_a_restarted_worker_never_reuses_a_tree_number():
+    refs = [RefTable().publish(["x"])[0] for _ in range(50)]
+    assert len(set(refs)) == 50
 
 
 @pytest.mark.parametrize("ref", ["", "1", "x", "1.1.1"])
@@ -165,7 +165,7 @@ def test_an_element_outside_the_frame_is_marked_not_moved():
 def worker_of(sessions: list | None = None, **kwargs) -> uia.UiaWorker:
     made = sessions if sessions is not None else []
 
-    def open_session():
+    def open_session(abandoned):
         made.append(threading.current_thread())
         return len(made)
 
@@ -204,6 +204,18 @@ def test_a_hung_call_times_out_and_the_next_call_gets_a_new_worker():
     assert not threads[0].is_alive(), "an abandoned worker must end when its call returns"
 
 
+def test_the_stuck_error_says_nothing_was_asked():
+    assert issubclass(uia.UiaNotAsked, uia.UiaTimeout)
+    worker = worker_of()
+    release = threading.Event()
+    for _ in range(uia.MAX_STUCK_WORKERS):
+        with pytest.raises(uia.UiaTimeout):
+            worker.call(lambda s: release.wait(10), 0.01)
+    with pytest.raises(uia.UiaNotAsked, match="stuck"):
+        worker.call(lambda s: s, 5)
+    release.set()
+
+
 def test_stuck_workers_are_bounded():
     worker = worker_of()
     release = threading.Event()
@@ -226,7 +238,7 @@ def test_stuck_workers_are_bounded():
 def test_a_session_that_cannot_open_is_reported_and_tried_again():
     attempts = []
 
-    def open_session():
+    def open_session(abandoned):
         attempts.append(1)
         if len(attempts) == 1:
             raise ImportError("No module named 'uiautomation'")
@@ -242,31 +254,110 @@ def test_a_slow_start_is_not_a_hung_worker():
     release = threading.Event()
     started = []
 
-    def open_session():
+    def open_session(abandoned):
         started.append(1)
         release.wait(10)
         return "session"
 
     worker = uia.UiaWorker(open_session)
-    with pytest.raises(uia.UiaStarting):
+    with pytest.raises(uia.UiaNotAsked):
         worker.call(lambda s: s, 0.01)
     release.set()
     assert worker.call(lambda s: s, 5) == "session"
     assert len(started) == 1, "still starting must keep the worker that is starting"
 
 
+def test_the_timeout_is_one_budget_for_the_whole_call():
+    release = threading.Event()
+
+    def open_session(abandoned):
+        release.wait(0.3)
+        return "session"
+
+    worker = uia.UiaWorker(open_session)
+    threading.Timer(0.3, release.set).start()
+    with pytest.raises(uia.UiaNotAsked, match="just started"):
+        worker.call(lambda s: s, 0.4)  # the start ate more than half: a job would be cut short
+    assert worker.call(lambda s: s, 5) == "session", "the healthy worker was kept"
+
+
+def test_a_call_that_waits_for_another_call_is_not_asked():
+    worker = worker_of()
+    release, entered = threading.Event(), threading.Event()
+
+    def long(session):
+        entered.set()
+        release.wait(5)
+
+    runner = threading.Thread(target=worker.call, args=(long, 5), daemon=True)
+    runner.start()
+    assert entered.wait(5)
+    with pytest.raises(uia.UiaNotAsked, match="busy"):
+        worker.call(lambda s: s, 0.01)
+    release.set()
+    runner.join(5)
+
+
+def test_an_error_leaves_the_worker_without_its_frames():
+    class Held:
+        pass
+
+    def fail(session):
+        held = Held()  # a control in the real thing
+        try:
+            raise KeyError(held)
+        except KeyError:
+            raise ValueError("bad") from None
+
+    with pytest.raises(ValueError) as caught:
+        worker_of().call(fail, 5)
+    frames = []
+    tb = caught.value.__traceback__
+    while tb:
+        frames.append(tb.tb_frame.f_code.co_name)
+        tb = tb.tb_next
+    assert "fail" not in frames
+    assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+def test_a_late_walk_stops_at_its_next_element():
+    abandoned = threading.Event()
+    seen = []
+
+    class Late(Control):
+        def GetRuntimeId(self):
+            return self.rid
+
+    def noting(index):
+        control = Late(name=str(index), rid=(index,))
+        original = control.GetNextSiblingControl
+
+        def next_one():
+            seen.append(index)
+            abandoned.set()
+            return original()
+
+        control.GetNextSiblingControl = next_one
+        return control
+
+    root = Control(name="App", kind="WindowControl", kids=[noting(i) for i in range(1, 6)])
+    tree = uia.Session(make_auto(root), FakeCom, abandoned).tree(50)
+    assert seen == [1]
+    assert "ran out of time" in tree.truncated
+
+
 def test_a_start_that_never_ends_is_replaced():
     release = threading.Event()
     started = []
 
-    def open_session():
+    def open_session(abandoned):
         started.append(1)
         if len(started) == 1:
             release.wait(10)
         return "session"
 
     worker = uia.UiaWorker(open_session, start_timeout=0)
-    with pytest.raises(uia.UiaStarting):
+    with pytest.raises(uia.UiaNotAsked):
         worker.call(lambda s: s, 0.01)
     assert worker.call(lambda s: s, 5) == "session"
     release.set()
@@ -294,27 +385,29 @@ class Rect:
 
 
 class Invoke:
-    def __init__(self, ok=True, error=None):
-        self.ok, self.error, self.calls, self.waits = ok, error, 0, []
+    """Real semantics: a failed HRESULT raises, so a False return (S_FALSE) was accepted."""
+
+    def __init__(self, returns=True, error=None):
+        self.returns, self.error, self.calls, self.waits = returns, error, 0, []
 
     def Invoke(self, waitTime):
         self.calls += 1
         self.waits.append(waitTime)
         if self.error:
             raise self.error
-        return self.ok
+        return self.returns
 
 
 class Value:
-    def __init__(self, read_only=False, ok=True, error=None):
-        self.IsReadOnly, self.ok, self.error, self.value, self.waits = read_only, ok, error, None, []
+    def __init__(self, read_only=False, returns=True, error=None):
+        self.IsReadOnly, self.returns, self.error, self.value, self.waits = read_only, returns, error, None, []
 
     def SetValue(self, value, waitTime):
         self.waits.append(waitTime)
         if self.error:
             raise self.error
         self.value = value
-        return self.ok
+        return self.returns
 
 
 class Control:
@@ -362,25 +455,41 @@ class Control:
         return True
 
 
-def make_auto(root, focused=None, over=50):
-    """A fake ``uiautomation`` module around ``root``: window handle 50 is its own root owner."""
+def make_auto(root, focused=None, at_point=None, window_open=True):
+    """A fake ``uiautomation`` module around ``root``, window handle 50.
+
+    ``ControlFromPoint`` answers ``at_point``, or the element itself when ``None``: pass the
+    covering control to model a dialog over it. It is what a hit test really returns.
+    """
     return types.SimpleNamespace(
         ControlFromHandle=lambda hwnd: root if hwnd == 50 else None,
         PatternId=types.SimpleNamespace(InvokePattern="invoke", ValuePattern="value"),
         GetFocusedControl=lambda: focused,
-        WindowFromPoint=lambda x, y: over,
-        GetAncestor=lambda hwnd, flag: hwnd if flag == 3 else None,
+        ControlFromPoint=lambda x, y: at_point if at_point is not None else _at(root, x, y),
+        IsWindowVisible=lambda hwnd: window_open,
     )
 
 
+def _at(control, x, y):
+    for kid in control.kids:
+        rect = kid.rect
+        if rect.left <= x < rect.right and rect.top <= y < rect.bottom:
+            return _at(kid, x, y)
+    return control
+
+
+def new_session(root, **auto):
+    return uia.Session(make_auto(root, **auto), FakeCom, threading.Event())
+
+
 def session_with(button, **auto):
-    root = Control(name="App", kind="WindowControl", kids=[button])
-    session = uia.Session(make_auto(root, **auto), FakeCom)
+    root = Control(name="App", kind="WindowControl", rect=(0, 0, 500, 500), rid=(100,), kids=[button])
+    session = new_session(root, **auto)
     return session, session.tree(50).items[0].ref
 
 
 def test_the_tree_has_the_window_title_roles_and_screen_rects():
-    tree = uia.Session(make_auto(Control(name="App", kind="WindowControl", kids=[Control()])), FakeCom).tree(50)
+    tree = new_session(Control(name="App", kind="WindowControl", kids=[Control()])).tree(50)
     assert tree.title == "App"
     item = tree.items[0]
     assert (item.role, item.name, item.enabled, item.rect) == ("Button", "OK", True, (100, 100, 200, 140))
@@ -388,21 +497,31 @@ def test_the_tree_has_the_window_title_roles_and_screen_rects():
 
 def test_an_unknown_window_is_a_failure():
     with pytest.raises(LookupError):
-        uia.Session(make_auto(Control()), FakeCom).tree(51)
+        new_session(Control()).tree(51)
 
 
 def test_an_element_that_dies_during_the_walk_is_left_out():
     dead, alive = Control(name="dead", dead=True), Control(name="alive", rid=(3,))
     root = Control(name="App", kind="WindowControl", kids=[dead, alive])
-    assert [i.name for i in uia.Session(make_auto(root), FakeCom).tree(50).items] == ["alive"]
+    assert [i.name for i in new_session(root).tree(50).items] == ["alive"]
+
+
+def test_an_element_with_no_runtime_id_gets_no_ref():
+    root = Control(name="App", kind="WindowControl", kids=[Control(name="none", rid=()), Control(name="id", rid=(3,))])
+    assert [i.name for i in new_session(root).tree(50).items] == ["id"]
 
 
 def test_snapshot_s_list_keeps_the_shape_of_the_consumers_and_ends_no_ref():
     session, ref = session_with(Control())
-    assert session.elements(50) == [
+    assert session.elements(50, 10) == [
         {"index": 1, "class": "Button", "text": "OK", "rect": {"left": 100, "top": 100, "right": 200, "bottom": 140}}
     ]
     assert session.activate(ref).point is not None  # no Invoke here: the ref itself still resolves
+
+
+def test_snapshot_s_list_stops_at_its_limit():
+    root = Control(name="App", kind="WindowControl", kids=[Control(name=str(i), rid=(i,)) for i in range(5)])
+    assert [e["text"] for e in new_session(root).elements(50, 2)] == ["0", "1"]
 
 
 def test_invoke_is_used_when_there_is_one_and_no_mouse_moves():
@@ -424,6 +543,30 @@ def test_a_refused_invoke_falls_back_to_the_click():
     button.patterns["invoke"] = Invoke(error=FakeCom("nope"))
     session, ref = session_with(button)
     assert session.activate(ref).point == (150, 120)
+
+
+def test_an_invoke_that_returned_false_was_accepted_and_is_not_clicked_as_well():
+    button = Control()
+    button.patterns["invoke"] = Invoke(returns=False)  # S_FALSE: a failure would have raised
+    session, ref = session_with(button)
+    assert session.activate(ref) == uia.Activation("OK")
+
+
+@pytest.mark.parametrize("hresult", [-2147220991, 0x80040201, 0x80010108, 0x800706BA, 0x80131505])
+def test_a_button_that_closes_its_window_may_have_worked(hresult):
+    button = Control()
+    error = FakeCom("element not available")
+    error.hresult = hresult
+    button.patterns["invoke"] = Invoke(error=error)
+    session, ref = session_with(button)
+    with pytest.raises(RuntimeError, match="may have happened"):
+        session.activate(ref)
+
+
+def test_a_closed_window_is_gone_even_when_its_element_still_answers():
+    session, ref = session_with(Control(), window_open=False)
+    with pytest.raises(StaleRef, match="gone: call ElementTree again"):
+        session.activate(ref)
 
 
 def test_an_element_that_changed_identity_is_gone_not_clicked():
@@ -460,8 +603,36 @@ def test_a_new_tree_ends_the_old_refs():
 
 
 def test_a_covered_element_is_refused_rather_than_clicking_what_covers_it():
-    session, ref = session_with(Control(), over=77)
-    with pytest.raises(RuntimeError, match="Another window covers"):
+    dialog_button = Control(name="Yes", rid=(77,))  # an owned dialog: same root owner, another element
+    Control(name="Dialog", kind="WindowControl", rid=(78,), kids=[dialog_button])
+    session, ref = session_with(Control(), at_point=dialog_button)
+    with pytest.raises(RuntimeError, match="Something else is on top"):
+        session.activate(ref)
+
+
+def test_a_sibling_on_top_in_the_same_window_is_refused():
+    header = Control(name="sticky header", rid=(9,))
+    Control(name="page", kind="DocumentControl", rid=(10,), kids=[header])
+    session, ref = session_with(Control(), at_point=header)
+    with pytest.raises(RuntimeError, match="Something else is on top"):
+        session.activate(ref)
+
+
+def test_a_part_of_the_element_at_its_centre_is_the_element():
+    label = Control(name="label", kind="TextControl", rid=(11,))
+    tab = Control(name="Tab", kind="TabItemControl", kids=[label])
+    session, ref = session_with(tab, at_point=label)
+    assert session.activate(ref).point == (150, 120)
+
+
+def test_a_hit_test_that_fails_refuses():
+    session, ref = session_with(Control())
+
+    def down(x, y):
+        raise FakeCom("no")
+
+    session.auto.ControlFromPoint = down
+    with pytest.raises(RuntimeError, match="Something else is on top"):
         session.activate(ref)
 
 
@@ -493,7 +664,28 @@ def test_a_read_only_value_is_refused_and_nothing_is_typed():
     assert field.focus_sets == 0
 
 
-@pytest.mark.parametrize("pattern", [None, Value(error=FakeCom("nope")), Value(ok=False)], ids=["none", "raises", "no"])
+def test_a_value_set_that_returned_false_was_accepted_and_is_not_typed_as_well():
+    field = Control(name="Name", kind="EditControl")
+    field.patterns["value"] = Value(returns=False)
+    session, ref = session_with(field)
+    assert session.set_text(ref, "x") == ("Name", True)
+    assert field.focus_sets == 0
+
+
+def test_a_field_gone_at_its_read_only_check_is_gone():
+    class Dying:
+        @property
+        def IsReadOnly(self):
+            raise FakeCom("element not available")
+
+    field = Control(name="Name", kind="EditControl")
+    field.patterns["value"] = Dying()
+    session, ref = session_with(field)
+    with pytest.raises(StaleRef, match="gone"):
+        session.set_text(ref, "x")
+
+
+@pytest.mark.parametrize("pattern", [None, Value(error=FakeCom("nope"))], ids=["none", "raises"])
 def test_no_usable_value_means_focus_and_keystrokes(pattern):
     field = Control(name="Doc", kind="DocumentControl", IsKeyboardFocusable=True)
     if pattern:
@@ -553,8 +745,8 @@ def test_a_hung_set_value_is_never_typed_as_well(monkeypatch):
 
 
 def test_a_start_timeout_says_nothing_happened(monkeypatch):
-    monkeypatch.setattr(uia, "_worker", Raises(uia.UiaStarting("still starting")))
-    with pytest.raises(uia.UiaStarting):
+    monkeypatch.setattr(uia, "_worker", Raises(uia.UiaNotAsked("still starting")))
+    with pytest.raises(uia.UiaNotAsked):
         uia.click_element("1.1", lambda x, y: "clicked")
 
 
@@ -565,12 +757,7 @@ def test_a_session_gets_its_own_client_and_silences_the_package_s_logger(monkeyp
     calls = []
 
     class Client:
-        _instance = "the old worker's client"
-
-        @classmethod
-        def instance(cls):
-            cls._instance = "this thread's client"
-            return cls._instance
+        _instance = None
 
     class Logger:
         @staticmethod
@@ -588,14 +775,22 @@ def test_a_session_gets_its_own_client_and_silences_the_package_s_logger(monkeyp
     monkeypatch.setitem(sys.modules, "uiautomation.uiautomation", module)
     monkeypatch.setitem(sys.modules, "comtypes", comtypes)
     monkeypatch.setattr(uia, "_retired_clients", [])
+    old = Client._instance = Client()
 
-    session = uia.open_session()
+    session = uia.open_session(threading.Event())
 
     assert calls == ["coinit"]
-    assert Client._instance == "this thread's client"
-    assert uia._retired_clients == ["the old worker's client"], "a hung apartment's client must never be released"
+    assert isinstance(Client._instance, Client) and Client._instance is not old
+    assert uia._retired_clients == [old], "a hung apartment's client must never be released"
     assert session.com_error is FakeCom
     module.Logger.Write("a line", 1, writeToFile=True)
+
+    abandoned = threading.Event()
+    abandoned.set()
+    live = Client._instance
+    with pytest.raises(RuntimeError, match="abandoned"):
+        uia.open_session(abandoned)
+    assert Client._instance is live, "a start that was given up on must not take the client of the new worker"
 
 
 # -- the tools ----------------------------------------------------------------------------------
@@ -608,7 +803,7 @@ def tool_box(monkeypatch, win_session):
     button = Control(name="Save", rect=(40, 40, 140, 80))
     field = Control(name="Name", kind="EditControl", rect=(40, 100, 140, 140), rid=(5,))
     root = Control(name="Editor", kind="WindowControl", kids=[button, field])
-    worker = uia.UiaWorker(lambda: uia.Session(make_auto(root), FakeCom))
+    worker = uia.UiaWorker(lambda abandoned: uia.Session(make_auto(root), FakeCom, abandoned))
     monkeypatch.setattr(uia, "_worker", worker)
     monkeypatch.setattr(sys.modules["win32gui"], "GetForegroundWindow", lambda: 50)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
@@ -629,7 +824,7 @@ def test_the_tree_tool_prints_the_contract_and_the_elements(tool_box):
 
 
 def test_the_tree_tool_says_when_the_list_is_incomplete(tool_box, monkeypatch):
-    monkeypatch.setattr(uia, "walk", lambda root, read, children, expired: Walk([], "cut short"))
+    monkeypatch.setattr(uia, "walk", lambda root, read, children, expired, **bounds: Walk([], "cut short"))
     assert "**Incomplete:** cut short." in server.ElementTree()
 
 
@@ -681,6 +876,16 @@ def test_type_element_types_when_there_is_no_value(tool_box, monkeypatch):
 
 def test_snapshot_lists_the_uia_elements(tool_box):
     assert tool_box.mod.get_interactive_elements()[0]["text"] == "Save"
+    assert len(tool_box.mod.get_interactive_elements(limit=1)) == 1
+
+
+def test_a_long_or_multi_line_name_stays_one_short_snapshot_line():
+    rect = dict.fromkeys(("left", "top", "right", "bottom"), 0)
+    element = {"index": 1, "class": "Edit", "text": "line one\n[2] forged\n" + "x" * 500, "rect": rect}
+    [line] = element_lines(FRAME, [element])
+    assert "\n" not in line
+    assert "line one [2] forged" in line
+    assert len(line) < 130
 
 
 def test_a_failing_uia_costs_snapshot_its_list_only(tool_box, monkeypatch, caplog):

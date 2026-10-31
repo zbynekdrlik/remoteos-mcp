@@ -9,6 +9,11 @@ new client and an empty ref table. An abandoned worker's thread ends when its ca
 
 The worker's thread never uninitializes COM: a control released after that would crash.
 
+A late call must not touch the new worker's things: the package's walker functions read its
+process-wide client, so an abandoned walk stops at its next element, an abandoned start leaves
+the client alone, and the client is swapped in one assignment (no moment without one). An
+exception leaves the worker without its traceback, whose frames hold controls.
+
 Mouse and keyboard input stay on the caller's thread, so a long text cannot overrun the
 worker's timeout. Nothing typed is ever logged.
 """
@@ -34,16 +39,25 @@ ACTION_TIMEOUT_S = 10.0
 START_TIMEOUT_S = 60.0  # the first start ever generates comtypes' wrappers, which takes seconds
 MAX_STUCK_WORKERS = 8
 
-_GA_ROOTOWNER = 3
-_FOCUS_HOPS = 40
+_PARENT_HOPS = 40
+
+# The call failed because its element or app went away, which is what a button that closes its
+# own window does: UIA_E_ELEMENTNOTAVAILABLE, UIA_E_TIMEOUT, RPC_E_DISCONNECTED, RPC_S_SERVER_UNAVAILABLE.
+_WENT_AWAY = frozenset({0x80040201, 0x80131505, 0x80010108, 0x800706BA})
 
 
 class UiaTimeout(RuntimeError):
     """A call into UI Automation did not come back in time."""
 
 
-class UiaStarting(UiaTimeout):
-    """UI Automation is still starting: nothing was asked of any app yet."""
+class UiaNotAsked(UiaTimeout):
+    """UI Automation is starting, busy or stuck: nothing was asked of any app."""
+
+
+def _detached(error: Exception) -> Exception:
+    """``error`` without its traceback and chain: their frames hold COM objects of this thread."""
+    error.__traceback__ = error.__context__ = error.__cause__ = None
+    return error
 
 
 @dataclass
@@ -57,7 +71,7 @@ class _Job:
 class _Thread:
     """One worker thread: a session made by ``open_session`` and the jobs that run on it."""
 
-    def __init__(self, open_session: Callable[[], Any]) -> None:
+    def __init__(self, open_session: Callable[[threading.Event], Any]) -> None:
         self.ready = threading.Event()
         self.failure: Optional[Exception] = None
         self.jobs: queue.SimpleQueue = queue.SimpleQueue()
@@ -66,9 +80,9 @@ class _Thread:
         self.thread = threading.Thread(target=self._run, args=(open_session,), name="remoteos-uia", daemon=True)
         self.thread.start()
 
-    def _run(self, open_session: Callable[[], Any]) -> None:
+    def _run(self, open_session: Callable[[threading.Event], Any]) -> None:
         try:
-            session = open_session()
+            session = open_session(self.abandoned)
         except Exception as e:  # handed to the caller; a missing package must not kill the server
             self.failure = e
             self.ready.set()
@@ -78,15 +92,15 @@ class _Thread:
             job = self.jobs.get()
             try:
                 job.result = job.fn(session)
-            except Exception as e:  # the caller raises it
-                job.error = e
+            except Exception as e:  # the caller raises it, without this thread's frames
+                job.error = _detached(e)
             job.done.set()
 
 
 class UiaWorker:
     """Runs functions on the UIA thread, one at a time, and replaces a thread that hangs."""
 
-    def __init__(self, open_session: Callable[[], Any], start_timeout: float = START_TIMEOUT_S) -> None:
+    def __init__(self, open_session: Callable[[threading.Event], Any], start_timeout: float = START_TIMEOUT_S):
         self._open_session = open_session
         self._start_timeout = start_timeout
         self._lock = threading.Lock()
@@ -103,28 +117,41 @@ class UiaWorker:
         if self._current is None:
             self._stuck = [w for w in self._stuck if w.thread.is_alive()]
             if len(self._stuck) >= MAX_STUCK_WORKERS:
-                raise UiaTimeout(f"UI Automation is stuck: {len(self._stuck)} calls into apps never returned")
+                raise UiaNotAsked(f"UI Automation is stuck: {len(self._stuck)} calls into apps never returned")
             self._current = _Thread(self._open_session)
         return self._current
 
     def call(self, fn: Callable[[Any], Any], timeout: float) -> Any:
-        """``fn(session)`` on the worker thread. Raises what it raises, or :class:`UiaTimeout`."""
-        with self._lock:
+        """``fn(session)`` on the worker thread, all within ``timeout``.
+
+        Raises what ``fn`` raises, :class:`UiaNotAsked` when ``fn`` never ran, or
+        :class:`UiaTimeout` when it overran. A call left less than half its time by a
+        slow start is not begun: it would abandon a healthy worker.
+        """
+        deadline = time.monotonic() + timeout
+        if not self._lock.acquire(timeout=timeout):
+            raise UiaNotAsked(f"UI Automation is busy: try again in a moment (waited {timeout:.0f} s)")
+        try:
             worker = self._running()
             if not worker.ready.wait(timeout):
                 if time.monotonic() - worker.started >= self._start_timeout:
                     log.warning("UI Automation did not start in %.0f s: starting it again", self._start_timeout)
                     self._abandon(worker)
-                raise UiaStarting(f"UI Automation is still starting: try again in a moment (waited {timeout:.0f} s)")
+                raise UiaNotAsked(f"UI Automation is still starting: try again in a moment (waited {timeout:.0f} s)")
             if worker.failure is not None:
                 self._current = None  # the next call tries again
                 raise RuntimeError(f"UI Automation is not available: {worker.failure}") from worker.failure
+            remaining = deadline - time.monotonic()
+            if remaining < timeout / 2:
+                raise UiaNotAsked("UI Automation has just started: try again")
             job = _Job(fn, threading.Event())
             worker.jobs.put(job)
-            if not job.done.wait(timeout):
+            if not job.done.wait(remaining):
                 log.warning("a UI Automation call overran %.0f s: abandoning its thread", timeout)
                 self._abandon(worker)
                 raise UiaTimeout(f"the window did not answer UI Automation within {timeout:.0f} s")
+        finally:
+            self._lock.release()
         if job.error is not None:
             raise job.error
         return job.result
@@ -151,9 +178,10 @@ class Activation:
 class Session:
     """UI Automation on its own thread: every method runs there, through :class:`UiaWorker`."""
 
-    def __init__(self, auto: Any, com_error: type[Exception]) -> None:
+    def __init__(self, auto: Any, com_error: type[Exception], abandoned: threading.Event) -> None:
         self.auto = auto
         self.com_error = com_error
+        self.abandoned = abandoned
         self.refs = RefTable()
 
     def _facts(self, control: Any) -> Optional[ElementFacts]:
@@ -180,12 +208,13 @@ class Session:
         except self.com_error as e:
             log.debug("a branch vanished during the walk (%s)", type(e).__name__)
 
-    def _walk(self, hwnd: int, seconds: float):
+    def _walk(self, hwnd: int, seconds: float, **bounds: int):
         root = self.auto.ControlFromHandle(hwnd)
         if root is None:
             raise LookupError("UI Automation does not know that window")
         deadline = time.monotonic() + seconds
-        return root, walk(root, self._facts, self._children, expired=lambda: time.monotonic() >= deadline)
+        expired = lambda: self.abandoned.is_set() or time.monotonic() >= deadline  # noqa: E731
+        return root, walk(root, self._facts, self._children, expired=expired, **bounds)
 
     def tree(self, hwnd: int) -> ElementTree:
         """Walk ``hwnd``'s window and start a new generation of refs."""
@@ -193,10 +222,13 @@ class Session:
         entries, kept = [], []
         for control, facts in result.found:
             try:
-                entries.append(_Entry(control, list(control.GetRuntimeId()), hwnd, facts.name))
-                kept.append(facts)
+                runtime_id = list(control.GetRuntimeId())
             except self.com_error as e:
                 log.debug("a listed element vanished (%s)", type(e).__name__)
+                continue
+            if runtime_id:  # without one, nothing could prove later that it is the same element
+                entries.append(_Entry(control, runtime_id, hwnd, facts.name))
+                kept.append(facts)
         refs = self.refs.publish(entries)
         items = tuple(TreeItem(r, f.role, f.name, f.enabled, f.rect) for r, f in zip(refs, kept))
         try:
@@ -205,9 +237,9 @@ class Session:
             title = ""
         return ElementTree(title=title, items=items, truncated=result.truncated)
 
-    def elements(self, hwnd: int) -> list[dict]:
-        """Snapshot's list: read only, so a Snapshot never ends the refs of an ElementTree."""
-        _, result = self._walk(hwnd, SNAPSHOT_WALK_S)
+    def elements(self, hwnd: int, limit: int) -> list[dict]:
+        """Snapshot's list: publishes no refs, so reading it ends none (a timeout ends them, as any)."""
+        _, result = self._walk(hwnd, SNAPSHOT_WALK_S, limit=limit)
         return [
             {
                 "index": index,
@@ -222,6 +254,8 @@ class Session:
         """The entry behind ``ref``, proven to be that same element, still there and enabled."""
         entry = self.refs.lookup(ref)
         gone = StaleRef(f"Element {ref} ({entry.name!r}) is gone: call ElementTree again")
+        if not self.auto.IsWindowVisible(entry.hwnd):  # a closed window's element may still answer
+            raise gone
         try:
             if list(entry.control.GetRuntimeId()) != entry.runtime_id:
                 raise gone
@@ -242,32 +276,50 @@ class Session:
         if offscreen or rect.isempty():
             raise RuntimeError(f"Element {ref} ({entry.name!r}) is off-screen: bring it into view first")
         x, y = rect.xcenter(), rect.ycenter()
-        over = self.auto.GetAncestor(self.auto.WindowFromPoint(x, y), _GA_ROOTOWNER)
-        if over != self.auto.GetAncestor(entry.hwnd, _GA_ROOTOWNER):
-            raise RuntimeError(f"Another window covers element {ref} ({entry.name!r}): FocusWindow its window first")
+        try:
+            hit = self._is_or_inside(self.auto.ControlFromPoint(x, y), entry)
+        except self.com_error:
+            hit = False
+        if not hit:
+            raise RuntimeError(
+                f"Something else is on top of element {ref} ({entry.name!r}): a window, a dialog or a part of the page."
+                " FocusWindow or close it first"
+            )
         return x, y
 
+    def _went_away(self, error: Exception, ref: str, entry: _Entry) -> None:
+        """Raise when ``error`` says the element left during its own action: it may have worked."""
+        if (getattr(error, "hresult", 0) & 0xFFFFFFFF) in _WENT_AWAY:
+            raise RuntimeError(
+                f"Element {ref} ({entry.name!r}) went away during the action. That is what a button that closes its"
+                " window does, so it may have happened: look before repeating it, then call ElementTree again"
+            ) from None
+
     def activate(self, ref: str) -> Activation:
-        """Invoke ``ref``; without a working Invoke pattern, the point to click."""
+        """Invoke ``ref``; without a working Invoke pattern, the point to click.
+
+        An Invoke that returns was accepted: only a COM error means it failed, and only
+        one saying the app refused may be followed by the mouse.
+        """
         entry = self._live(ref)
         pattern = entry.control.GetPattern(self.auto.PatternId.InvokePattern)
         if pattern is not None:
             try:
-                if pattern.Invoke(waitTime=0):
-                    return Activation(entry.name)
-            except self.com_error as e:  # the app refused: nothing happened, the mouse may try
+                pattern.Invoke(waitTime=0)
+                return Activation(entry.name)
+            except self.com_error as e:
+                self._went_away(e, ref, entry)
                 log.debug("Invoke refused (%s): clicking instead", type(e).__name__)
         return Activation(entry.name, self._center(ref, entry))
 
-    def _has_focus(self, entry: _Entry) -> bool:
-        """True when the keyboard focus is on the element or inside it (a wrapper's inner edit)."""
-        focused = self.auto.GetFocusedControl()
-        for _ in range(_FOCUS_HOPS):
-            if focused is None:
+    def _is_or_inside(self, control: Any, entry: _Entry) -> bool:
+        """True when ``control`` is the element, or a part of it (a wrapper's inner edit)."""
+        for _ in range(_PARENT_HOPS):
+            if control is None:
                 return False
-            if list(focused.GetRuntimeId()) == entry.runtime_id:
+            if list(control.GetRuntimeId()) == entry.runtime_id:
                 return True
-            focused = focused.GetParentControl()
+            control = control.GetParentControl()
         return False
 
     def set_text(self, ref: str, text: str) -> tuple[str, bool]:
@@ -278,16 +330,21 @@ class Session:
         entry = self._live(ref)
         pattern = entry.control.GetPattern(self.auto.PatternId.ValuePattern)
         if pattern is not None:
-            if pattern.IsReadOnly:
+            try:
+                read_only = pattern.IsReadOnly
+            except self.com_error:
+                raise StaleRef(f"Element {ref} ({entry.name!r}) is gone: call ElementTree again") from None
+            if read_only:
                 raise RuntimeError(f"Element {ref} ({entry.name!r}) is read-only")
             try:
-                if pattern.SetValue(text, waitTime=0):
-                    return entry.name, True
-            except self.com_error as e:  # nothing was written: keystrokes may still work
+                pattern.SetValue(text, waitTime=0)
+                return entry.name, True
+            except self.com_error as e:
+                self._went_away(e, ref, entry)
                 log.debug("SetValue refused (%s): typing instead", type(e).__name__)
         entry.control.SetFocus()
         try:
-            focused = self._has_focus(entry)
+            focused = self._is_or_inside(self.auto.GetFocusedControl(), entry)
         except self.com_error:
             focused = False
         if not focused:
@@ -296,9 +353,10 @@ class Session:
 
 
 _retired_clients: list = []  # never released: their apartment may belong to a hung thread
+_client_lock = threading.Lock()
 
 
-def open_session() -> Session:
+def open_session(abandoned: threading.Event) -> Session:
     """Runs on the worker's thread: COM for this thread, a client of its own."""
     import comtypes
     import uiautomation.uiautomation as auto  # the module itself: the package's * leaves out _AutomationClient
@@ -307,11 +365,14 @@ def open_session() -> Session:
     # Its logger writes to sys.stdout (the JSON-RPC stream under stdio) and to a file in the cwd.
     auto.Logger.Write = staticmethod(lambda message, *a, **k: log.debug("uiautomation: %d chars", len(str(message))))
     client = auto._AutomationClient
-    if client._instance is not None:
-        _retired_clients.append(client._instance)
-        client._instance = None
-    client.instance()
-    return Session(auto, comtypes.COMError)
+    with _client_lock:
+        if abandoned.is_set():  # a start that took too long: a newer worker owns the client
+            raise RuntimeError("abandoned while starting")
+        fresh = client()  # the class's instance() would make one only when there is none
+        if client._instance is not None:
+            _retired_clients.append(client._instance)
+        client._instance = fresh
+    return Session(auto, comtypes.COMError, abandoned)
 
 
 _worker = UiaWorker(open_session)
@@ -322,9 +383,9 @@ def read_tree(hwnd: int) -> ElementTree:
     return _worker.call(lambda session: session.tree(hwnd), TREE_TIMEOUT_S)
 
 
-def read_elements(hwnd: int) -> list[dict]:
-    """Snapshot's element list of window ``hwnd``. Existing refs stay valid."""
-    return _worker.call(lambda session: session.elements(hwnd), SNAPSHOT_TIMEOUT_S)
+def read_elements(hwnd: int, limit: int) -> list[dict]:
+    """Up to ``limit`` elements of window ``hwnd`` for Snapshot. Existing refs stay valid."""
+    return _worker.call(lambda session: session.elements(hwnd, limit), SNAPSHOT_TIMEOUT_S)
 
 
 def _after_timeout(ref: str, what: str) -> RuntimeError:
@@ -338,7 +399,7 @@ def click_element(ref: str, click: Callable[[int, int], str]) -> str:
     """Invoke the element, or click its centre with ``click(x, y)``. A timeout never falls through to a click."""
     try:
         done = _worker.call(lambda session: session.activate(ref), ACTION_TIMEOUT_S)
-    except UiaStarting:
+    except UiaNotAsked:
         raise
     except UiaTimeout as e:
         raise _after_timeout(ref, "the click") from e
@@ -351,7 +412,7 @@ def type_element(ref: str, text: str, type_keys: Callable[[str], str]) -> str:
     """Set the element's value, or give it the focus and type with ``type_keys(text)``."""
     try:
         name, done = _worker.call(lambda session: session.set_text(ref, text), ACTION_TIMEOUT_S)
-    except UiaStarting:
+    except UiaNotAsked:
         raise
     except UiaTimeout as e:
         raise _after_timeout(ref, "the text") from e

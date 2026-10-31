@@ -141,7 +141,7 @@ def AnnotatedSnapshot(
     img, frame = _capture_snapshot_frame(monitor, max_width)
     coordinates = f"**Coordinates:** {contract_line(frame)}"
 
-    elements = get_desktop().get_interactive_elements()
+    elements = get_desktop().get_interactive_elements(limit=max_elements)
     if not elements:
         note = "No interactive elements found"
         if is_linux():

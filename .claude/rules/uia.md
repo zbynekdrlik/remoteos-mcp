@@ -17,36 +17,49 @@ paths:
   `_AutomationClient` is a process singleton, so:
   - the import happens in `open_session`, on the worker; importing the package at module level
     would bind COM to the wrong thread;
-  - a new worker replaces the singleton. The old client goes to `_retired_clients` and is never
+  - a new worker replaces the singleton in ONE assignment (`client()`, never `_instance = None` then
+    `instance()`), under `_client_lock`. The old client goes to `_retired_clients` and is never
     released: its apartment may belong to a hung thread;
+  - the package's walker functions read that singleton, so a late job must end: `Session.abandoned`
+    stops a walk at its next element, and a start abandoned at `START_TIMEOUT_S` leaves the client alone;
+  - an exception leaves the worker `_detached`: its traceback's frames hold controls;
   - `import uiautomation.uiautomation`, the module: the package's `*` leaves out `_AutomationClient`;
   - nothing a job returns may hold a control. Results are plain data, and the ref table is on the
     `Session`, so a restarted worker has no refs: a hung call ends every ref.
 - **A hung call cannot be cancelled.** It is abandoned, and its thread ends when the call returns.
   `MAX_STUCK_WORKERS` bounds them. The thread never calls CoUninitialize: a control released
   after it crashes.
-- **"Still starting" (`UiaStarting`) is not a hang.** The first start ever generates comtypes'
-  wrappers, which takes seconds (into `comtypes/gen`, or `%APPDATA%\Python\…\comtypes_cache` when
-  that is not writable). It keeps the starting worker and, for an action, means nothing happened.
+- **`UiaNotAsked` (starting, busy, stuck) is not a hang: nothing was asked of any app.** The first
+  start ever generates comtypes' wrappers, which takes seconds (into `comtypes/gen`, or
+  `%APPDATA%\Python\…\comtypes_cache` when that is not writable). It keeps the starting worker. An
+  action reports it as it is, never as "may have happened". `timeout` is one budget for the whole
+  call, and a call left under half of it is not begun: it would abandon a healthy worker.
 - **The package's `Logger.Write` writes to `sys.stdout`** (the JSON-RPC stream under stdio) and to
-  `@AutomationLog.txt` in the cwd. `open_session` replaces it. Its `print`s are only in the bitmap
-  DLL loader, which we never touch.
+  `@AutomationLog.txt` in the cwd. `open_session` replaces it. Its `print`s are in the bitmap DLL
+  loader and behind `debug=True`, neither of which we reach.
 - **`import uiautomation` sets process-wide `restype`s** on the shared `ctypes.windll` functions
   (GetForegroundWindow, WindowFromPoint, GetAncestor, SendMessageW, GetDC, OpenProcess...). Nothing in
   `src` calls those through `ctypes.windll`. Set your own `restype` if you add one. It also calls
   `SetProcessDpiAwareness`, which fails harmlessly: per-monitor-v2 is already set (`dpi.py`), so
   `BoundingRectangle` is physical pixels, the screen space of the Windows contract.
-- **Refs are `<tree>.<n>`, the first tree number random.** Numbering from 1 would make an old ref
-  name another element of the new tree. A ref also carries the RuntimeId read at the walk:
-  a mismatch, or a COM error reading it, is "gone".
+- **Refs are `<tree>.<n>`, tree numbers unique in a process and the first one random.** Numbering
+  from 1 would make an old ref name another element of the new tree. A ref also carries the
+  RuntimeId read at the walk: a mismatch, a COM error reading it, or an invisible window
+  (`IsWindowVisible`: a closed window's element may still answer) is "gone". An element with an
+  empty RuntimeId gets no ref: nothing could prove later that it is the same one.
 - **`Snapshot`/`AnnotatedSnapshot` read through `Session.elements`, which publishes no refs**, with
-  a shorter budget. A UIA failure there costs the list, never the image; ElementTree reports it.
-- **ClickElement order:** `_live` (ref, identity, enabled), Invoke; a COM refusal or `False` falls
-  back to the mouse, a TIMEOUT never does (the Invoke may have run: a button opening a modal dialog
-  blocks it). The mouse needs `_center`: on-screen, and `WindowFromPoint`'s root owner equal to the
-  listed window's, so an owned popup passes and a covering window refuses.
+  a shorter budget and only the `limit` they show (`get_interactive_elements(limit=)`). A UIA failure
+  there costs the list, never the image; ElementTree reports it. Their labels go through
+  `snapshot._one_line`: a name can be a whole document, and text of an app must not forge a reply line.
+- **ClickElement order:** `_live` (ref, identity, enabled), Invoke. A failed HRESULT raises
+  `COMError`, so `Invoke()` returning at all means accepted, whatever it returns (`False` is only
+  `S_FALSE`): never act a second time on it. A COM refusal falls back to the mouse. A TIMEOUT never
+  does (a button opening a modal dialog blocks the Invoke), nor does a `_WENT_AWAY` HRESULT (a
+  button that closes its own window): both say "may have happened". The mouse needs `_center`:
+  on-screen, and `ControlFromPoint` at the centre is the element or inside it. Never compare
+  HWNDs: an owned dialog has the same root owner, and everything in a Chromium page shares one HWND.
 - **TypeElement:** Value pattern = the whole new value; read-only is refused, because keystrokes
-  would "succeed" into nothing. Otherwise SetFocus and `_has_focus` (the focus on the element or
+  would "succeed" into nothing. Otherwise SetFocus and `_is_or_inside` (the focus on the element or
   inside it), or nothing is typed. The keystrokes run on the caller's thread, so a long text
   cannot overrun the worker's timeout. The package's `Invoke`/`SetValue` sleep 0.5 s unless
   `waitTime=0`.

@@ -67,6 +67,7 @@ from remoteos.typing_input import check_method
 
 _ZOOM_QUALITY = 85  # small text is why Zoom exists: Snapshot's default 65 smears it
 _MAX_WAIT_S = 300.0
+_SNAPSHOT_ELEMENTS = 50
 _POLL_S = 0.5
 
 
@@ -140,9 +141,13 @@ def Snapshot(
     lines += ["**Windows:**", *window_lines(frame, windows)]
 
     # Interactive elements from foreground window
-    elements = _desktop.get_interactive_elements()
+    elements = _desktop.get_interactive_elements(limit=_SNAPSHOT_ELEMENTS)
     if elements:
-        lines += ["", "**Interactive Elements (foreground window):**", *element_lines(frame, elements[:50])]
+        lines += [
+            "",
+            "**Interactive Elements (foreground window):**",
+            *element_lines(frame, elements[:_SNAPSHOT_ELEMENTS]),
+        ]
 
     parts.append(TextContent(type="text", text="\n".join(lines)))
     return parts
@@ -653,8 +658,8 @@ def ClickElement(ref: str) -> str:
     """Activate an element from the latest ElementTree, by its ref.
 
     Uses the element's own Invoke action, which needs no mouse. An element without one
-    gets a left click at its centre, unless another window covers it. A ref of an older
-    tree, an element that is gone or disabled, is an error, never a click elsewhere.
+    gets a left click at its centre, unless something else is on top of it there. A ref of
+    an older tree, or an element that is gone or disabled, is an error, never a click elsewhere.
 
     Args:
         ref: The element's ref from ElementTree, e.g. "4821.12".

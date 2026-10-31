@@ -139,8 +139,8 @@ def enumerate_windows() -> list[WindowInfo]:
     return results
 
 
-def get_interactive_elements() -> list[dict]:
-    """The foreground window's interactive elements, from UI Automation (#35).
+def get_interactive_elements(limit: int = 300) -> list[dict]:
+    """Up to ``limit`` interactive elements of the foreground window, from UI Automation (#35).
 
     Snapshot and AnnotatedSnapshot show this next to their image: a window that cannot
     be read costs them the list, never the image. ElementTree reports such a failure.
@@ -151,7 +151,7 @@ def get_interactive_elements() -> list[dict]:
     if not foreground:
         return []
     try:
-        return uia.read_elements(foreground)
+        return uia.read_elements(foreground, limit)
     except Exception as e:
         log.warning("no UI Automation element list (%s)", type(e).__name__)
         return []

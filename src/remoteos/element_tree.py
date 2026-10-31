@@ -7,6 +7,7 @@ so all of it runs on fake elements on any machine. ``snapshot.tree_lines`` rende
 
 from __future__ import annotations
 
+import itertools
 import logging
 import secrets
 from dataclasses import dataclass
@@ -129,6 +130,9 @@ def walk(
     return Walk(found, f"elements deeper than {max_depth} levels are left out" if clipped else "")
 
 
+_tree_numbers = itertools.count(1000 + secrets.randbelow(9000))
+
+
 class StaleRef(LookupError):
     """A ref of an older tree, or of an element that is gone."""
 
@@ -137,17 +141,18 @@ class RefTable:
     """The refs of the LATEST tree. Publishing a tree ends the previous one.
 
     A ref is ``<tree>.<n>``, never a bare ``n``: numbering every tree from 1 would make a
-    ref of an old tree name some other element of the new one. The first tree number is
-    random, so a ref from before a server restart cannot match either.
+    ref of an old tree name some other element of the new one. Tree numbers are unique in
+    a process, also across restarted workers. The first one is random, so a ref from before
+    a server restart almost never matches (a 1 in 9000 chance per restart).
     """
 
     def __init__(self) -> None:
-        self._tree = 1000 + secrets.randbelow(9000)
+        self._tree = 0
         self._entries: dict[str, Any] = {}
 
     def publish(self, payloads: Sequence[Any]) -> list[str]:
         """Start a new tree holding ``payloads``; returns their refs, in order."""
-        self._tree += 1
+        self._tree = next(_tree_numbers)
         refs = [f"{self._tree}.{n}" for n in range(1, len(payloads) + 1)]
         self._entries = dict(zip(refs, payloads))
         return refs
