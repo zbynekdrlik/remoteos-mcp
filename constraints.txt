@@ -172,14 +172,25 @@ pymsgbox==2.0.1 ; sys_platform != 'linux'
 pyobjc-core==12.2.2 ; sys_platform == 'darwin'
     # via
     #   pyautogui
+    #   pyobjc-framework-applicationservices
     #   pyobjc-framework-cocoa
+    #   pyobjc-framework-coretext
     #   pyobjc-framework-quartz
+pyobjc-framework-applicationservices==12.2.2 ; sys_platform == 'darwin'
+    # via remoteos-mcp (pyproject.toml)
 pyobjc-framework-cocoa==12.2.2 ; sys_platform == 'darwin'
-    # via pyobjc-framework-quartz
+    # via
+    #   pyobjc-framework-applicationservices
+    #   pyobjc-framework-coretext
+    #   pyobjc-framework-quartz
+pyobjc-framework-coretext==12.2.2 ; sys_platform == 'darwin'
+    # via pyobjc-framework-applicationservices
 pyobjc-framework-quartz==12.2.2 ; sys_platform == 'darwin'
     # via
     #   remoteos-mcp (pyproject.toml)
     #   pyautogui
+    #   pyobjc-framework-applicationservices
+    #   pyobjc-framework-coretext
 pyperclip==1.11.0
     # via
     #   fastmcp-slim

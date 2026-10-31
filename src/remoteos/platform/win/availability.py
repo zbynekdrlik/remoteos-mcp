@@ -103,10 +103,11 @@ def diagnose(need: str = "input") -> Optional[str]:
     ``need``:
     - ``"capture"`` and ``"input"``: every check, because each of these blocks
       screenshots and input alike.
-    - ``"windows"`` (the window list, Snapshot without vision): only session 0
-      and the window station. A disconnected or locked session still lists the
-      user's windows (live on win-pz-server); outside the user's desktop the
-      list would be a hollow, empty success.
+    - ``"windows"`` (the window list, Snapshot without vision) and
+      ``"accessibility"`` (the element tree): only session 0 and the window
+      station. A disconnected or locked session still lists the user's windows
+      (live on win-pz-server); outside the user's desktop the list would be a
+      hollow, empty success.
 
     Only a positive finding is a diagnosis. A probe that fails is logged and the
     desktop is taken as usable (fail open), never blocked.

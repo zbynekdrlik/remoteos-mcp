@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import tempfile
@@ -13,12 +14,16 @@ import pyautogui
 
 from remoteos.coords import Bbox, CaptureGeometry, frame_for
 from remoteos.displays import DisplayInfo
+from remoteos.element_tree import ElementTree
 from remoteos.input_keys import canonical
+from remoteos.platform.mac import ax
 from remoteos.platform.mac.availability import diagnose  # noqa: F401  (the provider's diagnose(), #32)
 from remoteos.scroll import chunks, wheel_steps
 from remoteos.snapshot import fit_to_frame
 from remoteos.text_entry import enter_text
 from remoteos.typing_input import ENTER, TAB, Stroke, plan
+
+log = logging.getLogger("remoteos.platform.mac.desktop")
 
 # The modifier of the edit shortcuts (select all, paste) that type_text() sends: Command.
 # Ctrl+A in a Cocoa text field moves the caret to the start of the paragraph instead.
@@ -128,8 +133,64 @@ def enumerate_windows() -> list[WindowInfo]:
 
 
 def get_interactive_elements(limit: int = 300) -> list[dict]:
-    """Stub — macOS Accessibility API integration deferred (#38)."""
-    return []
+    """Up to ``limit`` interactive elements of the front window, from the Accessibility API (#37).
+
+    Snapshot and AnnotatedSnapshot show this next to their image: a window that cannot be read,
+    or a missing permission, costs them the list, never the image. ElementTree reports both.
+    """
+    try:
+        return ax.read_elements(limit)
+    except Exception as e:
+        log.warning("no Accessibility element list (%s)", type(e).__name__)
+        return []
+
+
+def marked_elements(limit: int = 300) -> tuple[list[dict], str]:
+    """:func:`get_interactive_elements` with a ref on each, and why the list is cut, if it is (#36).
+
+    It starts a new ref tree, so it ends the refs of an earlier ElementTree. Without the
+    Accessibility permission macOS answers nothing, and the reply says so.
+    """
+    missing = diagnose("accessibility")
+    if missing:
+        return [], missing.rstrip(".")
+    try:
+        return ax.read_marked(limit)
+    except Exception as e:
+        log.warning("no Accessibility element list (%s)", type(e).__name__)
+        return [], ""
+
+
+def _window_by_title(title: str) -> WindowInfo:
+    """The window whose title best matches ``title``; raises when none does."""
+    from thefuzz import fuzz
+
+    best_score, best = 0, None
+    for w in enumerate_windows():
+        score = fuzz.partial_ratio(title.lower(), w.title.lower())
+        if score > best_score:
+            best_score, best = score, w
+    if best is None or best_score < 50:
+        raise LookupError(f"No window matching '{title}' (best score {best_score})")
+    return best
+
+
+def element_tree(window: str = "") -> ElementTree:
+    """The element tree of the window whose title matches ``window``, or of the front one."""
+    if not window:
+        return ax.read_tree()
+    target = _window_by_title(window)
+    return ax.read_tree(target.pid, target.title.split(" — ", 1)[-1])  # enumerate_windows: "app — window"
+
+
+def click_element(ref: str) -> str:
+    """AXPress the element ``ref``, else click its centre with the left button."""
+    return ax.click_element(ref, click)
+
+
+def type_element(ref: str, text: str) -> str:
+    """Set the value of the element ``ref``, else give it the focus and type at its caret."""
+    return ax.type_element(ref, text, type_text)
 
 
 # ---------------------------------------------------------------------------

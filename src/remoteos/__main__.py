@@ -29,6 +29,15 @@ from remoteos.tiers import (
     resolve_enabled_tools,
 )
 
+
+def _echo_mac_problems() -> None:
+    """Say at start what macOS withholds: without a permission a tool fails quietly or only on its first use."""
+    from remoteos.platform.mac.availability import startup_problems
+
+    for problem in startup_problems():
+        click.echo(f"  [!] {problem}", err=True)
+
+
 # ====================== Apply task manager wrapping ========================
 
 
@@ -268,6 +277,8 @@ def cli(
     platform_excludes = None
     if is_windows():
         click.echo(f"  Windows DPI awareness: {app._WIN_DPI_MODE}", err=True)
+    if is_macos():
+        _echo_mac_problems()
     if is_linux():
         platform_excludes = set(LINUX_ALWAYS_EXCLUDED_TOOLS)
         try:

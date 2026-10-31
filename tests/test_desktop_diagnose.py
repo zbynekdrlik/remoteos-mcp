@@ -116,6 +116,14 @@ def test_windows_failing_probe_is_usable_and_logged(win_session, caplog):
     assert "desktop probe failed" in caplog.text
 
 
+def test_windows_element_tree_needs_what_the_window_list_needs(win_session):
+    mod, session = win_session
+    session.connect_state = WTS_DISCONNECTED
+    assert mod.diagnose("accessibility") is None
+    session.session_id = 0
+    assert "`schtasks /Run /TN RemoteOSMCP`" in mod.diagnose("accessibility")
+
+
 def test_windows_window_list_needs_only_the_users_desktop(win_session):
     # review round 3: the window list (Snapshot without vision) works on a disconnected or locked
     # session, but not from session 0 or a non-interactive window station: those are no user desktop

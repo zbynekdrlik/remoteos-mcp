@@ -28,6 +28,16 @@ def _quartz():
     return Quartz
 
 
+def _ax_trusted() -> bool:
+    """``AXIsProcessTrusted``, the permission to read other apps' controls; True when it cannot be asked."""
+    try:
+        import HIServices
+    except ImportError:
+        return True
+    trusted = getattr(HIServices, "AXIsProcessTrusted", None)
+    return trusted is None or bool(trusted())
+
+
 def _binary() -> str:
     """The Python binary macOS grants the permissions to (the venv's symlink resolved)."""
     return os.path.realpath(sys.executable)
@@ -46,6 +56,9 @@ def diagnose(need: str = "input") -> Optional[str]:
     - Posting events, for input: ``CGPreflightPostEventAccess``, the same check the
       event-posting code (``desktop._require_post_event_access``) gates on. It
       is granted under Privacy & Security › Accessibility.
+    - Reading other apps' controls (``"accessibility"``, the AX tree): ``AXIsProcessTrusted``,
+      a different TCC service from posting events (#37). Without it macOS answers nothing,
+      so the list would look empty. It works on the lock screen, as the window list does.
 
     Only a positive finding is a diagnosis. An API that is missing (an older
     macOS) or a probe that fails means "usable" (fail open).
@@ -71,7 +84,7 @@ def _diagnose(need: str) -> Optional[str]:
             return errors.MAC_NOT_ON_CONSOLE
         if need == "windows":  # the window list works on the lock screen and without either permission
             return None
-        if info.get(_SCREEN_IS_LOCKED, False):
+        if need != "accessibility" and info.get(_SCREEN_IS_LOCKED, False):
             return errors.LOCKED
     if need == "capture":
         screen_access = getattr(quartz, "CGPreflightScreenCaptureAccess", None)  # macOS 10.15+
@@ -81,5 +94,12 @@ def _diagnose(need: str) -> Optional[str]:
         post_access = getattr(quartz, "CGPreflightPostEventAccess", None)  # macOS 10.15+
         if post_access is not None and not post_access():
             return errors.mac_accessibility(_binary())
+    elif need == "accessibility" and not _ax_trusted():
+        return errors.mac_ax_tree(_binary())
     log.debug("desktop probe: macOS session usable (%s)", need)
     return None
+
+
+def startup_problems() -> list[str]:
+    """What the server cannot do here, once each, for the start-up log: a missing permission fails quietly."""
+    return list(dict.fromkeys(reason for reason in map(diagnose, ("capture", "input", "accessibility")) if reason))

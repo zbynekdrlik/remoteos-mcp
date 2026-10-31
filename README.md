@@ -196,10 +196,11 @@ with `action="down"` stays down until its `action="up"`.
 with what matched and where: the monitor and the OCR line for `text`, the window's rectangle in
 image pixels for `window`. Not found within `timeout` (0..300 s) is an error.
 
-## UI elements instead of pixels (Windows)
+## UI elements instead of pixels
 
-`ElementTree` lists a window's real controls from Windows UI Automation, so buttons and fields in
-Chrome, Electron, WPF and UWP apps are named, not guessed from a screenshot:
+`ElementTree` lists a window's real controls from the OS accessibility tree (UI Automation on
+Windows, AX on macOS, AT-SPI on Linux X11), so buttons and fields are named, not guessed from a
+screenshot:
 
 ```
 ElementTree(window="", monitor=0, max_width=1280)
@@ -212,18 +213,34 @@ ElementTree(window="", monitor=0, max_width=1280)
 - `window` is part of a title, matched as `FocusWindow` does; empty = the foreground window.
 - Bounds are image pixels of the Snapshot frame `(monitor, max_width)`. Only interactive, visible
   elements are listed, at most 300, and the reply says when the list is incomplete.
-- `ClickElement(ref)` uses the element's Invoke action, which needs no mouse. Without one, it
-  clicks the element's centre, and refuses when anything else is on top of it there.
-- `TypeElement(ref, text)` sets the element's value, **replacing** what was there. An element with
-  no settable value gets the focus and `text` is typed at its caret. The reply says which it was.
+- `ClickElement(ref)` uses the element's own action (Invoke, AXPress, AT-SPI's click or press), which
+  needs no mouse. Without one, it clicks the element's centre, and refuses when anything else is on
+  top of it there (on Linux: when its window is not the active one).
+- `TypeElement(ref, text)` sets the element's value (Value, AXValue, EditableText), **replacing** what
+  was there. An element with no settable value gets the focus and `text` is typed at its caret. The
+  reply says which it was.
 - A ref belongs to the latest tree. A ref of an older tree, or an element that is gone, is an
   error asking for a new `ElementTree`, never an action somewhere else. `AnnotatedSnapshot` starts
-  a new tree too. `Snapshot` does not end refs, unless the window stops answering: any UI Automation
-  timeout ends them.
+  a new tree too. `Snapshot` does not end refs, unless the window stops answering: on Windows any
+  UI Automation timeout ends them.
 - An app that blocks the call (a modal dialog opened by the button) ends in an error saying the
   action may have happened. Look before repeating it.
 
-Linux and macOS report "not available yet".
+**macOS** needs the Accessibility permission for the server's Python binary (`AXIsProcessTrusted`,
+a separate check from posting events, in the same System Settings pane). Without it these tools
+fail with what to allow, the server says so at start, and `AnnotatedSnapshot` reports it next to
+its image.
+
+**Linux** coverage depends on the app. GTK shows its controls. Qt and Chromium/Electron may show
+none until asked, and then the reply carries a hint:
+
+- Qt: start it with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`.
+- Chromium, Chrome, Electron: start it with `ACCESSIBILITY_ENABLED=1` in the environment **and**
+  `--force-renderer-accessibility`. The flag alone leaves it off the accessibility bus.
+
+**Wayland is not supported.** Every desktop tool there fails with one message saying why: the tools
+drive X11 (`xdotool`, `scrot`, `wmctrl`, `xclip`) and there is no portal or `ydotool` backend. Log in
+to an X11 session ("Ubuntu on Xorg", or `WaylandEnable=false` in `/etc/gdm3/custom.conf`).
 
 ## Marks on custom-drawn apps (AnnotatedSnapshot)
 
@@ -242,8 +259,8 @@ nothing there. `AnnotatedSnapshot` adds what OCR reads, as one numbered list on 
   on a line are one mark. Numbers run top-left to bottom-right, so a screen keeps its numbers.
 - `max_elements` (1-300, default 300) bounds the marks. Elements go in first, and the reply says
   how many were left out.
-- On Windows an element's `ref` works with `ClickElement` and `TypeElement`. It starts a new ref
-  tree, so it ends the refs of an earlier `ElementTree`.
+- An element's `ref` works with `ClickElement` and `TypeElement`. It starts a new ref tree, so it
+  ends the refs of an earlier `ElementTree`.
 - OCR runs on the full capture, not the image shrunk to `max_width`, and adds seconds to the call.
   If it fails, the reply says why and keeps the image and the elements.
 - It finds text, not unlabelled icons.
@@ -371,7 +388,7 @@ Before a desktop tool touches the screen, it checks that the desktop can be used
 - **macOS:** no GUI session, the session is not on the screen (fast user switching), or the
   screen is locked. Also a missing permission: **Screen Recording** for the screen tools,
   **Accessibility** for the input tools. The message names the Python binary to allow.
-- **Linux:** no X11 session. The headless/Wayland stub text itself is unchanged, and
+- **Linux:** no X11 session. The headless stub text itself is unchanged, and
   Snapshot, ScreenRecord and OCR now return the bare stub instead of `<Tool> error: <stub>`.
   A locked X11 screen is not refused: the screenshot shows the locker, and typed input
   reaches it.

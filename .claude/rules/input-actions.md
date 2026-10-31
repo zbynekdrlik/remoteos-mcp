@@ -41,6 +41,9 @@ paths:
     `_post_mouse` starts with the dragged event (6/7/27). `move_held` is one event: it ignores
     `Move`'s `duration`.
   - Key codes are the ANSI layout's `kVK_*`.
+- **Linux drag (#38) = `x11_input._drag`:** mousedown, a `mousemove` per step (30 a second, a subprocess
+  each) over `duration`, capped at `MAX_HOLD_S`, then mouseup on every path. After a failed step that
+  step's error stays the one reported, as with `held_keys`. A plain `Move` stays one jump.
 - **Linux:** `keydown A` holds Shift too, so a held letter is lower-cased (`_held_key`). `xdotool keydown` / `mousedown` outlive the xdotool process, so a press and its release
   are separate calls. `xdotool key --repeat N` is the repeat.
 - **Wait and WaitFor are `ToolCategory.WAIT`:** no desktop lock, 10 slots of their own, so a wait
