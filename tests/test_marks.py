@@ -37,6 +37,17 @@ def test_two_elements_each_holding_a_part_do_not_add_up():
     assert not covered(word(0, 0, 100, 20), [(0, 0, 40, 20), (60, 0, 100, 20)])
 
 
+def test_a_big_surface_element_does_not_swallow_the_labels_drawn_on_it():
+    surface = element(0, 0, 1920, 1080, text="", role="Pane")
+    found = merge([surface], [word(100, 100, 140, 116), word(300, 100, 340, 116)])
+    assert [m.source for m in found.marks] == [ELEMENT, OCR, OCR]
+
+
+@pytest.mark.parametrize("side, expected", [(200, True), (201, False)])
+def test_a_surface_starts_past_100_times_the_word_s_area(side, expected):
+    assert covered(word(0, 0, 20, 20), [(0, 0, side, side)]) is expected
+
+
 def test_a_word_on_an_element_adds_no_mark_and_a_free_word_does():
     found = merge([element(0, 0, 100, 40)], [word(10, 10, 50, 30, "Save"), word(200, 10, 250, 30, "Play")])
     assert [(m.source, m.name) for m in found.marks] == [(ELEMENT, "Save"), (OCR, "Play")]
@@ -129,6 +140,16 @@ def test_numbers_run_top_left_to_bottom_right_across_both_sources():
 def test_a_row_with_uneven_tops_reads_left_to_right():
     found = merge([], [word(300, 32, 340, 48, "b"), word(100, 34, 140, 50, "a")])
     assert [m.name for m in found.marks] == ["a", "b"]
+
+
+def test_one_pixel_of_jitter_never_reorders_a_row():
+    found = merge([], [word(300, 31, 340, 47, "b"), word(100, 32, 140, 48, "a")])
+    assert [m.name for m in found.marks] == ["a", "b"]
+
+
+def test_a_row_is_measured_from_its_first_top_so_rows_do_not_chain():
+    words = [word(300, 0, 340, 10, "a"), word(200, 16, 240, 26, "b"), word(100, 32, 140, 42, "c")]
+    assert [m.name for m in merge([], words).marks] == ["b", "a", "c"]
 
 
 def test_the_same_screen_gets_the_same_numbers_whatever_order_it_was_read_in():

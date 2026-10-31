@@ -15,13 +15,14 @@ from remoteos.app import (
     mcp,
 )
 from remoteos.coords import contract_line
-from remoteos.element_tree import one_line
 from remoteos.marks import MAX_MARKS, Word, merge
 from remoteos.marks import OCR as OCR_SOURCE
 from remoteos.platform import get_desktop, is_linux
 from remoteos.snapshot import draw_marks, encode_jpeg
 
 log = logging.getLogger("remoteos.tools.media")
+
+_MAX_REASON = 500  # several engines' errors in a row: the last one is the one that counts
 
 # ============================== OCR ========================================
 
@@ -155,7 +156,7 @@ def AnnotatedSnapshot(
     if not 1 <= max_elements <= MAX_MARKS:
         raise ValueError(f"max_elements must be 1..{MAX_MARKS}, got {max_elements}")
     img, frame = _capture_snapshot_frame(monitor, max_width)
-    elements = _marked_elements(max_elements)
+    elements, cut = _marked_elements(max_elements)
     words, notes = _read_words(frame)
     found = merge(elements, words, max_elements)
     lines = draw_marks(img, found.marks, frame)
@@ -170,8 +171,8 @@ def AnnotatedSnapshot(
         parts.append("No interactive elements or text found.")
     if found.dropped:
         parts.append(f"**Incomplete:** {found.dropped} more not listed (limit {max_elements}).")
-    elif len(elements) >= max_elements:
-        parts.append(f"**Incomplete:** the element list stopped at its limit of {max_elements}.")
+    if cut:
+        parts.append(f"**Incomplete:** {cut}.")
     parts += [f"**OCR:** {note}" for note in notes]
     return [
         ImageContent(type="image", data=encode_jpeg(img, quality), mimeType="image/jpeg"),
@@ -179,11 +180,13 @@ def AnnotatedSnapshot(
     ]
 
 
-def _marked_elements(limit: int) -> list[dict]:
-    """The foreground window's elements, with a ref on each where the OS has refs (Windows)."""
+def _marked_elements(limit: int) -> tuple[list[dict], str]:
+    """The foreground window's elements and why the list is cut: refs where the OS has them (Windows)."""
     desktop = get_desktop()
-    read = getattr(desktop, "marked_elements", desktop.get_interactive_elements)
-    return read(limit=limit)
+    if hasattr(desktop, "marked_elements"):
+        return desktop.marked_elements(limit=limit)
+    elements = desktop.get_interactive_elements(limit=limit)
+    return elements, f"the element list reached its limit of {limit}" if len(elements) >= limit else ""
 
 
 def _read_words(frame) -> tuple[tuple[Word, ...], list[str]]:
@@ -194,5 +197,5 @@ def _read_words(frame) -> tuple[tuple[Word, ...], list[str]]:
         reading = ocr.read_words(region, lambda bbox: _capture_with_retry(lambda: capture(bbox)))
     except Exception as e:
         log.warning("no OCR marks (%s)", type(e).__name__)
-        return (), [f"no text marks: {one_line(str(e))}"]
+        return (), ["no text marks: " + " ".join(str(e).split())[:_MAX_REASON]]
     return reading.words, [reading.note] if reading.note else []

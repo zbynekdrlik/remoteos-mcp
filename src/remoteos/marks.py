@@ -8,9 +8,11 @@ Everything here is in SCREEN coordinates; :mod:`remoteos.snapshot` maps a mark i
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence, TypeVar
 
 from remoteos.coords import Bbox
+
+T = TypeVar("T")
 
 MAX_MARKS = 300  # the bound of ElementTree too: a longer list is no use to read
 ELEMENT, OCR = "element", "ocr"
@@ -18,11 +20,13 @@ OCR_ROLE = "text"
 
 # A word belongs to an element when more than this part of its own area is inside the element.
 _COVERED = 0.5
+# An element this many times the word's area is a surface it is drawn on, not its control.
+_SURFACE = 100
 # Words join into a line when their middles are this many word heights apart at most...
 _SAME_LINE = 0.5
 # ...and the gap is at most this many heights: wider than a space, narrower than two buttons.
 _WORD_GAP = 0.8
-_ROW = 16  # marks this close in height read as one row: a 1 px difference must not reorder them
+_ROW = 16  # tops this close to a row's first top are that row: OCR's 1 px jitter must not reorder it
 
 
 @dataclass(frozen=True)
@@ -61,9 +65,16 @@ def _overlap(a: Bbox, b: Bbox) -> int:
 
 
 def covered(word: Word, rects: Iterable[Bbox]) -> bool:
-    """Whether one element holds more than half of ``word``'s own area."""
+    """Whether one element holds more than half of ``word``'s own area.
+
+    A surface does not count: a custom-drawn app may show one focusable pane over all of its
+    controls, and that element would otherwise swallow every label on it.
+    """
     area = _area(word.rect)
-    return any(_overlap(word.rect, rect) > _COVERED * area for rect in rects)
+    return any(
+        _overlap(word.rect, rect) > _COVERED * area and _area(rect) <= _SURFACE * area
+        for rect in rects
+    )
 
 
 def _height(rect: Bbox) -> int:
@@ -95,8 +106,19 @@ def join_words(words: Iterable[Word]) -> list[Word]:
     return lines
 
 
-def _order(rect: Bbox, name: str) -> tuple:
-    return rect[1] // _ROW, rect[0], rect[1], rect[2], rect[3], name
+def _reading_order(items: Iterable[T], key: Callable[[T], tuple[Bbox, str]]) -> list[T]:
+    """``items`` top-left to bottom-right, by rows; ``key`` gives an item's rectangle and name."""
+    def _exact(item: T) -> tuple:
+        rect, name = key(item)
+        return rect[1], rect[0], rect[2], rect[3], name
+
+    ordered, row_top, row = [], None, 0
+    for item in sorted(items, key=_exact):
+        top = key(item)[0][1]
+        if row_top is None or top - row_top > _ROW:
+            row, row_top = row + 1, top
+        ordered.append((row, item))
+    return [item for _, item in sorted(ordered, key=lambda pair: (pair[0], key(pair[1])[0][0], _exact(pair[1])))]
 
 
 def _element_rect(element: dict) -> Bbox:
@@ -126,11 +148,11 @@ def merge(elements: Sequence[dict], words: Sequence[Word], limit: int = MAX_MARK
     unique = _unique(elements)
     rects = [_element_rect(element) for element in unique]
     free = dict.fromkeys(word for word in words if _area(word.rect) and not covered(word, rects))
-    lines = sorted(join_words(free), key=lambda w: _order(w.rect, w.text))
+    lines = _reading_order(join_words(free), lambda w: (w.rect, w.text))
     kept_elements = unique[:limit]
     kept_lines = lines[: limit - len(kept_elements)]
     found = [(ELEMENT, e["class"], e["text"], _element_rect(e), e.get("ref")) for e in kept_elements]
     found += [(OCR, OCR_ROLE, w.text, w.rect, None) for w in kept_lines]
-    found.sort(key=lambda mark: _order(mark[3], mark[2]))
-    marks = tuple(Mark(number, *fields) for number, fields in enumerate(found, start=1))
+    ordered = _reading_order(found, lambda mark: (mark[3], mark[2]))
+    marks = tuple(Mark(number, *fields) for number, fields in enumerate(ordered, start=1))
     return MarkSet(marks, len(unique) + len(lines) - len(marks))

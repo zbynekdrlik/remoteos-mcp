@@ -523,8 +523,8 @@ def test_snapshot_s_list_keeps_the_shape_of_the_consumers_and_ends_no_ref():
 
 def test_marked_elements_carry_a_new_ref_that_works_and_end_the_older_tree():
     session, old = session_with(Control())
-    [marked] = session.marked(50, 10)
-    assert marked["text"] == "OK"
+    [marked], truncated = session.marked(50, 10)
+    assert marked["text"] == "OK" and not truncated
     assert session.activate(marked["ref"]).point is not None
     with pytest.raises(StaleRef):
         session.activate(old)
@@ -532,13 +532,15 @@ def test_marked_elements_carry_a_new_ref_that_works_and_end_the_older_tree():
 
 def test_a_marked_element_with_no_runtime_id_stays_a_mark_without_a_ref():
     root = Control(name="App", kind="WindowControl", kids=[Control(name="none", rid=()), Control(name="id", rid=(3,))])
-    marked = new_session(root).marked(50, 10)
+    marked, _ = new_session(root).marked(50, 10)
     assert [(e["text"], bool(e["ref"])) for e in marked] == [("none", False), ("id", True)]
 
 
-def test_marked_elements_stop_at_their_limit():
+def test_marked_elements_stop_at_their_limit_and_say_so():
     root = Control(name="App", kind="WindowControl", kids=[Control(name=str(i), rid=(i,)) for i in range(5)])
-    assert [e["text"] for e in new_session(root).marked(50, 2)] == ["0", "1"]
+    marked, truncated = new_session(root).marked(50, 2)
+    assert [e["text"] for e in marked] == ["0", "1"]
+    assert truncated
 
 
 def test_snapshot_s_list_stops_at_its_limit():
@@ -944,8 +946,8 @@ def test_annotated_snapshot_s_ref_reaches_click_element(tool_box, monkeypatch):
 
 
 def test_snapshot_ends_no_ref_of_annotated_snapshot(tool_box, monkeypatch):
-    assert tool_box.mod.marked_elements()[0]["ref"]
-    ref = tool_box.mod.marked_elements()[0]["ref"]
+    elements, _ = tool_box.mod.marked_elements()
+    ref = elements[0]["ref"]
     tool_box.mod.get_interactive_elements()
     tool_box.button.patterns["invoke"] = Invoke()
     assert server.ClickElement(ref).startswith("Invoked")
@@ -953,7 +955,7 @@ def test_snapshot_ends_no_ref_of_annotated_snapshot(tool_box, monkeypatch):
 
 def test_no_foreground_window_marks_nothing(win_session):
     mod, _ = win_session
-    assert mod.marked_elements() == []
+    assert mod.marked_elements() == ([], "")
 
 
 def test_a_failing_uia_costs_annotated_snapshot_its_elements_only(tool_box, monkeypatch, caplog):
@@ -961,7 +963,7 @@ def test_a_failing_uia_costs_annotated_snapshot_its_elements_only(tool_box, monk
         raise uia.UiaTimeout("the window did not answer")
 
     monkeypatch.setattr(uia._worker, "call", down)
-    assert tool_box.mod.marked_elements() == []
+    assert tool_box.mod.marked_elements() == ([], "")
     assert "no UI Automation element list (UiaTimeout)" in caplog.text
 
 

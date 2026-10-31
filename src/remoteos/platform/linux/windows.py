@@ -361,7 +361,7 @@ def _atspi_coord_strategy(atspi, frame) -> tuple[str, tuple[int, int]]:
 def get_interactive_elements(limit: int = 300) -> list[dict]:
     """Interactive UI elements of the focused app via the AT-SPI accessibility tree.
 
-    ``limit`` is what Windows needs to stop its walk early; the callers cut this list themselves.
+    ``limit`` bounds the list, as on Windows.
 
     Returns an empty list on a non-X11 box (headless contract — never shells out /
     imports gi), when AT-SPI is unavailable, or when the focused app exposes no
@@ -386,7 +386,7 @@ def get_interactive_elements(limit: int = 300) -> list[dict]:
             return []
         coord, offset = _atspi_coord_strategy(atspi, frame)
         adapter = _AtspiAdapter(atspi, coord=coord, offset=offset)
-        elements = _collect_actionable(frame, adapter)
+        elements = _collect_actionable(frame, adapter, max_elements=limit)
         log.info(
             "AT-SPI: collected %d interactive elements (coord=%s, offset=%s)",
             len(elements),

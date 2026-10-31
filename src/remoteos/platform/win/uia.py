@@ -259,12 +259,12 @@ class Session:
         _, result = self._walk(hwnd, SNAPSHOT_WALK_S, limit=limit)
         return [_listed(index, facts) for index, (_, facts) in enumerate(result.found, start=1)]
 
-    def marked(self, hwnd: int, limit: int) -> list[dict]:
-        """AnnotatedSnapshot's list (#36): each element with a ref, in a new tree, so a mark can be acted on."""
+    def marked(self, hwnd: int, limit: int) -> tuple[list[dict], str]:
+        """AnnotatedSnapshot's list (#36) and why it is cut: refs in a new tree, so a mark can be acted on."""
         _, result = self._walk(hwnd, SNAPSHOT_WALK_S, limit=limit)
         refs = {id(facts): ref for ref, facts in self._publish(hwnd, result.found)}
         listed = [(index, facts) for index, (_, facts) in enumerate(result.found, start=1)]
-        return [{**_listed(index, facts), "ref": refs.get(id(facts))} for index, facts in listed]
+        return [{**_listed(index, facts), "ref": refs.get(id(facts))} for index, facts in listed], result.truncated
 
     def _live(self, ref: str) -> _Entry:
         """The entry behind ``ref``, proven to be that same element, still there and enabled."""
@@ -411,7 +411,7 @@ def read_elements(hwnd: int, limit: int) -> list[dict]:
     return _worker.call(lambda session: session.elements(hwnd, limit), SNAPSHOT_TIMEOUT_S, needs=needs)
 
 
-def read_marked(hwnd: int, limit: int) -> list[dict]:
+def read_marked(hwnd: int, limit: int) -> tuple[list[dict], str]:
     """AnnotatedSnapshot's elements, each with a ref: a new tree, on Snapshot's short budget (#36)."""
     needs = SNAPSHOT_WALK_S + WALK_MARGIN_S
     return _worker.call(lambda session: session.marked(hwnd, limit), SNAPSHOT_TIMEOUT_S, needs=needs)

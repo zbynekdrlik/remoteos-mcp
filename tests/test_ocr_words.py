@@ -174,8 +174,8 @@ def coordinate_png() -> bytes:
 def pytesseract(monkeypatch):
     seen = {}
 
-    def image_to_data(img, lang, config):
-        seen.update(lang=lang, config=config)
+    def image_to_data(img, lang, config, timeout):
+        seen.update(lang=lang, config=config, timeout=timeout)
         return TSV_HEADER + tsv_word("Slovo", 4, 4, 8, 8)
 
     module = types.SimpleNamespace(get_languages=lambda config: ["eng"], image_to_data=image_to_data, seen=seen)
@@ -188,7 +188,7 @@ def test_macos_words_come_from_pytesseract_with_retina_scaled_boxes(monkeypatch,
     reading = ocr.read_words((0, 0, 50, 50), capture_of((100, 100)))
     assert reading.words == (Word("Slovo", (2, 2, 6, 6)),)
     assert reading.note == "OCR languages: slk not installed, used eng"
-    assert pytesseract.seen == {"lang": "eng", "config": "--psm 11"}
+    assert pytesseract.seen == {"lang": "eng", "config": "--psm 11", "timeout": 30}
 
 
 def test_macos_without_pytesseract_has_no_boxes_and_says_why(monkeypatch):
@@ -235,6 +235,22 @@ def test_windows_asks_for_slovak_then_english_by_their_tags_as_literals(powershe
 def test_a_caller_s_language_cannot_leave_its_literal(powershell):
     ocr.read_words((0, 0, 10, 10), capture_of((10, 10)), lang="x');calc;('")
     assert "@('x'');calc;(''')" in powershell.calls[0][-1]
+
+
+def test_a_caller_s_language_cannot_spell_a_placeholder(powershell):
+    ocr.read_words((0, 0, 10, 10), capture_of((10, 10)), lang="@PATH@")
+    assert "foreach ($tag in @('@PATH@')) {" in powershell.calls[0][-1]
+
+
+def test_the_decoding_comes_before_the_language_so_any_runner_proves_the_wait():
+    script = ocr._WINRT_SCRIPT
+    assert script.index("GetSoftwareBitmapAsync") < script.index("no OCR language is installed")
+
+
+def test_windows_drops_what_is_no_word_as_tesseract_does(powershell):
+    box = {"left": 1.0, "top": 1.0, "width": 5.0, "height": 5.0}
+    powershell.stdout = winrt_reply(words=[{"text": "|", **box}, {"text": "Ok", **box}])
+    assert [w.text for w in ocr.read_words((0, 0, 10, 10), capture_of((10, 10))).words] == ["Ok"]
 
 
 def test_a_language_windows_lacks_is_said(powershell):
@@ -344,6 +360,12 @@ def test_ocr_failing_keeps_the_image_and_says_why(fake_x11, monkeypatch):
     assert "**OCR:** no text marks: tesseract: no tesseract here; pytesseract is not installed" in _text(parts)
 
 
+def test_a_long_ocr_failure_keeps_its_real_reason(fake_x11, monkeypatch):
+    reason = "pytesseract is not installed; Windows OCR: Windows OCR failed: " + "x" * 60 + " the real reason"
+    monkeypatch.setattr(ocr, "read_words", lambda region, capture: (_ for _ in ()).throw(RuntimeError(reason)))
+    assert f"**OCR:** no text marks: {reason}" in _text(server.AnnotatedSnapshot())
+
+
 def test_a_screen_with_nothing_on_it_says_so(fake_x11, monkeypatch):
     monkeypatch.setattr(ocr.subprocess, "run", _Tesseract())
     assert "No interactive elements or text found." in _text(server.AnnotatedSnapshot())
@@ -368,7 +390,24 @@ def test_a_full_element_list_says_it_may_have_stopped(fake_x11, monkeypatch):
     monkeypatch.setattr("remoteos.platform.linux.desktop.get_interactive_elements", lambda limit=300: [element])
     monkeypatch.setattr(ocr.subprocess, "run", _Tesseract())
     text = _text(server.AnnotatedSnapshot(max_elements=1))
-    assert "**Incomplete:** the element list stopped at its limit of 1." in text
+    assert "**Incomplete:** the element list reached its limit of 1." in text
+
+
+def test_the_linux_walk_takes_the_limit(monkeypatch):
+    seen = {}
+
+    def collect(frame, adapter, *, max_elements):
+        seen["limit"] = max_elements
+        return []
+
+    monkeypatch.setattr(coordinate_tools.linux_session, "_SESSION", coordinate_tools.d.SessionInfo(mode="x11"))
+    windows = coordinate_tools.linux_windows
+    monkeypatch.setattr(windows, "_load_atspi", lambda: object())
+    monkeypatch.setattr(windows, "_atspi_active_frame", lambda atspi: object())
+    monkeypatch.setattr(windows, "_atspi_coord_strategy", lambda atspi, frame: ("screen", (0, 0)))
+    monkeypatch.setattr(windows, "_collect_actionable", collect)
+    assert coordinate_tools.d.get_interactive_elements(limit=250) == []
+    assert seen == {"limit": 250}
 
 
 @pytest.mark.parametrize("limit", [0, -1, 301])

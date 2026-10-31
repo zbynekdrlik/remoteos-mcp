@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,11 @@ def choose_languages(requested: str, installed: Iterable[str]) -> tuple[str, str
     return chosen, f"OCR languages: {'+'.join(missing)} not installed, used {chosen}" if missing else ""
 
 
+def _is_word(text: str) -> bool:
+    """Whether OCR read something a person would call a label: an edge of a meter reads as ``|``."""
+    return any(c.isalnum() for c in text)
+
+
 def parse_tsv(tsv: str) -> list[tuple[str, tuple[int, int, int, int]]]:
     """``(word, (left, top, right, bottom))`` in capture pixels, from Tesseract's TSV output."""
     words = []
@@ -88,7 +94,7 @@ def parse_tsv(tsv: str) -> list[tuple[str, tuple[int, int, int, int]]]:
         if len(columns) < _TSV_COLUMNS or columns[0] != _TSV_WORD_LEVEL:
             continue
         text = columns[11].strip()
-        if float(columns[10]) < _MIN_WORD_CONFIDENCE or not any(c.isalnum() for c in text):
+        if float(columns[10]) < _MIN_WORD_CONFIDENCE or not _is_word(text):
             continue
         left, top, width, height = (int(v) for v in columns[6:10])
         words.append((text, (left, top, left + width, top + height)))
@@ -177,23 +183,24 @@ function Await($operation, $type) {
     $task.Result
 }
 
-$installed = @([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages)
-$engine = $null
-$missing = @()
-foreach ($tag in @(@TAGS@)) {
-    $match = @($installed | Where-Object { $_.LanguageTag.Split('-')[0] -eq $tag })
-    if ($match.Count -eq 0) { $missing += $tag }
-    elseif ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($match[0]) }
-}
-if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
-if ($null -eq $engine) { throw 'no OCR language is installed on this Windows' }
-
 $path = @PATH@
 $stream = [System.IO.File]::OpenRead($path)
 $ras = [System.IO.WindowsRuntimeStreamExtensions]::AsRandomAccessStream($stream)
 $decoding = [Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($ras)
 $decoder = Await $decoding ([Windows.Graphics.Imaging.BitmapDecoder])
 $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+
+$installed = @([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages)
+$engine = $null
+$missing = @()
+foreach ($tag in @(@TAGS@)) {
+    $match = @($installed | Where-Object { $_.LanguageTag.Split('-')[0] -eq $tag.Split('-')[0] })
+    if ($match.Count -eq 0) { $missing += $tag }
+    elseif ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($match[0]) }
+}
+if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }
+if ($null -eq $engine) { throw 'no OCR language is installed on this Windows' }
+
 $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
 $stream.Close()
 $words = @(foreach ($line in $result.Lines) {
@@ -221,8 +228,9 @@ def _winrt_read(png_bytes: bytes, lang: str) -> dict:
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp.write(png_bytes)
         tmp_path = tmp.name
-    tags = ", ".join(ps_literal(tag) for tag in _winrt_tags(lang))
-    script = _WINRT_SCRIPT.replace("@TAGS@", tags).replace("@PATH@", ps_literal(tmp_path))
+    values = {"TAGS": ", ".join(ps_literal(tag) for tag in _winrt_tags(lang)), "PATH": ps_literal(tmp_path)}
+    # one pass: a caller's text that spells a placeholder must stay text
+    script = re.sub("@(TAGS|PATH)@", lambda match: values[match[1]], _WINRT_SCRIPT)
     try:
         result = run_child(powershell_argv(script), timeout=30, windows=True)
         out, problem = result.stdout.strip(), result.stderr.strip()
@@ -398,7 +406,7 @@ def _words_tesseract_cli(img, lang: str):
 def _words_pytesseract(img, lang: str):
     pytesseract = _pytesseract()
     chosen, note = choose_languages(lang, pytesseract.get_languages(config=""))
-    tsv = pytesseract.image_to_data(img, lang=chosen, config=" ".join(_TESSERACT_WORD_MODE))
+    tsv = pytesseract.image_to_data(img, lang=chosen, config=" ".join(_TESSERACT_WORD_MODE), timeout=30)
     return parse_tsv(tsv), note
 
 
@@ -407,7 +415,8 @@ def _words_winrt(img, lang: str):
     words = []
     for word in reading["words"]:
         left, top = word["left"], word["top"]
-        words.append((word["text"], (left, top, left + word["width"], top + word["height"])))
+        if _is_word(word["text"]):
+            words.append((word["text"], (left, top, left + word["width"], top + word["height"])))
     return words, _winrt_note(reading)
 
 
