@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from remoteos.errors import DesktopUnavailable
 from remoteos.platform.linux import session
@@ -21,7 +22,7 @@ _BUTTONS = {"left": 1, "middle": 2, "right": 3}
 
 
 def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
-    """Mouse click / double-click / hover at screen coordinates."""
+    """Mouse click / double / triple / hover / button down / button up at screen coordinates."""
     if get_session().mode != "x11":
         raise DesktopUnavailable(_unavailable())
     btn = _BUTTONS.get(button, 1)
@@ -31,6 +32,15 @@ def click(x: int, y: int, button: str = "left", action: str = "click") -> str:
     if action == "double":
         _xdotool(["mousemove", str(x), str(y), "click", "--repeat", "2", "--delay", "120", str(btn)])
         return f"Double-clicked {button} at ({x},{y})"
+    if action == "triple":
+        _xdotool(["mousemove", str(x), str(y), "click", "--repeat", "3", "--delay", "120", str(btn)])
+        return f"Triple-clicked {button} at ({x},{y})"
+    if action == "down":
+        _xdotool(["mousemove", str(x), str(y), "mousedown", str(btn)])
+        return f"Pressed {button} at ({x},{y})"
+    if action == "up":
+        _xdotool(["mousemove", str(x), str(y), "mouseup", str(btn)])
+        return f"Released {button} at ({x},{y})"
     _xdotool(["mousemove", str(x), str(y), "click", str(btn)])
     return f"Clicked {button} at ({x},{y})"
 
@@ -136,6 +146,8 @@ _KEY_ALIASES = {
     "del": "Delete",
     "delete": "Delete",
     "ins": "Insert",
+    "insert": "Insert",
+    **{f"f{n}": f"F{n}" for n in range(1, 25)},  # keysyms are case-sensitive
     "tab": "Tab",
     "space": "space",
     "backspace": "BackSpace",
@@ -147,6 +159,8 @@ _KEY_ALIASES = {
     "end": "End",
     "pageup": "Prior",
     "pagedown": "Next",
+    "pgup": "Prior",
+    "pgdn": "Next",
 }
 
 
@@ -155,14 +169,58 @@ def _map_key(part: str) -> str:
     return _KEY_ALIASES.get(p, part.strip())
 
 
-def shortcut(keys: str) -> str:
-    """Execute a keyboard shortcut, e.g. ``ctrl+c`` / ``alt+Tab`` / ``super+e``."""
+def check_key(key: str) -> None:
+    """Only xdotool knows the keysyms, and it says so when it runs: :func:`_key_command` raises then."""
+
+
+def _key_command(args: list[str], keys: str) -> None:
+    """Run a key command. xdotool ignores an unknown key name and still exits 0, so its stderr decides."""
+    if get_session().mode != "x11":
+        raise DesktopUnavailable(_unavailable())
+    result = session._run_x(["xdotool", *args])
+    if b"No such key name" in (result.stderr or b""):
+        raise ValueError(f"Unknown key: {keys}")
+
+
+def _held_key(key: str) -> str:
+    """The keysym to hold: one letter in lower case, ``keydown A`` would hold Shift with it."""
+    return key.lower() if len(key) == 1 else _map_key(key)
+
+
+def key_down(key: str) -> None:
+    """Press ``key`` and leave it down: xdotool's XTEST press outlives the xdotool process (#34)."""
+    _key_command(["keydown", _held_key(key)], key)
+
+
+def key_up(key: str) -> None:
+    """Release a key pressed by :func:`key_down`."""
+    _key_command(["keyup", _held_key(key)], key)
+
+
+_LOCATION = re.compile(r"^(X|Y)=(-?\d+)$", re.MULTILINE)
+
+
+def cursor_position() -> tuple[int, int]:
+    """The pointer in screen pixels, from ``xdotool getmouselocation --shell``."""
+    if get_session().mode != "x11":
+        raise DesktopUnavailable(_unavailable())
+    found = dict(_LOCATION.findall(_xdotool(["getmouselocation", "--shell"])))
+    if "X" not in found or "Y" not in found:
+        raise RuntimeError("xdotool getmouselocation gave no position")
+    return int(found["X"]), int(found["Y"])
+
+
+def shortcut(keys: str, repeat: int = 1) -> str:
+    """Execute a keyboard shortcut ``repeat`` times, e.g. ``ctrl+c`` / ``alt+Tab`` / ``super+e``."""
     if get_session().mode != "x11":
         raise DesktopUnavailable(_unavailable())
     combo = "+".join(_map_key(k) for k in keys.split("+") if k.strip())
     if not combo:
         raise ValueError("No keys given")
-    _xdotool(["key", combo])
+    if repeat > 1:
+        _key_command(["key", "--repeat", str(repeat), combo], keys)
+        return f"Executed shortcut: {keys} x{repeat}"
+    _key_command(["key", combo], keys)
     return f"Executed shortcut: {keys}"
 
 

@@ -158,6 +158,53 @@
    }
   },
   "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "CursorPosition"
+  },
+  "description": "Where the mouse cursor is, in IMAGE pixels of a Snapshot frame and in screen coordinates.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "max_width": {
+     "default": 1280,
+     "description": "max_width of the Snapshot frame (default 1280, as Snapshot).",
+     "type": "integer"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "monitor of the Snapshot frame (default 0, as Snapshot).",
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "name": "CursorPosition",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "CursorPosition"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
    "destructiveHint": false,
    "idempotentHint": null,
    "openWorldHint": false,
@@ -172,7 +219,7 @@
    "properties": {
     "action": {
      "default": "click",
-     "description": "'click', 'double', or 'hover'.",
+     "description": "'click', 'double', 'triple', 'hover', or 'down' / 'up' = press the\nbutton and leave it down / release it, for a drag in steps: Click 'down',\nMove, Click 'up'. A pressed button stays down until its 'up'.",
      "type": "string"
     },
     "button": {
@@ -189,6 +236,11 @@
      "default": 1280,
      "description": "max_width of the Snapshot frame (default 1280, as Snapshot).",
      "type": "integer"
+    },
+    "modifiers": {
+     "default": "",
+     "description": "Keys held during the action, e.g. 'ctrl', 'ctrl+shift', 'alt', 'win'\n('cmd' on macOS). Always released afterwards, also when the click fails.",
+     "type": "string"
     },
     "monitor": {
      "default": 0,
@@ -373,6 +425,11 @@
      "description": "max_width of the Snapshot frame (default 1280, as Snapshot).",
      "type": "integer"
     },
+    "modifiers": {
+     "default": "",
+     "description": "Keys held while the wheel turns, e.g. 'ctrl' to zoom. Always released afterwards.",
+     "type": "string"
+    },
     "monitor": {
      "default": 0,
      "description": "monitor of the Snapshot frame (default 0, as Snapshot).",
@@ -513,15 +570,20 @@
    "readOnlyHint": null,
    "title": "Shortcut"
   },
-  "description": "Execute keyboard shortcut.",
+  "description": "Execute keyboard shortcut, or press one key several times.",
   "execution": null,
   "icons": null,
   "inputSchema": {
    "additionalProperties": false,
    "properties": {
     "keys": {
-     "description": "Shortcut string, e.g. 'ctrl+c', 'alt+tab', 'win+e'.",
+     "description": "Shortcut string, e.g. 'ctrl+c', 'alt+tab', 'win+e', 'down'.",
      "type": "string"
+    },
+    "repeat": {
+     "default": 1,
+     "description": "How many times to press it, 1..100.",
+     "type": "integer"
     }
    },
    "required": [
@@ -551,13 +613,62 @@
    }
   },
   "annotations": {
+   "destructiveHint": false,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": null,
+   "title": "HoldKey"
+  },
+  "description": "Hold keys down for a time, then release them. They are released also on a failure.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "keys": {
+     "description": "One key or several joined by '+', e.g. 'w', 'shift+w', 'ctrl+alt': letters,\ndigits, F-keys and named keys (space, enter, tab, esc, up, pageup, ...).",
+     "type": "string"
+    },
+    "seconds": {
+     "default": 1.0,
+     "description": "How long to hold, capped at 30.",
+     "type": "number"
+    }
+   },
+   "required": [
+    "keys"
+   ],
+   "type": "object"
+  },
+  "name": "HoldKey",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "HoldKey"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
    "destructiveHint": null,
    "idempotentHint": null,
    "openWorldHint": false,
    "readOnlyHint": true,
    "title": "Wait"
   },
-  "description": "Pause execution.",
+  "description": "Pause execution, without blocking other tools. To wait for something on screen use WaitFor.",
   "execution": null,
   "icons": null,
   "inputSchema": {
@@ -565,7 +676,7 @@
    "properties": {
     "seconds": {
      "default": 1.0,
-     "description": "Seconds to wait.",
+     "description": "Seconds to wait, capped at 300.",
      "type": "number"
     }
    },
@@ -585,6 +696,68 @@
    "x-fastmcp-wrap-result": true
   },
   "title": "Wait"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "WaitFor"
+  },
+  "description": "Wait until text shows on screen or a window appears; other tools keep working meanwhile.\n\nChecks every 0.5 s and replies with what matched and where. Not found in time\nis an error. Matching is case-insensitive and on part of the text or title. Text\nis read by OCR: give a short distinctive string, OCR is not exact.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "max_width": {
+     "default": 1280,
+     "description": "max_width of the Snapshot frame for a window's rect (default 1280, as Snapshot).",
+     "type": "integer"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "Monitor to read (default 0, as Snapshot).",
+     "type": "integer"
+    },
+    "text": {
+     "default": "",
+     "description": "Text to find by OCR. Give exactly one of text and window.",
+     "type": "string"
+    },
+    "timeout": {
+     "default": 30,
+     "description": "Seconds to keep trying, 0..300 (0 = check once).",
+     "type": "number"
+    },
+    "window": {
+     "default": "",
+     "description": "Part of a window title to find.",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "WaitFor",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "WaitFor"
  },
  {
   "_meta": {

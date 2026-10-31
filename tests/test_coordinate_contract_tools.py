@@ -58,6 +58,8 @@ def _install_fake_x11(monkeypatch, root, heads, capture_size=None, xrandr_instal
             raise RuntimeError("xrandr not installed: [Errno 2] No such file or directory: 'xrandr'")
         if cmd[:2] == ["xdotool", "getdisplaygeometry"]:
             return _Proc(f"{heads[0][2]} {heads[0][3]}\n".encode())
+        if cmd[:2] == ["xdotool", "getmouselocation"]:
+            return _Proc(b"X=1280\nY=800\nSCREEN=0\nWINDOW=1\n")
         if cmd[:2] == ["xrandr", "--current"]:
             return _Proc(
                 f"Screen 0: minimum 8 x 8, current {root[0]} x {root[1]}, maximum 32767 x 32767\n"

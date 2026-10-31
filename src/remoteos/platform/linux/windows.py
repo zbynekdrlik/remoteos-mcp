@@ -63,13 +63,18 @@ def _parse_wmctrl_windows(text: str) -> list[WindowInfo]:
     return results
 
 
+def list_windows() -> list[WindowInfo]:
+    """The open top-level windows; a wmctrl failure raises, for a caller that polls (#34)."""
+    r = session._run_x(["wmctrl", "-lpG"])
+    return _parse_wmctrl_windows((r.stdout or b"").decode("utf-8", "replace"))
+
+
 def enumerate_windows() -> list[WindowInfo]:
     """List open top-level windows (via wmctrl). Empty list when not on X11."""
     if get_session().mode != "x11":
         return []
     try:
-        r = session._run_x(["wmctrl", "-lpG"])
-        return _parse_wmctrl_windows((r.stdout or b"").decode("utf-8", "replace"))
+        return list_windows()
     except RuntimeError as e:
         log.warning("enumerate_windows failed: %s", e)
         return []

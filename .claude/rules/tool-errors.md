@@ -112,11 +112,12 @@ paths:
       - Linux: the stub.
   - The tools call it through `_desktop_preflight(need)`, the decorator's `preflight=` hook.
   - `@_capture_tool` = AnnotatedSnapshot, Zoom, OCR, ScreenRecord.
-  - `@_display_tool` = DisplayInventory (`"windows"`: the displays are readable on a locked desktop).
+  - `@_display_tool` = DisplayInventory, CursorPosition (`"windows"`: both are readable on a locked desktop).
+  - WaitFor calls it itself: `"capture"` for text, `"windows"` for a window.
   - Snapshot calls it itself: `"capture"` for the screenshot (`use_vision`), else `"windows"`.
     The window list works on a disconnected or locked session (live on win-pz-server), but
     outside the user's desktop it would be a hollow empty success.
-  - `@_input_tool` = Click, Move, Type, Scroll, Shortcut, MinimizeAll.
+  - `@_input_tool` = Click, Move, Type, Scroll, Shortcut, HoldKey, MinimizeAll.
   - The clipboard, notification, LockScreen, FocusWindow and App tools have NO preflight. The
     clipboard and notifications work on a locked session. FocusWindow and App switch/resize
     fail there with their own `SetForegroundWindow` error.

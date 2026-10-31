@@ -53,6 +53,8 @@ class ToolCategory(str, Enum):
     SHELL = "shell"
     # Network tools — fully concurrent.
     NETWORK = "network"
+    # Waiting — sends no input and takes no desktop lock (#34); own slots, so waits never starve queries.
+    WAIT = "wait"
 
 
 # Which tools belong to which category
@@ -72,7 +74,7 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
     "OCR": ToolCategory.DESKTOP,
     "ScreenRecord": ToolCategory.DESKTOP,
     "LockScreen": ToolCategory.DESKTOP,
-    "Wait": ToolCategory.DESKTOP,
+    "HoldKey": ToolCategory.DESKTOP,
     # File operations
     "FileRead": ToolCategory.FILE,
     "FileWrite": ToolCategory.FILE,
@@ -85,6 +87,7 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
     # System queries — concurrent
     "GetSystemInfo": ToolCategory.QUERY,
     "DisplayInventory": ToolCategory.QUERY,
+    "CursorPosition": ToolCategory.QUERY,
     "GetClipboard": ToolCategory.QUERY,
     "SetClipboard": ToolCategory.QUERY,
     "ListProcesses": ToolCategory.QUERY,
@@ -106,11 +109,14 @@ TOOL_CATEGORIES: dict[str, ToolCategory] = {
     "Ping": ToolCategory.NETWORK,
     "PortCheck": ToolCategory.NETWORK,
     "NetConnections": ToolCategory.NETWORK,
+    # Waiting
+    "Wait": ToolCategory.WAIT,
+    "WaitFor": ToolCategory.WAIT,
 }
 
 # A RUNNING task older than this is taken as stuck and auto-cancelled (unless it declared a longer runtime).
 STALE_AFTER_S = 300
-# The arguments through which a call declares how long it runs: Shell's `timeout`, Wait's `seconds`.
+# The arguments through which a call declares how long it runs: Shell's and WaitFor's `timeout`, Wait's `seconds`.
 _RUNTIME_ARGS = ("timeout", "seconds")
 # Headroom over a declared runtime: Shell's kill-and-reap path takes a few seconds more.
 _TIMEOUT_HEADROOM_S = 60
@@ -133,6 +139,7 @@ CATEGORY_LIMITS: dict[ToolCategory, int] = {
     ToolCategory.QUERY: 10,
     ToolCategory.SHELL: 3,
     ToolCategory.NETWORK: 5,
+    ToolCategory.WAIT: 10,
 }
 
 

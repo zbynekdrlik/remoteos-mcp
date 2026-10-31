@@ -1,4 +1,6 @@
-"""Desktop control tools: Snapshot, Zoom, DisplayInventory, Click, Type, Scroll, Move, Shortcut, Wait."""
+"""Desktop control tools: Snapshot, Zoom, DisplayInventory, CursorPosition, Click, Type, Scroll, Move,
+Shortcut, HoldKey, Wait, WaitFor.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +9,7 @@ import time
 
 from mcp.types import ImageContent, TextContent
 
+from remoteos import ocr
 from remoteos.app import (
     ToolAnnotations,
     _capture_snapshot_frame,
@@ -29,13 +32,24 @@ from remoteos.coords import (
     contract_line,
     frame_for,
     image_to_screen,
+    in_image,
     mapping_note,
     region_geometry,
     region_to_screen,
+    screen_to_image,
     zoom_line,
 )
 from remoteos.displays import inventory_text
-from remoteos.errors import reports_errors
+from remoteos.errors import failure, reports_errors
+from remoteos.input_keys import (
+    MAX_HOLD_S,
+    check_click,
+    check_modifiers,
+    check_repeat,
+    held_keys,
+    hold_seconds,
+    split_keys,
+)
 from remoteos.platform import get_desktop, is_linux
 from remoteos.scroll import normalize_request
 from remoteos.snapshot import element_lines, encode_jpeg, fit_to_frame, window_lines
@@ -52,6 +66,8 @@ from remoteos.typing_input import check_method
 # states the region in screen coordinates, so no input tool needs a second mode.
 
 _ZOOM_QUALITY = 85  # small text is why Zoom exists: Snapshot's default 65 smears it
+_MAX_WAIT_S = 300.0
+_POLL_S = 0.5
 
 
 def _optional_point(x: int, y: int) -> list[tuple[int, int]]:
@@ -205,6 +221,28 @@ def DisplayInventory() -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="CursorPosition",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+@_display_tool
+def CursorPosition(monitor: int = 0, max_width: int = 1280) -> str:
+    """Where the mouse cursor is, in IMAGE pixels of a Snapshot frame and in screen coordinates.
+
+    Args:
+        monitor: monitor of the Snapshot frame (default 0, as Snapshot).
+        max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
+    """
+    x, y = get_desktop().cursor_position()
+    frame = _current_frame(monitor, max_width)
+    ix, iy = screen_to_image(frame, x, y)
+    marker = "" if in_image(frame, ix, iy) else " (off-frame)"
+    return f"Cursor at image ({ix},{iy}){marker}, screen ({x},{y}) (monitor={monitor}, max_width={max_width})"
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Click",
         destructiveHint=False,
         openWorldHint=False,
@@ -219,6 +257,7 @@ def Click(
     monitor: int = 0,
     max_width: int = 1280,
     coords: str = "image",
+    modifiers: str = "",
 ) -> str:
     """Mouse click at a point of the Snapshot image.
 
@@ -231,24 +270,22 @@ def Click(
         x: X in Snapshot image pixels (screen coordinates if coords="screen").
         y: Y in Snapshot image pixels (screen coordinates if coords="screen").
         button: 'left', 'right', or 'middle'.
-        action: 'click', 'double', or 'hover'.
+        action: 'click', 'double', 'triple', 'hover', or 'down' / 'up' = press the
+            button and leave it down / release it, for a drag in steps: Click 'down',
+            Move, Click 'up'. A pressed button stays down until its 'up'.
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
         coords: 'image' (default) or 'screen' = raw OS coordinates, passed through
             unchanged (physical pixels on Windows/Linux, points on macOS).
+        modifiers: Keys held during the action, e.g. 'ctrl', 'ctrl+shift', 'alt', 'win'
+            ('cmd' on macOS). Always released afterwards, also when the click fails.
     """
+    check_click(button, action)
+    mods = check_modifiers(modifiers)
     [(x, y)], note = _to_screen([(x, y)], monitor, max_width, coords)
-    if is_linux():
-        return get_desktop().click(x, y, button=button, action=action) + note
-    if action == "hover":
-        pyautogui.moveTo(x, y)
-        return f"Hovered at ({x},{y}){note}"
-    elif action == "double":
-        pyautogui.doubleClick(x, y, button=button)
-        return f"Double-clicked {button} at ({x},{y}){note}"
-    else:
-        pyautogui.click(x, y, button=button)
-        return f"Clicked {button} at ({x},{y}){note}"
+    desktop = get_desktop()
+    with held_keys(mods, desktop):
+        return desktop.click(x, y, button=button, action=action) + note
 
 
 @mcp.tool(
@@ -326,6 +363,7 @@ def Scroll(
     monitor: int = 0,
     max_width: int = 1280,
     coords: str = "image",
+    modifiers: str = "",
 ) -> str:
     """Turn the mouse wheel at a point of the Snapshot image.
 
@@ -347,12 +385,16 @@ def Scroll(
         monitor: monitor of the Snapshot frame (default 0, as Snapshot).
         max_width: max_width of the Snapshot frame (default 1280, as Snapshot).
         coords: 'image' (default) or 'screen' = raw OS coordinates.
+        modifiers: Keys held while the wheel turns, e.g. 'ctrl' to zoom. Always released afterwards.
     """
     steps = normalize_request(amount, direction, _tobool(horizontal))
+    mods = check_modifiers(modifiers)
     points, note = _to_screen(_optional_point(x, y), monitor, max_width, coords)
     sx, sy = points[0] if points else (None, None)
     log.debug("Scroll %s x%d (requested %d) at %s", steps.direction, steps.clicks, steps.requested, points)
-    return get_desktop().scroll(steps.direction, steps.requested, x=sx, y=sy) + note
+    desktop = get_desktop()
+    with held_keys(mods, desktop):
+        return desktop.scroll(steps.direction, steps.requested, x=sx, y=sy) + note
 
 
 @mcp.tool(
@@ -403,9 +445,10 @@ def Move(
             pyautogui.moveTo(start_x, start_y)
         pyautogui.drag(x - pyautogui.position()[0], y - pyautogui.position()[1], duration=duration)
         return f"Dragged to ({x},{y}){note}"
-    else:
+    move_held = getattr(get_desktop(), "move_held", None)  # macOS: a held button needs drag events (#34)
+    if move_held is None or not move_held(x, y):
         pyautogui.moveTo(x, y, duration=duration)
-        return f"Moved to ({x},{y}){note}"
+    return f"Moved to ({x},{y}){note}"
 
 
 @mcp.tool(
@@ -416,17 +459,46 @@ def Move(
     )
 )
 @_input_tool
-def Shortcut(keys: str) -> str:
-    """Execute keyboard shortcut.
+def Shortcut(keys: str, repeat: int = 1) -> str:
+    """Execute keyboard shortcut, or press one key several times.
 
     Args:
-        keys: Shortcut string, e.g. 'ctrl+c', 'alt+tab', 'win+e'.
+        keys: Shortcut string, e.g. 'ctrl+c', 'alt+tab', 'win+e', 'down'.
+        repeat: How many times to press it, 1..100.
     """
+    repeat = check_repeat(repeat)
     if is_linux():
-        return get_desktop().shortcut(keys)
+        return get_desktop().shortcut(keys, repeat)
     parts = [k.strip() for k in keys.lower().split("+")]
-    pyautogui.hotkey(*parts)
-    return f"Executed shortcut: {keys}"
+    for _ in range(repeat):
+        pyautogui.hotkey(*parts)
+    return f"Executed shortcut: {keys}" + (f" x{repeat}" if repeat > 1 else "")
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="HoldKey",
+        destructiveHint=False,
+        openWorldHint=False,
+    )
+)
+@_input_tool
+def HoldKey(keys: str, seconds: float = 1.0) -> str:
+    """Hold keys down for a time, then release them. They are released also on a failure.
+
+    Args:
+        keys: One key or several joined by '+', e.g. 'w', 'shift+w', 'ctrl+alt': letters,
+            digits, F-keys and named keys (space, enter, tab, esc, up, pageup, ...).
+        seconds: How long to hold, capped at 30.
+    """
+    names = split_keys(keys)
+    if not names:
+        raise ValueError("No keys given")
+    hold = hold_seconds(seconds)
+    log.debug("HoldKey %d keys for %ss", len(names), hold)
+    with held_keys(names, get_desktop()):
+        time.sleep(hold)
+    return f"Held {keys} for {hold}s" + (f" (capped at {MAX_HOLD_S:.0f}s)" if hold < seconds else "")
 
 
 @mcp.tool(
@@ -438,10 +510,89 @@ def Shortcut(keys: str) -> str:
 )
 @reports_errors
 def Wait(seconds: float = 1.0) -> str:
-    """Pause execution.
+    """Pause execution, without blocking other tools. To wait for something on screen use WaitFor.
 
     Args:
-        seconds: Seconds to wait.
+        seconds: Seconds to wait, capped at 300.
     """
-    time.sleep(seconds)
-    return f"Waited {seconds}s"
+    wait = min(seconds, _MAX_WAIT_S)
+    time.sleep(wait)
+    return f"Waited {wait}s" + (f" (capped at {_MAX_WAIT_S:.0f}s)" if wait < seconds else "")
+
+
+def _squeeze(text: str) -> str:
+    """``text`` for matching: case-folded, runs of whitespace as one space (OCR breaks lines freely)."""
+    return " ".join(text.split()).casefold()
+
+
+def _find_text(needle: str, monitor: int) -> str | None:
+    """A reply when OCR of ``monitor`` shows ``needle``, else None."""
+    if monitor > 0:
+        g = get_desktop().capture_geometry(monitor)
+        seen = ocr.run_ocr(left=g.x, top=g.y, right=g.x + g.width, bottom=g.y + g.height)
+    else:
+        seen = ocr.run_ocr()
+    wanted = _squeeze(needle)
+    if wanted not in _squeeze(seen):
+        return None
+    lines = [line.strip() for line in seen.splitlines() if wanted in _squeeze(line)]
+    return f"text on monitor {monitor}" + (f", line: {lines[0]}" if lines else "")
+
+
+def _find_window(needle: str, monitor: int, max_width: int) -> str | None:
+    """A reply when a window title contains ``needle``, else None. A failing window list raises."""
+    wanted = needle.strip().casefold()
+    hits = [w for w in get_desktop().list_windows() if wanted in w.title.casefold()]
+    if not hits:
+        return None
+    return "\n".join(["window (image pixels):", *window_lines(_current_frame(monitor, max_width), hits)])
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="WaitFor",
+        readOnlyHint=True,
+        openWorldHint=False,
+    )
+)
+@reports_errors  # its preflight depends on what it waits for, as Snapshot's on use_vision
+def WaitFor(
+    text: str = "",
+    window: str = "",
+    timeout: float = 30,
+    monitor: int = 0,
+    max_width: int = 1280,
+) -> str:
+    """Wait until text shows on screen or a window appears; other tools keep working meanwhile.
+
+    Checks every 0.5 s and replies with what matched and where. Not found in time
+    is an error. Matching is case-insensitive and on part of the text or title. Text
+    is read by OCR: give a short distinctive string, OCR is not exact.
+
+    Args:
+        text: Text to find by OCR. Give exactly one of text and window.
+        window: Part of a window title to find.
+        timeout: Seconds to keep trying, 0..300 (0 = check once).
+        monitor: Monitor to read (default 0, as Snapshot).
+        max_width: max_width of the Snapshot frame for a window's rect (default 1280, as Snapshot).
+    """
+    by_text = bool(text.strip())
+    if by_text == bool(window.strip()):
+        raise ValueError("Give exactly one of text and window")
+    if not 0 <= timeout <= _MAX_WAIT_S:
+        raise ValueError(f"timeout must be 0..{_MAX_WAIT_S:.0f}, got {timeout}")
+    if monitor < 0:
+        raise ValueError(f"No monitor {monitor}")
+    _desktop_preflight("capture" if by_text else "windows")
+    _current_frame(monitor, max_width)  # a monitor that does not exist fails now, not after the wait
+    started = time.monotonic()
+    while True:
+        found = _find_text(text, monitor) if by_text else _find_window(window, monitor, max_width)
+        elapsed = time.monotonic() - started
+        if found:
+            log.debug("WaitFor matched after %.1fs", elapsed)
+            return f"Found after {elapsed:.1f}s: {found}"
+        if elapsed >= timeout:
+            what = f"text {text!r}" if by_text else f"window titled {window!r}"
+            raise failure(f"WaitFor timed out after {timeout}s: no {what}")
+        time.sleep(min(_POLL_S, timeout - elapsed))
