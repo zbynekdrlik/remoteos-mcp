@@ -59,6 +59,105 @@
    }
   },
   "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Zoom"
+  },
+  "description": "Capture a part of the Snapshot image at native resolution, to read small text.\n\nView only. The rectangle is in IMAGE pixels of the last Snapshot (pass the same\nmonitor/max_width), cut to that frame. The result is captured at native\nresolution and downscaled only when wider than max_width. Input tools keep\ntaking Snapshot image pixels: to click something seen in the zoom, convert it\nwith the reply's origin and scale (screen = origin + round(image * scale)) and\npass coords=\"screen\". For a capture wider than 1280 px use max_width=0 with\ncoords=\"screen\".",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "coords": {
+     "default": "image",
+     "description": "'image' (default) or 'screen' = raw OS coordinates (physical pixels\non Windows/Linux, points on macOS).",
+     "type": "string"
+    },
+    "height": {
+     "description": "Rectangle height, in the same units as y.",
+     "type": "integer"
+    },
+    "max_width": {
+     "default": 1280,
+     "description": "max_width of the Snapshot frame, also the widest image returned (0=native).",
+     "type": "integer"
+    },
+    "monitor": {
+     "default": 0,
+     "description": "monitor of the Snapshot frame (default 0, as Snapshot).",
+     "type": "integer"
+    },
+    "width": {
+     "description": "Rectangle width, in the same units as x.",
+     "type": "integer"
+    },
+    "x": {
+     "description": "Left edge in Snapshot image pixels (screen coordinates if coords=\"screen\").",
+     "type": "integer"
+    },
+    "y": {
+     "description": "Top edge in Snapshot image pixels (screen coordinates if coords=\"screen\").",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "x",
+    "y",
+    "width",
+    "height"
+   ],
+   "type": "object"
+  },
+  "name": "Zoom",
+  "outputSchema": null,
+  "title": "Zoom"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
+   "destructiveHint": null,
+   "idempotentHint": null,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "DisplayInventory"
+  },
+  "description": "List the displays: what each `monitor` value of the screen and input tools means.\n\nOne line per display: its index (the tools' monitor=N), name, bounds and origin\nin screen coordinates, scale, and whether it is the primary. The first line says\nwhat monitor=0 is on this machine: all monitors on Windows and Linux, the main\ndisplay on macOS.",
+  "execution": null,
+  "icons": null,
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "DisplayInventory",
+  "outputSchema": {
+   "properties": {
+    "result": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "result"
+   ],
+   "type": "object",
+   "x-fastmcp-wrap-result": true
+  },
+  "title": "DisplayInventory"
+ },
+ {
+  "_meta": {
+   "fastmcp": {
+    "tags": []
+   }
+  },
+  "annotations": {
    "destructiveHint": false,
    "idempotentHint": null,
    "openWorldHint": false,
