@@ -1,6 +1,6 @@
 ---
 name: linux-desktop
-description: Linux X11 desktop provider — session detection, xdotool/scrot/xclip/wmctrl backends, and how to deploy + live-test desktop tools on an X11 box vs a headless box. Load before touching src/remoteos/platform/linux/desktop.py, the Linux tool gating in tiers.py/__main__.py, or the OCR Linux path.
+description: Linux X11 desktop provider — session detection, xdotool/scrot/xclip/wmctrl backends, and how to deploy + live-test desktop tools on an X11 box vs a headless box. Load before touching src/remoteos/platform/linux/ (desktop.py facade, session.py, windows.py, x11_capture.py, x11_input.py), the Linux tool gating in tiers.py/__main__.py, or the OCR Linux path.
 ---
 
 # Linux desktop provider (X11)
@@ -9,7 +9,8 @@ Landed in #6. #7 (AnnotatedSnapshot via AT-SPI) + #8 (ScreenRecord via ffmpeg x1
 
 ## Architecture (read before editing)
 
-- **Input tools (Click/Type/Scroll/Move/Shortcut) are dispatched in `__main__.py` via `pyautogui`, NOT the provider.** pyautogui is deliberately NOT imported on Linux (`if _sys.platform != "linux"`). So each input handler has an `if is_linux(): return get_desktop().<fn>(...)` branch that routes to xdotool in the provider. Win/Mac keep the pyautogui path.
+- **Layout (#49).** `desktop.py` is the provider facade. `session.py` = detection, the `_SESSION` cache, `_run_x`, lock and notify; `windows.py` = wmctrl, AT-SPI, focus, launch, resize; `x11_capture.py` = scrot, frame, ffmpeg; `x11_input.py` = xdotool input, xclip. Outside `session.py` the runner is always called `session._run_x(...)`: one binding, so a test patches `session._run_x` and `session._SESSION` once.
+- **Input tools (Click/Type/Scroll/Move/Shortcut) are dispatched in `tools/desktop.py` via `pyautogui`, NOT the provider.** pyautogui is deliberately NOT imported on Linux (`if _sys.platform != "linux"`). So each input handler has an `if is_linux(): return get_desktop().<fn>(...)` branch that routes to xdotool in the provider. Win/Mac keep the pyautogui path.
 - **Tool gating is runtime-session-aware.** `tiers.py` splits the old `LINUX_EXCLUDED_TOOLS` into `LINUX_ALWAYS_EXCLUDED_TOOLS` (Reg*, ReconnectSession, ScreenRecord, Scrape, AnnotatedSnapshot) + `LINUX_DISPLAY_TOOLS` (enabled only when X11 is detected). `__main__.py` calls `linux.desktop.get_session()` at startup; headless → exclude display tools (byte-identical to before, `[tools: 24/44]`), X11 → keep them (`[tools: 38/44]`). Startup log prints `Linux session: <mode>`.
 - **OCR on Linux** = provider `capture_png` (scrot) → `tesseract` CLI (no PIL/pytesseract). Pillow is a Linux dep for the screenshot fit/JPEG (`capture_frame` → `remoteos.snapshot`).
 - **Coordinate contract (#28).** `capture_geometry(monitor)` → `CaptureGeometry`, via `platform/linux/display.py`:

@@ -29,9 +29,9 @@ import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
+from tool_surface import server
 from tool_test_support import tool_error
 
-import remoteos.__main__ as server
 from remoteos import scrape
 from remoteos.config import load_config
 from remoteos.oauth import OAuthStore, build_oauth_routes

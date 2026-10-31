@@ -22,9 +22,10 @@ import pytest
 from fake_console_child import popen_answered_by
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from tool_surface import server
 
-import remoteos.__main__ as server
 from remoteos.platform.linux import desktop as linux_desktop
+from remoteos.platform.linux import session as linux_session
 
 _TASK = re.compile(r"^\[task:([0-9a-f]{12})\] ")
 _HEADLESS = "Not available on headless Linux (no display)"
@@ -263,19 +264,19 @@ def no_subprocess(monkeypatch):
     def _boom(*args, **kwargs):  # pragma: no cover - must not be called
         raise AssertionError("a desktop tool without a display must not run a subprocess")
 
-    monkeypatch.setattr(linux_desktop, "_run_x", _boom)
-    monkeypatch.setattr(linux_desktop, "_run_capture", _boom)
+    monkeypatch.setattr(linux_session, "_run_x", _boom)
+    monkeypatch.setattr(linux_session, "_run_capture", _boom)
 
 
 @pytest.mark.parametrize(("name", "args"), _DESKTOP_CALLS + [("LockScreen", {}), ("Notification", {"message": "x"})])
 def test_headless_desktop_tool_is_an_mcp_error_with_the_unchanged_stub(monkeypatch, no_subprocess, name, args):
-    monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="headless"))
+    monkeypatch.setattr(linux_session, "_SESSION", linux_desktop.SessionInfo(mode="headless"))
     _, text = _error_text(name, args)
     assert text == _HEADLESS
 
 
 @pytest.mark.parametrize(("name", "args"), _DESKTOP_CALLS)
 def test_wayland_desktop_tool_is_an_mcp_error_with_the_unchanged_stub(monkeypatch, no_subprocess, name, args):
-    monkeypatch.setattr(linux_desktop, "_SESSION", linux_desktop.SessionInfo(mode="wayland"))
+    monkeypatch.setattr(linux_session, "_SESSION", linux_desktop.SessionInfo(mode="wayland"))
     _, text = _error_text(name, args)
     assert text == _WAYLAND

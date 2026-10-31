@@ -16,8 +16,7 @@ import pytest
 from fake_console_child import popen_answered_by, run_result
 from fake_windows_session import FakeClipboard
 from PIL import ImageGrab
-
-import remoteos.__main__ as server
+from tool_surface import server
 
 
 @pytest.fixture

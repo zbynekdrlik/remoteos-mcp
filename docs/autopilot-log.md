@@ -562,3 +562,10 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - Gateway read timeout 3700 s, value test + the Shell `--timeout` pass-through test.
 - Shell: `StructuredText` keeps `-> str` for direct callers, `wrap_sync_tool` makes the `ToolResult`; the tool declares its own `output_schema`, replacing fastmcp's `{"result": ...}`. The CLI prints the exact streams and parses text only for an older server.
 - Tests: `test_put_of_10_mb_through_the_gateway_matches_its_sha256`, `test_an_interrupted_put_leaves_the_target_and_the_next_put_finishes`, `test_structured_shell_output_round_trips_what_plain_text_could_not`.
+
+## #49 — split `__main__.py` and the Linux provider (0.7.0.dev44)
+
+- Pure moves, proved two ways: `tests/test_tools_list_golden.py` (snapshotted before the first move) and a multiset line diff of old vs new files (only imports, section banners, `session._run_x(` and `app._WIN_DPI_MODE` differ).
+- `app.py` + `tools/{desktop,windows,shell,files,system,network,media,tasks}.py`; `__main__.py` keeps the CLI and the task-wrapping pass. EventLog stays in `tools/network.py`: moving it to `system.py` would change the `tools/list` order.
+- `platform/linux/`: `session.py`, `windows.py`, `x11_capture.py`, `x11_input.py`; `desktop.py` is the facade.
+- Tests read and patch the real modules through `tests/tool_surface.py` (`server`); test bodies are otherwise unchanged.

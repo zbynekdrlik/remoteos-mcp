@@ -37,9 +37,9 @@ from pathlib import Path
 
 import pytest
 from fake_console_child import TEXT_MODE, assert_runs_powershell, oem_code_page, popen_answered_by, run_result
+from tool_surface import server
 from tool_test_support import tool_error
 
-import remoteos.__main__ as server
 from remoteos.platform.win import services as win_services
 
 SLOVAK = "Žltý kôň ďakuje – €"

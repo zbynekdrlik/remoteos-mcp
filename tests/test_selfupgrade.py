@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 from fake_console_child import popen_answered_by, run_result
 from fastmcp.exceptions import ToolError
+from tool_surface import server
 
-import remoteos.__main__ as server
 from remoteos import selfupgrade
 from remoteos.platform import command
 from remoteos.tiers import LINUX_EXCLUDED_TOOLS, TOOL_TIERS
