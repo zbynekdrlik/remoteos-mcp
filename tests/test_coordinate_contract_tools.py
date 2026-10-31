@@ -135,7 +135,7 @@ def test_click_hover_and_double_are_mapped(fake_x11):
 
 def test_move_and_drag_start_are_mapped(fake_x11):
     server.Move(640, 400)
-    server.Move(640, 400, drag=True, start_x=10, start_y=20)
+    server.Move(640, 400, drag=True, start_x=10, start_y=20, duration=0)
     assert _mousemoves(fake_x11) == [["1280", "800"], ["20", "40"], ["1280", "800"]]
 
 
@@ -184,13 +184,13 @@ def test_type_scroll_and_drag_start_reach_column_and_row_zero(fake_x11):
     # x=0 alone / y=0 alone is the frame's left column / top row, never "no point" (#31)
     server.Type("hi", x=0, y=200)
     server.Scroll(-3, x=300, y=0)
-    server.Move(640, 400, drag=True, start_x=0, start_y=20)
+    server.Move(640, 400, drag=True, start_x=0, start_y=20, duration=0)
     assert _mousemoves(fake_x11) == [["0", "400"], ["600", "0"], ["0", "40"], ["1280", "800"]]
 
 
 def test_drag_without_start_point_drags_from_the_current_position(fake_x11):
     # only 0/0 (the default) means "no start point"
-    server.Move(640, 400, drag=True)
+    server.Move(640, 400, drag=True, duration=0)
     assert _mousemoves(fake_x11) == [["1280", "800"]]
     assert ["xdotool", "mousedown", "1"] in fake_x11
 
