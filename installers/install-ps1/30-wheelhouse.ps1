@@ -210,7 +210,7 @@ function Install-RemoteOSWheelhouse([string]$Python, [string]$Wheelhouse, [strin
     $listLeft = "import importlib.metadata as m`n" +
                 "for d in m.distributions():`n" +
                 "    n = (d.metadata.get('Name') or '').lower().replace('_', '-')`n" +
-                "    if n in ('remoteos-mcp', 'fastmcp', 'fastmcp-slim'): print('REMOTEOS_LEFT=' + n + ' ' + str(getattr(d, '_path', '')))"
+                "    if n in ('remoteos-mcp', 'fastmcp', 'fastmcp-slim'): print('REMOTEOS_LEFT=' + n + ' ' + ascii(str(getattr(d, '_path', ''))))"
     $uninstallOutput = ''
     $lastLeft = $null
     for ($pass = 1; $pass -le 5; $pass++) {
@@ -219,11 +219,11 @@ function Install-RemoteOSWheelhouse([string]$Python, [string]$Wheelhouse, [strin
             return [pscustomobject]@{ Ok = $false; Error = "the installed packages could not be read (exit $($read.Exit))"
                                       Output = $uninstallOutput + $read.Output }
         }
-        # One line per copy: the name, then where it lives (two copies of one name = two lines)
+        # One line per copy: the name, then where it lives, in ascii() (two copies of one name = two lines)
         $left = @()
         $copies = @()
         foreach ($line in ($read.Output -split "`r?`n")) {
-            if ($line -match '^REMOTEOS_LEFT=(\S+) (.+?)\s*$') {
+            if ($line -match '^REMOTEOS_LEFT=(\S+) ?(.*?)\s*$') {
                 $copies += "$($Matches[1]) $($Matches[2])"
                 if ($left -notcontains $Matches[1]) { $left += $Matches[1] }
             }

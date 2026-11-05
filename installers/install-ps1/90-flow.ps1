@@ -288,7 +288,13 @@ Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinu
 $ErrorActionPreference = $prevEAP
 # Run as another account, pip and the import check would see THAT account's user site; the server
 # imports the desktop user's first, where a second copy of the old packages may sit (#87)
+# An uncaught terminating error ends the run without Exit-RemoteOSInstaller: restore, then rethrow
+trap {
+    if ($script:remoteosUserBase) { $env:PYTHONUSERBASE = $script:remoteosUserBase.Previous }
+    break
+}
 if ($otherAccount) {
+    $script:remoteosUserBase = @{ Previous = $env:PYTHONUSERBASE }
     $env:PYTHONUSERBASE = "$desktopProfile\AppData\Roaming\Python"
 }
 # A run killed from here on (an SSH drop, a crash) is rolled back from outside (#65)
@@ -514,5 +520,6 @@ Write-Host "  To uninstall later:" -ForegroundColor Gray
 Write-Host "  irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/uninstall.ps1 | iex" -ForegroundColor Gray
 Write-Host ""
 # irm | iex ends here with the console still open: the lock must not outlive the run
+if ($script:remoteosUserBase) { $env:PYTHONUSERBASE = $script:remoteosUserBase.Previous }
 $installLock.ReleaseMutex()
 $installLock.Dispose()

@@ -28,6 +28,8 @@ function Test-RemoteOSPythonReachable([string]$PythonPath, [string]$RunProfile, 
 function Exit-RemoteOSInstaller([int]$Code, [bool]$Pause) {
     # exit $Code; with $Pause wait for Enter first (a Read-Host that cannot read must not keep the run alive)
     if ($Pause) { try { Read-Host "  Press Enter to close" | Out-Null } catch {} }
+    # An irm | iex console stays open: the desktop user's PYTHONUSERBASE must not outlive the run (#87)
+    if ($script:remoteosUserBase) { $env:PYTHONUSERBASE = $script:remoteosUserBase.Previous }
     exit $Code
 }
 
