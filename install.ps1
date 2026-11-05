@@ -629,6 +629,8 @@ function Invoke-RemoteOSRollback($Point, [string]$Python, [scriptblock]$StopServ
     $null = & $StopServer
     $reinstall = Install-RemoteOSWheelhouse -Python $Python -Wheelhouse $Point.Path -Version $Point.Version
     if (-not $reinstall.Ok) { return $reinstall }
+    # Again: the RemoteOSMCP task may have started a server while pip reinstalled (#87)
+    $null = & $StopServer
     $startError = & $StartServer
     if ($startError) { return [pscustomobject]@{ Ok = $false; Error = "$startError"; Output = '' } }
     $proof = & $ProveHealth $Point.Version
