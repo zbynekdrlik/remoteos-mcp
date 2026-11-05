@@ -276,7 +276,8 @@ $rollback = Invoke-RemoteOSRollback -Point {self._point(old, '1.0')} -Python {_q
         drops a double quote inside a native program's argument."""
         old = tmp_path / "old"
         _wheel(old, "fastmcp", "8.0", _FASTMCP)
-        early = tmp_path / "venv" / "early"
+        # A non-ASCII folder (re-review of #87): the listing prints copy paths into a cp1252 pipe
+        early = tmp_path / "venv" / "early-\u011b"
         pip = [str(venv), "-m", "pip", "install", "-q", "--no-index", "--find-links", str(old)]
         subprocess.run([*pip, "fastmcp==8.0"], check=True, timeout=300)
         subprocess.run([*pip, "--target", str(early), "fastmcp==8.0"], check=True, timeout=300)

@@ -513,3 +513,25 @@ def test_another_account_s_install_sees_the_desktop_user_s_user_site() -> None:
     assert len(base) == 1 and base[0] < _stop_line() < install, (base, _stop_line(), install)
     guard = [line.strip() for n, line in flow if base[0] - 3 <= n < base[0]]
     assert "if ($otherAccount) {" in guard, guard
+
+
+def test_the_pre_uninstall_listing_prints_paths_in_ascii() -> None:
+    """Re-review of #87: python's stdout into a pipe is the ANSI code page; a path with a character
+    outside it (a profile named with an e-caron on an en-US box) raised UnicodeEncodeError and the
+    listing exited 1, after the stop, in the rollback too. The path is printed with ascii(), and a
+    copy with no path still counts (the regex takes an empty location)."""
+    body = "\n".join(_function_code("Install-RemoteOSWheelhouse"))
+    assert "ascii(str(getattr(d, '_path', '')))" in body, body
+    assert r"'^REMOTEOS_LEFT=(\S+) ?(.*?)\s*$'" in body, body
+
+
+def test_the_desktop_user_s_pythonuserbase_does_not_outlive_the_run() -> None:
+    """Re-review of #87: an `irm | iex` run keeps its console, so PYTHONUSERBASE set for another
+    account's install would steer that admin's later `pip install --user` into the desktop
+    user's profile. The previous value is restored at every exit and at the flow's end."""
+    flow = "\n".join(line for _, line in _flow_lines())
+    assert "$script:remoteosUserBase = @{ Previous = $env:PYTHONUSERBASE }" in flow, flow
+    assert flow.rstrip().endswith("$env:PYTHONUSERBASE = $script:remoteosUserBase.Previous }"), flow[-300:]
+    body = _function_code("Exit-RemoteOSInstaller")
+    restore = "if ($script:remoteosUserBase) { $env:PYTHONUSERBASE = $script:remoteosUserBase.Previous }"
+    assert restore in body and body.index(restore) < body.index("exit $Code"), body
