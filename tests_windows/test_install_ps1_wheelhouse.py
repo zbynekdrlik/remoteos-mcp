@@ -503,6 +503,7 @@ Exit-RemoteOSAfterFailure -Reason 'pip install failed' -Output '' @rollback
         assert calls == [
             "STOP port=8092",
             "INSTALL the-python C:\\wh\\old 1.0",
+            "STOP port=8092",
             "START C:\\Users\\box\\.remoteos-mcp True",
             "HEALTH port=8092 1.0 True",
         ], result.stdout
