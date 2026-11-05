@@ -531,7 +531,8 @@ def test_the_desktop_user_s_pythonuserbase_does_not_outlive_the_run() -> None:
     user's profile. The previous value is restored at every exit and at the flow's end."""
     flow = "\n".join(line for _, line in _flow_lines())
     assert "$script:remoteosUserBase = @{ Previous = $env:PYTHONUSERBASE }" in flow, flow
-    assert flow.rstrip().endswith("$env:PYTHONUSERBASE = $script:remoteosUserBase.Previous }"), flow[-300:]
-    body = _function_code("Exit-RemoteOSInstaller")
+    # Right before the lock release, which stays the flow's last two lines (test_installer_updater)
     restore = "if ($script:remoteosUserBase) { $env:PYTHONUSERBASE = $script:remoteosUserBase.Previous }"
+    assert flow.rstrip().endswith(restore + "\n$installLock.ReleaseMutex()\n$installLock.Dispose()"), flow[-300:]
+    body = _function_code("Exit-RemoteOSInstaller")
     assert restore in body and body.index(restore) < body.index("exit $Code"), body
