@@ -490,20 +490,32 @@ function Install-RemoteOSWheelhouse([string]$Python, [string]$Wheelhouse, [strin
     # site-packages, #87), and the copy left behind deleted fastmcp-slim's fastmcp/__init__.py on upgrade.
     $listLeft = "import importlib.metadata as m`n" +
                 "for d in m.distributions():`n" +
-                "    n = (d.metadata['Name'] or '').lower().replace('_', '-')`n" +
-                "    if n in ('remoteos-mcp', 'fastmcp', 'fastmcp-slim'): print('REMOTEOS_LEFT=' + n)"
+                "    n = (d.metadata.get('Name') or '').lower().replace('_', '-')`n" +
+                "    if n in ('remoteos-mcp', 'fastmcp', 'fastmcp-slim'): print('REMOTEOS_LEFT=' + n + ' ' + str(getattr(d, '_path', '')))"
     $uninstallOutput = ''
+    $lastLeft = $null
     for ($pass = 1; $pass -le 5; $pass++) {
         $read = Invoke-RemoteOSNative $Python @('-c', $listLeft)
         if ($read.Exit -ne 0) {
             return [pscustomobject]@{ Ok = $false; Error = "the installed packages could not be read (exit $($read.Exit))"
                                       Output = $uninstallOutput + $read.Output }
         }
+        # One line per copy: the name, then where it lives (two copies of one name = two lines)
         $left = @()
+        $copies = @()
         foreach ($line in ($read.Output -split "`r?`n")) {
-            if ($line -match '^REMOTEOS_LEFT=(\S+)\s*$' -and $left -notcontains $Matches[1]) { $left += $Matches[1] }
+            if ($line -match '^REMOTEOS_LEFT=(\S+) (.+?)\s*$') {
+                $copies += "$($Matches[1]) $($Matches[2])"
+                if ($left -notcontains $Matches[1]) { $left += $Matches[1] }
+            }
         }
         if ($left.Count -eq 0) { break }
+        # pip answers 0 for a copy it will not remove (outside the environment, no RECORD): no progress = stop now
+        if (($copies -join '|') -ceq $lastLeft) {
+            return [pscustomobject]@{ Ok = $false; Output = $uninstallOutput
+                                      Error = "pip did not remove $($left -join ', ') (see pip's output)" }
+        }
+        $lastLeft = $copies -join '|'
         if ($pass -eq 5) {
             return [pscustomobject]@{ Ok = $false; Output = $uninstallOutput
                                       Error = "the pre-uninstall left $($left -join ', ') installed after 4 passes" }
@@ -1287,6 +1299,11 @@ if (Test-Path $oldConfigDir) {
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
 $ErrorActionPreference = $prevEAP
+# Run as another account, pip and the import check would see THAT account's user site; the server
+# imports the desktop user's first, where a second copy of the old packages may sit (#87)
+if ($otherAccount) {
+    $env:PYTHONUSERBASE = "$desktopProfile\AppData\Roaming\Python"
+}
 # A run killed from here on (an SSH drop, a crash) is rolled back from outside (#65)
 if ($rollbackPoint) {
     $trapPython = (Get-Command $python -ErrorAction SilentlyContinue).Source
