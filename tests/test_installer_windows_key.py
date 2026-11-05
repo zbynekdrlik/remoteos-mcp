@@ -536,3 +536,17 @@ def test_the_desktop_user_s_pythonuserbase_does_not_outlive_the_run() -> None:
     assert flow.rstrip().endswith(restore + "\n$installLock.ReleaseMutex()\n$installLock.Dispose()"), flow[-300:]
     body = _function_code("Exit-RemoteOSInstaller")
     assert restore in body and body.index(restore) < body.index("exit $Code"), body
+
+
+def test_the_saved_pythonuserbase_starts_empty_and_an_uncaught_error_restores_it() -> None:
+    """Re-review round 3 of #87: in irm | iex the script scope is the console's global scope, so a
+    value saved by an earlier run in the same console would be restored by a later run; and an
+    uncaught terminating error ended the run without the restore. The flow clears the saved value
+    before it may set one, and a trap restores it and rethrows (break)."""
+    flow = [line.strip() for _, line in _flow_lines()]
+    clear = flow.index("$script:remoteosUserBase = $null")
+    save = flow.index("$script:remoteosUserBase = @{ Previous = $env:PYTHONUSERBASE }")
+    assert clear < save, (clear, save)
+    restore = "if ($script:remoteosUserBase) { $env:PYTHONUSERBASE = $script:remoteosUserBase.Previous }"
+    trap = flow.index("trap {")
+    assert flow[trap + 1] == restore and flow[trap + 2] == "break" and flow[trap + 3] == "}", flow[trap:trap + 4]
