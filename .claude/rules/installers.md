@@ -421,7 +421,17 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   - The firewall rule: the new one is created BEFORE the old ones are removed, so a failure that
     rolls back keeps the LAN reachable.
   - The pre-uninstall's exit code is fatal now (it was ignored); the rollback runs the same
-    uninstall. A re-run of the same commit keeps only that wheelhouse (`@($sha, $sha)`): the
+    uninstall.
+  - **The pre-uninstall repeats until none of the three is left (#87).** One `pip uninstall`
+    removes only the FIRST copy on the path. Old boxes may hold a second set in the user site
+    (`AppData\Roaming\Python\PythonNNN`, a `pip install --user` era): the copy left in
+    site-packages then deleted fastmcp-slim's `fastmcp/__init__.py` on upgrade (`cannot import
+    name 'FastMCP' from 'fastmcp'`, pz-server, pjsnvs). Max four passes, then fail before the install.
+  - **The server is stopped TWICE (#87):** before pip and again right before the start. The old
+    RemoteOSMCP task (every 5 min) can fire while pip runs; its cmd.exe reads the OLD .bat and
+    starts the new packages with the old command line (the key on it, pjkeb), and the health check
+    passes against that process because it reports the new version. A `_stop_line()` test helper
+    counts from the first stop. A re-run of the same commit keeps only that wheelhouse (`@($sha, $sha)`): the
     proven commit is the current one.
   - **The rollback trap (#65, `35-rollback-trap.ps1`).** PowerShell has no EXIT trap for a killed
     process, and an SSH drop kills the session's children, so the watcher is a scheduled task,
@@ -448,7 +458,11 @@ The live-deploy procedure lives in the `/remoteos-install` skill. This file cove
   - A native child's output goes through `Invoke-RemoteOSNative` (`2>&1`, each record as text,
     under `Continue`). In argument mode a bare `[pscustomobject]@{...}` is a STRING: wrap it in
     parentheses (bit the tests).
-  - Probe locally: tests_windows' wheelhouse tests run under pwsh 7 on Linux with a `powershell`
+  - **A `python -c` snippet passed from PowerShell quotes with `'` only.** Windows PowerShell 5.1
+    drops a `"` inside a native program's argument (NameError on the real job), pwsh 7 does not, so
+    the local probe misses it. In a PowerShell single-quoted literal, double the `'`.
+  - Probe locally: tests_windows' wheelhouse tests run under pwsh 7 on Linux (the `TestWheelhouseAcl`
+    cases fail there on any commit: ACLs are Windows-only) with a `powershell`
     symlink to pwsh first in PATH and `--noconftest` (a venv's `bin/python`); the real-pip
     preflight against GitHub/PyPI works the same way.
 - **The `shell` CI job** runs `shellcheck install-linux.sh install.sh uninstall*.sh` and the

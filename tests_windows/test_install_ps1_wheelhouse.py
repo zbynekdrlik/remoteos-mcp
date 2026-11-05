@@ -261,7 +261,9 @@ $rollback = Invoke-RemoteOSRollback -Point {self._point(old, '1.0')} -Python {_q
         assert out["between"] is None, "the failed install did not leave the box without the package (the test setup)"
         assert out["rollback"] is True, out
         assert out["after"] == "1.0"
-        assert out["calls"] == ["stop", "start", "health 1.0"], "rollback order: stop, reinstall, start, prove"
+        # The second stop (#87): the old RemoteOSMCP task may start a server while pip reinstalls
+        assert out["calls"] == ["stop", "stop", "start", "health 1.0"], (
+            "rollback order: stop, reinstall, stop again, start, prove")
 
     def test_a_second_copy_of_the_old_fastmcp_is_removed_before_the_install(self, tmp_path: Path, venv: Path) -> None:
         """win-pz-server and win-pjsnvs-pokladna, 2026-11-02 (#87): the first run on a box whose old
@@ -298,6 +300,29 @@ $import = Invoke-RemoteOSNative {_q(venv)} @('-c', 'from fastmcp import FastMCP;
         assert out["before"] == "2", f"the setup did not install two copies: {out}"
         assert out["ok"] is True, out
         assert out["import"] == "IMPORT_OK", out
+
+    def test_a_copy_pip_will_not_remove_fails_at_once_with_pip_s_output(self, tmp_path: Path, venv: Path) -> None:
+        """Review of #87: pip answers 0 for a copy it cannot remove ("Can't uninstall 'fastmcp'. No
+        files were found", or "outside environment"), so without a progress check the loop spent its passes and failed
+        with no reason. The same list after a pass is a failure at once, with pip's output."""
+        old = tmp_path / "old"
+        _wheel(old, "fastmcp", "8.0", _FASTMCP)
+        outside = tmp_path / "outside"
+        subprocess.run([str(venv), "-m", "pip", "install", "-q", "--no-index", "--find-links", str(old),
+                        "--target", str(outside), "fastmcp==8.0"], check=True, timeout=300)
+        new = _wheelhouse(tmp_path / "wh" / SHA_NEW, "2.0")
+
+        out = _ps(tmp_path, _NO_NETWORK + f"""
+$env:PYTHONPATH = {_q(outside)}
+$r = Install-RemoteOSWheelhouse -Python {_q(venv)} -Wheelhouse {_q(new)} -Version '2.0'
+@{{ ok = $r.Ok; error = $r.Error; output = $r.Output; installed = (Get-RemoteOSInstalledVersion {_q(venv)}) }} |
+    ConvertTo-Json -Compress
+""")
+
+        assert out["ok"] is False, out
+        assert "pip did not remove fastmcp" in out["error"], out
+        assert "uninstall 'fastmcp'" in out["output"], "pip's own reason is not kept"
+        assert out["installed"] is None, "it installed anyway"
 
     def test_the_rollback_reports_a_failing_old_health_check(self, tmp_path: Path, venv: Path) -> None:
         old = _wheelhouse(tmp_path / "wh" / SHA_OLD, "1.0")
@@ -501,6 +526,7 @@ Exit-RemoteOSAfterFailure -Reason 'pip install failed' -Output '' @rollback
         assert calls == [
             "STOP port=8092",
             "INSTALL the-python C:\\wh\\old 1.0",
+            "STOP port=8092",
             "START C:\\Users\\box\\.remoteos-mcp True",
             "HEALTH port=8092 1.0 True",
         ], result.stdout

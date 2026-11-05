@@ -286,6 +286,11 @@ if (Test-Path $oldConfigDir) {
 Unregister-ScheduledTask -TaskName "WinRemoteMCP" -Confirm:$false -ErrorAction SilentlyContinue
 Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinue
 $ErrorActionPreference = $prevEAP
+# Run as another account, pip and the import check would see THAT account's user site; the server
+# imports the desktop user's first, where a second copy of the old packages may sit (#87)
+if ($otherAccount) {
+    $env:PYTHONUSERBASE = "$desktopProfile\AppData\Roaming\Python"
+}
 # A run killed from here on (an SSH drop, a crash) is rolled back from outside (#65)
 if ($rollbackPoint) {
     $trapPython = (Get-Command $python -ErrorAction SilentlyContinue).Source
