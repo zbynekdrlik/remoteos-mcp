@@ -1303,6 +1303,13 @@ Remove-NetFirewallRule -DisplayName "WinRemote MCP" -ErrorAction SilentlyContinu
 $ErrorActionPreference = $prevEAP
 # Run as another account, pip and the import check would see THAT account's user site; the server
 # imports the desktop user's first, where a second copy of the old packages may sit (#87)
+# irm | iex keeps this scope in the console: never restore a value an earlier run saved
+$script:remoteosUserBase = $null
+# An uncaught terminating error ends the run without Exit-RemoteOSInstaller: restore, then rethrow
+trap {
+    if ($script:remoteosUserBase) { $env:PYTHONUSERBASE = $script:remoteosUserBase.Previous }
+    break
+}
 if ($otherAccount) {
     $script:remoteosUserBase = @{ Previous = $env:PYTHONUSERBASE }
     $env:PYTHONUSERBASE = "$desktopProfile\AppData\Roaming\Python"
