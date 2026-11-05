@@ -261,7 +261,9 @@ $rollback = Invoke-RemoteOSRollback -Point {self._point(old, '1.0')} -Python {_q
         assert out["between"] is None, "the failed install did not leave the box without the package (the test setup)"
         assert out["rollback"] is True, out
         assert out["after"] == "1.0"
-        assert out["calls"] == ["stop", "start", "health 1.0"], "rollback order: stop, reinstall, start, prove"
+        # The second stop (#87): the old RemoteOSMCP task may start a server while pip reinstalls
+        assert out["calls"] == ["stop", "stop", "start", "health 1.0"], (
+            "rollback order: stop, reinstall, stop again, start, prove")
 
     def test_a_second_copy_of_the_old_fastmcp_is_removed_before_the_install(self, tmp_path: Path, venv: Path) -> None:
         """win-pz-server and win-pjsnvs-pokladna, 2026-11-02 (#87): the first run on a box whose old
