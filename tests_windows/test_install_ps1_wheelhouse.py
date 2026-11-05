@@ -301,6 +301,29 @@ $import = Invoke-RemoteOSNative {_q(venv)} @('-c', 'from fastmcp import FastMCP;
         assert out["ok"] is True, out
         assert out["import"] == "IMPORT_OK", out
 
+    def test_a_copy_pip_will_not_remove_fails_at_once_with_pip_s_output(self, tmp_path: Path, venv: Path) -> None:
+        """Review of #87: pip answers 0 for a copy it cannot remove ("Can't uninstall 'fastmcp'. No
+        files were found", or "outside environment"), so without a progress check the loop spent its passes and failed
+        with no reason. The same list after a pass is a failure at once, with pip's output."""
+        old = tmp_path / "old"
+        _wheel(old, "fastmcp", "8.0", _FASTMCP)
+        outside = tmp_path / "outside"
+        subprocess.run([str(venv), "-m", "pip", "install", "-q", "--no-index", "--find-links", str(old),
+                        "--target", str(outside), "fastmcp==8.0"], check=True, timeout=300)
+        new = _wheelhouse(tmp_path / "wh" / SHA_NEW, "2.0")
+
+        out = _ps(tmp_path, _NO_NETWORK + f"""
+$env:PYTHONPATH = {_q(outside)}
+$r = Install-RemoteOSWheelhouse -Python {_q(venv)} -Wheelhouse {_q(new)} -Version '2.0'
+@{{ ok = $r.Ok; error = $r.Error; output = $r.Output; installed = (Get-RemoteOSInstalledVersion {_q(venv)}) }} |
+    ConvertTo-Json -Compress
+""")
+
+        assert out["ok"] is False, out
+        assert "pip did not remove fastmcp" in out["error"], out
+        assert "uninstall 'fastmcp'" in out["output"], "pip's own reason is not kept"
+        assert out["installed"] is None, "it installed anyway"
+
     def test_the_rollback_reports_a_failing_old_health_check(self, tmp_path: Path, venv: Path) -> None:
         old = _wheelhouse(tmp_path / "wh" / SHA_OLD, "1.0")
 

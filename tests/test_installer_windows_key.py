@@ -492,3 +492,24 @@ def test_a_server_the_old_task_started_during_the_install_is_stopped_before_the_
                  " -StartDirect $startDirect")
     stops = [n for n, line in flow if line.strip() == "Stop-RemoteOSServer -Port $Port"]
     assert any(max(bat, task) < n < start for n in stops), (bat, task, start, stops)
+
+
+def test_the_pre_uninstall_reads_names_that_a_broken_dist_info_lacks() -> None:
+    """Review of #87: a .dist-info with no METADATA Name (an interrupted pip run) raises KeyError
+    on newer importlib.metadata; `.get` keeps the listing alive."""
+    body = "\n".join(_function_code("Install-RemoteOSWheelhouse"))
+    assert "d.metadata.get(''Name'')" in body or "d.metadata.get('Name')" in body, body
+
+
+def test_another_account_s_install_sees_the_desktop_user_s_user_site() -> None:
+    """Review of #87: run as another account (SSH as an admin, a UAC elevation as another user),
+    pip and the import check saw THAT account's user site, not the desktop user's, where the
+    server's second copy sits. The flow points PYTHONUSERBASE at the desktop user's before the
+    first stop, so the pre-uninstall and the import check see what the server imports."""
+    flow = _flow_lines()
+    base = [n for n, line in flow
+            if line.strip() == '$env:PYTHONUSERBASE = "$desktopProfile\\AppData\\Roaming\\Python"']
+    install = next(n for n, line in flow if line.startswith("$install = Install-RemoteOSWheelhouse"))
+    assert len(base) == 1 and base[0] < _stop_line() < install, (base, _stop_line(), install)
+    guard = [line.strip() for n, line in flow if base[0] - 3 <= n < base[0]]
+    assert "if ($otherAccount) {" in guard, guard
