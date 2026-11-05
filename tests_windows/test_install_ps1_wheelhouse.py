@@ -270,7 +270,8 @@ $rollback = Invoke-RemoteOSRollback -Point {self._point(old, '1.0')} -Python {_q
         removes only the first copy on the path. The install then wrote fastmcp-slim's
         `fastmcp/__init__.py` and upgraded the copy left in site-packages, whose old RECORD
         deleted that same file. Here the first copy is a folder ahead of site-packages on the path
-        (PYTHONPATH), as the user site is."""
+        (PYTHONPATH), as the user site is. The Python snippets quote with ' only: Windows PowerShell 5.1
+        drops a double quote inside a native program's argument."""
         old = tmp_path / "old"
         _wheel(old, "fastmcp", "8.0", _FASTMCP)
         early = tmp_path / "venv" / "early"
@@ -285,10 +286,11 @@ $rollback = Invoke-RemoteOSRollback -Point {self._point(old, '1.0')} -Python {_q
 
         out = _ps(tmp_path, _NO_NETWORK + f"""
 $env:PYTHONPATH = {_q(early)}
-$count = 'import importlib.metadata as m; print(len([d for d in m.distributions() if d.metadata["Name"] == "fastmcp"]))'
+$count = 'import importlib.metadata as m; ' +
+    'print(len([d for d in m.distributions() if d.metadata[''Name''] == ''fastmcp'']))'
 $before = Invoke-RemoteOSNative {_q(venv)} @('-c', $count)
 $r = Install-RemoteOSWheelhouse -Python {_q(venv)} -Wheelhouse {_q(new)} -Version '2.0'
-$import = Invoke-RemoteOSNative {_q(venv)} @('-c', 'from fastmcp import FastMCP; print("IMPORT_OK")')
+$import = Invoke-RemoteOSNative {_q(venv)} @('-c', 'from fastmcp import FastMCP; print(''IMPORT_OK'')')
 @{{ before = $before.Output.Trim(); ok = $r.Ok; error = $r.Error; output = $r.Output
     import = $import.Output.Trim() }} | ConvertTo-Json -Compress
 """)
