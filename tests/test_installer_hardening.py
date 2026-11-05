@@ -288,7 +288,8 @@ class TestDeterministicPreUninstall:
         fastmcp-slim before the main pip install."""
         content = INSTALLER_WINDOWS.read_text()
         # Since #64: Install-RemoteOSWheelhouse, offline from the commit's wheelhouse
-        uninstall_pos = _find_first_code_line(content, "Pip", "'uninstall'", "'remoteos-mcp'")
+        # Since #87 it repeats over what is left: one uninstall removes only the first copy on the path
+        uninstall_pos = _find_first_code_line(content, "Pip", "'uninstall', '-y'")
         install_pos = _find_first_code_line(content, "Pip", "'install'", "'--no-index'", exclude="'--dry-run'")
         assert uninstall_pos is not None, (
             "install.ps1 must pip uninstall remoteos-mcp before install"
@@ -300,11 +301,10 @@ class TestDeterministicPreUninstall:
             f"install.ps1: pre-uninstall (line {uninstall_pos + 1}) must "
             f"precede pip install (line {install_pos + 1})"
         )
-        # The uninstall line must also name fastmcp and fastmcp-slim
-        lines = content.split("\n")
-        uninstall_line = lines[uninstall_pos].strip()
-        assert "fastmcp" in uninstall_line, (
-            f"install.ps1 pre-uninstall must include fastmcp: {uninstall_line!r}"
+        # The list it uninstalls from must name all three, read before the uninstall
+        names_pos = _find_first_code_line(content, "('remoteos-mcp', 'fastmcp', 'fastmcp-slim')")
+        assert names_pos is not None and names_pos < uninstall_pos, (
+            "install.ps1 pre-uninstall must cover remoteos-mcp, fastmcp and fastmcp-slim"
         )
 
     def test_windows_no_force_reinstall(self) -> None:

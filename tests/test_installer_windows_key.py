@@ -359,9 +359,11 @@ def test_the_install_is_offline_from_the_wheelhouse() -> None:
     installs = [line for line in body if "@('install'" in line]
     assert installs == ["$install = Invoke-RemoteOSPip $Python @('install', '--no-index', '--find-links', $Wheelhouse,"
                         " '-c', (Join-Path $Wheelhouse 'constraints.txt'), \"remoteos-mcp==$Version\")"], installs
+    # The pre-uninstall repeats until no copy of the three is left (#87: two copies, one uninstall)
+    names = next(i for i, line in enumerate(body) if "('remoteos-mcp', 'fastmcp', 'fastmcp-slim')" in line)
     uninstall = next(i for i, line in enumerate(body)
-                     if "@('uninstall', '-y', 'remoteos-mcp', 'fastmcp', 'fastmcp-slim')" in line)
-    assert uninstall < body.index(installs[0]), "the pre-uninstall (#12 RECORD clash) must come first"
+                     if line == "$uninstall = Invoke-RemoteOSPip $Python (@('uninstall', '-y') + $left)")
+    assert names < uninstall < body.index(installs[0]), "the pre-uninstall (#12 RECORD clash) must come first"
     code = "\n".join(line for _, line in _code_lines())
     assert "--force-reinstall" not in code
     flow = "\n".join(line for _, line in _flow_lines())
