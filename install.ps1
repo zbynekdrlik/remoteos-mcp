@@ -486,9 +486,33 @@ function Get-RemoteOSRollbackPoint([string]$ConfigDir, [string]$Root, [string]$P
 
 function Install-RemoteOSWheelhouse([string]$Python, [string]$Wheelhouse, [string]$Version) {
     # Offline; the pre-uninstall stays (#12), never --force-reinstall; version + import check -> @{Ok; Error; Output}
-    $uninstall = Invoke-RemoteOSPip $Python @('uninstall', '-y', 'remoteos-mcp', 'fastmcp', 'fastmcp-slim')
-    if ($uninstall.Exit -ne 0) {
-        return [pscustomobject]@{ Ok = $false; Error = "the pre-uninstall failed (exit $($uninstall.Exit))"; Output = $uninstall.Output }
+    # One pip uninstall removes only the FIRST copy on the path. A box may hold two (the user site and
+    # site-packages, #87), and the copy left behind deleted fastmcp-slim's fastmcp/__init__.py on upgrade.
+    $listLeft = "import importlib.metadata as m`n" +
+                "for d in m.distributions():`n" +
+                "    n = (d.metadata['Name'] or '').lower().replace('_', '-')`n" +
+                "    if n in ('remoteos-mcp', 'fastmcp', 'fastmcp-slim'): print('REMOTEOS_LEFT=' + n)"
+    $uninstallOutput = ''
+    for ($pass = 1; $pass -le 5; $pass++) {
+        $read = Invoke-RemoteOSNative $Python @('-c', $listLeft)
+        if ($read.Exit -ne 0) {
+            return [pscustomobject]@{ Ok = $false; Error = "the installed packages could not be read (exit $($read.Exit))"
+                                      Output = $uninstallOutput + $read.Output }
+        }
+        $left = @()
+        foreach ($line in ($read.Output -split "`r?`n")) {
+            if ($line -match '^REMOTEOS_LEFT=(\S+)\s*$' -and $left -notcontains $Matches[1]) { $left += $Matches[1] }
+        }
+        if ($left.Count -eq 0) { break }
+        if ($pass -eq 5) {
+            return [pscustomobject]@{ Ok = $false; Output = $uninstallOutput
+                                      Error = "the pre-uninstall left $($left -join ', ') installed after 4 passes" }
+        }
+        $uninstall = Invoke-RemoteOSPip $Python (@('uninstall', '-y') + $left)
+        $uninstallOutput += $uninstall.Output
+        if ($uninstall.Exit -ne 0) {
+            return [pscustomobject]@{ Ok = $false; Error = "the pre-uninstall failed (exit $($uninstall.Exit))"; Output = $uninstallOutput }
+        }
     }
     $install = Invoke-RemoteOSPip $Python @('install', '--no-index', '--find-links', $Wheelhouse, '-c', (Join-Path $Wheelhouse 'constraints.txt'), "remoteos-mcp==$Version")
     $installed = Get-RemoteOSInstalledVersion $Python
