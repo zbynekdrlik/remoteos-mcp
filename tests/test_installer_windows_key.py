@@ -264,8 +264,10 @@ def test_every_failure_after_the_gate_exits_1_through_the_helper() -> None:
 
 
 def _stop_line() -> int:
+    # The FIRST stop, before pip; the second one, before the start, stops what the old task may have
+    # started meanwhile (#87)
     stops = [n for n, line in _flow_lines() if line.startswith("Stop-RemoteOSServer")]
-    assert len(stops) == 1, stops
+    assert len(stops) == 2, stops
     return stops[0]
 
 
@@ -474,3 +476,19 @@ def test_account_names_are_qualified_where_computer_and_user_share_a_name():
     assert "NTAccount($User)" not in code
     assert "-UserId $User" not in code
     assert "-UserId $desktopUser" not in code
+
+
+def test_a_server_the_old_task_started_during_the_install_is_stopped_before_the_start() -> None:
+    """win-pjkeb-pokladna, 2026-11-05 (#87): the old RemoteOSMCP task (every 5 minutes) fired while
+    pip ran, after the stop: its cmd.exe read the OLD start-remoteos.bat and started the new
+    packages with --auth-key on the command line. The new .bat was written 10 s later, the
+    `schtasks /Run` found the port taken, and the health check passed against that process
+    (it reports the new version). The installer stops again once the new files are written, so
+    whatever answers the health check was started from them."""
+    flow = _flow_lines()
+    bat = next(n for n, line in flow if 'Set-Content "$ConfigDir\\start-remoteos.bat"' in line)
+    task = next(n for n, line in flow if line.strip().startswith('Register-ScheduledTask -TaskName "RemoteOSMCP"'))
+    start = next(n for n, line in flow if line.strip() == "$startError = Start-RemoteOSServer -ConfigDir $ConfigDir"
+                 " -StartDirect $startDirect")
+    stops = [n for n, line in flow if line.strip() == "Stop-RemoteOSServer -Port $Port"]
+    assert any(max(bat, task) < n < start for n in stops), (bat, task, start, stops)
