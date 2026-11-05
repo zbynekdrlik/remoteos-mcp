@@ -264,8 +264,10 @@ def test_every_failure_after_the_gate_exits_1_through_the_helper() -> None:
 
 
 def _stop_line() -> int:
+    # The FIRST stop, before pip; the second one, before the start, stops what the old task may have
+    # started meanwhile (#87)
     stops = [n for n, line in _flow_lines() if line.startswith("Stop-RemoteOSServer")]
-    assert len(stops) == 1, stops
+    assert len(stops) == 2, stops
     return stops[0]
 
 
