@@ -423,6 +423,10 @@ if ($startDirect) {
 } else {
     Write-Host "  Starting server through the scheduled task, as $desktopUser in the desktop session..." -ForegroundColor Cyan
 }
+# The old RemoteOSMCP task (every 5 min) may have started a server from the OLD start script while
+# pip ran (pjkeb, #87: the key on its command line, and it passed the health check). Stop it again
+# now that the new files are written, so what answers the health check was started from them.
+Stop-RemoteOSServer -Port $Port
 $startError = Start-RemoteOSServer -ConfigDir $ConfigDir -StartDirect $startDirect
 if ($startError) {
     Exit-RemoteOSAfterFailure -Reason $startError -Output '' @rollback
