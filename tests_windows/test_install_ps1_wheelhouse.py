@@ -263,6 +263,40 @@ $rollback = Invoke-RemoteOSRollback -Point {self._point(old, '1.0')} -Python {_q
         assert out["after"] == "1.0"
         assert out["calls"] == ["stop", "start", "health 1.0"], "rollback order: stop, reinstall, start, prove"
 
+    def test_a_second_copy_of_the_old_fastmcp_is_removed_before_the_install(self, tmp_path: Path, venv: Path) -> None:
+        """win-pz-server and win-pjsnvs-pokladna, 2026-11-02 (#87): the first run on a box whose old
+        monolithic fastmcp sat in TWO places (the user site, from a `pip install --user` era, and
+        site-packages) ended `cannot import name 'FastMCP' from 'fastmcp'`. One `pip uninstall`
+        removes only the first copy on the path. The install then wrote fastmcp-slim's
+        `fastmcp/__init__.py` and upgraded the copy left in site-packages, whose old RECORD
+        deleted that same file. Here the first copy is a folder ahead of site-packages on the path
+        (PYTHONPATH), as the user site is."""
+        old = tmp_path / "old"
+        _wheel(old, "fastmcp", "8.0", _FASTMCP)
+        early = tmp_path / "venv" / "early"
+        subprocess.run([str(venv), "-m", "pip", "install", "-q", "--no-index", "--find-links", str(old), "fastmcp==8.0"],
+                       check=True, timeout=300)
+        subprocess.run([str(venv), "-m", "pip", "install", "-q", "--no-index", "--find-links", str(old),
+                        "--target", str(early), "fastmcp==8.0"], check=True, timeout=300)
+        new = tmp_path / "wh" / SHA_NEW
+        _wheel(new, "remoteos-mcp", "2.0", _REMOTEOS, ("fastmcp",))
+        _wheel(new, "fastmcp", "9.0", {}, ("fastmcp-slim==9.0",))
+        _wheel(new, "fastmcp-slim", "9.0", _FASTMCP)
+        (new / "constraints.txt").write_text("fastmcp==9.0\nfastmcp-slim==9.0\n")
+
+        out = _ps(tmp_path, _NO_NETWORK + f"""
+$env:PYTHONPATH = {_q(early)}
+$before = Invoke-RemoteOSNative {_q(venv)} @('-c', 'import importlib.metadata as m; print(len([d for d in m.distributions() if d.metadata["Name"] == "fastmcp"]))')
+$r = Install-RemoteOSWheelhouse -Python {_q(venv)} -Wheelhouse {_q(new)} -Version '2.0'
+$import = Invoke-RemoteOSNative {_q(venv)} @('-c', 'from fastmcp import FastMCP; print("IMPORT_OK")')
+@{{ before = $before.Output.Trim(); ok = $r.Ok; error = $r.Error; output = $r.Output; import = $import.Output.Trim() }} |
+    ConvertTo-Json -Compress
+""")
+
+        assert out["before"] == "2", f"the setup did not install two copies: {out}"
+        assert out["ok"] is True, out
+        assert out["import"] == "IMPORT_OK", out
+
     def test_the_rollback_reports_a_failing_old_health_check(self, tmp_path: Path, venv: Path) -> None:
         old = _wheelhouse(tmp_path / "wh" / SHA_OLD, "1.0")
 
