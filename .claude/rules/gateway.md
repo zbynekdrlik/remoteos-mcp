@@ -201,7 +201,9 @@ paths:
     meanwhile. A failed clear stays in the book (retried); `settle` runs after drift/no-admin and
     never costs the run its status write.
   - `check._settle` judges what is open from the FINAL status (`open_notices`): a box gone from the
-    key store has no open condition, so its notices are cleared. Not run on the failure path.
+    key store has no open condition, so its notices are cleared. It runs AFTER the status write
+    (clears and ssh `--alive` can be slow; the unit has `TimeoutStartSec=300`), never on the
+    failure path. A restart record's host/account are re-validated (manifest regexes) before ssh.
   - Restart: `session_scan` records `start` (stat field 22) per session; `still_running` reads
     `/proc/<pid>/stat` directly for this host (world-readable: the check unit has
     `NoNewPrivileges`, so `sudo` would fail) and runs `session_scan --alive` over ssh for another

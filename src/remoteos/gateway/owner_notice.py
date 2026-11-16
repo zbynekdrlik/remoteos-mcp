@@ -161,16 +161,24 @@ class Notifier:
             logger.error("owner notices: `notify --help` did not run (%s) — sending plain notices", type(exc).__name__)
             return False
         text = proc.stdout.decode("utf-8", "replace")
-        supported = proc.returncode == 0 and all(flag in text for flag in OWNER_NOTICE_FLAGS)
+        supported = proc.returncode == 0 and all(re.search(rf"(?<![\w-]){flag}\b", text) for flag in OWNER_NOTICE_FLAGS)
         if not supported:
             logger.info("owner notices: this airuleset has no --owner-notice — sending plain notices")
         return supported
 
     def __call__(self, body: str, notice: str | None = None, record: dict | None = None) -> bool:
-        if notice is None or not self.per_condition:
+        if notice is None or not self.per_condition or self.book is None or self.project_dir is None:
             return self._send(body, [])
-        assert self.book is not None and self.project_dir is not None  # per_condition says so
-        with self.book.locked():  # a concurrent settle must not clear what this send records
+        with contextlib.ExitStack() as stack:
+            try:  # a concurrent settle must not clear what this send records
+                stack.enter_context(self.book.locked())
+            except OSError as exc:  # no book, no clear: a U item nobody could ever remove
+                logger.error(
+                    "owner notices: %s cannot be locked (%s) — sending a plain notice",
+                    self.book.path,
+                    exc.strerror or type(exc).__name__,
+                )
+                return self._send(body, [])
             delivered = self._send(body, ["--owner-notice", notice, "--cwd", str(self.project_dir)])
             if delivered:
                 try:

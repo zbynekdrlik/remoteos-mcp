@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from remoteos.gateway import owner_notice, session_scan
-from remoteos.gateway.manifest import Project
+from remoteos.gateway.manifest import Project, is_valid_account, is_valid_host
 from remoteos.gateway.messages import split_to_fit
 from remoteos.gateway.owner_notice import Notify
 from remoteos.gateway.targets import Target, TargetError, target_for
@@ -141,6 +141,8 @@ def still_running(entry: dict, local_host: str) -> bool | None:
     host = restart.get("host") if isinstance(restart, dict) else None
     account = restart.get("account") if isinstance(restart, dict) else None
     if not isinstance(sessions, list) or not isinstance(host, str) or not isinstance(account, str):
+        return False
+    if not is_valid_host(host) or not is_valid_account(account):  # never an ssh option from a hand edit
         return False
     pairs = [
         f"{s['pid']}:{s.get('start')}"

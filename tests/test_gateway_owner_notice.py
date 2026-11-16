@@ -335,3 +335,80 @@ def test_conditions_announced_before_the_flag_existed_are_put_into_u_once(tmp_pa
             assert check.run(gateway.base_url).exit_code == 0
 
     assert len(check.calls()) == 4  # re-sent once, never again
+
+
+def test_a_notices_file_that_cannot_be_locked_sends_plain_and_never_fails_the_run(
+    tmp_path, monkeypatch, project, with_flag
+):
+    check = NoticeCheck(tmp_path, monkeypatch, project)
+    locked_out = tmp_path / "read-only"
+    locked_out.mkdir(mode=0o500)
+    check.notices = locked_out / "owner-notices.json"
+    check.store({"linux-a": {"url": closed_port_url(), "key": fresh_secret("k")}})
+    with FakeFleetMachine(healthz=True) as gateway:
+        result = check.run(gateway.base_url)
+
+    assert result.exit_code == 0, result.output
+    [argv] = check.calls()
+    assert "--owner-notice" not in argv  # in U it could never be cleared
+    assert check.state()["machines"]["linux-a"]["notified"] is True
+
+
+def test_a_book_that_cannot_be_written_never_makes_a_notice_go_out_every_run(
+    tmp_path, monkeypatch, project, with_flag
+):
+    check = NoticeCheck(tmp_path, monkeypatch, project)
+    full = tmp_path / "full-disk"
+    full.mkdir()
+    check.notices = full / "owner-notices.json"
+    (full / "owner-notices.json.lock").write_text("", encoding="utf-8")  # the lock opens, the write cannot
+    full.chmod(0o500)
+    check.store({"linux-a": {"url": closed_port_url(), "key": fresh_secret("k")}})
+    with FakeFleetMachine(healthz=True) as gateway:
+        for _ in range(3):
+            assert check.run(gateway.base_url).exit_code == 0
+
+    [argv] = check.calls()  # recorded in U once, not re-sent by the one-time reopen
+    assert _option(argv, "--owner-notice") == "state-linux-a"
+
+
+def test_settle_never_clears_a_notice_re_sent_while_it_was_judged(tmp_path, monkeypatch, project, with_flag):
+    script, log = install_fake_airuleset(tmp_path / "airuleset", monkeypatch)
+    notifier = airuleset_notifier(script, "zbynek", project_dir=project, notices=tmp_path / "owner-notices.json")
+    assert notifier("old text", "state-linux-a")
+
+    def re_sent_meanwhile(name: str, entry: dict) -> bool:
+        assert notifier("new text", name)  # sync/check re-recorded it after settle read the book
+        return False
+
+    notifier.settle(re_sent_meanwhile)
+    assert "--clear-owner-notice" not in json.dumps(notify_calls(log))
+    assert set(notifier.book.read()) == {"state-linux-a"}
+
+
+def test_settle_waits_for_a_send_that_holds_the_book(tmp_path, monkeypatch, project, with_flag):
+    import threading
+
+    script, log = install_fake_airuleset(tmp_path / "airuleset", monkeypatch)
+    notifier = airuleset_notifier(script, "zbynek", project_dir=project, notices=tmp_path / "owner-notices.json")
+    assert notifier("text", "state-linux-a")
+    holder = airuleset_notifier(script, "zbynek", project_dir=project, notices=tmp_path / "owner-notices.json")
+    with holder.book.locked():  # another process mid-send
+        settling = threading.Thread(target=notifier.settle, args=(lambda name, entry: False,))
+        settling.start()
+        settling.join(timeout=2)
+        assert settling.is_alive()  # blocked on the lock
+        assert "--clear-owner-notice" not in json.dumps(notify_calls(log))
+    settling.join(timeout=30)
+    assert not settling.is_alive()
+    assert notifier.book.read() == {}
+
+
+@pytest.mark.parametrize(("host", "account"), [("dev2", "-oProxyCommand=touch"), ("-oProxyCommand=x", "newlevel")])
+def test_a_hand_edited_restart_record_never_becomes_an_ssh_option(tmp_path, monkeypatch, host, account):
+    from remoteos.gateway import live_sessions
+
+    log = install_fake_remote_tools(tmp_path / "bin", monkeypatch)
+    entry = {"restart": {"host": host, "account": account, "sessions": [{"pid": 1, "start": 2}]}}
+    assert live_sessions.still_running(entry, "dev1") is False  # done: cleared, never run
+    assert remote_calls(log) == []

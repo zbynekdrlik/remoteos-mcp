@@ -32,6 +32,7 @@ condition is gone at the end of every run.
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime as _dt
 import json
 import logging
@@ -301,23 +302,29 @@ def open_notices(status: dict) -> set[str]:
     return open_now
 
 
-def _reopen_unrecorded(status: dict, old_machines: dict, notifier: Notify | None) -> None:
-    """An open condition announced before it could become a U item (the airuleset had no
-    ``--owner-notice`` yet, #102) is announced once more, so the owner sees it in U. Anything sent
-    with a slug is in the book, so this re-sends each condition at most once."""
-    if not owner_notice.per_condition(notifier):
-        return
-    assert isinstance(notifier, Notifier) and notifier.book is not None
+def _reopen_unrecorded(status: dict, previous: dict, old_machines: dict, notifier: Notify | None) -> dict:
+    """The first run that can send per condition (#102) announces once more every open condition
+    the older airuleset could not put into U, so the owner sees it there. ``status["owner_notices"]``
+    marks that this happened: later runs never re-send (a notice whose book entry could not be
+    written must not go out every 10 minutes). Returns the previous machine records drift and
+    no-admin read (a copy when one was reopened: ``previous`` itself is never changed)."""
+    if not owner_notice.per_condition(notifier) or not isinstance(notifier, Notifier) or notifier.book is None:
+        return old_machines
+    status["owner_notices"] = True
+    if previous.get("owner_notices") is True:
+        return old_machines
     recorded = notifier.book.read()
     for name, record in [(GATEWAY_KEY, status["gateway"]), *status["machines"].items()]:
         notice = _state_notice(name, record)
         if notice is not None and record["notified"] and notice not in recorded:
             record["notified"] = False
-    for name, previous in old_machines.items():
+    reopened = copy.deepcopy(old_machines)
+    for name, record in reopened.items():
         for key, kind in (("drift", drift_report.STALE), ("no_admin", no_admin.NO_ADMIN)):
-            episode = previous.get(key) if isinstance(previous, dict) else None
+            episode = record.get(key) if isinstance(record, dict) else None
             if isinstance(episode, dict) and episode.get("notified") and owner_notice.slug(kind, name) not in recorded:
                 episode["notified"] = False
+    return reopened
 
 
 def _settle(notifier: Notify | None, status: dict, host: str) -> None:
@@ -404,7 +411,7 @@ def _check_loaded(
         "gateway": _advance(previous.get("gateway"), health, stamp),
         "machines": {name: _advance(old_machines.get(name), obs, stamp) for name, obs in sorted(observations.items())},
     }
-    _reopen_unrecorded(status, old_machines, notifier)
+    old_machines = _reopen_unrecorded(status, previous, old_machines, notifier)
     pending = {GATEWAY_KEY: status["gateway"]} if not status["gateway"]["notified"] else {}
     pending.update({n: r for n, r in status["machines"].items() if not r["notified"]})
     # The check could not run last time (or that recovery was not announced yet): say it is back.
@@ -429,13 +436,13 @@ def _check_loaded(
     for extra in (drift_sent, admin_sent):
         if extra is not None:
             sent = extra if sent is None else (sent and extra)
-    _settle(notifier, status, host)
     try:
         _write_status(status_path, status)
     except OSError as exc:
         reason = f"cannot write the status file {status_path} ({exc.strerror or type(exc).__name__})"
         _report_failure(status_path, previous, reason, stamp, notifier, host)
         raise CheckError(reason) from exc
+    _settle(notifier, status, host)  # after the write: slow clears must never cost the run its status
     return CheckReport(status=status, sent=sent)
 
 
