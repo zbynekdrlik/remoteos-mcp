@@ -747,15 +747,24 @@ or notify is reported in the output and never fails the sync.
   announced.
 - **Owner notices in the footer U (#102).** When the installed airuleset has `notify
   --owner-notice` (airuleset #1300; read once per run from `notify --help`), every open
-  condition is its OWN notice with a slug: `state-<box>`, `gateway-health`, `stale-<box>`,
-  `no-admin-<box>`, `check-failed`, and `restart-<project>` (from `sync-configs`). A suppressed
-  notice then becomes one item in the footer `U` of the remoteos-mcp checkout, the same slug
-  replaces it, and `notify --clear-owner-notice <slug>` drops it once the condition is gone (the
-  box is ok again, caught up, has admin, the check runs, or every noted session of a restart has
-  ended). The recorded slugs live in `~/.local/state/remoteos-gateway/owner-notices.json`; a
-  clear that fails stays there and is retried on the next run. A notice airuleset did not record
-  (exit 1) is not delivered and is retried too. Without the flag, the notices are the plain,
-  grouped messages above.
+  condition is a notice with a slug. The machine conditions are ONE notice per KIND, never one
+  per box (owner ruling 2026-11-16: 17 unreachable boxes must not be 17 U items):
+  - `fleet-down` lists every box that is not ok (unreachable / 401 / error) with its state,
+  - `fleet-stale` every box behind the stable release, `fleet-no-admin` every box without admin.
+
+  When the set of boxes (or a box's state) changes, the same slug is sent again with the new text
+  and replaces the item; when the set is empty the slug is cleared. The text last delivered per
+  kind is remembered in the status file (`fleet_notices`), so a run that had to send plain does
+  not re-send it. The other slugs are `gateway-health`, `check-failed` and `restart-<project>`
+  (from `sync-configs`). A suppressed notice becomes one item in the footer `U` of the
+  remoteos-mcp checkout, and `notify --clear-owner-notice <slug>` drops it once the condition is
+  gone (no box down, behind or without admin; the gateway answers; the check runs; every noted
+  session of a restart has ended). A box going back to ok is plain news, not a U item. The
+  recorded slugs live in `~/.local/state/remoteos-gateway/owner-notices.json`; a clear that fails
+  stays there and is retried on the next run, and an old per-box slug (`state-<box>`,
+  `stale-<box>`, `no-admin-<box>`) still in that file is cleared once and forgotten. A notice
+  airuleset did not record (exit 1) is not delivered and is retried too. Without the flag, the
+  notices are the plain, grouped messages above.
   - `--notify-project-dir` (env `REMOTEOS_GATEWAY_NOTIFY_PROJECT_DIR`, default
     `~/devel/remoteos-mcp`) is airuleset's `--cwd`, passed explicitly because the unit runs in
     `$HOME`. It must be a git checkout root and not `$HOME`; otherwise an error is logged and the

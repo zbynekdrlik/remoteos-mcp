@@ -10,7 +10,9 @@ NOT recorded, so it is not delivered and is retried like any undelivered notice.
 
 Whether the installed airuleset has the flag is read ONCE per run from ``notify --help``. Without
 it (or without a usable project directory) every notice goes out as before: plain ``--body``,
-grouped. With it, each condition is its own message with its own slug (``slug``).
+grouped. With it, each open condition has its own slug: the machine conditions ONE per kind
+(``fleet_notice``: ``fleet-down`` / ``fleet-stale`` / ``fleet-no-admin``, listing their boxes),
+plus ``gateway-health``, ``check-failed`` and ``restart-<project>`` (``slug``).
 
 The slugs recorded in U are kept in the notice BOOK (``owner-notices.json`` in the state dir),
 edited under a lock because ``check`` and ``sync-configs`` both write it. ``settle`` clears every
@@ -285,18 +287,13 @@ def announce(
     notifier: Notify | None,
     pending: dict[str, dict],
     compose: Callable[[dict[str, dict]], list[tuple[str, list[str]]]],
-    notice_of: Callable[[str], str | None],
 ) -> tuple[bool, list[str]]:
-    """Send what *compose* makes of *pending*: one message + slug per name when the notifier sends
-    per condition, else the grouped messages. Returns (all delivered, the names delivered)."""
-    if per_condition(notifier):
-        batches = [(text, names, notice_of(n)) for n in pending for text, names in compose({n: pending[n]})]
-    else:
-        batches = [(text, names, None) for text, names in compose(pending)]
+    """Send the grouped plain messages *compose* makes of *pending* (an owner notice per condition
+    KIND is ``fleet_notice``'s, never one per box). Returns (all delivered, the names delivered)."""
     sent, done = True, []
-    for text, names, notice in batches:
+    for text, names in compose(pending):
         logger.warning("check: %s", text.replace("\n", " "))
-        delivered = send(notifier, text, notice)
+        delivered = send(notifier, text)
         sent = sent and delivered
         if delivered:
             done.extend(names)
