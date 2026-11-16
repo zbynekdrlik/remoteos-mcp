@@ -753,9 +753,10 @@ or notify is reported in the output and never fails the sync.
   - `fleet-stale` every box behind the stable release, `fleet-no-admin` every box without admin.
 
   When the set of boxes (or a box's state) changes, the same slug is sent again with the new text
-  and replaces the item; when the set is empty the slug is cleared. The text last delivered per
-  kind is remembered in the status file (`fleet_notices`), so a run that had to send plain does
-  not re-send it. The other slugs are `gateway-health`, `check-failed` and `restart-<project>`
+  and replaces the item; when the set is empty the slug is cleared. What each kind's last
+  delivered text said (a fingerprint: the boxes with their state, version or stable tag) is kept
+  in the status file (`fleet_notices`), so a run that had to send plain does not re-send it. The
+  texts carry no day counts ("pozadu od <dátum>"), so an unchanged item stays true. The other slugs are `gateway-health`, `check-failed` and `restart-<project>`
   (from `sync-configs`). A suppressed notice becomes one item in the footer `U` of the
   remoteos-mcp checkout, and `notify --clear-owner-notice <slug>` drops it once the condition is
   gone (no box down, behind or without admin; the gateway answers; the check runs; every noted

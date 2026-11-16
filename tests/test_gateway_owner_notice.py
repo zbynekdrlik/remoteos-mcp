@@ -294,11 +294,15 @@ def test_stale_boxes_are_one_item_replaced_as_the_set_shrinks_and_cleared_when_e
         assert set(check.u()) == {"fleet-stale"}
         body = check.u()["fleet-stale"]
         assert "(2)" in body and f"v{STABLE_VERSION}" in body
-        assert f"• win-a: verzia {OLD_VERSION}" in body and f"• win-b: verzia {OLD_VERSION}" in body
+        assert f"• win-a: verzia {OLD_VERSION}, pozadu od " in body and f"• win-b: verzia {OLD_VERSION}" in body
+        assert "dní" not in body  # a day count would go stale while the item stays unchanged
+        assert check.run(gateway.base_url).exit_code == 0  # nothing changed: nothing re-sent
 
         a.version = STABLE_VERSION
+        b.version = "0.7.0.dev30"  # upgraded, still behind: the text must say so
         assert check.run(gateway.base_url).exit_code == 0
-        assert set(check.u()) == {"fleet-stale"} and "win-a" not in check.u()["fleet-stale"]
+        body = check.u()["fleet-stale"]
+        assert set(check.u()) == {"fleet-stale"} and "win-a" not in body and "• win-b: verzia 0.7.0.dev30" in body
 
         b.version = STABLE_VERSION
         assert check.run(gateway.base_url).exit_code == 0
@@ -537,6 +541,7 @@ def test_the_one_time_reannounce_survives_a_run_that_had_to_send_plain(tmp_path,
 
     assert len(check.calls()) == 1
     assert check.state()["fleet_notices"] == {"fleet-down": [["linux-a", "unreachable"]]}
+    assert check.state()["owner_notices"] is True  # the one-time gateway re-announce is not repeated
 
 
 def test_a_lookalike_flag_in_the_help_is_not_support(tmp_path, monkeypatch, project, with_flag):
@@ -547,3 +552,48 @@ def test_a_lookalike_flag_in_the_help_is_not_support(tmp_path, monkeypatch, proj
     monkeypatch.setenv("FAKE_HELP_TEXT", "  --owner-notice SLUG\n  --clear-owner-notice SLUG\n")
     fresh = airuleset_notifier(script, "zbynek", project_dir=project, notices=tmp_path / "owner-notices.json")
     assert fresh.per_condition is True
+
+
+def test_a_down_gateway_announced_before_the_flag_existed_is_put_into_u_once(tmp_path, monkeypatch, project):
+    monkeypatch.setenv("FAKE_NOTIFY_STATUS", "suppressed")
+    check = NoticeCheck(tmp_path, monkeypatch, project)
+    check.store({})
+    assert check.run(closed_port_url()).exit_code == 0  # the old airuleset: plain, nothing in U
+    assert len(check.calls()) == 1 and check.u() == {}
+
+    monkeypatch.setenv("FAKE_NOTIFY_OWNER_NOTICE", "1")  # airuleset upgraded
+    assert check.run(closed_port_url()).exit_code == 0
+    assert check.run(closed_port_url()).exit_code == 0
+
+    sends = [_option(argv, "--owner-notice") for argv in check.calls()]
+    assert sends == [None, "gateway-health"]  # re-sent once, never again
+    assert set(check.u()) == {"gateway-health"} and check.state()["owner_notices"] is True
+
+
+def test_a_kind_in_u_that_the_book_lost_is_still_cleared_and_a_failed_clear_is_retried(
+    tmp_path, monkeypatch, project, with_flag
+):
+    check = NoticeCheck(tmp_path, monkeypatch, project)
+    full = tmp_path / "full-disk"
+    full.mkdir()
+    check.notices = full / "owner-notices.json"
+    (full / "owner-notices.json.lock").write_text("", encoding="utf-8")  # the lock opens, the write cannot
+    full.chmod(0o500)
+    key = fresh_secret("k")
+    with FakeFleetMachine(accept_keys=("other",)) as box, FakeFleetMachine(healthz=True) as gateway:
+        check.store({"linux-a": {"url": box.url, "key": key}})
+        assert check.run(gateway.base_url).exit_code == 0
+        assert set(check.u()) == {"fleet-down"} and not check.notices.exists()  # in U, not in the book
+
+        box.accept_keys = [key]  # the set is empty now
+        monkeypatch.setenv("FAKE_CLEAR_EXIT", "1")
+        assert check.run(gateway.base_url).exit_code == 0
+        assert set(check.u()) == {"fleet-down"} and check.state()["fleet_notices"] == {"fleet-down": []}
+
+        monkeypatch.delenv("FAKE_CLEAR_EXIT")
+        assert check.run(gateway.base_url).exit_code == 0
+        assert check.u() == {} and check.state()["fleet_notices"] == {}
+        assert check.run(gateway.base_url).exit_code == 0
+
+    clears = [argv for argv in check.calls() if "--clear-owner-notice" in argv]
+    assert len(clears) == 2  # the failed one and its retry, never again

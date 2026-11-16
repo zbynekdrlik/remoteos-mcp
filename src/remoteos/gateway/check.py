@@ -47,7 +47,7 @@ from remoteos.gateway import drift as drift_report
 from remoteos.gateway import fileops, fleet_notice, live_sessions, no_admin, owner_notice
 from remoteos.gateway.drift import DriftPolicy
 from remoteos.gateway.keystore import edit_keystore, load_keystore
-from remoteos.gateway.messages import split_to_fit
+from remoteos.gateway.messages import KEY_HINT, STATE_LABELS, split_to_fit
 from remoteos.gateway.owner_notice import Notifier, Notify
 from remoteos.gateway.probe import (
     STATE_OK,
@@ -75,7 +75,7 @@ GATEWAY_KEY = "<gateway>"
 GATEWAY_NOTICE = "gateway-health"
 CHECK_FAILED = "check-failed"
 
-_LABELS = fleet_notice.LABELS
+_LABELS = STATE_LABELS
 
 
 @dataclass
@@ -237,7 +237,7 @@ def _change_line(name: str, record: dict) -> str:
 def _hints(records: list[dict]) -> list[str]:
     hints = []
     if any(r["state"] == STATE_UNAUTHORIZED for r in records):
-        hints.append(fleet_notice.KEY_HINT)
+        hints.append(KEY_HINT)
     if any(r["state"] == STATE_UNAUTHORIZED or str(r["detail"]).startswith("repaired") for r in records):
         hints.append(
             "Projekty cez bránu sa nemenia; priamu kópiu kľúčov (projekt remoteos-mcp) obnoví"
@@ -332,11 +332,13 @@ def _settle(notifier: Notify | None, status: dict, host: str) -> None:
         logger.exception("check: clearing owner notices failed — retried next run")
 
 
-def _reconcile_kinds(status: dict, notifier: Notify | None, host: str, moment: _dt.datetime) -> bool | None:
-    """The fleet kind notices (#102). Like drift, never costs the run its status write: a failure
-    is logged, and what was not delivered is retried next run."""
+def _reconcile_kinds(status: dict, notifier: Notify | None, host: str) -> bool | None:
+    """The fleet kind notices (#102): send what changed, clear a closed kind the book lost. Like
+    drift, never costs the run its status write: a failure is logged, and retried next run."""
     try:
-        return fleet_notice.reconcile(status, notifier, host, moment)
+        sent = fleet_notice.reconcile(status, notifier, host)
+        fleet_notice.clear_unbooked(status, notifier)
+        return sent
     except Exception:
         logger.exception("check: the fleet notices failed — retried next run")
         return False
@@ -435,7 +437,7 @@ def _check_loaded(
     )
     admins = {name: observation.admin for name, observation in observations.items()}
     admin_sent = no_admin.update(status["machines"], old_machines, admins, stamp, host, notifier, announce=not per_kind)
-    kinds_sent = _reconcile_kinds(status, notifier, host, moment) if per_kind else None
+    kinds_sent = _reconcile_kinds(status, notifier, host) if per_kind else None
     for extra in (drift_sent, admin_sent, kinds_sent):
         if extra is not None:
             sent = extra if sent is None else (sent and extra)

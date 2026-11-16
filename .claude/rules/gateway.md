@@ -195,9 +195,13 @@ paths:
     with its state), `fleet-stale` (drift) and `fleet-no-admin` from the FINAL status, each ONE text
     (`fleet_notice.fit`: what does not fit `CHUNK_LIMIT` becomes "… a ďalších N"; an unreachable
     box's boilerplate detail is left out so ~20 boxes fit). A FINGERPRINT per kind (down: name +
-    state; stale: name + stable tag; no-admin: names) is kept in the status file `fleet_notices`
-    once delivered: a different one re-sends the same slug (replaces), an undelivered send keeps
-    the old one (retried), an empty kind drops out and `_settle` clears it. In per-kind mode
+    state; stale: name + version + stable tag; no-admin: names) is kept in the status file
+    `fleet_notices` once delivered: a different one re-sends the same slug (replaces), an
+    undelivered send keeps the old one (retried). A text must hold nothing the fingerprint does not
+    (no day count: "pozadu od <date>"), or the unchanged U item goes stale. An empty kind is
+    cleared by `_settle` from the book; one in U but NOT in the book (its book write failed) by
+    `fleet_notice.clear_unbooked` before the status write (a failed clear stays `[]` = owed, retried).
+    Each kind is built on its own in `reconcile`: one that raises never blocks the others. In per-kind mode
     `check` sends no per-box message for a box going down (`fleet-down` marks it notified), and
     `drift.update` / `no_admin.update` run with `announce=False`. `gateway-health`, `check-failed`,
     `restart-<project>` stay their own slugs (`owner_notice.slug`; an upper-case or too long name

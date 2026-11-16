@@ -107,8 +107,7 @@ def _days(record: dict, moment: _dt.datetime) -> int:
         return 0
 
 
-def line(name: str, record: dict, moment: _dt.datetime) -> str:
-    """One box's line in a drift text (here and in ``fleet_notice``'s ``fleet-stale``)."""
+def _line(name: str, record: dict, moment: _dt.datetime) -> str:
     return f"• {name}: verzia {record.get('version', '?')}, za stable už {_days(record, moment)} dní"
 
 
@@ -120,7 +119,7 @@ def compose_messages(pending: dict[str, dict], host: str, moment: _dt.datetime) 
     reserve = len(" (99/99)")
 
     def lines(names: list[str]) -> list[str]:
-        return [line(name, pending[name], moment) for name in names]
+        return [_line(name, pending[name], moment) for name in names]
 
     groups = split_to_fit(pending, lambda names: len("\n".join([title, *lines(names)])) + reserve)
     texts = []

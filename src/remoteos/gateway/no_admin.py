@@ -16,11 +16,12 @@ from __future__ import annotations
 import logging
 
 from remoteos.gateway import owner_notice
-from remoteos.gateway.fleet_notice import ADMIN_HINT
 from remoteos.gateway.messages import split_to_fit
 from remoteos.gateway.owner_notice import Notify
 
 logger = logging.getLogger("remoteos.gateway.no_admin")
+
+ADMIN_HINT = "Oprava: spusti na stroji inštalátor (remoteos-install), server má bežať ako admin."
 
 
 def _known(previous: object) -> dict | None:
