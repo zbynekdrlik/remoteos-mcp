@@ -1,4 +1,9 @@
-"""Owner notices reach the footer U, one per open condition, and are cleared when it is gone (#102).
+"""Owner notices reach the footer U, one per condition KIND, and are cleared when it is gone (#102).
+
+Owner ruling 2026-11-16: 17 unreachable boxes must be ONE U item (``fleet-down``) listing them, not
+17 ``state-<box>`` items; same for ``fleet-stale`` and ``fleet-no-admin``. A change in the set
+re-sends the same slug (it replaces the item), an empty set clears it, and the old per-box slugs a
+book still holds are cleared once and forgotten.
 
 airuleset #1300 added ``notify --owner-notice <slug> --cwd <project>`` (a suppressed send becomes one
 U item, the same slug replaces it, exit 1 = not recorded) and ``--clear-owner-notice``. The fake
@@ -69,7 +74,7 @@ def _option(argv: list[str], name: str) -> str | None:
     return argv[argv.index(name) + 1] if name in argv else None
 
 
-def test_a_401_box_is_one_u_item_and_its_recovery_clears_it(tmp_path, monkeypatch, project, with_flag):
+def test_a_401_box_is_in_the_fleet_down_item_and_its_recovery_clears_it(tmp_path, monkeypatch, project, with_flag):
     check = NoticeCheck(tmp_path, monkeypatch, project)
     key, rotated = fresh_secret("machinekey"), fresh_secret("rotatedkey")
     with FakeFleetMachine(accept_keys=(key,)) as box, FakeFleetMachine(healthz=True) as gateway:
@@ -81,14 +86,14 @@ def test_a_401_box_is_one_u_item_and_its_recovery_clears_it(tmp_path, monkeypatc
         result = check.run(gateway.base_url)
         assert result.exit_code == 0, result.output
         [argv] = check.calls()
-        assert _option(argv, "--owner-notice") == "state-linux-cam2"
+        assert _option(argv, "--owner-notice") == "fleet-down"
         assert _option(argv, "--cwd") == str(project)  # explicit: the unit runs in $HOME
-        assert set(check.u()) == {"state-linux-cam2"} and "401" in check.u()["state-linux-cam2"]
-        assert set(check.book()) == {"state-linux-cam2"}
+        assert set(check.u()) == {"fleet-down"} and "linux-cam2: odmieta kľúč (401)" in check.u()["fleet-down"]
+        assert set(check.book()) == {"fleet-down"}
         assert check.state()["machines"]["linux-cam2"]["notified"] is True
 
         assert check.run(gateway.base_url).exit_code == 0  # still 401: nothing new, nothing cleared
-        assert len(check.calls()) == 1 and set(check.u()) == {"state-linux-cam2"}
+        assert len(check.calls()) == 1 and set(check.u()) == {"fleet-down"}
 
         box.accept_keys = [key]  # back
         assert check.run(gateway.base_url).exit_code == 0
@@ -96,24 +101,87 @@ def test_a_401_box_is_one_u_item_and_its_recovery_clears_it(tmp_path, monkeypatc
     recovery, clear = check.calls()[1:]
     assert _option(recovery, "--owner-notice") is None  # "it works again" is news, not an open condition
     assert "linux-cam2" in _option(recovery, "--body")
-    assert _option(clear, "--clear-owner-notice") == "state-linux-cam2" and _option(clear, "--cwd") == str(project)
+    assert _option(clear, "--clear-owner-notice") == "fleet-down" and _option(clear, "--cwd") == str(project)
     assert check.u() == {} and check.book() == {}
     for argv in check.calls():
         assert key not in json.dumps(argv) and rotated not in json.dumps(argv)
 
 
-def test_each_box_is_its_own_item_and_the_flag_is_probed_once_per_run(tmp_path, monkeypatch, project, with_flag):
+DOWN_17 = [f"win-pokladna-{index:02d}" for index in range(16)] + ["linux-cam4"]
+
+
+def test_17_down_boxes_are_one_u_item_and_the_flag_is_probed_once_per_run(tmp_path, monkeypatch, project, with_flag):
     help_log = tmp_path / "help.log"
     monkeypatch.setenv("FAKE_HELP_LOG", str(help_log))
     check = NoticeCheck(tmp_path, monkeypatch, project)
-    check.store({name: {"url": closed_port_url(), "key": fresh_secret("k")} for name in ("linux-a", "linux-b")})
+    keys = {name: fresh_secret("k") for name in DOWN_17}
+    check.store({name: {"url": closed_port_url(), "key": keys[name]} for name in DOWN_17})
     with FakeFleetMachine(healthz=True) as gateway:
         result = check.run(gateway.base_url)
+        assert result.exit_code == 0, result.output
+        assert check.run(gateway.base_url).exit_code == 0  # the same set: nothing re-sent
 
-    assert result.exit_code == 0, result.output
-    assert sorted(_option(argv, "--owner-notice") for argv in check.calls()) == ["state-linux-a", "state-linux-b"]
-    assert "linux-b" not in check.u()["state-linux-a"] and "linux-a" not in check.u()["state-linux-b"]
-    assert help_log.read_text(encoding="utf-8").count("help") == 1
+    [argv] = check.calls()
+    assert _option(argv, "--owner-notice") == "fleet-down"
+    assert set(check.u()) == {"fleet-down"} and set(check.book()) == {"fleet-down"}
+    body = check.u()["fleet-down"]
+    assert "(17)" in body
+    for name in DOWN_17:
+        assert f"• {name}: nedostupný" in body
+        assert keys[name] not in body
+    assert all(record["notified"] for record in check.state()["machines"].values())
+    assert help_log.read_text(encoding="utf-8").count("help") == 2  # once per run, two runs
+
+
+def test_a_change_in_the_down_set_replaces_the_one_item_and_an_empty_set_clears_it(
+    tmp_path, monkeypatch, project, with_flag
+):
+    check = NoticeCheck(tmp_path, monkeypatch, project)
+    key = fresh_secret("k")
+    down = {name: {"url": closed_port_url(), "key": fresh_secret("k")} for name in ("linux-a", "linux-b")}
+    with FakeFleetMachine(accept_keys=(key,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        check.store({**down, "linux-c": {"url": box.url, "key": key}})
+        assert check.run(gateway.base_url).exit_code == 0
+        assert "linux-c" not in check.u()["fleet-down"]
+
+        box.accept_keys = ["other"]  # linux-c joins the set (401)
+        assert check.run(gateway.base_url).exit_code == 0
+        assert set(check.u()) == {"fleet-down"}  # still ONE item, replaced
+        body = check.u()["fleet-down"]
+        assert "(3)" in body and "linux-c: odmieta kľúč (401)" in body and "linux-a: nedostupný" in body
+
+        check.store({"linux-c": {"url": box.url, "key": key}})  # a and b leave the key store
+        assert check.run(gateway.base_url).exit_code == 0
+        body = check.u()["fleet-down"]
+        assert "(1)" in body and "linux-a" not in body
+
+        box.accept_keys = [key]  # the last one is back: the set is empty
+        assert check.run(gateway.base_url).exit_code == 0
+
+    sends = [_option(argv, "--owner-notice") for argv in check.calls() if "--owner-notice" in argv]
+    assert sends == ["fleet-down"] * 3
+    assert [_option(argv, "--clear-owner-notice") for argv in check.calls() if "--clear-owner-notice" in argv] == [
+        "fleet-down"
+    ]
+    assert check.u() == {} and check.book() == {} and check.state()["fleet_notices"] == {}
+
+
+def test_old_per_box_slugs_are_cleared_once_and_forgotten(tmp_path, monkeypatch, project, with_flag):
+    check = NoticeCheck(tmp_path, monkeypatch, project)
+    old = ["state-linux-cam1", "state-win-pjzav-pokladna", "stale-win-foh", "no-admin-win-foh"]
+    check.notices.parent.mkdir(parents=True, exist_ok=True)
+    check.notices.write_text(
+        json.dumps({"notices": {name: {"since": "2026-11-16T08:00:00.000+00:00"} for name in old}}), encoding="utf-8"
+    )
+    key = fresh_secret("k")
+    with FakeFleetMachine(accept_keys=(key,)) as box, FakeFleetMachine(healthz=True) as gateway:
+        check.store({"linux-a": {"url": box.url, "key": key}, "linux-b": {"url": closed_port_url(), "key": key}})
+        assert check.run(gateway.base_url).exit_code == 0
+        assert check.run(gateway.base_url).exit_code == 0
+
+    clears = [_option(argv, "--clear-owner-notice") for argv in check.calls() if "--clear-owner-notice" in argv]
+    assert sorted(clears) == sorted(old)  # each once (clearing a slug U no longer has is harmless)
+    assert set(check.book()) == {"fleet-down"} and set(check.u()) == {"fleet-down"}
 
 
 def test_a_notice_airuleset_did_not_record_is_not_delivered_and_is_retried(tmp_path, monkeypatch, project, with_flag):
@@ -130,7 +198,7 @@ def test_a_notice_airuleset_did_not_record_is_not_delivered_and_is_retried(tmp_p
         assert check.run(gateway.base_url).exit_code == 0
 
     assert check.state()["machines"]["linux-a"]["notified"] is True
-    assert set(check.u()) == {"state-linux-a"} and set(check.book()) == {"state-linux-a"}
+    assert set(check.u()) == {"fleet-down"} and set(check.book()) == {"fleet-down"}
 
 
 def test_a_clear_that_failed_stays_recorded_and_is_retried(tmp_path, monkeypatch, project, with_flag):
@@ -139,12 +207,12 @@ def test_a_clear_that_failed_stays_recorded_and_is_retried(tmp_path, monkeypatch
     with FakeFleetMachine(accept_keys=("other",)) as box, FakeFleetMachine(healthz=True) as gateway:
         check.store({"linux-a": {"url": box.url, "key": key}})
         assert check.run(gateway.base_url).exit_code == 0
-        assert set(check.u()) == {"state-linux-a"}
+        assert set(check.u()) == {"fleet-down"}
 
         box.accept_keys = [key]
         monkeypatch.setenv("FAKE_CLEAR_EXIT", "1")
         assert check.run(gateway.base_url).exit_code == 0  # a failed clear never fails the run
-        assert set(check.u()) == {"state-linux-a"} and set(check.book()) == {"state-linux-a"}
+        assert set(check.u()) == {"fleet-down"} and set(check.book()) == {"fleet-down"}
 
         monkeypatch.delenv("FAKE_CLEAR_EXIT")
         assert check.run(gateway.base_url).exit_code == 0
@@ -187,18 +255,56 @@ def test_an_unusable_project_dir_falls_back_to_plain_notices(tmp_path, monkeypat
     assert "--notify-project-dir unusable" in caplog.text
 
 
-def test_no_admin_and_a_down_gateway_have_their_own_items(tmp_path, monkeypatch, project, with_flag):
+def test_no_admin_boxes_are_one_item_and_a_down_gateway_its_own(tmp_path, monkeypatch, project, with_flag):
     check = NoticeCheck(tmp_path, monkeypatch, project)
     key = fresh_secret("k")
-    with FakeFleetMachine(accept_keys=(key,), version="0.7.0.dev56", admin=False) as box:
-        check.store({"win-foh": {"url": box.url, "key": key}})
+    with (
+        FakeFleetMachine(accept_keys=(key,), version="0.7.0.dev56", admin=False) as box,
+        FakeFleetMachine(accept_keys=(key,), version="0.7.0.dev56", admin=False) as other,
+    ):
+        check.store({"win-foh": {"url": box.url, "key": key}, "win-dsg": {"url": other.url, "key": key}})
         assert check.run(closed_port_url()).exit_code == 0  # the gateway does not answer
-        assert set(check.u()) == {"no-admin-win-foh", "gateway-health"}
+        assert set(check.u()) == {"fleet-no-admin", "gateway-health"}
+        body = check.u()["fleet-no-admin"]
+        assert "(2)" in body and "• win-foh: server nemá admin práva" in body and "• win-dsg:" in body
 
-        box.admin = True
+        box.admin = other.admin = True
         with FakeFleetMachine(healthz=True) as gateway:
             assert check.run(gateway.base_url).exit_code == 0
 
+    assert check.u() == {} and check.book() == {}
+
+
+def test_stale_boxes_are_one_item_replaced_as_the_set_shrinks_and_cleared_when_empty(
+    tmp_path, monkeypatch, project, with_flag
+):
+    from test_gateway_drift import OLD_VERSION, STABLE_VERSION, soaked
+
+    check = NoticeCheck(tmp_path, monkeypatch, project)
+    key = fresh_secret("k")
+    with (
+        FakeFleetMachine(accept_keys=(key,), version=OLD_VERSION) as a,
+        FakeFleetMachine(accept_keys=(key,), version=OLD_VERSION) as b,
+        FakeFleetMachine(healthz=True) as gateway,
+        FakeFleetMachine(releases=soaked()) as github,
+    ):
+        check.releases_url = f"{github.base_url}/releases"
+        check.store({"win-a": {"url": a.url, "key": key}, "win-b": {"url": b.url, "key": key}})
+        assert check.run(gateway.base_url).exit_code == 0
+        assert set(check.u()) == {"fleet-stale"}
+        body = check.u()["fleet-stale"]
+        assert "(2)" in body and f"v{STABLE_VERSION}" in body
+        assert f"• win-a: verzia {OLD_VERSION}" in body and f"• win-b: verzia {OLD_VERSION}" in body
+
+        a.version = STABLE_VERSION
+        assert check.run(gateway.base_url).exit_code == 0
+        assert set(check.u()) == {"fleet-stale"} and "win-a" not in check.u()["fleet-stale"]
+
+        b.version = STABLE_VERSION
+        assert check.run(gateway.base_url).exit_code == 0
+
+    sends = [_option(argv, "--owner-notice") for argv in check.calls() if "--owner-notice" in argv]
+    assert sends == ["fleet-stale", "fleet-stale"]
     assert check.u() == {} and check.book() == {}
 
 
@@ -224,7 +330,7 @@ def test_a_recorded_notice_for_a_box_that_left_the_key_store_is_cleared(tmp_path
     check.store({"linux-a": {"url": closed_port_url(), "key": fresh_secret("k")}})
     with FakeFleetMachine(healthz=True) as gateway:
         check.run(gateway.base_url)
-        assert set(check.u()) == {"state-linux-a"}
+        assert set(check.u()) == {"fleet-down"}
         check.store({})
         assert check.run(gateway.base_url).exit_code == 0
     assert check.u() == {}
@@ -331,7 +437,7 @@ def test_conditions_announced_before_the_flag_existed_are_put_into_u_once(tmp_pa
 
             monkeypatch.setenv("FAKE_NOTIFY_OWNER_NOTICE", "1")  # airuleset upgraded
             assert check.run(gateway.base_url).exit_code == 0
-            assert set(check.u()) == {"state-win-foh", "no-admin-win-foh"}
+            assert set(check.u()) == {"fleet-down", "fleet-no-admin"}
             assert check.run(gateway.base_url).exit_code == 0
 
     assert len(check.calls()) == 4  # re-sent once, never again
@@ -368,8 +474,8 @@ def test_a_book_that_cannot_be_written_never_makes_a_notice_go_out_every_run(
         for _ in range(3):
             assert check.run(gateway.base_url).exit_code == 0
 
-    [argv] = check.calls()  # recorded in U once, not re-sent by the one-time reopen
-    assert _option(argv, "--owner-notice") == "state-linux-a"
+    [argv] = check.calls()  # recorded in U once: the delivered fingerprint is in the status file
+    assert _option(argv, "--owner-notice") == "fleet-down"
 
 
 def test_settle_never_clears_a_notice_re_sent_while_it_was_judged(tmp_path, monkeypatch, project, with_flag):
@@ -430,7 +536,7 @@ def test_the_one_time_reannounce_survives_a_run_that_had_to_send_plain(tmp_path,
         assert check.run(gateway.base_url).exit_code == 0
 
     assert len(check.calls()) == 1
-    assert check.state()["owner_notices"] is True
+    assert check.state()["fleet_notices"] == {"fleet-down": [["linux-a", "unreachable"]]}
 
 
 def test_a_lookalike_flag_in_the_help_is_not_support(tmp_path, monkeypatch, project, with_flag):
