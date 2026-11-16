@@ -24,11 +24,9 @@ from pathlib import Path
 import click
 
 from remoteos.gateway.check import (
-    DEFAULT_AIRULESET_PATH,
     DEFAULT_NOTIFY_OWNER,
     DEFAULT_STATUS_PATH,
     CheckError,
-    airuleset_notifier,
     load_status,
     run_check,
 )
@@ -45,6 +43,13 @@ from remoteos.gateway.keystore import (
     set_key,
 )
 from remoteos.gateway.manifest import DEFAULT_GATEWAY_URL, ManifestError, load_manifest
+from remoteos.gateway.owner_notice import (
+    DEFAULT_AIRULESET_PATH,
+    DEFAULT_NOTICES_PATH,
+    DEFAULT_PROJECT_DIR,
+    Notifier,
+    airuleset_notifier,
+)
 from remoteos.gateway.probe import STATE_OK
 from remoteos.gateway.registry import (
     LEGACY_MACHINES_PATH,
@@ -66,6 +71,22 @@ _GATEWAY_URL_HELP = f"The gateway (default: the manifest's [gateway] url, else {
 
 def _notify_options(function):
     function = click.option(
+        "--notify-project-dir",
+        type=click.Path(file_okay=False, path_type=Path),
+        envvar="REMOTEOS_GATEWAY_NOTIFY_PROJECT_DIR",
+        default=DEFAULT_PROJECT_DIR,
+        show_default=True,
+        help="notify --cwd: the git checkout whose footer U shows the owner notices (#102); not $HOME.",
+    )(function)
+    function = click.option(
+        "--notices-file",
+        type=click.Path(dir_okay=False, path_type=Path),
+        envvar="REMOTEOS_GATEWAY_NOTICES_FILE",
+        default=DEFAULT_NOTICES_PATH,
+        show_default=True,
+        help="The owner notices recorded in U, so each is cleared when its condition is gone (#102).",
+    )(function)
+    function = click.option(
         "--notify-owner",
         envvar="REMOTEOS_GATEWAY_NOTIFY_OWNER",
         default=DEFAULT_NOTIFY_OWNER,
@@ -81,6 +102,12 @@ def _notify_options(function):
         show_default=True,
         help="airuleset.py whose `notify --body` tells the owner; missing = printed or logged instead.",
     )(function)
+
+
+def _notifier(airuleset_path: Path, owner: str | None, project_dir: Path, notices: Path) -> Notifier | None:
+    return airuleset_notifier(
+        airuleset_path.expanduser(), owner, project_dir=project_dir.expanduser(), notices=notices.expanduser()
+    )
 
 
 def _status_file_option(function):
@@ -109,6 +136,7 @@ def _gateway_url(paths, explicit: str | None, *, strict: bool) -> str:
         log = logging.getLogger("remoteos.gateway.check")
         log.warning("manifest unreadable (%s) — using %s", exc, DEFAULT_GATEWAY_URL)
         return DEFAULT_GATEWAY_URL
+
 
 _RELOAD_NOTE = "A running gateway applies this on its next request (or SIGHUP) — no restart needed."
 
@@ -179,8 +207,7 @@ def machine_set_key(paths, name: str, url: str | None, force: bool) -> None:
     click.echo(f"  probe with the new key: {outcome.probe.state} ({outcome.probe.detail})")
     if outcome.probe.state != STATE_OK:
         click.echo(
-            "  WARNING: not verified — the machine did not accept the key just now."
-            " `remoteos-gateway check` will tell."
+            "  WARNING: not verified — the machine did not accept the key just now. `remoteos-gateway check` will tell."
         )
     if outcome.created:
         _expose_new(paths, [name])
@@ -366,7 +393,14 @@ def _describe_recipe(recipe: RepairRecipe) -> str:
 @_notify_options
 @click.pass_obj
 def sync_configs_command(
-    paths, dry_run: bool, local_host: str, prune: bool, airuleset_path: Path, notify_owner: str | None
+    paths,
+    dry_run: bool,
+    local_host: str,
+    prune: bool,
+    airuleset_path: Path,
+    notify_owner: str | None,
+    notify_project_dir: Path,
+    notices_file: Path,
 ) -> None:
     """Generate every project's MCP config from the manifest: fleet entries through the gateway
     (one token per project, allow-list = the manifest); every other entry is left byte-equal.
@@ -383,7 +417,7 @@ def sync_configs_command(
             today=_dt.date.today().isoformat(),
             echo=click.echo,
             prune=prune,
-            notifier=airuleset_notifier(airuleset_path.expanduser(), notify_owner),
+            notifier=_notifier(airuleset_path, notify_owner, notify_project_dir, notices_file),
         )
     except (ManifestError, MachineSourceError, RegistryError, SyncError) as exc:
         raise _fail(exc) from exc
@@ -414,6 +448,8 @@ def check_command(
     gateway_url: str | None,
     airuleset_path: Path,
     notify_owner: str | None,
+    notify_project_dir: Path,
+    notices_file: Path,
     local_host: str,
     releases_url: str,
 ) -> None:
@@ -428,7 +464,7 @@ def check_command(
             paths.machines,
             status_file.expanduser(),
             gateway_url=gateway_url,
-            notifier=airuleset_notifier(airuleset_path.expanduser(), notify_owner),
+            notifier=_notifier(airuleset_path, notify_owner, notify_project_dir, notices_file),
             host=local_host,
             drift=DriftPolicy(fetch=lambda: fetch_releases(releases_url), soak_days=soak_days()),
         )

@@ -725,7 +725,9 @@ after all test jobs passed (`scripts/create-release.sh`, a no-op when it exists)
 **Restart notice:** after a real `sync-configs`, every project whose config was written is scanned
 where it lives (local, `sudo -n`, ssh) for live Claude sessions: `claude` processes whose cwd's
 `.mcp.json` resolves to that config, with their tmux pane. ONE owner message names them with
-"spusti `/exit` a `claude -c`". No live session, no message. `--dry-run` prints what it would send.
+"spusti `/exit` a `claude -c`" (with airuleset's `--owner-notice`: one notice
+`restart-<project>` per project, cleared by `check` once those sessions have ended). No live
+session, no message. `--dry-run` prints what it would send.
 The text is always printed, because the owner's airuleset policy may post nothing. A failed scan
 or notify is reported in the output and never fails the sync.
 
@@ -743,6 +745,21 @@ or notify is reported in the output and never fails the sync.
   this kind of message: it counts as handled, and the text stays in the journal. A check that
   cannot run at all (an invalid key store) is announced once too, exits 1, and its recovery is
   announced.
+- **Owner notices in the footer U (#102).** When the installed airuleset has `notify
+  --owner-notice` (airuleset #1300; read once per run from `notify --help`), every open
+  condition is its OWN notice with a slug: `state-<box>`, `gateway-health`, `stale-<box>`,
+  `no-admin-<box>`, `check-failed`, and `restart-<project>` (from `sync-configs`). A suppressed
+  notice then becomes one item in the footer `U` of the remoteos-mcp checkout, the same slug
+  replaces it, and `notify --clear-owner-notice <slug>` drops it once the condition is gone (the
+  box is ok again, caught up, has admin, the check runs, or every noted session of a restart has
+  ended). The recorded slugs live in `~/.local/state/remoteos-gateway/owner-notices.json`; a
+  clear that fails stays there and is retried on the next run. A notice airuleset did not record
+  (exit 1) is not delivered and is retried too. Without the flag, the notices are the plain,
+  grouped messages above.
+  - `--notify-project-dir` (env `REMOTEOS_GATEWAY_NOTIFY_PROJECT_DIR`, default
+    `~/devel/remoteos-mcp`) is airuleset's `--cwd`, passed explicitly because the unit runs in
+    `$HOME`. It must be a git checkout root and not `$HOME`; otherwise an error is logged and the
+    plain notices are sent. `--notices-file` (env `REMOTEOS_GATEWAY_NOTICES_FILE`) moves the book.
 - **Fleet version drift.** It records each machine's `/health` version (`machine list` shows the
   last one seen) and compares it with the stable release:
   - A box older than stable for more than 3 days is reported once, with its version and days,

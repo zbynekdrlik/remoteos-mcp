@@ -14,11 +14,14 @@ Only a value read in THIS run is judged: a box that does not answer, or a server
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 
+from remoteos.gateway import owner_notice
 from remoteos.gateway.messages import split_to_fit
+from remoteos.gateway.owner_notice import Notify
 
 logger = logging.getLogger("remoteos.gateway.no_admin")
+
+NO_ADMIN = "no-admin"  # the owner-notice slug kind: no-admin-<box> (#102)
 
 
 def _known(previous: object) -> dict | None:
@@ -56,19 +59,17 @@ def compose_messages(pending: dict[str, dict], host: str) -> list[tuple[str, lis
     return texts
 
 
-def announce(machines: dict[str, dict], host: str, notifier: Callable[[str], bool] | None) -> bool | None:
-    """Send what is owed. Returns None when nothing was, else whether all of it went out."""
+def announce(machines: dict[str, dict], host: str, notifier: Notify | None) -> bool | None:
+    """Send what is owed (one owner notice ``no-admin-<box>`` per box when the notifier can).
+    Returns None when nothing was, else whether all of it went out."""
     pending = {n: r for n, r in machines.items() if "no_admin" in r and not r["no_admin"]["notified"]}
     if not pending:
         return None
-    sent = True
-    for text, names in compose_messages(pending, host):
-        logger.warning("check: %s", text.replace("\n", " "))
-        delivered = notifier(text) if notifier is not None else True
-        sent = sent and delivered
-        if delivered:
-            for name in names:
-                pending[name]["no_admin"]["notified"] = True
+    sent, done = owner_notice.announce(
+        notifier, pending, lambda group: compose_messages(group, host), lambda name: owner_notice.slug(NO_ADMIN, name)
+    )
+    for name in done:
+        pending[name]["no_admin"]["notified"] = True
     return sent
 
 
@@ -78,7 +79,7 @@ def update(
     admins: dict[str, bool | None],
     stamp: str,
     host: str,
-    notifier: Callable[[str], bool] | None,
+    notifier: Notify | None,
 ) -> bool | None:
     """Judge and report one run. Like drift, nothing here may cost the run its status write."""
     for name, record in machines.items():

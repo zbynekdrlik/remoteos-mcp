@@ -48,10 +48,19 @@ _PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}")
 _ACCOUNT_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 _GATEWAY_URL_RE = re.compile(r"https?://[A-Za-z0-9.\-\[\]:]+")
+
 _TOP_KEYS = frozenset({"gateway", "projects"})
 _GATEWAY_KEYS = frozenset({"url"})
 _PROJECT_KEYS = frozenset({"host", "account", "config", "machines", "mode"})
 _REQUIRED = ("host", "account", "config", "machines")
+
+
+def is_valid_host(value: str) -> bool:
+    return bool(_HOST_RE.fullmatch(value))
+
+
+def is_valid_account(value: str) -> bool:
+    return bool(_ACCOUNT_RE.fullmatch(value))
 
 
 class ManifestError(Exception):
