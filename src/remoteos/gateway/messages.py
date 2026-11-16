@@ -11,6 +11,10 @@ from typing import TypeVar
 
 CHUNK_LIMIT = 1700
 
+# The machine states in owner texts (``check`` change lines, ``fleet_notice``'s fleet-down).
+STATE_LABELS = {"ok": "funguje", "401": "odmieta kľúč (401)", "unreachable": "nedostupný", "error": "chyba"}
+KEY_HINT = "Kľúč: `remoteos-gateway machine set-key <stroj>` (kľúč na stdin)."
+
 Item = TypeVar("Item")
 
 

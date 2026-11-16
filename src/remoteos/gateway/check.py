@@ -24,15 +24,15 @@ Each machine's public ``/health`` gives its version and whether it has admin rig
 reports a box older than the stable release (#63), ``no_admin.py`` a box without admin (#57).
 
 With an airuleset that has ``--owner-notice`` (#102, ``owner_notice.py``) every open condition is
-its own footer-U notice (``state-<box>``, ``gateway-health``, ``stale-<box>``, ``no-admin-<box>``,
-``check-failed``; ``restart-<project>`` from sync-configs), and ``_settle`` clears each one whose
-condition is gone at the end of every run.
+a footer-U notice: ONE per machine condition KIND listing its boxes (``fleet-down``,
+``fleet-stale``, ``fleet-no-admin``, ``fleet_notice.py``, owner ruling 2026-11-16), plus
+``gateway-health`` and ``check-failed`` (``restart-<project>`` from sync-configs); ``_settle``
+clears each one whose condition is gone at the end of every run, and any old per-box slug.
 """
 
 from __future__ import annotations
 
 import asyncio
-import copy
 import datetime as _dt
 import json
 import logging
@@ -44,10 +44,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from remoteos.gateway import drift as drift_report
-from remoteos.gateway import fileops, live_sessions, no_admin, owner_notice
+from remoteos.gateway import fileops, fleet_notice, live_sessions, no_admin, owner_notice
 from remoteos.gateway.drift import DriftPolicy
 from remoteos.gateway.keystore import edit_keystore, load_keystore
-from remoteos.gateway.messages import split_to_fit
+from remoteos.gateway.messages import KEY_HINT, STATE_LABELS, split_to_fit
 from remoteos.gateway.owner_notice import Notifier, Notify
 from remoteos.gateway.probe import (
     STATE_OK,
@@ -70,12 +70,12 @@ REPAIR_TIMEOUT_S = 30
 # The gateway's own record in the in-memory pending map: a key no machine name can be (names are
 # [A-Za-z0-9][A-Za-z0-9._-]*), so a machine named "gateway" never collides with it.
 GATEWAY_KEY = "<gateway>"
-# Owner-notice slugs (#102): one footer-U item per open condition, cleared when it is gone.
+# Owner-notice slugs (#102): one footer-U item per open condition, cleared when it is gone. The
+# machine conditions are one item per KIND (``fleet_notice``), never one per box.
 GATEWAY_NOTICE = "gateway-health"
-STATE = "state"  # state-<box>
 CHECK_FAILED = "check-failed"
 
-_LABELS = {"ok": "funguje", "401": "odmieta kľúč (401)", "unreachable": "nedostupný", "error": "chyba"}
+_LABELS = STATE_LABELS
 
 
 @dataclass
@@ -237,7 +237,7 @@ def _change_line(name: str, record: dict) -> str:
 def _hints(records: list[dict]) -> list[str]:
     hints = []
     if any(r["state"] == STATE_UNAUTHORIZED for r in records):
-        hints.append("Kľúč: `remoteos-gateway machine set-key <stroj>` (kľúč na stdin).")
+        hints.append(KEY_HINT)
     if any(r["state"] == STATE_UNAUTHORIZED or str(r["detail"]).startswith("repaired") for r in records):
         hints.append(
             "Projekty cez bránu sa nemenia; priamu kópiu kľúčov (projekt remoteos-mcp) obnoví"
@@ -263,19 +263,13 @@ def compose_messages(pending: dict[str, dict], host: str, *, recovered: bool = F
     return texts
 
 
-def _state_notice(name: str, record: dict) -> str | None:
-    """The owner-notice slug of a state change; None for a change TO ok (news, not an open
-    condition: it goes out plain, and the box's open notice is cleared by ``_settle``)."""
-    if record["state"] == STATE_OK:
-        return None
-    return GATEWAY_NOTICE if name == GATEWAY_KEY else owner_notice.slug(STATE, name)
-
-
 def _state_messages(
     pending: dict[str, dict], host: str, recovered: bool, notifier: Notify | None
 ) -> list[tuple[str, list[str], str | None, bool]]:
     """``(text, names announced, owner-notice slug, carries the "running again" title)``: grouped
-    as before, or one message per item when the notifier sends per condition (#102)."""
+    as before, or — when the notifier sends per condition (#102) — the gateway as its own notice
+    and the boxes back to ``ok`` as plain news. A box that went DOWN is not announced here: it is
+    one line of the ``fleet-down`` notice (``fleet_notice.reconcile``), which marks it notified."""
     if not owner_notice.per_condition(notifier):
         texts = compose_messages(pending, host, recovered=recovered)
         return [(text, names, None, recovered and index == 0) for index, (text, names) in enumerate(texts)]
@@ -283,49 +277,40 @@ def _state_messages(
     if recovered:
         [(text, _names)] = compose_messages({}, host, recovered=True)
         messages.append((text, [], None, True))
-    for name, record in pending.items():
-        for text, names in compose_messages({name: record}, host):
-            messages.append((text, names, _state_notice(name, record), False))
+    if GATEWAY_KEY in pending:
+        record = pending[GATEWAY_KEY]
+        notice = GATEWAY_NOTICE if record["state"] != STATE_OK else None
+        for text, names in compose_messages({GATEWAY_KEY: record}, host):
+            messages.append((text, names, notice, False))
+    back = {n: r for n, r in pending.items() if n != GATEWAY_KEY and r["state"] == STATE_OK}
+    if back:  # news, not an open condition: plain, and fleet-down is replaced or cleared
+        for text, names in compose_messages(back, host):
+            messages.append((text, names, None, False))
     return messages
 
 
 def open_notices(status: dict) -> set[str]:
-    """The owner-notice slugs of every condition still open after this run."""
+    """The owner-notice slugs of every condition still open after this run: the gateway's and one
+    per machine condition KIND (an old per-box slug is never open, so ``_settle`` clears it)."""
     open_now = {GATEWAY_NOTICE} if status["gateway"]["state"] != STATE_OK else set()
-    for name, record in status["machines"].items():
-        if record["state"] != STATE_OK:
-            open_now.add(owner_notice.slug(STATE, name))
-        if "drift" in record:
-            open_now.add(owner_notice.slug(drift_report.STALE, name))
-        if "no_admin" in record:
-            open_now.add(owner_notice.slug(no_admin.NO_ADMIN, name))
-    return open_now
+    return open_now | fleet_notice.open_slugs(status["machines"])
 
 
-def _reopen_unrecorded(status: dict, previous: dict, old_machines: dict, notifier: Notify | None) -> dict:
-    """The first run that can send per condition (#102) announces once more every open condition
-    the older airuleset could not put into U, so the owner sees it there. ``status["owner_notices"]``
-    marks that this happened: later runs never re-send (a notice whose book entry could not be
-    written must not go out every 10 minutes). Returns the previous machine records drift and
-    no-admin read (a copy when one was reopened: ``previous`` itself is never changed)."""
+def _reopen_gateway(status: dict, previous: dict, notifier: Notify | None) -> None:
+    """The first run that can send per condition (#102) announces a down gateway once more if the
+    older airuleset could not put it into U. ``status["owner_notices"]`` marks that this happened:
+    later runs never re-send (a notice whose book entry could not be written must not go out every
+    10 minutes). The machine kinds need no such pass: a kind with no delivered fingerprint in the
+    status file is sent anyway (``fleet_notice.reconcile``)."""
     if previous.get("owner_notices") is True:  # kept through a run that had to send plain notices
         status["owner_notices"] = True
-        return old_machines
+        return
     if not owner_notice.per_condition(notifier) or not isinstance(notifier, Notifier) or notifier.book is None:
-        return old_machines
+        return
     status["owner_notices"] = True
-    recorded = notifier.book.read()
-    for name, record in [(GATEWAY_KEY, status["gateway"]), *status["machines"].items()]:
-        notice = _state_notice(name, record)
-        if notice is not None and record["notified"] and notice not in recorded:
-            record["notified"] = False
-    reopened = copy.deepcopy(old_machines)
-    for name, record in reopened.items():
-        for key, kind in (("drift", drift_report.STALE), ("no_admin", no_admin.NO_ADMIN)):
-            episode = record.get(key) if isinstance(record, dict) else None
-            if isinstance(episode, dict) and episode.get("notified") and owner_notice.slug(kind, name) not in recorded:
-                episode["notified"] = False
-    return reopened
+    gateway = status["gateway"]
+    if gateway["state"] != STATE_OK and gateway["notified"] and GATEWAY_NOTICE not in notifier.book.read():
+        gateway["notified"] = False
 
 
 def _settle(notifier: Notify | None, status: dict, host: str) -> None:
@@ -345,6 +330,18 @@ def _settle(notifier: Notify | None, status: dict, host: str) -> None:
         notifier.settle(still_open)
     except Exception:
         logger.exception("check: clearing owner notices failed — retried next run")
+
+
+def _reconcile_kinds(status: dict, notifier: Notify | None, host: str) -> bool | None:
+    """The fleet kind notices (#102): send what changed, clear a closed kind the book lost. Like
+    drift, never costs the run its status write: a failure is logged, and retried next run."""
+    try:
+        sent = fleet_notice.reconcile(status, notifier, host)
+        fleet_notice.clear_unbooked(status, notifier)
+        return sent
+    except Exception:
+        logger.exception("check: the fleet notices failed — retried next run")
+        return False
 
 
 @dataclass
@@ -412,7 +409,9 @@ def _check_loaded(
         "gateway": _advance(previous.get("gateway"), health, stamp),
         "machines": {name: _advance(old_machines.get(name), obs, stamp) for name, obs in sorted(observations.items())},
     }
-    old_machines = _reopen_unrecorded(status, previous, old_machines, notifier)
+    _reopen_gateway(status, previous, notifier)
+    status[fleet_notice.STATUS_KEY] = fleet_notice.delivered_before(previous)  # kept through a plain run
+    per_kind = owner_notice.per_condition(notifier)
     pending = {GATEWAY_KEY: status["gateway"]} if not status["gateway"]["notified"] else {}
     pending.update({n: r for n, r in status["machines"].items() if not r["notified"]})
     # The check could not run last time (or that recovery was not announced yet): say it is back.
@@ -420,6 +419,8 @@ def _check_loaded(
     for name, record in pending.items():
         logger.warning("check: %s is %s (was %s) — %s", name, record["state"], record["previous"], record["detail"])
     sent: bool | None = None
+    if per_kind:  # the boxes that went down are announced by fleet-down below, not one by one
+        pending = {n: r for n, r in pending.items() if n == GATEWAY_KEY or r["state"] == STATE_OK}
     if pending or recovered:
         sent = True
         for text, names, notice, says_recovered in _state_messages(pending, host, recovered, notifier):
@@ -431,10 +432,13 @@ def _check_loaded(
             elif says_recovered:  # the message with the "running again" title
                 status["recovery_pending"] = True
     versions = {name: observation.version for name, observation in observations.items()}
-    drift_sent = drift_report.update(status["machines"], old_machines, versions, drift, stamp, moment, host, notifier)
+    drift_sent = drift_report.update(
+        status["machines"], old_machines, versions, drift, stamp, moment, host, notifier, announce=not per_kind
+    )
     admins = {name: observation.admin for name, observation in observations.items()}
-    admin_sent = no_admin.update(status["machines"], old_machines, admins, stamp, host, notifier)
-    for extra in (drift_sent, admin_sent):
+    admin_sent = no_admin.update(status["machines"], old_machines, admins, stamp, host, notifier, announce=not per_kind)
+    kinds_sent = _reconcile_kinds(status, notifier, host) if per_kind else None
+    for extra in (drift_sent, admin_sent, kinds_sent):
         if extra is not None:
             sent = extra if sent is None else (sent and extra)
     try:

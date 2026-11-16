@@ -21,7 +21,7 @@ from remoteos.gateway.owner_notice import Notify
 
 logger = logging.getLogger("remoteos.gateway.no_admin")
 
-NO_ADMIN = "no-admin"  # the owner-notice slug kind: no-admin-<box> (#102)
+ADMIN_HINT = "Oprava: spusti na stroji inštalátor (remoteos-install), server má bežať ako admin."
 
 
 def _known(previous: object) -> dict | None:
@@ -45,7 +45,7 @@ def judge(record: dict, previous: object, admin: bool | None, stamp: str) -> Non
 def compose_messages(pending: dict[str, dict], host: str) -> list[tuple[str, list[str]]]:
     """The owner's texts (Slovak, phone-readable), as ``(text, the names it announces)``."""
     title = f"MCP brána ({host}): stroje bez admin práv"
-    hint = "Oprava: spusti na stroji inštalátor (remoteos-install), server má bežať ako admin."
+    hint = ADMIN_HINT
     reserve = len(" (99/99)")
 
     def lines(names: list[str]) -> list[str]:
@@ -59,15 +59,13 @@ def compose_messages(pending: dict[str, dict], host: str) -> list[tuple[str, lis
     return texts
 
 
-def announce(machines: dict[str, dict], host: str, notifier: Notify | None) -> bool | None:
-    """Send what is owed (one owner notice ``no-admin-<box>`` per box when the notifier can).
-    Returns None when nothing was, else whether all of it went out."""
+def _announce(machines: dict[str, dict], host: str, notifier: Notify | None) -> bool | None:
+    """Send what is owed as the grouped plain messages. Returns None when nothing was, else whether
+    all of it went out. (Per condition, ``fleet_notice`` sends ONE ``fleet-no-admin`` instead, #102.)"""
     pending = {n: r for n, r in machines.items() if "no_admin" in r and not r["no_admin"]["notified"]}
     if not pending:
         return None
-    sent, done = owner_notice.announce(
-        notifier, pending, lambda group: compose_messages(group, host), lambda name: owner_notice.slug(NO_ADMIN, name)
-    )
+    sent, done = owner_notice.announce(notifier, pending, lambda group: compose_messages(group, host))
     for name in done:
         pending[name]["no_admin"]["notified"] = True
     return sent
@@ -80,12 +78,17 @@ def update(
     stamp: str,
     host: str,
     notifier: Notify | None,
+    *,
+    announce: bool = True,
 ) -> bool | None:
-    """Judge and report one run. Like drift, nothing here may cost the run its status write."""
+    """Judge and report one run (``announce=False``: judge only, the caller sends the
+    ``fleet-no-admin`` notice). Like drift, nothing here may cost the run its status write."""
     for name, record in machines.items():
         judge(record, previous.get(name), admins.get(name), stamp)
+    if not announce:
+        return None
     try:
-        return announce(machines, host, notifier)
+        return _announce(machines, host, notifier)
     except Exception:
         logger.exception("check: the no-admin report failed — it stays owed")
         return None

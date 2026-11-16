@@ -190,10 +190,26 @@ paths:
     `$HOME`. Never send `--owner-notice` otherwise: airuleset exits 2 (unknown flag) or 1 (bad
     `--cwd`), and the notice would be retried forever. A plain callable notifier (tests) is never
     per condition.
-  - Per condition = one message per item (`owner_notice.announce` / `check._state_messages`), each
-    with its slug (`owner_notice.slug`: `<kind>-<name>`; an upper-case or too long name gets a
-    sha1 tail, so two names never share one). A change TO `ok` goes out plain: it is news, not an
-    open condition. The recovery title ("opäť beží") goes out plain too.
+  - **ONE U item per condition KIND, never per box** (owner ruling 2026-11-16, after 17 unreachable
+    boxes became 17 `state-<box>` items): `fleet_notice.py` builds `fleet-down` (every box not ok,
+    with its state), `fleet-stale` (drift) and `fleet-no-admin` from the FINAL status, each ONE text
+    (`fleet_notice.fit`: what does not fit `CHUNK_LIMIT` becomes "… a ďalších N"; an unreachable
+    box's boilerplate detail is left out so ~20 boxes fit). A FINGERPRINT per kind (down: name +
+    state; stale: name + version + stable tag; no-admin: names) is kept in the status file
+    `fleet_notices` once delivered: a different one re-sends the same slug (replaces), an
+    undelivered send keeps the old one (retried). A text must hold nothing the fingerprint does not
+    (no day count: "pozadu od <date>"), or the unchanged U item goes stale. An empty kind is
+    cleared by `_settle` from the book; one in U but NOT in the book (its book write failed) by
+    `fleet_notice.clear_unbooked` before the status write (a failed clear stays `[]` = owed, retried).
+    Each kind is built on its own in `reconcile`: one that raises never blocks the others. In per-kind mode
+    `check` sends no per-box message for a box going down (`fleet-down` marks it notified), and
+    `drift.update` / `no_admin.update` run with `announce=False`. `gateway-health`, `check-failed`,
+    `restart-<project>` stay their own slugs (`owner_notice.slug`; an upper-case or too long name
+    gets a sha1 tail). A change TO `ok` goes out plain: it is news, not an open condition. The
+    recovery title ("opäť beží") goes out plain too.
+  - Migration: an old per-box slug (`state-`/`stale-`/`no-admin-<box>`) left in the book is never
+    in `open_notices`, so `settle` clears it once and removes it (clearing a slug U no longer
+    has is harmless).
   - Exit 1 with `--owner-notice` = not recorded = NOT delivered (retried like any other).
   - The book `owner-notices.json` (state dir) holds what is in U. `sync-configs` (restart) and
     `check` both write it, so every send-with-slug + add and every clear + remove holds

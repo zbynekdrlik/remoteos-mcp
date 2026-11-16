@@ -26,7 +26,6 @@ from remoteos.release_channel import Release, ReleaseFetchError, behind_since, c
 logger = logging.getLogger("remoteos.gateway.drift")
 
 GRACE_DAYS = 3
-STALE = "stale"  # the owner-notice slug kind: stale-<box> (#102)
 
 
 @dataclass(frozen=True)
@@ -130,23 +129,18 @@ def compose_messages(pending: dict[str, dict], host: str, moment: _dt.datetime) 
     return texts
 
 
-def announce(
+def _announce(
     machines: dict[str, dict],
     host: str,
     moment: _dt.datetime,
     notifier: Notify | None,
 ) -> bool | None:
-    """Send what is owed (one owner notice ``stale-<box>`` per box when the notifier can). Returns
-    None when nothing was, else whether all of it went out."""
+    """Send what is owed as the grouped plain messages. Returns None when nothing was, else whether
+    all of it went out. (Per condition, ``fleet_notice`` sends ONE ``fleet-stale`` instead, #102.)"""
     pending = {n: r for n, r in machines.items() if "drift" in r and not r["drift"]["notified"]}
     if not pending:
         return None
-    sent, done = owner_notice.announce(
-        notifier,
-        pending,
-        lambda group: compose_messages(group, host, moment),
-        lambda name: owner_notice.slug(STALE, name),
-    )
+    sent, done = owner_notice.announce(notifier, pending, lambda group: compose_messages(group, host, moment))
     for name in done:
         pending[name]["drift"]["notified"] = True
     return sent
@@ -161,9 +155,12 @@ def update(
     moment: _dt.datetime,
     host: str,
     notifier: Notify | None,
+    *,
+    announce: bool = True,
 ) -> bool | None:
-    """Record versions and report drift for one run. Nothing here may cost the run its status
-    write: a failure only skips drift (logged), and every record keeps the drift it had."""
+    """Record versions and report drift for one run (``announce=False``: judge only, the caller
+    sends the ``fleet-stale`` notice). Nothing here may cost the run its status write: a failure
+    only skips drift (logged), and every record keeps the drift it had."""
     for name, record in machines.items():
         record_versions(record, previous.get(name), versions.get(name), stamp)
     try:
@@ -171,7 +168,9 @@ def update(
         for name, record in machines.items():
             soak = policy.soak_days if policy is not None else 0
             judge(record, previous.get(name), versions.get(name), releases, moment, soak)
-        return announce(machines, host, moment, notifier) if releases is not None else None
+        if releases is None or not announce:
+            return None
+        return _announce(machines, host, moment, notifier)
     except Exception:
         logger.exception("check: drift failed — no drift judged this run")
         for name, record in machines.items():
