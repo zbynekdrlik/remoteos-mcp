@@ -594,3 +594,10 @@ Terse per-ticket record of autonomous cycles (decisions, commits, tests, PR).
 - `marks.py` (pure merge), `ocr.read_words` on Tesseract CLI / pytesseract / WinRT, `AnnotatedSnapshot` lists one numbered set; default language `slk+eng` with a stated fallback; `tesseract-ocr-slk` in the Linux installer. Tests: `tests/test_marks.py`, `tests/test_ocr_words.py`, `tests_windows/test_ocr_windows.py`.
 - Decisions: words are filtered before joining; elements go in first at the limit; AnnotatedSnapshot publishes a new ref tree (Snapshot still none); `max_elements` default 300; the WinRT script now waits through `AsTask` and answers JSON. See `.claude/rules/marks.md`.
 - A fake hid a real bug: `--psm 11` as one argv item fails on real tesseract; caught by a local run.
+
+## #102 — gateway owner notices go to the footer U (PR #103, merge 889d680, v0.7.0.dev56)
+
+- Commits: 877405c bump, 600b729 feature, ea9a389 + 86e0d34 review fixes, 07b1b34 CVE pin upgrade (pip-audit found 6 new advisories on the PR).
+- Tests: tests/test_gateway_owner_notice.py (28, real fake airuleset.py subprocess with a fake U; a real `claude` process for restart clears).
+- Decisions: per-condition slugs only when `notify --help` lists `--owner-notice` and `--notify-project-dir` is a usable git root; the locked book `owner-notices.json` holds what is in U (check and sync both write it); settle runs after the status write; one-time re-announce of pre-flag conditions guarded by the `owner_notices` status marker. See `.claude/rules/gateway.md`.
+- Live: installed airuleset has no flag yet, so dev1 sends plain notices until the airuleset #1300 push.
