@@ -412,3 +412,32 @@ def test_a_hand_edited_restart_record_never_becomes_an_ssh_option(tmp_path, monk
     entry = {"restart": {"host": host, "account": account, "sessions": [{"pid": 1, "start": 2}]}}
     assert live_sessions.still_running(entry, "dev1") is False  # done: cleared, never run
     assert remote_calls(log) == []
+
+
+def test_the_one_time_reannounce_survives_a_run_that_had_to_send_plain(tmp_path, monkeypatch, project, with_flag):
+    check = NoticeCheck(tmp_path, monkeypatch, project)
+    full = tmp_path / "full-disk"
+    full.mkdir()
+    check.notices = full / "owner-notices.json"
+    (full / "owner-notices.json.lock").write_text("", encoding="utf-8")
+    full.chmod(0o500)  # the book can never be written
+    check.store({"linux-a": {"url": closed_port_url(), "key": fresh_secret("k")}})
+    with FakeFleetMachine(healthz=True) as gateway:
+        assert check.run(gateway.base_url).exit_code == 0
+        monkeypatch.delenv("FAKE_NOTIFY_OWNER_NOTICE")  # one run where `notify --help` lacks the flag
+        assert check.run(gateway.base_url).exit_code == 0
+        monkeypatch.setenv("FAKE_NOTIFY_OWNER_NOTICE", "1")
+        assert check.run(gateway.base_url).exit_code == 0
+
+    assert len(check.calls()) == 1
+    assert check.state()["owner_notices"] is True
+
+
+def test_a_lookalike_flag_in_the_help_is_not_support(tmp_path, monkeypatch, project, with_flag):
+    monkeypatch.setenv("FAKE_HELP_TEXT", "usage: notify [--owner-notice-v2 X] [--clear-owner-notice-v2 X]")
+    script, _log = install_fake_airuleset(tmp_path / "airuleset", monkeypatch)
+    notifier = airuleset_notifier(script, "zbynek", project_dir=project, notices=tmp_path / "owner-notices.json")
+    assert notifier.per_condition is False
+    monkeypatch.setenv("FAKE_HELP_TEXT", "  --owner-notice SLUG\n  --clear-owner-notice SLUG\n")
+    fresh = airuleset_notifier(script, "zbynek", project_dir=project, notices=tmp_path / "owner-notices.json")
+    assert fresh.per_condition is True

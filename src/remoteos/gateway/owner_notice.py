@@ -161,7 +161,9 @@ class Notifier:
             logger.error("owner notices: `notify --help` did not run (%s) — sending plain notices", type(exc).__name__)
             return False
         text = proc.stdout.decode("utf-8", "replace")
-        supported = proc.returncode == 0 and all(re.search(rf"(?<![\w-]){flag}\b", text) for flag in OWNER_NOTICE_FLAGS)
+        supported = proc.returncode == 0 and all(
+            re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", text) for flag in OWNER_NOTICE_FLAGS
+        )
         if not supported:
             logger.info("owner notices: this airuleset has no --owner-notice — sending plain notices")
         return supported

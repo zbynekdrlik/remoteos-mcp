@@ -243,7 +243,7 @@ owner_notice = os.environ.get("FAKE_NOTIFY_OWNER_NOTICE") == "1"  # an airuleset
 if args[-1:] == ["--help"]:  # the capability probe: not a notice, not in the notify log
     if os.environ.get("FAKE_HELP_LOG"):
         open(os.environ["FAKE_HELP_LOG"], "a").write("help\\n")
-    print("usage: airuleset notify [--body BODY] [--cwd CWD]"
+    print(os.environ.get("FAKE_HELP_TEXT") or "usage: airuleset notify [--body BODY] [--cwd CWD]"
           + (" [--owner-notice SLUG] [--clear-owner-notice SLUG]" if owner_notice else ""))
     sys.exit(0)
 with open(os.environ["FAKE_NOTIFY_LOG"], "a") as log:

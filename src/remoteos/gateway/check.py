@@ -308,11 +308,12 @@ def _reopen_unrecorded(status: dict, previous: dict, old_machines: dict, notifie
     marks that this happened: later runs never re-send (a notice whose book entry could not be
     written must not go out every 10 minutes). Returns the previous machine records drift and
     no-admin read (a copy when one was reopened: ``previous`` itself is never changed)."""
+    if previous.get("owner_notices") is True:  # kept through a run that had to send plain notices
+        status["owner_notices"] = True
+        return old_machines
     if not owner_notice.per_condition(notifier) or not isinstance(notifier, Notifier) or notifier.book is None:
         return old_machines
     status["owner_notices"] = True
-    if previous.get("owner_notices") is True:
-        return old_machines
     recorded = notifier.book.read()
     for name, record in [(GATEWAY_KEY, status["gateway"]), *status["machines"].items()]:
         notice = _state_notice(name, record)
