@@ -22,6 +22,11 @@ No key is ever logged, printed, written to the status file or put in a notificat
 
 Each machine's public ``/health`` gives its version and whether it has admin rights: ``drift.py``
 reports a box older than the stable release (#63), ``no_admin.py`` a box without admin (#57).
+
+With an airuleset that has ``--owner-notice`` (#102, ``owner_notice.py``) every open condition is
+its own footer-U notice (``state-<box>``, ``gateway-health``, ``stale-<box>``, ``no-admin-<box>``,
+``check-failed``; ``restart-<project>`` from sync-configs), and ``_settle`` clears each one whose
+condition is gone at the end of every run.
 """
 
 from __future__ import annotations
@@ -31,21 +36,18 @@ import datetime as _dt
 import json
 import logging
 import os
-import secrets
 import shlex
-import shutil
 import subprocess
-import sys
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from remoteos.gateway import drift as drift_report
-from remoteos.gateway import fileops, no_admin
+from remoteos.gateway import fileops, live_sessions, no_admin, owner_notice
 from remoteos.gateway.drift import DriftPolicy
 from remoteos.gateway.keystore import edit_keystore, load_keystore
 from remoteos.gateway.messages import split_to_fit
+from remoteos.gateway.owner_notice import Notifier, Notify
 from remoteos.gateway.probe import (
     STATE_OK,
     STATE_UNAUTHORIZED,
@@ -62,13 +64,15 @@ from remoteos.gateway.targets import SSH_OPTIONS, last_line
 logger = logging.getLogger("remoteos.gateway.check")
 
 DEFAULT_STATUS_PATH = Path.home() / ".local" / "state" / "remoteos-gateway" / "machines-status.json"
-DEFAULT_AIRULESET_PATH = Path.home() / "devel" / "airuleset" / "airuleset.py"
 DEFAULT_NOTIFY_OWNER = "zbynek"
 REPAIR_TIMEOUT_S = 30
-NOTIFY_TIMEOUT_S = 60
 # The gateway's own record in the in-memory pending map: a key no machine name can be (names are
 # [A-Za-z0-9][A-Za-z0-9._-]*), so a machine named "gateway" never collides with it.
 GATEWAY_KEY = "<gateway>"
+# Owner-notice slugs (#102): one footer-U item per open condition, cleared when it is gone.
+GATEWAY_NOTICE = "gateway-health"
+STATE = "state"  # state-<box>
+CHECK_FAILED = "check-failed"
 
 _LABELS = {"ok": "funguje", "401": "odmieta kľúč (401)", "unreachable": "nedostupný", "error": "chyba"}
 
@@ -258,46 +262,81 @@ def compose_messages(pending: dict[str, dict], host: str, *, recovered: bool = F
     return texts
 
 
-# What `airuleset.py notify --body` prints (send()'s status). It EXITS 0 EVEN WHEN THE POST FAILED,
-# so only these printed statuses count as delivered ("dedup" = already delivered under that key;
-# "suppressed" = the owner's policy decided nothing is posted, which airuleset itself counts as
-# delivered: retrying it every 10 minutes could never change the answer).
-_DELIVERED = frozenset({"sent", "dedup", "suppressed"})
-
-
-def airuleset_notifier(script: Path, owner: str | None) -> Callable[[str], bool] | None:
-    """``python3 <airuleset.py> notify --body <text> --dedup-key <per attempt>``; None when the
-    script is not there. Delivered = it ran AND printed ``sent``, ``dedup`` or ``suppressed``."""
-    if not script.is_file():
+def _state_notice(name: str, record: dict) -> str | None:
+    """The owner-notice slug of a state change; None for a change TO ok (news, not an open
+    condition: it goes out plain, and the box's open notice is cleared by ``_settle``)."""
+    if record["state"] == STATE_OK:
         return None
-    python = shutil.which("python3") or sys.executable
+    return GATEWAY_NOTICE if name == GATEWAY_KEY else owner_notice.slug(STATE, name)
 
-    def send(body: str) -> bool:
-        # one key per ATTEMPT: a retry of an undelivered message must never be deduped away
-        attempt = f"remoteos-gateway-check#{time.time_ns()}#{secrets.token_hex(4)}"
-        argv = [python, str(script), "notify", "--body", body, "--dedup-key", attempt]
-        if owner:
-            argv += ["--owner-name", owner]
-        try:
-            proc = subprocess.run(
-                argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=NOTIFY_TIMEOUT_S, check=False
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            logger.error("notify did not run (%s)", type(exc).__name__)
-            return False
-        status = last_line(proc.stdout)
-        if proc.returncode != 0 or status not in _DELIVERED:
-            if proc.returncode == 0:
-                reason = f"printed {status!r}"
-            else:
-                reason = last_line(proc.stderr) or f"exit {proc.returncode}"
-            logger.error("notify NOT delivered (%s)", reason)
-            return False
-        if status == "suppressed":
-            logger.warning("notify: the owner's policy posted nothing for this message")
-        return True
 
-    return send
+def _state_messages(
+    pending: dict[str, dict], host: str, recovered: bool, notifier: Notify | None
+) -> list[tuple[str, list[str], str | None, bool]]:
+    """``(text, names announced, owner-notice slug, carries the "running again" title)``: grouped
+    as before, or one message per item when the notifier sends per condition (#102)."""
+    if not owner_notice.per_condition(notifier):
+        texts = compose_messages(pending, host, recovered=recovered)
+        return [(text, names, None, recovered and index == 0) for index, (text, names) in enumerate(texts)]
+    messages = []
+    if recovered:
+        [(text, _names)] = compose_messages({}, host, recovered=True)
+        messages.append((text, [], None, True))
+    for name, record in pending.items():
+        for text, names in compose_messages({name: record}, host):
+            messages.append((text, names, _state_notice(name, record), False))
+    return messages
+
+
+def open_notices(status: dict) -> set[str]:
+    """The owner-notice slugs of every condition still open after this run."""
+    open_now = {GATEWAY_NOTICE} if status["gateway"]["state"] != STATE_OK else set()
+    for name, record in status["machines"].items():
+        if record["state"] != STATE_OK:
+            open_now.add(owner_notice.slug(STATE, name))
+        if "drift" in record:
+            open_now.add(owner_notice.slug(drift_report.STALE, name))
+        if "no_admin" in record:
+            open_now.add(owner_notice.slug(no_admin.NO_ADMIN, name))
+    return open_now
+
+
+def _reopen_unrecorded(status: dict, old_machines: dict, notifier: Notify | None) -> None:
+    """An open condition announced before it could become a U item (the airuleset had no
+    ``--owner-notice`` yet, #102) is announced once more, so the owner sees it in U. Anything sent
+    with a slug is in the book, so this re-sends each condition at most once."""
+    if not owner_notice.per_condition(notifier):
+        return
+    assert isinstance(notifier, Notifier) and notifier.book is not None
+    recorded = notifier.book.read()
+    for name, record in [(GATEWAY_KEY, status["gateway"]), *status["machines"].items()]:
+        notice = _state_notice(name, record)
+        if notice is not None and record["notified"] and notice not in recorded:
+            record["notified"] = False
+    for name, previous in old_machines.items():
+        for key, kind in (("drift", drift_report.STALE), ("no_admin", no_admin.NO_ADMIN)):
+            episode = previous.get(key) if isinstance(previous, dict) else None
+            if isinstance(episode, dict) and episode.get("notified") and owner_notice.slug(kind, name) not in recorded:
+                episode["notified"] = False
+
+
+def _settle(notifier: Notify | None, status: dict, host: str) -> None:
+    """Clear the owner notices whose condition is gone (#102). A restart notice is open while one of
+    its sessions still runs. Never costs the run its status write: a failure is logged, and what
+    was not cleared is retried next run."""
+    if not isinstance(notifier, Notifier):
+        return
+    open_now = open_notices(status)
+
+    def still_open(name: str, entry: dict) -> bool | None:
+        if name.startswith(live_sessions.RESTART + "-"):
+            return live_sessions.still_running(entry, host)
+        return name in open_now
+
+    try:
+        notifier.settle(still_open)
+    except Exception:
+        logger.exception("check: clearing owner notices failed — retried next run")
 
 
 @dataclass
@@ -311,7 +350,7 @@ def run_check(
     status_path: Path,
     *,
     gateway_url: str,
-    notifier: Callable[[str], bool] | None,
+    notifier: Notify | None,
     ssh_bin: str | None = None,
     host: str = "dev1",
     now: Callable[[], _dt.datetime] | None = None,
@@ -345,7 +384,7 @@ def _check_loaded(
     keystore_path: Path,
     status_path: Path,
     gateway_url: str,
-    notifier: Callable[[str], bool] | None,
+    notifier: Notify | None,
     ssh_bin: str | None,
     host: str,
     drift: DriftPolicy | None,
@@ -365,6 +404,7 @@ def _check_loaded(
         "gateway": _advance(previous.get("gateway"), health, stamp),
         "machines": {name: _advance(old_machines.get(name), obs, stamp) for name, obs in sorted(observations.items())},
     }
+    _reopen_unrecorded(status, old_machines, notifier)
     pending = {GATEWAY_KEY: status["gateway"]} if not status["gateway"]["notified"] else {}
     pending.update({n: r for n, r in status["machines"].items() if not r["notified"]})
     # The check could not run last time (or that recovery was not announced yet): say it is back.
@@ -374,13 +414,13 @@ def _check_loaded(
     sent: bool | None = None
     if pending or recovered:
         sent = True
-        for index, (text, names) in enumerate(compose_messages(pending, host, recovered=recovered)):
-            delivered = notifier(text) if notifier is not None else True
+        for text, names, notice, says_recovered in _state_messages(pending, host, recovered, notifier):
+            delivered = owner_notice.send(notifier, text, notice)
             sent = sent and delivered
             if delivered:  # only the machines of a DELIVERED message are done; the rest retry
                 for name in names:
                     pending[name]["notified"] = True
-            elif index == 0 and recovered:  # the first message carries the "running again" title
+            elif says_recovered:  # the message with the "running again" title
                 status["recovery_pending"] = True
     versions = {name: observation.version for name, observation in observations.items()}
     drift_sent = drift_report.update(status["machines"], old_machines, versions, drift, stamp, moment, host, notifier)
@@ -389,6 +429,7 @@ def _check_loaded(
     for extra in (drift_sent, admin_sent):
         if extra is not None:
             sent = extra if sent is None else (sent and extra)
+    _settle(notifier, status, host)
     try:
         _write_status(status_path, status)
     except OSError as exc:
@@ -407,7 +448,7 @@ def _write_status(path: Path, status: dict) -> None:
 
 
 def _report_failure(
-    status_path: Path, previous: dict, message: str, stamp: str, notifier: Callable[[str], bool] | None, host: str
+    status_path: Path, previous: dict, message: str, stamp: str, notifier: Notify | None, host: str
 ) -> None:
     """The check itself cannot run: say so ONCE per distinct failure, so the watchdog never goes
     silent. The last machine states are kept. If even the status file cannot be written, the
@@ -423,7 +464,7 @@ def _report_failure(
     if not record["notified"]:
         text = f"MCP brána ({host}): kontrola strojov NEBEŽÍ — {message}"
         try:
-            record["notified"] = notifier(text) if notifier is not None else True
+            record["notified"] = owner_notice.send(notifier, text, CHECK_FAILED)
         except Exception as exc:  # the report of a failure must not itself become a new crash
             logger.error("check: the failure notice could not be sent (%s)", type(exc).__name__)
             record["notified"] = False

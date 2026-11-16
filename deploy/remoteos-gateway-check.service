@@ -9,6 +9,8 @@
 # Each run probes every machine of the key store DIRECTLY with its stored key, plus the
 # gateway's /healthz, writes ~/.local/state/remoteos-gateway/machines-status.json and announces
 # each state change ONCE through ~/devel/airuleset/airuleset.py (a log line when it is absent).
+# With airuleset's --owner-notice (#102) each open condition is one item in the footer U of
+# ~/devel/remoteos-mcp (REMOTEOS_GATEWAY_NOTIFY_PROJECT_DIR), cleared when it is gone.
 #
 # Logs: journalctl --user -u remoteos-gateway-check
 

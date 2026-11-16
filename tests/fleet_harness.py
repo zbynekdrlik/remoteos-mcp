@@ -189,7 +189,7 @@ def write_private_json(path: Path, data: dict) -> Path:
 # LOCALLY with stdin passed through, as the real tool would on the far side. Set
 # FAKE_SSH_DENY / FAKE_SUDO_DENY to make it fail the way a missing key login / sudoers rule does.
 
-_FAKE_SSH = '''#!{python}
+_FAKE_SSH = """#!{python}
 import json, os, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_REMOTE_LOG"], "a") as log:
@@ -202,9 +202,9 @@ while i < len(args) and args[i].startswith("-"):
     i += 2 if args[i] in ("-o", "-p", "-i", "-l") else 1
 # ssh hands everything after the destination to the remote shell as ONE command line
 sys.exit(subprocess.run(["/bin/sh", "-c", " ".join(args[i + 1:])]).returncode)
-'''
+"""
 
-_FAKE_SUDO = '''#!{python}
+_FAKE_SUDO = """#!{python}
 import json, os, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_REMOTE_LOG"], "a") as log:
@@ -214,7 +214,7 @@ if os.environ.get("FAKE_SUDO_DENY"):
     sys.exit(1)
 assert args[:2] == ["-n", "-u"] and args[3] == "--", args
 sys.exit(subprocess.run(args[4:]).returncode)
-'''
+"""
 
 
 def install_fake_remote_tools(bin_dir: Path, monkeypatch) -> Path:
@@ -236,14 +236,48 @@ def install_fake_remote_tools(bin_dir: Path, monkeypatch) -> Path:
     return log
 
 
-_FAKE_AIRULESET = '''#!{python}
+_FAKE_AIRULESET = """#!{python}
 import json, os, sys
+args = sys.argv[1:]
+owner_notice = os.environ.get("FAKE_NOTIFY_OWNER_NOTICE") == "1"  # an airuleset with #1300
+if args[-1:] == ["--help"]:  # the capability probe: not a notice, not in the notify log
+    if os.environ.get("FAKE_HELP_LOG"):
+        open(os.environ["FAKE_HELP_LOG"], "a").write("help\\n")
+    print("usage: airuleset notify [--body BODY] [--cwd CWD]"
+          + (" [--owner-notice SLUG] [--clear-owner-notice SLUG]" if owner_notice else ""))
+    sys.exit(0)
 with open(os.environ["FAKE_NOTIFY_LOG"], "a") as log:
-    log.write(json.dumps(sys.argv[1:]) + "\\n")
+    log.write(json.dumps(args) + "\\n")
+def option(name):
+    return args[args.index(name) + 1] if name in args else None
+slug, clear, cwd = option("--owner-notice"), option("--clear-owner-notice"), option("--cwd")
+if (slug or clear) and not owner_notice:
+    print("airuleset: error: unrecognized arguments", file=sys.stderr)
+    sys.exit(2)  # argparse, like the real one before #1300
+if (slug or clear) and not (cwd and os.path.exists(os.path.join(cwd, ".git"))):
+    print("notify: need --cwd inside a project git repo (#1300)", file=sys.stderr)
+    sys.exit(1)
+u_path = os.environ.get("FAKE_NOTIFY_U", "")
+u = json.load(open(u_path)) if u_path and os.path.exists(u_path) else {{}}
+if clear:  # the footer U of that project loses the item
+    print("clear-owner-notice")
+    if os.environ.get("FAKE_CLEAR_EXIT", "0") != "0":
+        print("notify: the question map is locked", file=sys.stderr)
+        sys.exit(int(os.environ["FAKE_CLEAR_EXIT"]))
+    u.pop(cwd + "|" + clear, None)
+    json.dump(u, open(u_path, "w"))
+    sys.exit(0)
 # like the real `notify --body`: it PRINTS send()'s status and exits 0 even when the post failed
-print(os.environ.get("FAKE_NOTIFY_STATUS", "sent"))
+status = os.environ.get("FAKE_NOTIFY_STATUS", "sent")
+print(status)
+if slug and status == "suppressed":  # the #1300 record: one U item per slug, the same slug replaces
+    if os.environ.get("FAKE_RECORD_EXIT", "0") != "0":
+        print("notify: owner notice NOT recorded in U (#1300)", file=sys.stderr)
+        sys.exit(int(os.environ["FAKE_RECORD_EXIT"]))
+    u[cwd + "|" + slug] = option("--body")
+    json.dump(u, open(u_path, "w"))
 sys.exit(int(os.environ.get("FAKE_NOTIFY_EXIT", "0")))
-'''
+"""
 
 
 def install_fake_airuleset(directory: Path, monkeypatch) -> tuple[Path, Path]:
@@ -252,6 +286,11 @@ def install_fake_airuleset(directory: Path, monkeypatch) -> tuple[Path, Path]:
     Like the real one it prints the send status (``FAKE_NOTIFY_STATUS``, default ``sent``; the
     real ``send()`` returns sent / dedup / dry-run / no-config / error) and exits 0 regardless;
     ``FAKE_NOTIFY_EXIT`` makes the script itself fail (it did not run).
+
+    ``FAKE_NOTIFY_OWNER_NOTICE=1`` is an airuleset with #1300: ``notify --help`` lists
+    ``--owner-notice``, a ``suppressed`` send with it lands in ``footer_u(directory)``, and
+    ``--clear-owner-notice`` drops it (``FAKE_RECORD_EXIT`` / ``FAKE_CLEAR_EXIT`` make those fail).
+    Without it the flags are an argparse error (exit 2), like airuleset before #1300.
     """
     import sys
 
@@ -260,7 +299,14 @@ def install_fake_airuleset(directory: Path, monkeypatch) -> tuple[Path, Path]:
     script.write_text(_FAKE_AIRULESET.format(python=sys.executable), encoding="utf-8")
     log = directory / "notify-calls.jsonl"
     monkeypatch.setenv("FAKE_NOTIFY_LOG", str(log))
+    monkeypatch.setenv("FAKE_NOTIFY_U", str(directory / "footer-u.json"))
     return script, log
+
+
+def footer_u(directory: Path) -> dict[str, str]:
+    """The fake airuleset's footer U: ``{"<cwd>|<slug>": body}`` (#102)."""
+    path = directory / "footer-u.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 def notify_calls(log: Path) -> list[list[str]]:

@@ -195,7 +195,8 @@ def _choose_url(registration: Registration, explicit: str | None) -> str:
 @cli_fleet._status_file_option
 @click.pass_context
 def enroll_finish_command(ctx: click.Context, name: str, projects: str, url: str | None, replace: bool,
-                          local_host: str, airuleset_path: Path, notify_owner: str | None, status_file: Path) -> None:
+                          local_host: str, airuleset_path: Path, notify_owner: str | None, notify_project_dir: Path,
+                          notices_file: Path, status_file: Path) -> None:
     """Internal, run by ``enroll``: the registration comes on STDIN."""
     paths = ctx.obj
     wanted = _project_list(projects)
@@ -214,10 +215,10 @@ def enroll_finish_command(ctx: click.Context, name: str, projects: str, url: str
     except (EnrollError, MachineSourceError, ManifestError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"{name}: key {mask_secret(registration.key)}, url {outcome.url}")
-    ctx.invoke(cli_fleet.sync_configs_command, dry_run=False, local_host=local_host, prune=False,
-               airuleset_path=airuleset_path, notify_owner=notify_owner)
-    ctx.invoke(cli_fleet.check_command, status_file=status_file, gateway_url=None, airuleset_path=airuleset_path,
-               notify_owner=notify_owner, local_host=local_host,
+    notify = {"airuleset_path": airuleset_path, "notify_owner": notify_owner,
+              "notify_project_dir": notify_project_dir, "notices_file": notices_file}
+    ctx.invoke(cli_fleet.sync_configs_command, dry_run=False, local_host=local_host, prune=False, **notify)
+    ctx.invoke(cli_fleet.check_command, status_file=status_file, gateway_url=None, **notify, local_host=local_host,
                releases_url=os.environ.get("REMOTEOS_RELEASES_URL", RELEASES_URL))
     machines = load_status(status_file.expanduser()).get("machines")
     record = machines.get(name) if isinstance(machines, dict) else None

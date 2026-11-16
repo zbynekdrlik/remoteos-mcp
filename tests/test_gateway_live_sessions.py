@@ -66,6 +66,9 @@ class FakeProc:
         (directory / "cwd").symlink_to(cwd)
         body = "\0".join(f"{k}={v}" for k, v in (environ or {}).items())
         (directory / "environ").write_text(body, encoding="utf-8")
+        # field 22 of stat is the start time
+        stat = f"{pid} ({comm}) S 1 " + " ".join(["0"] * 17) + f" {pid * 10} 0 0\n"
+        (directory / "stat").write_text(stat, encoding="utf-8")
 
 
 def test_the_scan_finds_the_right_panes(tmp_path, fake_tmux):
@@ -90,9 +93,9 @@ def test_the_scan_finds_the_right_panes(tmp_path, fake_tmux):
     sessions = session_scan.scan(str(config), proc_root=str(proc.root), tmux=str(fake_tmux))
 
     assert sessions == [
-        {"pid": 100, "tmux": True, "pane": "main:2"},
-        {"pid": 101, "tmux": True, "pane": "main:3"},
-        {"pid": 102, "tmux": False, "pane": None},
+        {"pid": 100, "start": 1000, "tmux": True, "pane": "main:2"},
+        {"pid": 101, "start": 1010, "tmux": True, "pane": "main:3"},
+        {"pid": 102, "start": 1020, "tmux": False, "pane": None},
     ]
     assert "hunter2" not in json.dumps(sessions)
     [call] = [json.loads(line) for line in (tmp_path / "tmux.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -106,7 +109,9 @@ def test_a_dead_tmux_leaves_the_session_with_no_pane(tmp_path, fake_tmux, monkey
     proc = FakeProc(tmp_path / "proc")
     proc.add(100, "claude", project_dir(tmp_path, "x", config), {"TMUX": "/s,1,0", "TMUX_PANE": "%7"})
 
-    assert session_scan.scan(str(config), str(proc.root), str(fake_tmux)) == [{"pid": 100, "tmux": True, "pane": None}]
+    assert session_scan.scan(str(config), str(proc.root), str(fake_tmux)) == [
+        {"pid": 100, "start": 1000, "tmux": True, "pane": None}
+    ]
 
 
 def test_the_scanner_is_python_3_8_with_no_package_import():
@@ -301,9 +306,7 @@ def test_a_failed_scan_is_reported_and_fails_nothing(run, monkeypatch):
 
 
 @pytest.mark.parametrize(("overrides", "tool"), [({"account": "another-account"}, "sudo"), ({"host": "dev2"}, "ssh")])
-def test_the_other_writers_scan_through_the_same_target_with_no_secret_in_an_argv(
-    run, monkeypatch, overrides, tool
-):
+def test_the_other_writers_scan_through_the_same_target_with_no_secret_in_an_argv(run, monkeypatch, overrides, tool):
     log = install_fake_remote_tools(run.tmp / "bin", monkeypatch)
     run.manifest(**overrides)
     with LiveSession(run.tmp, run.project, "%7"):

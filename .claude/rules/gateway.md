@@ -184,6 +184,31 @@ paths:
     `messages.split_to_fit`, shared by every owner message), and only the
     machines of a DELIVERED message count as notified. While an announcement is still owed, the
     record keeps the detail of the change (`repaired: ...`), so a retry still says what happened.
+- **Owner notices (`owner_notice.py`, #102, airuleset #1300):**
+  - `Notifier.per_condition` = the airuleset has `--owner-notice` (`notify --help`, probed ONCE per
+    notifier = per run, `cached_property`) AND `--notify-project-dir` is a git root that is not
+    `$HOME`. Never send `--owner-notice` otherwise: airuleset exits 2 (unknown flag) or 1 (bad
+    `--cwd`), and the notice would be retried forever. A plain callable notifier (tests) is never
+    per condition.
+  - Per condition = one message per item (`owner_notice.announce` / `check._state_messages`), each
+    with its slug (`owner_notice.slug`: `<kind>-<name>`; an upper-case or too long name gets a
+    sha1 tail, so two names never share one). A change TO `ok` goes out plain: it is news, not an
+    open condition. The recovery title ("opäť beží") goes out plain too.
+  - Exit 1 with `--owner-notice` = not recorded = NOT delivered (retried like any other).
+  - The book `owner-notices.json` (state dir) holds what is in U. `sync-configs` (restart) and
+    `check` both write it, so every send-with-slug + add and every clear + remove holds
+    `NoticeBook.locked()`; `settle` re-reads the entry under the lock and skips one re-sent
+    meanwhile. A failed clear stays in the book (retried); `settle` runs after drift/no-admin and
+    never costs the run its status write.
+  - `check._settle` judges what is open from the FINAL status (`open_notices`): a box gone from the
+    key store has no open condition, so its notices are cleared. Not run on the failure path.
+  - Restart: `session_scan` records `start` (stat field 22) per session; `still_running` reads
+    `/proc/<pid>/stat` directly for this host (world-readable: the check unit has
+    `NoNewPrivileges`, so `sudo` would fail) and runs `session_scan --alive` over ssh for another
+    host. Same pid + another start time = restarted. A failed ssh = None = kept, never cleared blind.
+  - The fake `airuleset.py` in `fleet_harness` keeps a fake U (`footer_u`) only with
+    `FAKE_NOTIFY_OWNER_NOTICE=1`; without it the flags are an argparse error, like the real one
+    before #1300. `--help` is not written to the notify log.
 - **Version drift (`drift.py`, #63, resolver `remoteos/release_channel.py`):**
   - `release_channel.py` is stdlib only (the per-box updater uses it too), so `version_key` is a
     small regex for `1.2.3[.devN]`, not `packaging`. Anything else is "not comparable" and is
@@ -275,7 +300,7 @@ paths:
     deep (`RecursionError`), or any other repair exception (the guard in `observe`) becomes a
     result / 401 detail for THAT machine; the status is still written and the rest announced.
   - The notification (Slovak, phone-readable) goes out through
-    `airuleset.py notify --body [--owner-name]`. The unit sets
+    `airuleset.py notify --body [--owner-name] [--owner-notice <slug> --cwd <dir>]` (#102). The unit sets
     `REMOTEOS_GATEWAY_NOTIFY_OWNER`: a headless caller has no tmux pane for airuleset to find
     the owner from.
 - **Tests:** `tests/fleet_harness.py`.
