@@ -87,6 +87,10 @@ class UiaActionUnanswered(UiaTimeout):
     """UI Automation gave up on an app during its action (Invoke, SetValue): it may have happened."""
 
 
+class UiaLookupFailed(RuntimeError):
+    """UI Automation refused the window lookup (not a timeout): says which step and its HRESULT (#116)."""
+
+
 def _hresult(error: Exception) -> int:
     return getattr(error, "hresult", 0) & 0xFFFFFFFF
 
@@ -304,13 +308,29 @@ class Session:
             self._unanswered(e)
             log.debug("a branch vanished during the walk (%s)", type(e).__name__)
 
-    def _walk(self, hwnd: int, seconds: float, **bounds: int):
-        deadline = time.monotonic() + seconds  # the walk's time includes finding the window
+    def _window(self, hwnd: int) -> Any:
+        """``hwnd``'s control, or ``None``. Two calls into the app; a failure says which one failed.
+
+        A timeout is :class:`UiaUnanswered`, any other COM error :class:`UiaLookupFailed`
+        with the step and its HRESULT, never the raw error (#116).
+        """
+        step = "finding the window"
         try:
-            root = self._control(lambda: self.automation.ElementFromHandle(hwnd)) if hwnd else None
+            element = self._ask(lambda: self.automation.ElementFromHandle(hwnd))
+            if not element:  # a NULL element pointer
+                return None
+            step = "reading the window's control type"
+            return self._ask(lambda: self.auto.Control.CreateControlFromElement(element))
         except self.com_error as e:
             self._unanswered(e)
-            raise
+            log.warning("the window lookup failed while %s (%#010x)", step, _hresult(e))
+            raise UiaLookupFailed(
+                f"UI Automation failed while {step} (HRESULT {_hresult(e):#010x}): nothing was done to it"
+            ) from None
+
+    def _walk(self, hwnd: int, seconds: float, **bounds: int):
+        deadline = time.monotonic() + seconds  # the walk's time includes finding the window
+        root = self._window(hwnd) if hwnd else None
         if root is None:
             raise LookupError("UI Automation does not know that window")
         expired = lambda: self.abandoned.is_set() or time.monotonic() >= deadline  # noqa: E731
