@@ -10,12 +10,14 @@ each listing its boxes:
 - ``fleet-no-admin`` — every box without admin rights (``no_admin`` on its record)
 
 Each kind has a FINGERPRINT of what its text says (down: name + state + org; stale: name + version +
-stable tag; no-admin: names), and its text holds nothing else that changes (no day counts), so the
-item stays true until the fingerprint changes. The fingerprint last delivered is kept in the status file
-(``status["fleet_notices"] = {slug: fingerprint}``), so it survives a run that had to send plain
-notices and a book that cannot be written. A different fingerprint re-sends the SAME slug
-(airuleset replaces the U item); an undelivered send keeps the old fingerprint, so it is retried
-next run. A kind whose set is empty is not open: ``check._settle`` clears its slug, and any old
+stable tag; no-admin: names), and its text holds nothing else that changes (no day counts). The
+fingerprint last delivered is kept in the status file (``status["fleet_notices"] = {slug:
+fingerprint}``), so it survives a run that had to send plain notices and a book that cannot be
+written. Only a different BOX SET re-sends the SAME slug (airuleset replaces the U item): the same
+boxes with another state / version / org, or a fingerprint in an older format after an upgrade, are
+not news (#109, owner 2026-11-17: an acknowledged item must not come back for the same boxes); the
+new fingerprint is then stored silently. An undelivered send keeps the old fingerprint, so it is
+retried next run. A kind whose set is empty is not open: ``check._settle`` clears its slug, and any old
 per-box slug (``state-<box>``, ``stale-<box>``, ``no-admin-<box>``) the book still holds, once. A
 kind delivered but missing from the book (its book write failed) is cleared by ``clear_unbooked``
 instead; a clear that fails there stays owed (fingerprint ``[]``) and is retried next run.
@@ -190,6 +192,15 @@ def delivered_before(previous: dict) -> dict[str, list]:
     return {slug: value for slug, value in known.items() if slug in KINDS and isinstance(value, list)}
 
 
+def _box_set(fingerprint: object) -> frozenset[str] | None:
+    """The box names of a delivered fingerprint, whatever its format (each item starts with the
+    name since #102); None when it is not one (owed clear ``[]`` or a hand edit): sent again."""
+    if not isinstance(fingerprint, list) or not fingerprint:
+        return None
+    names = [item[0] for item in fingerprint if isinstance(item, list) and item and isinstance(item[0], str)]
+    return frozenset(names) if len(names) == len(fingerprint) else None
+
+
 def _mark_notified(machines: dict[str, dict], notice: KindNotice) -> None:
     for name in notice.names:
         record = machines[name]
@@ -222,7 +233,9 @@ def reconcile(status: dict, notifier: Notify | None, host: str) -> bool | None:
             continue
         if notice is None:
             continue
-        if known.get(slug) == notice.fingerprint:
+        if _box_set(known.get(slug)) == frozenset(notice.names):  # same boxes: not news (#109)
+            if known.get(slug) != notice.fingerprint:
+                logger.info("check: %s: same boxes, detail changed — not re-sent", slug)
             current[slug] = notice.fingerprint
             _mark_notified(machines, notice)
             continue

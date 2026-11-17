@@ -42,3 +42,68 @@ def test_nothing_open_builds_no_notice_and_no_open_slug():
     machines = {"linux-a": {"state": "ok", "since": "x", "detail": "ok"}}
     assert fleet_notice.build(machines, "dev1") == {}
     assert fleet_notice.open_slugs(machines) == set()
+
+
+# -- only a changed BOX SET is news (#109, owner 2026-11-17) ----------------------------------------
+
+
+class _Recorder:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str | None]] = []
+
+    def __call__(self, body: str, notice: str | None = None, record: dict | None = None) -> bool:
+        self.sent.append((body, notice))
+        return True
+
+
+def _status(machines: dict[str, dict], known: dict) -> dict:
+    return {"machines": machines, fleet_notice.STATUS_KEY: known}
+
+
+def _stale_box(version: str) -> dict:
+    return {"state": "ok", "since": "x", "detail": "ok", "version": version,
+            "drift": {"stable": "0.7.0.dev50", "since": "2026-11-01", "notified": True}}
+
+
+def test_the_same_down_boxes_are_never_re_sent_whatever_the_fingerprint_format_or_state():
+    machines = _down(2, 1)
+    names = sorted(machines)
+    old_format = [[name, "unreachable"] for name in names]  # a fingerprint written by an older version
+    machines[names[0]]["state"] = "401"  # same box, another state
+    machines[names[0]]["org"] = "nlmedia"  # and an org the old fingerprint never had
+    status = _status(machines, {fleet_notice.DOWN: old_format})
+    send = _Recorder()
+
+    assert fleet_notice.reconcile(status, send, "dev1") is None
+    assert send.sent == []
+    assert sorted(item[0] for item in status[fleet_notice.STATUS_KEY][fleet_notice.DOWN]) == names
+    assert all(r["notified"] for r in machines.values())
+
+
+def test_a_changed_down_set_is_sent_again():
+    machines = _down(2, 1)
+    names = sorted(machines)
+    status = _status(machines, {fleet_notice.DOWN: [[names[0], "unreachable", ""]]})
+    send = _Recorder()
+    assert fleet_notice.reconcile(status, send, "dev1") is True
+    [(body, _)] = send.sent
+    assert body.startswith("MCP brána (dev1): nefunkčné stroje (2)")
+
+
+def test_the_same_stale_boxes_on_a_newer_version_are_not_re_sent_but_a_new_box_is():
+    known = {fleet_notice.STALE: [["linux-a", "0.7.0.dev40", "0.7.0.dev50"]]}
+    status = _status({"linux-a": _stale_box("0.7.0.dev45")}, known)  # upgraded, still behind
+    send = _Recorder()
+    assert fleet_notice.reconcile(status, send, "dev1") is None and send.sent == []
+
+    status["machines"]["linux-b"] = _stale_box("0.7.0.dev41")
+    assert fleet_notice.reconcile(status, send, "dev1") is True
+    [(body, _)] = send.sent
+    assert "linux-a" in body and "linux-b" in body
+
+
+def test_an_owed_clear_or_a_hand_edited_fingerprint_is_sent_again():
+    for known in ([], [["linux-a"], "x"], "junk"):
+        status = _status({"linux-a": _stale_box("0.7.0.dev45")}, {fleet_notice.STALE: known})
+        send = _Recorder()
+        assert fleet_notice.reconcile(status, send, "dev1") is True, known
