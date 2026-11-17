@@ -469,8 +469,11 @@ short `timeout`.
 A new box needs one command on dev1 and one on the box. Nobody carries the key.
 
 ```bash
-remoteos-gateway enroll win-new-pc --projects songplayer,camera-box
+remoteos-gateway enroll win-new-pc --org nlmedia --projects songplayer,camera-box
 ```
+
+`--org` (`nlmedia` / `slovnormal`) is the company the box belongs to and is required. A project already holding
+machines of the other company is refused before the box is touched (see "One company per project" below).
 
 It opens a one-time public URL, prints the command for Windows (run it in PowerShell as Administrator; the
 enrollment URL does not cross a UAC prompt), Linux and macOS, and waits up to an hour. Run the command once on
@@ -604,8 +607,8 @@ every copy stale, and every running Claude Code session kept sending the old key
 owner reconnected it. Now:
 
 - **One key store** — `~/.config/remoteos-gateway/machines.json` (`0600`, dir `0700`), on
-  dev1: `{"<machine>": {"url": "http://<box>:8092/mcp", "key": "<key>"}}`. It is the
-  gateway's machine source (`serve --machines`, the default).
+  dev1: `{"<machine>": {"url": "http://<box>:8092/mcp", "key": "<key>", "org": "nlmedia"}}`.
+  It is the gateway's machine source (`serve --machines`, the default).
 - **One manifest** — `~/.config/remoteos-gateway/projects.toml`: per project, where its
   config lives and which machines it may reach.
 - **Generated configs** — `remoteos-gateway sync-configs` writes each project's config. Each
@@ -617,10 +620,28 @@ owner reconnected it. Now:
 |---|---|
 | A machine's key changed | `remoteos-gateway machine set-key <machine>` with the key on stdin. Every project routed through the gateway gets it on its next call: no config change, no reconnect. The direct remoteos-mcp copy is refreshed by `remoteos-gateway sync-configs`. |
 | Add a machine to a project | Add it to the project's `machines` in `projects.toml`, then `remoteos-gateway sync-configs`. Running sessions reach it at once through the `fleet` server; its typed `mcp__<machine>__*` tools arrive with the next restart. |
-| Add a NEW machine | `remoteos-gateway machine set-key <machine> --url http://<box>:8092/mcp` (key on stdin), then the step above. |
+| Add a NEW machine | `remoteos-gateway machine set-key <machine> --url http://<box>:8092/mcp --org <nlmedia\|slovnormal>` (key on stdin), then the step above. |
+| Set a machine's company | `remoteos-gateway machine set-org <nlmedia\|slovnormal> <machine> [<machine> ...]` (all or nothing; keys are never shown). |
 | Add a project | One `[projects.<name>]` table in `projects.toml`, then `remoteos-gateway sync-configs`. |
 | See what would change | `remoteos-gateway sync-configs --dry-run` (every key and token masked). |
-| See the machines | `remoteos-gateway machine list` (keys masked) and `~/.local/state/remoteos-gateway/machines-status.json`. |
+| See the machines | `remoteos-gateway machine list` (keys masked, org per machine, counts per org) and `~/.local/state/remoteos-gateway/machines-status.json`. |
+
+**One company per project (#105).** Every machine belongs to one company: `org` in the key store,
+`nlmedia` or `slovnormal` (the Slovnormal / Pekárova žena boxes: `win-pz-server`, the
+`win-pj*-pokladna` tills, `win-spisska-pc`, `win-holla-pc`, `mac-david-nb`). Any other value is
+refused.
+
+- `sync-configs` refuses the whole run, changing nothing, when a project's machines belong to two
+  companies. The fleet-ops project `remoteos-mcp` is the only exception (`sync.CROSS_ORG_PROJECTS`
+  in the code, so no project can declare itself one).
+- A machine with no org still serves through the gateway, but `sync-configs` refuses to run while a
+  manifest machine has none, and `machine list` prints `org MISSING` plus a warning. There is no
+  default: a forgotten Slovnormal box must not pass as nlmedia.
+- `machine set-key --url` (a new machine) and `enroll` require `--org`; `machine import` adds a new
+  machine with no org (set it with `set-org` before the next `sync-configs`) and keeps the org of a
+  known one.
+- The `fleet-down` owner notice stays one text, its boxes grouped under `Slovnormal:`, `nlmedia:`
+  and `bez organizácie:`. `check` writes each machine's `org` into the status file for this.
 
 The manifest:
 
@@ -805,6 +826,12 @@ journalctl --user -u remoteos-gateway-check          # each run's table
    `/healthz`.
 5. `remoteos-gateway sync-configs --dry-run`, review, then `remoteos-gateway sync-configs`.
 6. Install the check timer, and restart each project's sessions once.
+
+**Adding the org to an existing key store (0.7.0.dev58, #105):** upgrade the venv, restart the
+gateway (an older gateway refuses a key store with `org`, an unknown key: at reload it keeps its last
+good copy), then `remoteos-gateway machine set-org slovnormal <boxes...>` and `machine set-org nlmedia
+<the rest...>`, check `machine list` shows no `org MISSING`, then `sync-configs`. Rolling back below
+0.7.0.dev58 needs the `org` fields removed from `machines.json` first.
 
 **Rolling back** to a gateway older than 0.7.0.dev33 after `sync-configs` has run: the old
 version rejects the registry's `managed_by` field (an unknown key) and refuses to start. Drop

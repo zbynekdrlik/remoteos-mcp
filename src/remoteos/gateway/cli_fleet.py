@@ -1,8 +1,9 @@
 """``remoteos-gateway`` fleet commands (#51): the key store, generated configs, the drift check.
 
     remoteos-gateway machine set-key linux-cam2 < key-file      # the key on STDIN, never an argv
-    remoteos-gateway machine set-key new-box --url http://new-box.lan:8092/mcp < key-file
-    remoteos-gateway machine list                                # keys masked
+    remoteos-gateway machine set-key new-box --url http://new-box.lan:8092/mcp --org nlmedia < key-file
+    remoteos-gateway machine set-org slovnormal win-pz-server win-spisska-pc   # the company (#105)
+    remoteos-gateway machine list                                # keys masked, org per machine
     remoteos-gateway machine import [--from <file.mcp.json> ... | --from-manifest] [--dry-run]
     remoteos-gateway machine repair-recipe linux-cam2 --ssh root@cam2.lan [--sudo]
     remoteos-gateway sync-configs [--dry-run]                    # every project's config, from projects.toml
@@ -19,6 +20,7 @@ import datetime as _dt
 import logging
 import socket
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import click
@@ -38,9 +40,11 @@ from remoteos.gateway.keystore import (
     edit_keystore,
     load_keystore,
     mask_secret,
+    missing_orgs,
     resolve_import,
     scan_sources,
     set_key,
+    set_org,
 )
 from remoteos.gateway.manifest import DEFAULT_GATEWAY_URL, ManifestError, load_manifest
 from remoteos.gateway.owner_notice import (
@@ -53,7 +57,8 @@ from remoteos.gateway.owner_notice import (
 from remoteos.gateway.probe import STATE_OK
 from remoteos.gateway.registry import (
     LEGACY_MACHINES_PATH,
-    MachineEntry,
+    ORG_MISSING_HINT,
+    ORGS,
     MachineSourceError,
     RegistryError,
     RepairRecipe,
@@ -194,13 +199,19 @@ def machine() -> None:
 @machine.command("set-key")
 @click.argument("name")
 @click.option("--url", default=None, help="The machine's /mcp url (required to ADD a machine; changes it otherwise).")
+@click.option(
+    "--org",
+    type=click.Choice(ORGS),
+    default=None,
+    help="The company the machine belongs to (required to ADD a machine; changes it otherwise).",
+)
 @click.option("--force", is_flag=True, help="Store the key even though the machine rejects it (HTTP 401).")
 @click.pass_obj
-def machine_set_key(paths, name: str, url: str | None, force: bool) -> None:
+def machine_set_key(paths, name: str, url: str | None, org: str | None, force: bool) -> None:
     """Set machine NAME's key, read from STDIN (one line). Never pass a key as an argument."""
     key = _read_key_from_stdin()
     try:
-        outcome = set_key(paths.machines, name, key, url=url, force=force)
+        outcome = set_key(paths.machines, name, key, url=url, org=org, force=force)
     except MachineSourceError as exc:
         raise _fail(exc) from exc
     click.echo(f"{name}: {'added' if outcome.created else 'key set'} — key {mask_secret(key)}, url {outcome.url}")
@@ -236,9 +247,42 @@ def machine_list(paths, status_file: Path) -> None:
         record = records.get(name)
         version = record.get("version") if isinstance(record, dict) else None
         shown = version if isinstance(version, str) else "?"
-        click.echo(f"  {name}  {entry.url}  key {mask_secret(entry.key)}  version {shown}  repair: {repair}")
+        org = entry.org or "MISSING"
+        click.echo(
+            f"  {name}  org {org}  {entry.url}  key {mask_secret(entry.key)}  version {shown}  repair: {repair}"
+        )
     if not entries:
         click.echo("  (empty — build it with `remoteos-gateway machine import`)")
+    counts = {org: sum(1 for e in entries.values() if e.org == org) for org in ORGS}
+    if entries:
+        click.echo("orgs: " + ", ".join(f"{org} {count}" for org, count in counts.items()))
+    unset = missing_orgs(entries)
+    if unset:
+        click.echo(
+            f"WARNING: {len(unset)} machine(s) have NO org: {', '.join(unset)} — sync-configs refuses to run;"
+            f" {ORG_MISSING_HINT}",
+            err=True,
+        )
+
+
+@machine.command("set-org")
+@click.argument("org", type=click.Choice(ORGS))
+@click.argument("names", nargs=-1, required=True)
+@click.pass_obj
+def machine_set_org(paths, org: str, names: tuple[str, ...]) -> None:
+    """Set the company (ORG) of the machines NAMES (#105). All or nothing: a name that is not in the
+    key store refuses the call. Keys are neither read out nor printed."""
+    try:
+        changed = set_org(paths.machines, org, names)
+    except MachineSourceError as exc:
+        raise _fail(exc) from exc
+    unchanged = [name for name in dict.fromkeys(names) if name not in changed]
+    if changed:
+        click.echo(f"org {org}: {', '.join(changed)}")
+    if unchanged:
+        click.echo(f"already {org}: {', '.join(unchanged)}")
+    if changed:
+        click.echo(_RELOAD_NOTE)
 
 
 @machine.command("import")
@@ -366,7 +410,7 @@ def machine_repair_recipe(
             entry = entries.get(name)
             if entry is None:
                 raise MachineSourceError(f"machine {name!r} is not in the key store {paths.machines}")
-            entries[name] = MachineEntry(url=entry.url, key=entry.key, repair=recipe)
+            entries[name] = replace(entry, repair=recipe)
     except MachineSourceError as exc:
         raise _fail(exc) from exc
     if recipe is None:

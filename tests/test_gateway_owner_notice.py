@@ -540,7 +540,7 @@ def test_the_one_time_reannounce_survives_a_run_that_had_to_send_plain(tmp_path,
         assert check.run(gateway.base_url).exit_code == 0
 
     assert len(check.calls()) == 1
-    assert check.state()["fleet_notices"] == {"fleet-down": [["linux-a", "unreachable"]]}
+    assert check.state()["fleet_notices"] == {"fleet-down": [["linux-a", "unreachable", ""]]}
     assert check.state()["owner_notices"] is True  # the one-time gateway re-announce is not repeated
 
 

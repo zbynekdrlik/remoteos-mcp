@@ -40,7 +40,7 @@ import os
 import shlex
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from remoteos.gateway import drift as drift_report
@@ -144,7 +144,7 @@ async def _repair(name: str, entry: MachineEntry, *, keystore_path: Path, ssh_bi
             # won the race: leave it alone
             if current is None or (current.url, current.key) != (entry.url, entry.key):
                 return Observation(STATE_UNAUTHORIZED, "repair skipped: the key store changed meanwhile")
-            entries[name] = MachineEntry(url=current.url, key=key, repair=current.repair)
+            entries[name] = replace(current, key=key)
     except MachineSourceError as exc:  # it turned invalid since the load: the next run announces that
         return Observation(STATE_UNAUTHORIZED, f"repair skipped: the key store is unreadable now ({exc})")
     except OSError as exc:  # a read-only directory, a full disk, a lock file it cannot create
@@ -409,6 +409,9 @@ def _check_loaded(
         "gateway": _advance(previous.get("gateway"), health, stamp),
         "machines": {name: _advance(old_machines.get(name), obs, stamp) for name, obs in sorted(observations.items())},
     }
+    for name, record in status["machines"].items():  # the company, for the fleet-down grouping (#105)
+        if entries[name].org is not None:
+            record["org"] = entries[name].org
     _reopen_gateway(status, previous, notifier)
     status[fleet_notice.STATUS_KEY] = fleet_notice.delivered_before(previous)  # kept through a plain run
     per_kind = owner_notice.per_condition(notifier)

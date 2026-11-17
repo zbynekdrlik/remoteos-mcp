@@ -111,8 +111,8 @@ class Fleet:
         self.monkeypatch = monkeypatch
         self.key = fresh_secret("Enrolled")
         self.machines = write_private_json(tmp_path / "machines.json", {
-            "linux-cam2": {"url": closed_port_url(), "key": "cam2"},
-            "linux-cam3": {"url": closed_port_url(), "key": "cam3"},
+            "linux-cam2": {"url": closed_port_url(), "key": "cam2", "org": "nlmedia"},
+            "linux-cam3": {"url": closed_port_url(), "key": "cam3", "org": "nlmedia"},
         })
         self.registry = tmp_path / "registry.json"
         self.config = tmp_path / "camera-box.mcp.json"
@@ -159,9 +159,10 @@ class Fleet:
         return ["--registry", str(self.registry), "--machines", str(self.machines),
                 "--access-log", str(self.tmp / "access.jsonl"), "--manifest", str(self.manifest)]
 
-    def enroll(self, *args: str):
+    def enroll(self, *args: str, org: str | None = "nlmedia"):
         return CliRunner().invoke(gateway_cli.main, [
-            *self.base(), "enroll", "win-new-pc", "--ssh-key", str(self.ssh_pub), "--timeout", "30", *args])
+            *self.base(), "enroll", "win-new-pc", "--ssh-key", str(self.ssh_pub), "--timeout", "30",
+            *(["--org", org] if org else []), *args])
 
     def calls(self) -> list[list[str]]:
         log = self.vault / "calls.jsonl"
@@ -226,7 +227,8 @@ def test_a_key_the_machine_rejects_is_stored_nowhere(fleet):
     assert "accepted the key at no address" in result.output
     assert "stays in the vault" in result.output
     assert "win-new-pc" not in fleet.machines.read_text()
-    assert "enroll-finish win-new-pc --projects camera-box" in result.output and "--replace" in result.output
+    assert "enroll-finish win-new-pc --org nlmedia --projects camera-box" in result.output
+    assert "--replace" in result.output
     assert fleet.manifest.read_text() == before
     assert fleet.key not in result.output
     assert (fleet.vault / enroll.secret_name("win-new-pc")).exists(), "kept for the retry"
@@ -457,7 +459,8 @@ def test_a_comment_with_a_bracket_or_a_quote_does_not_fool_the_edit(tmp_path):
 @pytest.mark.parametrize("name", ["enroll-test", "strih-pp", "linuxbox"])
 def test_a_name_without_an_os_prefix_is_refused_before_the_box_is_touched(fleet, name):
     result = CliRunner().invoke(gateway_cli.main, [
-        *fleet.base(), "enroll", name, "--projects", "camera-box", "--ssh-key", str(fleet.ssh_pub)])
+        *fleet.base(), "enroll", name, "--org", "nlmedia", "--projects", "camera-box", "--ssh-key",
+        str(fleet.ssh_pub)])
     assert result.exit_code != 0
     assert "win-, linux- or mac-" in result.output
     assert fleet.calls() == []

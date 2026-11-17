@@ -27,8 +27,9 @@ A managed consumer whose project left the manifest keeps its token hash with an 
 allow-list (``--prune`` removes it), so undoing a mistaken manifest edit needs no new token.
 
 Fail closed: an invalid or empty manifest, an invalid key store, a manifest machine missing
-from the key store, or direct mode off the gateway's own account refuses the whole run before
-anything changes; an unreadable / unparseable config, a config inside a git work tree (refused
+from the key store, a manifest machine with no org, a project whose machines belong to two orgs
+(#105; only ``CROSS_ORG_PROJECTS`` may), or direct mode off the gateway's own account refuses the
+whole run before anything changes; an unreadable / unparseable config, a config inside a git work tree (refused
 at read, before any token is minted) or a missing ssh / sudo access fails that project only (its
 allow-list is only ever narrowed). A file never carries a token the gateway
 does not know — except the config of a project removed with ``--prune``, whose consumer is gone
@@ -44,11 +45,12 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from remoteos.gateway.keystore import bearer_value, mask_secret
+from remoteos.gateway.keystore import bearer_value, mask_secret, missing_orgs
 from remoteos.gateway.live_sessions import notify_restarts
 from remoteos.gateway.manifest import MODE_DIRECT, MODE_GATEWAY, Manifest, Project
 from remoteos.gateway.registry import (
     FLEET_SERVER,
+    ORG_MISSING_HINT,
     SYNC_MANAGER,
     Consumer,
     MachineEntry,
@@ -61,6 +63,11 @@ from remoteos.gateway.registry import (
 from remoteos.gateway.targets import Target, TargetError, current_account, target_for
 
 logger = logging.getLogger("remoteos.gateway.sync")
+
+# The only projects whose machines may belong to more than one org (#105): the fleet-ops project
+# that upgrades and debugs every box. A code constant on purpose: a manifest flag would let any
+# project declare itself an exception.
+CROSS_ORG_PROJECTS = frozenset({"remoteos-mcp"})
 
 
 class SyncError(Exception):
@@ -414,6 +421,19 @@ def validate_run(manifest: Manifest, keystore: dict[str, MachineEntry], *, local
             "manifest machines missing from the key store: " + ", ".join(missing)
             + " — add them with `remoteos-gateway machine set-key <name> --url <url>`; nothing was changed"
         )
+    unset = missing_orgs(keystore, sorted({m for p in manifest.projects.values() for m in p.machines}))
+    if unset:
+        raise SyncError(
+            f"manifest machines with no org in the key store: {', '.join(unset)} — {ORG_MISSING_HINT};"
+            " nothing was changed"
+        )
+    mixed = [_org_mix(p, keystore) for p in manifest.projects.values() if p.name not in CROSS_ORG_PROJECTS]
+    mixed = [line for line in mixed if line]
+    if mixed:
+        raise SyncError(
+            "a project may hold machines of ONE org only (#105): " + "; ".join(mixed)
+            + " — take the other org's machines out of projects.toml. Nothing was changed."
+        )
     me = current_account()
     for project in manifest.projects.values():
         if project.mode == MODE_DIRECT and (project.host, project.account) != (local_host, me):
@@ -422,6 +442,18 @@ def validate_run(manifest: Manifest, keystore: dict[str, MachineEntry], *, local
                 f" only for the gateway's own account ({me}@{local_host}); {project.name} is"
                 f" {project.account}@{project.host}. Nothing was changed."
             )
+
+
+def _org_mix(project: Project, keystore: dict[str, MachineEntry]) -> str:
+    """``""`` when every machine of *project* has one org, else which machines have which."""
+    by_org: dict[str, list[str]] = {}
+    for machine in project.machines:
+        by_org.setdefault(keystore[machine].org or "?", []).append(machine)
+    if len(by_org) < 2:
+        return ""
+    return f"[projects.{project.name}] mixes " + ", ".join(
+        f"{org} ({', '.join(sorted(names))})" for org, names in sorted(by_org.items())
+    )
 
 
 def sync_configs(

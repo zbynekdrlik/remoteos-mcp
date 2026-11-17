@@ -156,6 +156,25 @@ paths:
   while the import probed.
 - **`consumer add` / `allow` refuse a sync-managed consumer** (`Registry._refuse_if_managed`):
   its allow-list must stay the manifest's. `deny` / `revoke` (narrowing) still work.
+- **Org per machine (#105, owner 2026-11-17: Slovnormal apart from nlmedia):**
+  - `MachineEntry.org`, key store field `"org"`, closed set `registry.ORGS` (`nlmedia`, `slovnormal`);
+    `validate_org` errors never repeat the value (length only). An entry with no org still PARSES:
+    the gateway and `check` read the same file, so a strict parse would take every project offline
+    over a metadata field. The loud refusal is in `sync.validate_run` (a manifest machine with no org,
+    or a project spanning two orgs, refuses the whole run) and in `machine list` (`org MISSING` +
+    warning). No default org, ever.
+  - The only cross-org project is `sync.CROSS_ORG_PROJECTS` (`remoteos-mcp`), a code constant on
+    purpose: a manifest flag would let any project opt out.
+  - Every rewrite of an entry goes through `dataclasses.replace` (repair-recipe, check's repair,
+    set_key, apply_import), never `MachineEntry(url=, key=, repair=)`: that silently dropped the org.
+  - `set_org` is all or nothing (an unknown name refuses the call). `set_key` needs `org` for a NEW
+    machine; `enroll` / `enroll-finish` take `--org` and refuse a project holding another org's
+    machines in `_check_request`, before any box or vault is touched.
+  - `fleet-down` stays ONE text (the one-per-kind ruling), lines grouped under an org header
+    (Slovnormal, nlmedia, bez organizácie); `check` writes `org` into each status record and the
+    fingerprint is `[name, state, org-or-""]`, so an org change replaces the U item.
+  - Deploy order: install → restart the gateway → `set-org`. An OLDER gateway refuses a key store
+    carrying `org` (unknown key): at reload it keeps the last good copy, at a start it refuses.
 - **`edit_keystore` saves only when the content changed:** every save makes the running
   gateway reload, and a no-op (the repair race's early return) must not.
 - **`check`:**

@@ -4,11 +4,12 @@ With an airuleset that has ``--owner-notice`` (``owner_notice.Notifier.per_condi
 machine conditions are not one U item per box (17 boxes down were 17 items) but one per kind,
 each listing its boxes:
 
-- ``fleet-down``     — every box that is not ``ok`` (``401`` / ``unreachable`` / ``error``), with its state
+- ``fleet-down``     — every box that is not ``ok`` (``401`` / ``unreachable`` / ``error``), with its state,
+                       grouped under its company (``org`` on its record, #105: Slovnormal apart from nlmedia)
 - ``fleet-stale``    — every box behind the stable release (``drift`` on its record)
 - ``fleet-no-admin`` — every box without admin rights (``no_admin`` on its record)
 
-Each kind has a FINGERPRINT of what its text says (down: name + state; stale: name + version +
+Each kind has a FINGERPRINT of what its text says (down: name + state + org; stale: name + version +
 stable tag; no-admin: names), and its text holds nothing else that changes (no day counts), so the
 item stays true until the fingerprint changes. The fingerprint last delivered is kept in the status file
 (``status["fleet_notices"] = {slug: fingerprint}``), so it survives a run that had to send plain
@@ -40,6 +41,9 @@ STATUS_KEY = "fleet_notices"
 
 KINDS = (DOWN, STALE, NO_ADMIN)
 _DETAIL_LIMIT = 80
+ORG_TITLES = {"slovnormal": "Slovnormal", "nlmedia": "nlmedia"}
+_NO_ORG = "bez organizácie"
+_GROUP_ORDER = (ORG_TITLES["slovnormal"], ORG_TITLES["nlmedia"], _NO_ORG)
 
 
 def _is_down(record: dict) -> bool:
@@ -76,13 +80,32 @@ def fit(title: str, lines: list[str], tail: list[str], limit: int = CHUNK_LIMIT)
     return title[:limit]
 
 
+def _org_key(record: dict) -> str:
+    """The record's org, ``""`` when none; an org this code does not know (a hand edit) counts as none."""
+    org = record.get("org")
+    return org if isinstance(org, str) and org in ORG_TITLES else ""
+
+
+def _org(record: dict) -> str:
+    """The record's company label, the header its line is grouped under."""
+    return ORG_TITLES.get(_org_key(record), _NO_ORG)
+
+
 def _down(machines: dict[str, dict], host: str) -> KindNotice | None:
-    names = sorted(n for n, r in machines.items() if _is_down(r))
+    """ONE notice (the owner's one-item-per-kind ruling), its lines grouped under a company header
+    (#105): Slovnormal first, then nlmedia, then boxes without an org."""
+    names = sorted(
+        (n for n, r in machines.items() if _is_down(r)), key=lambda n: (_GROUP_ORDER.index(_org(machines[n])), n)
+    )
     if not names:
         return None
     lines = []
+    group = None
     for name in names:
         record = machines[name]
+        if _org(record) != group:
+            group = _org(record)
+            lines.append(f"{group}:")
         since = str(record.get("since") or "")[:16].replace("T", " ")
         line = f"• {name}: {STATE_LABELS.get(record['state'], record['state'])} (od {since})"
         if record["state"] != "unreachable":  # "All connection attempts failed" x17 says nothing
@@ -90,7 +113,8 @@ def _down(machines: dict[str, dict], host: str) -> KindNotice | None:
         lines.append(line)
     tail = [KEY_HINT] if any(machines[n]["state"] == "401" for n in names) else []
     title = f"MCP brána ({host}): nefunkčné stroje ({len(names)})"
-    return KindNotice(DOWN, [[n, machines[n]["state"]] for n in names], names, fit(title, lines, tail))
+    fingerprint = [[n, machines[n]["state"], _org_key(machines[n])] for n in names]
+    return KindNotice(DOWN, fingerprint, names, fit(title, lines, tail))
 
 
 def _stale(machines: dict[str, dict], host: str) -> KindNotice | None:
