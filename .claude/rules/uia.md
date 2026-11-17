@@ -30,6 +30,20 @@ paths:
 - **A hung call cannot be cancelled.** It is abandoned, and its thread ends when the call returns.
   `MAX_STUCK_WORKERS` bounds them. The thread never calls CoUninitialize: a control released
   after it crashes.
+- **UI Automation gives up on an app before we do (#114).** The client is `CUIAutomation8` as
+  `IUIAutomation2` (installed into the package's client: `IUIAutomation` + `ViewWalker`; it derives
+  from `IUIAutomation`). Before each job `UiaWorker(answer_within=Session.answer_within)` sets its
+  `TransactionTimeout` to what the call has left minus `ANSWER_MARGIN_S`. The default is 20 s,
+  longer than every budget, so before #114 an app that did not answer ALWAYS abandoned the worker
+  (measured on windows-latest: a busy UI thread → 15.0 s + a stuck thread; with the bound → a
+  COMError in about 1 s, worker alive). Its timeout HRESULTs (`_TIMED_OUT`: UIA_E_TIMEOUT
+  0x80131505, ERROR_TIMEOUT 0x800705B4) are `UiaTimeout` wherever the session reads the app, never
+  "vanished" (an element skipped silently) or "gone" (a ref ended for nothing); on Invoke/SetValue
+  "may have happened", never a fallback to the mouse or the keys. The abandon stays the backstop
+  for a job of many slow calls. The walk's deadline includes `ControlFromHandle`.
+- **Hanging a test window:** a busy loop on its UI thread (`while ((Get-Date) -lt $end) {}` in a
+  forms timer tick). `Start-Sleep` does not hang it: a CLR wait on an STA thread pumps sent
+  messages, WM_GETOBJECT included. `SendMessageTimeout(WM_NULL)` tells whether it answers.
 - **`UiaNotAsked` (starting, busy, stuck) is not a hang: nothing was asked of any app.** The first
   start ever generates comtypes' wrappers, which takes seconds (into `comtypes/gen`, or
   `%APPDATA%\Python\…\comtypes_cache` when that is not writable). It keeps the starting worker. An
@@ -70,7 +84,9 @@ paths:
 - **Never log a name's or a text's content:** counts and exception types only (#31).
 - **Tests:** `tests/test_element_tree.py` runs the real worker threads; only the package's controls
   and patterns are faked. `tests_windows/test_uia_windows.py` runs the real package against a
-  WinForms window in the `windows-powershell` CI job.
+  WinForms window in the `windows-powershell` CI job; its `tree_of` retries a `UiaTimeout` too (a
+  window started a moment ago on a stalled runner may not answer yet: the #114 flake, where the
+  first contact of a fresh window took over 12 s while the same run's next test was 4x slow).
 - **Live (supervisor, after deploy):** on a Windows box, `ElementTree` of a Chromium window lists
   its buttons (the very first walk can be short: Chromium builds its tree when a UIA client
   appears); `ClickElement` one and see its effect; `TypeElement` a field and read it back.
