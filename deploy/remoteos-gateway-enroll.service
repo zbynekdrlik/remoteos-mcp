@@ -4,9 +4,9 @@
 #
 #   cp deploy/remoteos-gateway-enroll.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now remoteos-gateway-enroll
-#   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8797/healthz     # 204
+#   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8817/healthz     # 204
 #
-# It binds 127.0.0.1:8797 only (it refuses anything but loopback); dev1's named cloudflared tunnel
+# It binds 127.0.0.1:8817 only (it refuses anything but loopback); dev1's named cloudflared tunnel
 # publishes it as https://enroll-dev1.newlevel.media. A box's registration waits in
 # ~/.local/state/remoteos-gateway/enroll/pending (0600 files, 24 h) until
 # `remoteos-gateway enroll-accept`; `remoteos-gateway-check` turns a waiting one into ONE owner notice.

@@ -40,7 +40,7 @@ from remoteos.gateway.enroll_queue import EnrollQueue, QueueFull, log_meta, sour
 logger = logging.getLogger("remoteos.gateway.enroll_listen")
 
 DEFAULT_LISTEN_HOST = "127.0.0.1"
-DEFAULT_LISTEN_PORT = 8797
+DEFAULT_LISTEN_PORT = 8817
 REGISTRATION_LIMIT = 16 * 1024
 LOG_LIMIT = 256 * 1024
 RATE_WINDOW_S = 600.0

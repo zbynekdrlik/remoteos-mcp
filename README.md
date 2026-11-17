@@ -523,7 +523,7 @@ machine's `/mcp` url when the posted addresses cannot be reached from dev1 (a bo
 `--replace` overwrites a machine already in the key store. A failed accept leaves the registration queued.
 
 The endpoint (`remoteos-gateway enroll-listen`, unit `deploy/remoteos-gateway-enroll.service`) binds
-127.0.0.1:8797 only; dev1's named cloudflared tunnel publishes it. It takes `POST /enroll/` (the
+127.0.0.1:8817 only; dev1's named cloudflared tunnel publishes it. It takes `POST /enroll/` (the
 registration, at most 16 KiB, validated), `POST /enroll/log` (at most 256 KiB) and `GET /healthz`, limits
 each address (Cloudflare's `CF-Connecting-IP`; an IPv6 /64 counts as one) to 10 posts per 10 minutes and
 everyone to 120 (registrations and logs on separate budgets), and keeps at most 50 registrations, 5 per

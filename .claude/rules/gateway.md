@@ -491,7 +491,7 @@ paths:
 - **The owner notice** is a fourth fleet kind, `enroll-pending`, built from `status["enroll_pending"]`
   (`[[id, hostname]]`, written by `check` from the queue; an unreadable queue keeps the last list, never
   clears). Like the other kinds: ONE item, only a changed id set re-sends, an empty queue clears it.
-- **The public hostname** (`enroll-dev1.newlevel.media` -> a named tunnel -> 127.0.0.1:8797) is an
+- **The public hostname** (`enroll-dev1.newlevel.media` -> a named tunnel -> 127.0.0.1:8817) is an
   account-level Cloudflare change: airuleset's (#1241), never minted from this project. No Access app
   covers `*.newlevel.media` (checked 2026-11-17), so the hostname needs no Access bypass.
 - Tests: `test_gateway_enroll_listen.py` (real HTTP through uvicorn + the real command as a child),
