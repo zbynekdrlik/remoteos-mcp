@@ -63,7 +63,10 @@ paths:
     silently) or "gone" (a ref ended for nothing). On Invoke/SetValue they are
     `UiaActionUnanswered` "may have happened", never a fallback to the mouse or the keys.
     ClickElement/TypeElement pass both through as they are. The abandon stays the backstop.
-  - Any other COM error of the window lookup still reaches the tool raw (as before #114).
+  - Any other COM error of the window lookup (`Session._window`: `ElementFromHandle`, then its
+    control type) is `UiaLookupFailed` "UI Automation failed while <step> (HRESULT 0x…): nothing was
+    done to it", raised `from None` (#116): never the raw COMError, whose text names no step.
+    ElementTree shows it as `ElementTree error: …`; Snapshot/AnnotatedSnapshot still drop the list.
   - Tests: `tests/test_uia_timeouts.py` (one case per read site; a fake clock and a ledger that
     checks the limit in force at every call). The fakes are `tests/uia_fakes.py`: they behave like
     the package (GetPattern/SetFocus swallow, navigation is element + type, CreatePattern's
