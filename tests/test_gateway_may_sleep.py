@@ -310,3 +310,94 @@ def test_check_output_shows_the_real_state_and_marks_the_sleeping_box(tmp_path, 
     assert "unreachable" in outputs["night"] and "asleep (may_sleep)" in outputs["night"]
     assert "unreachable" in outputs["noon"] and "asleep" not in outputs["noon"]
     assert check.state()["machines"]["win-pjzav-pokladna"]["may_sleep"] is True
+
+
+def test_waking_up_after_the_flag_was_turned_off_overnight_is_not_news_either(
+    tmp_path, monkeypatch, project, with_flag
+):
+    check = SleepCheck(tmp_path, monkeypatch, project)
+    key = fresh_secret("k")
+    with FakeFleetMachine(healthz=True) as gateway:
+        with FakeFleetMachine(accept_keys=(key,)) as pokladna:
+            check.store({"win-pjzav-pokladna": {"url": pokladna.url, "key": key, "may_sleep": True}})
+            check.run_at(gateway.base_url, _at("2026-11-16T15:00:00"))
+        check.run_at(gateway.base_url, _at("2026-11-16T19:00:00"))  # asleep, nobody told
+        with FakeFleetMachine(accept_keys=(key,)) as morning:
+            check.store({"win-pjzav-pokladna": {"url": morning.url, "key": key}})  # set-sleep off meanwhile
+            report = check.run_at(gateway.base_url, _at("2026-11-17T06:30:00"))
+
+    record = report.status["machines"]["win-pjzav-pokladna"]
+    assert record["state"] == "ok" and record["notified"] is True and "may_sleep" not in record
+    assert check.calls() == []
+
+
+def test_turning_the_flag_off_while_asleep_reports_the_box_at_once(tmp_path, monkeypatch, project, with_flag):
+    check = SleepCheck(tmp_path, monkeypatch, project)
+    key = fresh_secret("k")
+    with FakeFleetMachine(healthz=True) as gateway:
+        with FakeFleetMachine(accept_keys=(key,)) as pokladna:
+            check.store({"win-pjzav-pokladna": {"url": pokladna.url, "key": key, "may_sleep": True}})
+            check.run_at(gateway.base_url, _at("2026-11-16T15:00:00"))  # ok during the day
+            url = pokladna.url
+        check.run_at(gateway.base_url, _at("2026-11-16T19:00:00"))  # closed: asleep
+        assert check.down_item() is None
+        check.store({"win-pjzav-pokladna": {"url": url, "key": key}})  # set-sleep off
+        check.run_at(gateway.base_url, _at("2026-11-16T19:10:00"))
+    assert "win-pjzav-pokladna: nedostupný" in check.down_item()
+
+
+def test_a_box_still_down_drops_out_at_midnight_and_is_reported_again_at_ten(tmp_path, monkeypatch, project, with_flag):
+    """The rule is per local day: a reported box that stays dead leaves the item at midnight and is back at 10:00."""
+    check = SleepCheck(tmp_path, monkeypatch, project)
+    check.store({"win-pjzav-pokladna": {"url": closed_port_url(), "key": fresh_secret("k"), "may_sleep": True}})
+    with FakeFleetMachine(healthz=True) as gateway:
+        check.run_at(gateway.base_url, _at("2026-11-16T10:00:00"))  # 11:00 local, never up: reported
+        assert "win-pjzav-pokladna" in check.down_item()
+        check.run_at(gateway.base_url, _at("2026-11-16T22:50:00"))  # 23:50 local: still reported
+        assert "win-pjzav-pokladna" in check.down_item()
+        check.run_at(gateway.base_url, _at("2026-11-16T23:10:00"))  # 00:10 local: a new day, before ten
+        assert check.down_item() is None
+        check.run_at(gateway.base_url, _at("2026-11-17T09:10:00"))  # 10:10 local
+        assert "win-pjzav-pokladna" in check.down_item()
+    sends = [_option(argv, "--owner-notice") for argv in check.calls() if "--owner-notice" in argv]
+    clears = [_option(argv, "--clear-owner-notice") for argv in check.calls() if "--clear-owner-notice" in argv]
+    assert sends == ["fleet-down", "fleet-down"] and clears == ["fleet-down"]
+
+
+def test_a_record_from_before_the_flag_counts_its_last_ok_run(tmp_path, monkeypatch, project, with_flag):
+    """An upgrade: the status file has no last_ok yet. A box ok at the last run was ok at its checked_at."""
+    check = SleepCheck(tmp_path, monkeypatch, project)
+    check.store({"win-pjzav-pokladna": {"url": closed_port_url(), "key": fresh_secret("k"), "may_sleep": True}})
+    old = {"state": "ok", "since": "2026-11-17T06:00:00.000+00:00", "detail": "ok", "notified": True, "previous": None}
+    write_private_json(
+        check.status,
+        {
+            "checked_at": "2026-11-17T08:00:00.000+00:00",  # 09:00 local today
+            "gateway": {**old, "detail": "version x"},
+            "machines": {"win-pjzav-pokladna": old},
+        },
+    )
+    with FakeFleetMachine(healthz=True) as gateway:
+        report = check.run_at(gateway.base_url, _at("2026-11-17T17:30:00"))  # 18:30 local, closed
+    record = report.status["machines"]["win-pjzav-pokladna"]
+    assert record["last_ok"] == "2026-11-17T08:00:00.000+00:00" and record["asleep"] is True
+    assert check.down_item() is None
+
+
+def test_a_failed_run_s_stamp_is_never_taken_as_last_ok(tmp_path, monkeypatch, project, with_flag):
+    check = SleepCheck(tmp_path, monkeypatch, project)
+    check.store({"win-pjzav-pokladna": {"url": closed_port_url(), "key": fresh_secret("k"), "may_sleep": True}})
+    old = {"state": "ok", "since": "2026-11-16T06:00:00.000+00:00", "detail": "ok", "notified": True, "previous": None}
+    write_private_json(
+        check.status,
+        {
+            "checked_at": "2026-11-17T08:00:00.000+00:00",  # a run that FAILED today
+            "error": {"message": "x", "since": "2026-11-17T08:00:00.000+00:00", "notified": True},
+            "gateway": {**old, "detail": "version x"},
+            "machines": {"win-pjzav-pokladna": old},
+        },
+    )
+    with FakeFleetMachine(healthz=True) as gateway:
+        report = check.run_at(gateway.base_url, _at("2026-11-17T10:00:00"))  # 11:00 local
+    assert "last_ok" not in report.status["machines"]["win-pjzav-pokladna"]
+    assert "win-pjzav-pokladna: nedostupný" in check.down_item()
