@@ -387,8 +387,13 @@ paths:
   `manifest.rename_machine` is a no-op when NEW is there and OLD gone; `rename` counts as RESUMED
   (NEW in the key store, OLD gone) only with evidence of the earlier run — OLD still in the registry,
   or the url `_retire_first` recorded — so a typo for OLD next to an existing NEW is refused.
-  `Registry.rename_machine(fresh=False)` is a no-op when nothing carries OLD; a FRESH rename always
-  runs the stale-NEW check, even for an OLD that nothing carries (review round 2).
+  `Registry.rename_machine(fresh=False)` is a no-op when nothing carries OLD and never refuses (a sync
+  between the runs may have put NEW into a managed allow-list); a FRESH rename always runs the
+  stale-NEW check, even for an OLD that nothing carries (review rounds 2-3). When nothing carries
+  OLD the registry step is skipped (no save, no reload) and counted done, so a later failure points
+  to `sync-configs`. Known edge: a key-store write that LANDED but reported an error, for an OLD
+  nothing carries and no direct project, leaves no evidence; the rerun is refused and the owner
+  finishes with `sync-configs`.
 - `remove` = `Registry.forget_machine` (unexpose + out of EVERY allow-list, hand-made ones too:
   only narrows); refuses when a project would be left empty (the manifest forbids `[]`).
 - `rename` = `Registry.rename_machine`: exposure follows (a kill-switched OLD stays unexposed as

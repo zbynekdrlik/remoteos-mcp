@@ -11,9 +11,9 @@ manifest), the key store, the registry, and the normal ``sync-configs``, which d
 removes or edits it first). ``rename`` keeps org, key, repair recipe, exposure and every consumer's
 access, and refuses a NEW name still left in the registry (a leftover would hand the box to it).
 
-A step that fails says which steps were done; rerunning the SAME command finishes the job (each step
-skips what is already done). ``check`` forgets the old name on its next run: its status file and
-fleet notices are built from the key store.
+A step that fails says which steps were done and what finishes the job: before the registry step,
+the SAME command (each step skips what is already done); after it, ``sync-configs``. ``check``
+forgets the old name on its next run: its status file and fleet notices are built from the key store.
 
 A dry run writes nothing, not even the manifest lock (the sync runs dry on the edited manifest and key
 store, in memory). Output holds names and urls only, never a key or token.
@@ -208,6 +208,7 @@ def machine_rename(paths, old: str, new: str, local_host: str, dry_run: bool) ->
             raise KeystoreError(f"{problem} ({paths.machines}) — nothing changed")
         manifest = manifest_rename(paths.manifest, old, new, dry_run=True)  # validates NEW, refuses before writing
         exposed = old in registry.exposed or (resumed and new in registry.exposed)
+        carried = _in_registry(registry, old)  # read before the in-memory rename below changes the copy
         touched = registry.rename_machine(old, new, fresh=fresh)  # in memory: refuses a NEW left in the registry
         projects = _projects_holding(manifest, {new})
         retired = {old: keystore[old].url if fresh else keystore[new].url}
@@ -229,7 +230,10 @@ def machine_rename(paths, old: str, new: str, local_host: str, dry_run: bool) ->
             moved = r.rename_machine(old, new, fresh=fresh)
             return moved, was_exposed or new in r.exposed
 
-        touched, exposed = _edit_registry(paths, carry_over)
+        if carried:
+            touched, exposed = _edit_registry(paths, carry_over)
+        else:  # nothing carries OLD: no registry edit, and a later failure needs only sync-configs
+            touched = []
         steps.done.append("registry")
         _report_rename(old, new, retired[old], projects, touched, exposed, dry_run=False)
         logger.info("machine rename: %s -> %s (projects %s)", old, new, ", ".join(projects) or "-")

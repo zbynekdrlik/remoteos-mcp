@@ -304,7 +304,9 @@ class Registry:
         carried = old in self.exposed or any(old in c.machines for c in self.consumers.values())
         if not fresh and not carried:
             return []  # a rerun: this step was done already
-        if stale:  # a leftover of a hand removal: carrying OLD over would hand the box to those
+        if stale and fresh:  # a leftover of a hand removal: carrying OLD over would hand the box to those
+            # (a rerun is never refused: the fresh run checked, and a sync in between may have put NEW
+            # into a managed consumer's allow-list on purpose)
             raise RegistryError(
                 f"{new!r} is still in the registry ({', '.join(stale)}) — clear it first"
                 f" (`remoteos-gateway unexpose {new}`, `remoteos-gateway deny <consumer> {new}`); nothing changed"

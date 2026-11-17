@@ -22,7 +22,7 @@ from fleet_harness import FakeFleetMachine, closed_port_url, footer_u, install_f
 from test_gateway_sync import ME, Fleet
 
 from remoteos.gateway import cli as gateway_cli
-from remoteos.gateway.registry import load_registry
+from remoteos.gateway.registry import RegistryError, load_registry
 
 DIRECT = {"host": "dev1", "mode": "direct"}
 
@@ -537,3 +537,38 @@ def test_a_typo_for_old_next_to_an_existing_new_is_refused_not_reported_as_a_ren
     result = machine(fleet, "rename", "linux-typo", "linux-cam1")
     assert result.exit_code == 1 and "no earlier rename of it is in progress" in result.output
     assert files(fleet, camera, direct, fleet.registry.with_name("sync-direct.json")) == before
+
+
+# -- review round 3 -------------------------------------------------------------------------------
+
+
+def test_renaming_a_box_nothing_in_the_registry_carries_leaves_the_registry_untouched(fleet):
+    two_projects(fleet)
+    registry = json.loads(fleet.registry.read_text(encoding="utf-8"))
+    registry["exposed"].remove("linux-presenter")  # in the key store only: no project, no consumer
+    fleet.registry.write_text(json.dumps(registry), encoding="utf-8")
+    before = fleet.registry.read_bytes()
+
+    result = machine(fleet, "rename", "linux-presenter", "linux-presenter2")
+
+    assert result.exit_code == 0, result.output
+    assert fleet.registry.read_bytes() == before  # no edit, no gateway reload
+    assert "linux-presenter2" in json.loads(fleet.keystore.read_text(encoding="utf-8"))
+    assert "NOT exposed (kept so)" in result.output
+
+
+def test_a_rerun_rename_is_never_refused_for_new_in_a_managed_allow_list():
+    """After a registry-step failure the owner may run sync-configs, which puts NEW into the
+    managed consumer: the rerun must still carry OLD over, not call that a leftover."""
+    from remoteos.gateway.registry import Consumer, Registry
+
+    registry = Registry(
+        exposed=["linux-old"],
+        consumers={"camera-box@dev1": Consumer(machines=["linux-new"], managed_by="sync-configs")},
+    )
+    assert registry.rename_machine("linux-old", "linux-new", fresh=False) == []
+    assert registry.exposed == ["linux-new"]
+    with pytest.raises(RegistryError, match="still in the registry"):
+        Registry(exposed=["linux-old"], consumers={"x": Consumer(machines=["linux-new"])}).rename_machine(
+            "linux-old", "linux-new"
+        )
