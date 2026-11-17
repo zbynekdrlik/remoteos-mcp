@@ -335,3 +335,25 @@ def test_an_unreadable_queue_raises_and_check_keeps_the_last_list(tmp_path):
         assert _enroll_pending(tmp_path) is None  # None = keep the last list, never "empty"
     finally:
         queue.pending_dir.chmod(0o700)
+
+
+def test_reject_by_source_takes_the_whole_ipv6_64(endpoint):
+    for index in range(2):
+        endpoint.post(body(fresh_secret("Box"), hostname=f"pc{index}"), ip=f"2001:db8:5:6::{index + 1}")
+    endpoint.post(body(fresh_secret("Box"), hostname="kept"), ip="2001:db8:5:7::1")
+    result = _invoke("enroll-reject", "--source", "2001:db8:5:6::abcd", "--enroll-dir", str(endpoint.queue.root))
+    assert "2 registration(s)" in result.output
+    assert [entry.registration.hostname for entry in endpoint.queue.pending()] == ["kept"]
+
+
+def test_an_unreadable_queue_is_a_clean_error_not_a_traceback(tmp_path):
+    queue = EnrollQueue(tmp_path)
+    queue.add(enroll_queue.parse_registration(json.dumps(body(fresh_secret("K"))).encode()), "::1")
+    queue.pending_dir.chmod(0)
+    try:
+        for args in (["enroll-list"], ["enroll-reject", "--all"]):
+            result = _invoke(*args, "--enroll-dir", str(tmp_path))
+            assert result.exit_code == 1 and "cannot be read or written (PermissionError" in result.output
+            assert not isinstance(result.exception, PermissionError)
+    finally:
+        queue.pending_dir.chmod(0o700)

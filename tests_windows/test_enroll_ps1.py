@@ -148,7 +148,8 @@ $code = Invoke-RemoteOSEnrolledInstall -InstallerPath {_q(installer)} -LogPath {
     assert "ref=dev" in got["log"] and "pip failed" in got["log"]
 
 
-def test_the_elevated_window_exits_with_the_run_s_code(tmp_path):
+@pytest.mark.parametrize(("path", "code"), [("/dev/enroll.ps1", 7), ("/missing", 1)])
+def test_the_elevated_window_exits_with_the_run_s_code_and_1_when_the_download_fails(tmp_path, path, code):
     served = b"$global:LASTEXITCODE = 7\n"
 
     class Handler(BaseHTTPRequestHandler):
@@ -156,7 +157,7 @@ def test_the_elevated_window_exits_with_the_run_s_code(tmp_path):
             return
 
         def do_GET(self):  # noqa: N802 - stdlib naming
-            ok = self.path == "/dev/enroll.ps1"
+            ok = self.path == path
             self.send_response(200 if ok else 404)
             self.send_header("content-type", "text/plain")
             self.send_header("content-length", str(len(served) if ok else 0))
@@ -175,4 +176,4 @@ def test_the_elevated_window_exits_with_the_run_s_code(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
-    assert result.returncode == 7, result.stdout + result.stderr
+    assert result.returncode == code, result.stdout + result.stderr

@@ -28,7 +28,7 @@ from remoteos.gateway import cli_fleet
 from remoteos.gateway.cli_enroll import _check_request, _project_list, finish_registration
 from remoteos.gateway.enroll import EnrollError
 from remoteos.gateway.enroll_listen import DEFAULT_LISTEN_HOST, DEFAULT_LISTEN_PORT, create_app
-from remoteos.gateway.enroll_queue import DEFAULT_ENROLL_DIR, EnrollQueue, source_text
+from remoteos.gateway.enroll_queue import DEFAULT_ENROLL_DIR, EnrollQueue, source_group, source_text
 from remoteos.gateway.registry import ORGS
 
 
@@ -47,6 +47,18 @@ def printable(text: str) -> str:
     """Text a box posted, safe for the operator's terminal: control characters (an ESC sequence could
     rewrite the screen) become ``?``; newlines and tabs stay."""
     return _CONTROL.sub("?", text)
+
+
+def _queue_error(queue: EnrollQueue, exc: OSError) -> click.ClickException:
+    return click.ClickException(f"the enrollment queue {queue.root} cannot be read or written"
+                                f" ({type(exc).__name__}: {exc.strerror or 'error'})")
+
+
+def _pending(queue: EnrollQueue) -> list:
+    try:
+        return queue.pending()
+    except OSError as exc:
+        raise _queue_error(queue, exc) from exc
 
 
 def _when(stamp: float) -> str:
@@ -94,7 +106,7 @@ def enroll_listen_command(host: str, port: int, log_level: str, enroll_dir: Path
 def enroll_list_command(enroll_dir: Path) -> None:
     """The registrations waiting for enroll-accept (never their keys) and the install logs."""
     queue = EnrollQueue(enroll_dir)
-    entries = queue.pending()
+    entries = _pending(queue)
     if not entries:
         click.echo("no pending registration")
     for entry in entries:
@@ -102,7 +114,10 @@ def enroll_list_command(enroll_dir: Path) -> None:
         addresses = ", ".join(r.addresses) or "no private address (accept needs --url)"
         click.echo(f"{entry.id}  {_when(entry.received_at)}  {r.hostname}  {r.os}  v{r.version}  port {r.port}"
                    f"  ssh account {r.account}  from {entry.source}  addresses: {addresses}")
-    logs = queue.logs()
+    try:
+        logs = queue.logs()
+    except OSError as exc:
+        raise _queue_error(queue, exc) from exc
     if logs:
         newest = logs[-1]
         click.echo(f"install logs: {len(logs)}, newest {newest.id} from {newest.hostname} ({newest.os}),"
@@ -133,14 +148,21 @@ def enroll_accept_command(ctx: click.Context, ref: str, name: str, org: str, pro
         entry = queue.get(ref)
     except EnrollError as exc:
         raise click.ClickException(str(exc)) from exc
+    except OSError as exc:
+        raise _queue_error(queue, exc) from exc
     click.echo(f"registration {entry.id}: posted from {entry.source} at {_when(entry.received_at)}")
     notify = {"airuleset_path": airuleset_path, "notify_owner": notify_owner,
               "notify_project_dir": notify_project_dir, "notices_file": notices_file}
     stored = []
 
     def drop_registration() -> None:  # the key store holds the key now: the queued copy goes
-        queue.remove(entry.id)
         stored.append(True)
+        try:
+            queue.remove(entry.id)
+        except OSError as exc:  # the machine is enrolled anyway: say what is left, go on
+            click.echo(f"[!] registration {entry.id} could not be removed from the queue ({type(exc).__name__}):"
+                       f" reject it by hand with `remoteos-gateway enroll-reject {entry.id}`")
+            return
         click.echo(f"registration {entry.id} done: removed from the queue")
 
     try:
@@ -159,7 +181,8 @@ def enroll_accept_command(ctx: click.Context, ref: str, name: str, org: str, pro
 
 @click.command("enroll-reject")
 @click.argument("entry_id", required=False)
-@click.option("--source", default=None, help="Reject every registration posted from this address.")
+@click.option("--source", default=None,
+              help="Reject every registration posted from this address (IPv6: its whole /64, as the limits count).")
 @click.option("--all", "reject_all", is_flag=True, help="Reject every pending registration.")
 @_enroll_dir_option
 def enroll_reject_command(entry_id: str | None, source: str | None, reject_all: bool, enroll_dir: Path) -> None:
@@ -168,13 +191,21 @@ def enroll_reject_command(entry_id: str | None, source: str | None, reject_all: 
         raise click.UsageError("name ONE of: an id, --source <address>, --all")
     queue = EnrollQueue(enroll_dir)
     if entry_id is not None:
-        if not queue.remove(entry_id):
+        try:
+            removed = queue.remove(entry_id)
+        except OSError as exc:
+            raise _queue_error(queue, exc) from exc
+        if not removed:
             raise click.ClickException("no pending registration with that id: see `remoteos-gateway enroll-list`")
         click.echo(f"registration {entry_id} rejected and deleted")
         return
-    chosen = [entry for entry in queue.pending() if reject_all or entry.source == source_text(source)]
-    for entry in chosen:
-        queue.remove(entry.id)
+    group = source_group(source_text(source)) if source is not None else None
+    chosen = [entry for entry in _pending(queue) if reject_all or source_group(entry.source) == group]
+    try:
+        for entry in chosen:
+            queue.remove(entry.id)
+    except OSError as exc:
+        raise _queue_error(queue, exc) from exc
     click.echo(f"{len(chosen)} registration(s) rejected and deleted")
 
 
@@ -184,6 +215,13 @@ def enroll_reject_command(entry_id: str | None, source: str | None, reject_all: 
 def enroll_log_command(log_id: str | None, enroll_dir: Path) -> None:
     """List the install logs boxes posted, or print the one LOG_ID."""
     queue = EnrollQueue(enroll_dir)
+    try:
+        _print_logs(queue, log_id)
+    except OSError as exc:
+        raise _queue_error(queue, exc) from exc
+
+
+def _print_logs(queue: EnrollQueue, log_id: str | None) -> None:
     if log_id is None:
         logs = queue.logs()
         if not logs:
