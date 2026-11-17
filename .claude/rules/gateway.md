@@ -9,6 +9,13 @@ paths:
   - "tests/test_release_channel.py"
   - "scripts/create-release.sh"
   - "deploy/remoteos-gateway*"
+  - "installers/enroll-*/**"
+  - "installers/enroll-values.conf"
+  - "enroll.ps1"
+  - "enroll-linux.sh"
+  - "enroll.sh"
+  - "tests/test_enroll_wrappers.py"
+  - "tests_windows/test_enroll_ps1.py"
 ---
 
 # remoteos-gateway (dev1 MCP gateway, #25) — gotchas
@@ -440,3 +447,53 @@ paths:
   `enroll-finish`: machines on 127.0.0.1 go through `--url`.
 
 - **Enroll a box behind the sites' NAT with `--url`.** A box posts the addresses it sees: strih-pp is 10.77.8.202 on its own NIC and 10.76.8.202 from dev1, so the posted address is unreachable and the finish fails (live, #26). The registration stays in the vault for an hour: rerun the printed finish command with `--url http://<name>.lan:8092/mcp`. A name must start with `win-`, `linux-` or `mac-`.
+
+## Permanent enrollment (#101): `enroll_listen.py`, `enroll_queue.py`, `cli_enroll_queue.py`, `installers/enroll-*`
+
+- **One fixed README line per OS** (`enroll.ps1`, `enroll-linux.sh`, `enroll.sh`, generated; the endpoint +
+  dev1's public SSH key come from `installers/enroll-values.conf` through `@@NAME@@` placeholders, a
+  missing value fails the build). They run the normal installer with `REMOTEOS_ENROLL` = the permanent
+  URL, so the installers' enrollment code (#26) is unchanged: the URL must keep passing `enroll_url_ok` /
+  `Test-RemoteOSEnrollUrl` (one path segment + `/`: `/enroll/`) and the listener must answer exactly `ok`.
+- The values are PUBLIC constants (the endpoint only queues), so enroll.ps1 relaunches itself for UAC
+  (`-EncodedCommand`, the ref inside) — unlike #26's one-time URL, which never crosses the elevation.
+  The installer runs as a CHILD powershell (`-File`: no pause, its `exit` cannot end the wrapper); a
+  piped wrapper never `exit`s (it would close the person's console). The bash child gets `</dev/null`:
+  the rest of the piped script must not reach it.
+- **A failed install posts its log tail** (`POST /enroll/log`, text, `X-Remoteos-Host/Os/Exit` headers,
+  no JSON escaping in bash/PS); the server validates the headers (`log_meta`) and keeps the newest
+  `MAX_LOGS`. `enroll-log` reads them. PowerShell: a reply with no text content type is `byte[]`.
+- **The listener** binds loopback only (`_loopback_only`), `proxy_headers=False`; the poster is
+  `CF-Connecting-IP` only when the peer is loopback (cloudflared). Caps: 16 KiB registration / 256 KiB
+  log, enforced while streaming (a missing or lying Content-Length too; `isascii()` before `isdigit()`),
+  per-poster + global sliding window keyed by `source_group` (IPv4 address, IPv6 /64: one host holds a
+  /64), registrations and logs on SEPARATE limiters, `MAX_PENDING` + `MAX_PER_SOURCE` in the queue
+  (review round 1: 5 addresses filled the queue for 24 h). `enroll-reject --source <ip>` / `--all` clean
+  a flood. No `--log-level debug` (uvicorn would log bodies). Errors name the field
+  (`parse_registration`), never the value.
+- **The queue:** one 0600 file per registration (temp + rename), 0700 dirs, 24 h expiry (the key goes
+  with the file), a repost of the same hostname + key is the same entry, ids are 8 hex checked before
+  any path, every file is re-validated on read (a tampered one is skipped). The folders are listed
+  with `os.scandir`, never `Path.glob` (it answers "none" for a mode-000 folder): an unreadable queue
+  RAISES, so `check` keeps the last list instead of clearing the notice. Expiry runs inside `pending()`,
+  so `check`'s 10-minute timer is the expiry clock. `enroll-log` prints control characters as `?`
+  (`printable`): the text is anyone's, an ESC sequence could rewrite the operator's screen.
+- **`enroll-accept`** = `finish_registration` (shared with `enroll-finish`) with `check_hostname`: the
+  public `/health` of each candidate must report the posted hostname (short names compared,
+  case-insensitive; a server that reports none does NOT match) BEFORE the key is sent there. Candidates
+  are private/tailscale only (`candidate_urls`), `--url` the override. A failure BEFORE the key is
+  stored keeps the entry; `after_store` drops it once the key store + manifest hold the machine (the
+  retry is then `sync-configs`/`check`), so the closing `check` no longer lists it. **`ctx.invoke`
+  fills a parameter's DEFAULT, never its envvar**: `finish_registration` passes `enroll_dir` (and
+  `releases_url`) itself, else the check read dev1's real queue from the tests.
+- The PowerShell relaunch command ends `$enrollCode = $LASTEXITCODE; try { Read-Host } catch {}; exit
+  $enrollCode`: a window's exit code is its LAST statement's, and the Read-Host made every failure a 0.
+- **The owner notice** is a fourth fleet kind, `enroll-pending`, built from `status["enroll_pending"]`
+  (`[[id, hostname]]`, written by `check` from the queue; an unreadable queue keeps the last list, never
+  clears). Like the other kinds: ONE item, only a changed id set re-sends, an empty queue clears it.
+- **The public hostname** (`enroll-dev1.newlevel.media` -> a named tunnel -> 127.0.0.1:8817) is an
+  account-level Cloudflare change: airuleset's (#1241), never minted from this project. No Access app
+  covers `*.newlevel.media` (checked 2026-11-17), so the hostname needs no Access bypass.
+- Tests: `test_gateway_enroll_listen.py` (real HTTP through uvicorn + the real command as a child),
+  `test_gateway_enroll_accept.py`, `test_enroll_wrappers.py` (the generated bash wrappers piped into bash
+  with a fake curl; also under bash 3.2 in the shell job), `tests_windows/test_enroll_ps1.py`.

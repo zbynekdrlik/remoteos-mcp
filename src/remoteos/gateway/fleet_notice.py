@@ -8,6 +8,9 @@ each listing its boxes:
                        grouped under its company (``org`` on its record, #105: Slovnormal apart from nlmedia)
 - ``fleet-stale``    — every box behind the stable release (``drift`` on its record)
 - ``fleet-no-admin`` — every box without admin rights (``no_admin`` on its record)
+- ``enroll-pending`` — every registration waiting for ``enroll-accept`` (#101), from
+                       ``status["enroll_pending"]`` (``[[id, hostname], ...]``, written by ``check``
+                       from the queue), not from a machine record: the box is not in the key store yet
 
 Each kind has a FINGERPRINT of what its text says (down: name + state + org; stale: name + version +
 stable tag; no-admin: names), and its text holds nothing else that changes (no day counts). The
@@ -39,9 +42,14 @@ logger = logging.getLogger("remoteos.gateway.fleet_notice")
 DOWN = "fleet-down"
 STALE = "fleet-stale"
 NO_ADMIN = "fleet-no-admin"
+ENROLL = "enroll-pending"
 STATUS_KEY = "fleet_notices"
+PENDING_KEY = "enroll_pending"
+ENROLL_HINT = ("Prijať len počítač, ktorý vlastník potvrdil (porovnaj adresu odosielateľa v"
+               " remoteos-gateway enroll-list): enroll-accept <id|hostname> --name win-… --org … --projects …"
+               " · odmietnuť: enroll-reject <id> / --source <adresa> / --all")
 
-KINDS = (DOWN, STALE, NO_ADMIN)
+KINDS = (DOWN, STALE, NO_ADMIN, ENROLL)
 _DETAIL_LIMIT = 80
 ORG_TITLES = {"slovnormal": "Slovnormal", "nlmedia": "nlmedia"}
 _NO_ORG = "bez organizácie"
@@ -163,8 +171,31 @@ def _no_admin(machines: dict[str, dict], host: str) -> KindNotice | None:
     return KindNotice(NO_ADMIN, [[n] for n in names], names, fit(title, lines, [ADMIN_HINT]))
 
 
-def build_kind(slug: str, machines: dict[str, dict], host: str) -> KindNotice | None:
-    """The notice of kind *slug* in *machines* (a final status); None when no box is in it."""
+def pending_of(status: dict) -> list[list[str]]:
+    """The waiting registrations ``check`` wrote (``[[id, hostname], ...]``); anything else is none."""
+    value = status.get(PENDING_KEY)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value
+            if isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)]
+
+
+def _enroll(pending: list[list[str]], host: str) -> KindNotice | None:
+    """ONE item for every box waiting to be accepted (the owner says which machine it is)."""
+    if not pending:
+        return None
+    lines = [f"• {hostname} (id {entry_id})" for entry_id, hostname in pending]
+    title = f"Nový počítač čaká na prijatie do MCP brány ({host}): {len(pending)}"
+    return KindNotice(ENROLL, [list(item) for item in pending], [entry_id for entry_id, _ in pending],
+                      fit(title, lines, [ENROLL_HINT]))
+
+
+def build_kind(slug: str, machines: dict[str, dict], host: str,
+               pending: list[list[str]] | None = None) -> KindNotice | None:
+    """The notice of kind *slug* in *machines* (a final status) and *pending* (the enrollment
+    queue); None when nothing is in it."""
+    if slug == ENROLL:
+        return _enroll(pending or [], host)
     if slug == DOWN:
         return _down(machines, host)
     if slug == STALE:
@@ -172,15 +203,17 @@ def build_kind(slug: str, machines: dict[str, dict], host: str) -> KindNotice | 
     return _no_admin(machines, host)
 
 
-def build(machines: dict[str, dict], host: str) -> dict[str, KindNotice]:
-    """The kind notices that are open in *machines*, by slug."""
-    made = (build_kind(slug, machines, host) for slug in KINDS)
+def build(machines: dict[str, dict], host: str, pending: list[list[str]] | None = None) -> dict[str, KindNotice]:
+    """The kind notices that are open in *machines* and *pending*, by slug."""
+    made = (build_kind(slug, machines, host, pending) for slug in KINDS)
     return {notice.slug: notice for notice in made if notice is not None}
 
 
-def open_slugs(machines: dict[str, dict]) -> set[str]:
-    """The kind slugs open in *machines*: a kind with at least one box."""
-    return {slug for slug, is_open in _OPEN.items() if any(is_open(r) for r in machines.values())}
+def open_slugs(machines: dict[str, dict], pending: list[list[str]] | None = None) -> set[str]:
+    """The kind slugs open in *machines*: a kind with at least one box; ``enroll-pending`` when a
+    registration waits."""
+    open_now = {slug for slug, is_open in _OPEN.items() if any(is_open(r) for r in machines.values())}
+    return open_now | ({ENROLL} if pending else set())
 
 
 def delivered_before(previous: dict) -> dict[str, list]:
@@ -202,6 +235,8 @@ def _box_set(fingerprint: object) -> frozenset[str] | None:
 
 
 def _mark_notified(machines: dict[str, dict], notice: KindNotice) -> None:
+    if notice.slug == ENROLL:  # registrations, not machine records
+        return
     for name in notice.names:
         record = machines[name]
         if notice.slug == DOWN:
@@ -219,12 +254,14 @@ def reconcile(status: dict, notifier: Notify | None, host: str) -> bool | None:
     Each kind on its own: one that fails is logged and retried, the others still go out.
     Returns None when nothing had to go out, else whether all of it did."""
     machines = status["machines"]
+    pending = pending_of(status)
     known = status.get(STATUS_KEY) if isinstance(status.get(STATUS_KEY), dict) else {}
-    current: dict[str, list] = {slug: value for slug, value in known.items() if slug not in open_slugs(machines)}
+    open_now = open_slugs(machines, pending)
+    current: dict[str, list] = {slug: value for slug, value in known.items() if slug not in open_now}
     sent: bool | None = None
     for slug in KINDS:
         try:
-            notice = build_kind(slug, machines, host)
+            notice = build_kind(slug, machines, host, pending)
         except Exception:
             logger.exception("check: the %s notice could not be built — retried next run", slug)
             sent = False
@@ -258,7 +295,7 @@ def clear_unbooked(status: dict, notifier: Notify | None) -> None:
     notices = status.get(STATUS_KEY)
     if not isinstance(notices, dict):
         return
-    open_now = open_slugs(status["machines"])
+    open_now = open_slugs(status["machines"], pending_of(status))
     closed = [slug for slug in KINDS if slug in notices and slug not in open_now]
     if not closed:
         return

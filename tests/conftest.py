@@ -35,6 +35,7 @@ def _isolate_gateway_environment(tmp_path, monkeypatch):
         ("REMOTEOS_GATEWAY_STATUS_FILE", "machines-status.json"),
         ("REMOTEOS_GATEWAY_NOTICES_FILE", "owner-notices.json"),
         ("REMOTEOS_GATEWAY_NOTIFY_PROJECT_DIR", "no-project"),
+        ("REMOTEOS_GATEWAY_ENROLL_DIR", "enroll"),
     ):
         monkeypatch.setenv(name, str(isolated / file))
     monkeypatch.setenv("REMOTEOS_GATEWAY_SSH", str(isolated / "no-ssh"))

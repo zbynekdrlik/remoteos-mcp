@@ -294,7 +294,7 @@ def open_notices(status: dict) -> set[str]:
     """The owner-notice slugs of every condition still open after this run: the gateway's and one
     per machine condition KIND (an old per-box slug is never open, so ``_settle`` clears it)."""
     open_now = {GATEWAY_NOTICE} if status["gateway"]["state"] != STATE_OK else set()
-    return open_now | fleet_notice.open_slugs(status["machines"])
+    return open_now | fleet_notice.open_slugs(status["machines"], fleet_notice.pending_of(status))
 
 
 def _reopen_gateway(status: dict, previous: dict, notifier: Notify | None) -> None:
@@ -356,7 +356,10 @@ def run_check(
     host: str = "dev1",
     now: Callable[[], _dt.datetime] | None = None,
     drift: DriftPolicy | None = None,
+    enroll_pending: list[list[str]] | None = None,
 ) -> CheckReport:
+    """*enroll_pending*: the registrations waiting for ``enroll-accept`` (#101) as ``[[id, hostname]]``;
+    None = the queue could not be read this run, so the last run's list is kept."""
     moment = (now or (lambda: _dt.datetime.now(_dt.timezone.utc)))()
     stamp = moment.isoformat(timespec="milliseconds")
     previous = load_status(status_path)
@@ -367,7 +370,8 @@ def run_check(
         raise
     try:
         return _check_loaded(
-            entries, previous, moment, keystore_path, status_path, gateway_url, notifier, ssh_bin, host, drift
+            entries, previous, moment, keystore_path, status_path, gateway_url, notifier, ssh_bin, host, drift,
+            enroll_pending,
         )
     except CheckError:
         raise
@@ -389,6 +393,7 @@ def _check_loaded(
     ssh_bin: str | None,
     host: str,
     drift: DriftPolicy | None,
+    enroll_pending: list[list[str]] | None = None,
 ) -> CheckReport:
     stamp = moment.isoformat(timespec="milliseconds")
     observations, health = asyncio.run(
@@ -408,6 +413,9 @@ def _check_loaded(
     for name, record in status["machines"].items():  # the company, for the fleet-down grouping (#105)
         if entries[name].org is not None:
             record["org"] = entries[name].org
+    waiting = fleet_notice.pending_of(previous) if enroll_pending is None else enroll_pending
+    if waiting:
+        status[fleet_notice.PENDING_KEY] = waiting
     _reopen_gateway(status, previous, notifier)
     status[fleet_notice.STATUS_KEY] = fleet_notice.delivered_before(previous)  # kept through a plain run
     per_kind = owner_notice.per_condition(notifier)

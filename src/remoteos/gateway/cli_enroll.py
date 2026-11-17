@@ -10,13 +10,14 @@ machine to the projects, ``sync-configs``, ``check``. The how and why: ``enroll.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import shlex
 import signal
 import socket
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import click
@@ -38,9 +39,10 @@ from remoteos.gateway.enroll import (
     secret_name,
     wait_for_registration,
 )
+from remoteos.gateway.enroll_queue import DEFAULT_ENROLL_DIR
 from remoteos.gateway.keystore import load_keystore, mask_secret, set_key
 from remoteos.gateway.manifest import ManifestError, add_machine, load_manifest
-from remoteos.gateway.probe import STATE_OK, probe_one
+from remoteos.gateway.probe import STATE_OK, new_client, probe_one, probe_version
 from remoteos.gateway.registry import (
     ORG_MISSING_HINT,
     ORGS,
@@ -200,18 +202,74 @@ def enroll_command(paths, name: str, org: str, projects: str, url: str | None, r
     click.echo(f"{name} is enrolled")
 
 
-def _choose_url(registration: Registration, explicit: str | None) -> str:
-    """The first url where the machine accepts the posted key. Only private addresses get it."""
+def _hostname_matches(url: str, registration: Registration) -> bool:
+    """The box at *url* says, on its public ``/health``, that it is the host that posted (#101).
+    A server too old to report its hostname does not match: an accept must see the name."""
+    result = asyncio.run(_health(url))
+    reported = (result.hostname or "").lower() if result.state == STATE_OK else ""
+    posted = registration.hostname.lower()
+    match = bool(reported) and (reported == posted or reported.split(".")[0] == posted.split(".")[0])
+    click.echo(f"  {url}: /health hostname {result.hostname or '(none)'}"
+               f" — {'matches' if match else 'does NOT match'} {registration.hostname}")
+    return match
+
+
+async def _health(url: str):
+    async with new_client() as client:
+        return await probe_version(client, url)
+
+
+def _choose_url(registration: Registration, explicit: str | None, *, check_hostname: bool = False) -> str:
+    """The first url where the machine accepts the posted key (and, for a public registration, says
+    it is the posted host). Only private addresses get the key."""
     candidates = [explicit] if explicit else candidate_urls(registration)
     if not candidates:
         raise EnrollError("the registration names no private address: pass --url")
     authorization = f"Bearer {registration.key}"
     for url in candidates:
+        if check_hostname and not _hostname_matches(url, registration):
+            continue  # the key is never sent to a box that is not the one that posted
         result = probe_one(url, authorization)
         click.echo(f"  {url}: {result.state} ({result.detail})")
         if result.state == STATE_OK:
             return url
     raise EnrollError("the machine accepted the key at no address: is it reachable from dev1? Pass --url")
+
+
+def finish_registration(ctx: click.Context, registration: Registration, *, name: str, org: str, projects: list[str],
+                        url: str | None, local_host: str, notify: dict, status_file: Path,
+                        check_hostname: bool = False, enroll_dir: Path | None = None,
+                        after_store: Callable[[], None] | None = None) -> None:
+    """What a person did by hand once a box posted: verify the key, store it, expose a new machine,
+    add it to the projects, ``sync-configs``, ``check``. Shared by ``enroll-finish`` and
+    ``enroll-accept``; *after_store* runs once the key store and the manifest hold the machine,
+    before the sync (the accept drops the queued registration there). Raises
+    ``click.ClickException``; the key never reaches the output."""
+    paths = ctx.obj
+    try:
+        click.echo(f"registration: {registration.hostname} ({registration.os}), v{registration.version},"
+                   f" ssh account {registration.account}")
+        target = _choose_url(registration, url, check_hostname=check_hostname)
+        outcome = set_key(paths.machines, name, registration.key, url=target, org=org)
+        if outcome.created:
+            cli_fleet._expose_new(paths, [name])  # before the manifest: a retry finds the machine known
+        for project in projects:
+            added = add_machine(paths.manifest, project, name)
+            click.echo(f"  {project}: {'added' if added else 'already lists it'}")
+    except (EnrollError, MachineSourceError, ManifestError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"{name}: key {mask_secret(registration.key)}, url {outcome.url}")
+    if after_store is not None:
+        after_store()
+    ctx.invoke(cli_fleet.sync_configs_command, dry_run=False, local_host=local_host, prune=False)
+    # ctx.invoke fills a parameter's DEFAULT, never its envvar: pass what the command line would read
+    ctx.invoke(cli_fleet.check_command, status_file=status_file, gateway_url=None, **notify, local_host=local_host,
+               releases_url=os.environ.get("REMOTEOS_RELEASES_URL", RELEASES_URL),
+               enroll_dir=enroll_dir or Path(os.environ.get("REMOTEOS_GATEWAY_ENROLL_DIR") or DEFAULT_ENROLL_DIR))
+    machines = load_status(status_file.expanduser()).get("machines")
+    record = machines.get(name) if isinstance(machines, dict) else None
+    if not isinstance(record, dict) or record.get("state") != STATE_OK:
+        raise click.ClickException(f"{name}: check does not report it ok: {record}")
 
 
 @click.command("enroll-finish")
@@ -228,29 +286,13 @@ def enroll_finish_command(ctx: click.Context, name: str, org: str, projects: str
                           local_host: str, airuleset_path: Path, notify_owner: str | None, notify_project_dir: Path,
                           notices_file: Path, status_file: Path) -> None:
     """Internal, run by ``enroll``: the registration comes on STDIN."""
-    paths = ctx.obj
     wanted = _project_list(projects)
-    _check_request(paths, name, org, wanted, replace, url)
+    _check_request(ctx.obj, name, org, wanted, replace, url)
     try:
         registration = parse_registration(sys.stdin.buffer.read())
-        click.echo(f"registration: {registration.hostname} ({registration.os}), v{registration.version},"
-                   f" ssh account {registration.account}")
-        target = _choose_url(registration, url)
-        outcome = set_key(paths.machines, name, registration.key, url=target, org=org)
-        if outcome.created:
-            cli_fleet._expose_new(paths, [name])  # before the manifest: a retry finds the machine known
-        for project in wanted:
-            added = add_machine(paths.manifest, project, name)
-            click.echo(f"  {project}: {'added' if added else 'already lists it'}")
-    except (EnrollError, MachineSourceError, ManifestError) as exc:
+    except EnrollError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"{name}: key {mask_secret(registration.key)}, url {outcome.url}")
     notify = {"airuleset_path": airuleset_path, "notify_owner": notify_owner,
               "notify_project_dir": notify_project_dir, "notices_file": notices_file}
-    ctx.invoke(cli_fleet.sync_configs_command, dry_run=False, local_host=local_host, prune=False)
-    ctx.invoke(cli_fleet.check_command, status_file=status_file, gateway_url=None, **notify, local_host=local_host,
-               releases_url=os.environ.get("REMOTEOS_RELEASES_URL", RELEASES_URL))
-    machines = load_status(status_file.expanduser()).get("machines")
-    record = machines.get(name) if isinstance(machines, dict) else None
-    if not isinstance(record, dict) or record.get("state") != STATE_OK:
-        raise click.ClickException(f"{name}: check does not report it ok: {record}")
+    finish_registration(ctx, registration, name=name, org=org, projects=wanted, url=url, local_host=local_host,
+                        notify=notify, status_file=status_file)
