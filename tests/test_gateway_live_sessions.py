@@ -11,9 +11,11 @@ from __future__ import annotations
 import ast
 import json
 import os
+import select
 import subprocess
 import sys
-import time
+import tempfile
+from pathlib import Path
 
 import pytest
 from fleet_harness import install_fake_airuleset, install_fake_remote_tools, notify_calls, remote_calls
@@ -146,24 +148,28 @@ def test_nothing_live_composes_nothing():
 
 
 class LiveSession:
-    """A real process whose comm is ``claude`` (a shebang script keeps its file name as comm)."""
+    """A real process whose comm is ``claude`` (a shebang script keeps its file name as comm).
+
+    Each session has its OWN script: rewriting a shared one while an earlier shell had not read it
+    yet made that session run nothing and end (#108). The constructor returns once the script says
+    ``ready``, i.e. the shell runs it: the exec is over, so the environ the scan reads is in place
+    (comm is set at the start of the exec, the environ only at its end)."""
 
     def __init__(self, tmp_path, cwd, pane: str | None) -> None:
-        script = tmp_path / "session-bin" / "claude"
-        script.parent.mkdir(exist_ok=True)
-        script.write_text("#!/bin/sh\nread -r _\n", encoding="utf-8")
+        script = Path(tempfile.mkdtemp(prefix="session-bin-", dir=tmp_path)) / "claude"
+        script.write_text("#!/bin/sh\necho ready\nread -r _\n", encoding="utf-8")
         script.chmod(0o755)
         env = {k: v for k, v in os.environ.items() if not k.startswith("TMUX")}
         if pane:
             env.update(TMUX="/tmp/fake-tmux,1,0", TMUX_PANE=pane)
-        self.process = subprocess.Popen([str(script)], cwd=cwd, env=env, stdin=subprocess.PIPE)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            comm = open(f"/proc/{self.process.pid}/comm", encoding="utf-8").read().strip()
-            if comm == "claude":
-                return
-            time.sleep(0.01)
-        raise AssertionError(f"the process is named {comm!r}")
+        self.process = subprocess.Popen([str(script)], cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        ready, _, _ = select.select([self.process.stdout], [], [], 5)
+        line = self.process.stdout.readline() if ready else b""
+        if line != b"ready\n":
+            self.__exit__()
+            raise AssertionError(f"the fake session did not start its script: {line!r}")
+        comm = Path(f"/proc/{self.process.pid}/comm").read_text(encoding="utf-8").strip()
+        assert comm == "claude", f"the process is named {comm!r}"
 
     def __enter__(self):
         return self
@@ -171,6 +177,8 @@ class LiveSession:
     def __exit__(self, *exc):
         self.process.kill()
         self.process.wait()
+        self.process.stdin.close()
+        self.process.stdout.close()
 
 
 def script_of(pid: int) -> str:
