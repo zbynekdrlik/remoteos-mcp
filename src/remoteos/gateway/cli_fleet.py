@@ -35,6 +35,7 @@ from remoteos.gateway.check import (
     run_check,
 )
 from remoteos.gateway.drift import DriftPolicy
+from remoteos.gateway.enroll_queue import DEFAULT_ENROLL_DIR, EnrollQueue
 from remoteos.gateway.keystore import (
     DEFAULT_IMPORT_MATCH,
     apply_import,
@@ -71,6 +72,8 @@ from remoteos.gateway.registry import (
 from remoteos.gateway.sync import CROSS_ORG_PROJECTS, SyncError, sync_configs
 from remoteos.gateway.targets import TargetError, target_for
 from remoteos.release_channel import RELEASES_URL, fetch_releases, soak_days
+
+logger = logging.getLogger("remoteos.gateway.cli_fleet")
 
 LOCAL_HOST_HELP = "This host's name as the manifest's `host` spells it (dev1); other hosts are reached over ssh."
 _GATEWAY_URL_HELP = f"The gateway (default: the manifest's [gateway] url, else {DEFAULT_GATEWAY_URL})."
@@ -488,6 +491,16 @@ def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> 
 # -- check ------------------------------------------------------------------------------
 
 
+def _enroll_pending(enroll_dir: Path) -> list[list[str]] | None:
+    """The registrations waiting for ``enroll-accept``; None when the queue cannot be read (the
+    last run's list is kept, so a read error neither clears nor re-sends the owner notice)."""
+    try:
+        return [[entry.id, entry.registration.hostname] for entry in EnrollQueue(enroll_dir).pending()]
+    except OSError as exc:
+        logger.error("check: the enrollment queue %s cannot be read (%s)", enroll_dir, type(exc).__name__)
+        return None
+
+
 @click.command("check")
 @_status_file_option
 @click.option("--gateway-url", default=None, help=_GATEWAY_URL_HELP + " Its /healthz is probed too.")
@@ -500,6 +513,14 @@ def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> 
     show_default=True,
     help="The GitHub release list; stable is judged from it (a failed read only skips drift for that run).",
 )
+@click.option(
+    "--enroll-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    envvar="REMOTEOS_GATEWAY_ENROLL_DIR",
+    default=DEFAULT_ENROLL_DIR,
+    show_default=True,
+    help="The enrollment queue (#101): a registration waiting there is ONE owner notice.",
+)
 @click.pass_obj
 def check_command(
     paths,
@@ -511,6 +532,7 @@ def check_command(
     notices_file: Path,
     local_host: str,
     releases_url: str,
+    enroll_dir: Path,
 ) -> None:
     """Probe every machine directly with its stored key + the gateway's /healthz; record the
     states and versions, announce each change ONCE, and report a box older than stable.
@@ -526,6 +548,7 @@ def check_command(
             notifier=_notifier(airuleset_path, notify_owner, notify_project_dir, notices_file),
             host=local_host,
             drift=DriftPolicy(fetch=lambda: fetch_releases(releases_url), soak_days=soak_days()),
+            enroll_pending=_enroll_pending(enroll_dir),
         )
     except (MachineSourceError, CheckError) as exc:
         raise fail(exc) from exc

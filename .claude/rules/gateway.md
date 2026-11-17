@@ -9,6 +9,13 @@ paths:
   - "tests/test_release_channel.py"
   - "scripts/create-release.sh"
   - "deploy/remoteos-gateway*"
+  - "installers/enroll-*/**"
+  - "installers/enroll-values.conf"
+  - "enroll.ps1"
+  - "enroll-linux.sh"
+  - "enroll.sh"
+  - "tests/test_enroll_wrappers.py"
+  - "tests_windows/test_enroll_ps1.py"
 ---
 
 # remoteos-gateway (dev1 MCP gateway, #25) — gotchas
@@ -440,3 +447,40 @@ paths:
   `enroll-finish`: machines on 127.0.0.1 go through `--url`.
 
 - **Enroll a box behind the sites' NAT with `--url`.** A box posts the addresses it sees: strih-pp is 10.77.8.202 on its own NIC and 10.76.8.202 from dev1, so the posted address is unreachable and the finish fails (live, #26). The registration stays in the vault for an hour: rerun the printed finish command with `--url http://<name>.lan:8092/mcp`. A name must start with `win-`, `linux-` or `mac-`.
+
+## Permanent enrollment (#101): `enroll_listen.py`, `enroll_queue.py`, `cli_enroll_queue.py`, `installers/enroll-*`
+
+- **One fixed README line per OS** (`enroll.ps1`, `enroll-linux.sh`, `enroll.sh`, generated; the endpoint +
+  dev1's public SSH key come from `installers/enroll-values.conf` through `@@NAME@@` placeholders, a
+  missing value fails the build). They run the normal installer with `REMOTEOS_ENROLL` = the permanent
+  URL, so the installers' enrollment code (#26) is unchanged: the URL must keep passing `enroll_url_ok` /
+  `Test-RemoteOSEnrollUrl` (one path segment + `/`: `/enroll/`) and the listener must answer exactly `ok`.
+- The values are PUBLIC constants (the endpoint only queues), so enroll.ps1 relaunches itself for UAC
+  (`-EncodedCommand`, the ref inside) — unlike #26's one-time URL, which never crosses the elevation.
+  The installer runs as a CHILD powershell (`-File`: no pause, its `exit` cannot end the wrapper); a
+  piped wrapper never `exit`s (it would close the person's console). The bash child gets `</dev/null`:
+  the rest of the piped script must not reach it.
+- **A failed install posts its log tail** (`POST /enroll/log`, text, `X-Remoteos-Host/Os/Exit` headers,
+  no JSON escaping in bash/PS); the server validates the headers (`log_meta`) and keeps the newest
+  `MAX_LOGS`. `enroll-log` reads them. PowerShell: a reply with no text content type is `byte[]`.
+- **The listener** binds loopback only (`_loopback_only`), `proxy_headers=False`; the poster is
+  `CF-Connecting-IP` only when the peer is loopback (cloudflared). Caps: 16 KiB registration / 256 KiB
+  log, enforced while streaming (a missing or lying Content-Length too), per-address + global sliding
+  window, `MAX_PENDING` queue. No `--log-level debug` (uvicorn would log bodies). Errors name the field
+  (`parse_registration`), never the value.
+- **The queue:** one 0600 file per registration (temp + rename), 0700 dirs, 24 h expiry (the key goes
+  with the file), a repost of the same hostname + key is the same entry, ids are 8 hex checked before
+  any path, every file is re-validated on read (a tampered one is skipped).
+- **`enroll-accept`** = `finish_registration` (shared with `enroll-finish`) with `check_hostname`: the
+  public `/health` of each candidate must report the posted hostname (short names compared,
+  case-insensitive; a server that reports none does NOT match) BEFORE the key is sent there. Candidates
+  are private/tailscale only (`candidate_urls`), `--url` the override. A failure keeps the entry.
+- **The owner notice** is a fourth fleet kind, `enroll-pending`, built from `status["enroll_pending"]`
+  (`[[id, hostname]]`, written by `check` from the queue; an unreadable queue keeps the last list, never
+  clears). Like the other kinds: ONE item, only a changed id set re-sends, an empty queue clears it.
+- **The public hostname** (`enroll-dev1.newlevel.media` -> a named tunnel -> 127.0.0.1:8797) is an
+  account-level Cloudflare change: airuleset's (#1241), never minted from this project. No Access app
+  covers `*.newlevel.media` (checked 2026-11-17), so the hostname needs no Access bypass.
+- Tests: `test_gateway_enroll_listen.py` (real HTTP through uvicorn + the real command as a child),
+  `test_gateway_enroll_accept.py`, `test_enroll_wrappers.py` (the generated bash wrappers piped into bash
+  with a fake curl; also under bash 3.2 in the shell job), `tests_windows/test_enroll_ps1.py`.

@@ -27,19 +27,54 @@ def test_the_committed_installers_equal_their_parts():
 
 @pytest.mark.parametrize("name", ["install-linux.sh", "install.ps1"])
 def test_every_installer_is_generated_and_says_so(name):
-    parts_dir, suffix = build_installers.INSTALLERS[name]
-    parts = sorted((ROOT / parts_dir).glob(f"*{suffix}"))
+    parts_dir, patterns = build_installers.INSTALLERS[name]
+    parts = [p for pattern in patterns for p in sorted((ROOT / parts_dir).glob(pattern))]
     assert len(parts) > 1
     assert (ROOT / name).read_bytes() == b"".join(p.read_bytes() for p in parts)
     assert f"from {parts_dir}/" in (ROOT / name).read_text().split("\n\n")[0]
+
+
+@pytest.mark.parametrize("name", ["enroll.ps1", "enroll-linux.sh", "enroll.sh"])
+def test_every_enroll_wrapper_is_generated_says_so_and_has_no_placeholder_left(name):
+    parts_dir, _ = build_installers.INSTALLERS[name]
+    text = (ROOT / name).read_text()
+    assert f"from {parts_dir}/" in text.split("\n\n")[0]
+    assert "@@" not in text
+    assert "https://enroll-dev1.newlevel.media/enroll/" in text
+
+
+def test_the_two_bash_wrappers_differ_only_in_their_header():
+    linux, macos = (ROOT / "enroll-linux.sh").read_text(), (ROOT / "enroll.sh").read_text()
+    common = (ROOT / "installers/enroll-sh/50-run.sh").read_text().split("ENROLL_URL=")[0]
+    assert common in linux and common in macos
+    assert 'INSTALLER_NAME="install-linux.sh"' in linux and 'INSTALLER_NAME="install.sh"' in macos
+
+
+def test_a_placeholder_with_no_value_fails_the_build(tree):
+    part = tree / "installers/enroll-ps1/00-header.ps1"
+    part.write_text(part.read_text() + "$x = '@@NO_SUCH_VALUE@@'\n")
+    before = (tree / "enroll.ps1").read_bytes()
+    with pytest.raises(SystemExit, match="NO_SUCH_VALUE"):
+        build_installers.main([], root=tree)
+    assert (tree / "enroll.ps1").read_bytes() == before
+
+
+def test_a_changed_value_changes_all_three_wrappers(tree):
+    values = tree / build_installers.VALUES
+    values.write_text(values.read_text().replace("enroll-dev1.newlevel.media", "enroll-other.example"))
+    assert build_installers.main(["--check"], root=tree) == 1
+    assert build_installers.main([], root=tree) == 0
+    for name in ("enroll.ps1", "enroll-linux.sh", "enroll.sh"):
+        assert "https://enroll-other.example/enroll/" in (tree / name).read_text()
 
 
 @pytest.fixture
 def tree(tmp_path):
     """A copy of the parts + the installers, so a test can change them."""
     for name, (parts_dir, _) in build_installers.INSTALLERS.items():
-        shutil.copytree(ROOT / parts_dir, tmp_path / parts_dir)
+        shutil.copytree(ROOT / parts_dir, tmp_path / parts_dir, dirs_exist_ok=True)
         shutil.copy2(ROOT / name, tmp_path / name)
+    shutil.copy2(ROOT / build_installers.VALUES, tmp_path / build_installers.VALUES)
     return tmp_path
 
 

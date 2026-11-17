@@ -73,8 +73,10 @@ class FakeFleetMachine:
         version: str | None = None,
         admin: bool | None = None,
         releases: list | None = None,
+        hostname: str | None = None,
     ):
         self.accept_keys = list(accept_keys)
+        self.hostname = hostname  # /health's hostname (#101's accept checks it); None = not reported
         self.status = status  # a fixed answer (e.g. 500) instead of the key check
         self.healthz = healthz
         self.version = version  # answers GET /health like a machine; None = 404
@@ -122,6 +124,8 @@ class FakeFleetMachine:
                 elif self.path == "/health" and machine.version is not None:
                     machine.seen_health_authorization.append(self.headers.get("authorization"))
                     extra = {} if machine.admin is None else {"admin": machine.admin}
+                    if machine.hostname is not None:
+                        extra["hostname"] = machine.hostname
                     self._answer(200, {"status": "ok", "version": machine.version, **extra})
                 elif self.path == "/releases" and machine.releases is not None:
                     self._answer(200, machine.releases)

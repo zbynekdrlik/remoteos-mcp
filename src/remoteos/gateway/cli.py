@@ -14,7 +14,8 @@ request (file change) or on SIGHUP — no restart needed.
 
 The fleet commands (#51) — ``machine set-key|list|import|repair-recipe``, ``sync-configs``
 and ``check`` — live in ``cli_fleet.py`` and are registered on this group, like ``enroll`` (#26,
-``cli_enroll.py``).
+``cli_enroll.py``) and the permanent enrollment's ``enroll-listen|list|accept|reject|log`` (#101,
+``cli_enroll_queue.py``).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from pathlib import Path
 import click
 
 from remoteos import __version__
-from remoteos.gateway import cli_enroll, cli_fleet, cli_machine_edit  # noqa: F401 (registers machine remove/rename)
+from remoteos.gateway import cli_enroll, cli_enroll_queue, cli_fleet, cli_machine_edit  # noqa: F401 (registers machine remove/rename)
 from remoteos.gateway.accesslog import DEFAULT_ACCESS_LOG_PATH, read_access_log
 from remoteos.gateway.manifest import DEFAULT_MANIFEST_PATH
 from remoteos.gateway.registry import (
@@ -382,6 +383,11 @@ main.add_command(cli_fleet.sync_configs_command)
 main.add_command(cli_fleet.check_command)
 main.add_command(cli_enroll.enroll_command)
 main.add_command(cli_enroll.enroll_finish_command)
+main.add_command(cli_enroll_queue.enroll_listen_command)
+main.add_command(cli_enroll_queue.enroll_list_command)
+main.add_command(cli_enroll_queue.enroll_accept_command)
+main.add_command(cli_enroll_queue.enroll_reject_command)
+main.add_command(cli_enroll_queue.enroll_log_command)
 
 if __name__ == "__main__":  # pragma: no cover
     main()

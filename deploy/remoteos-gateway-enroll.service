@@ -1,0 +1,41 @@
+# remoteos permanent enrollment endpoint (#101) — systemd --user unit for dev1.
+#
+# Install it next to remoteos-gateway.service, as the same account (README "One-command onboarding"):
+#
+#   cp deploy/remoteos-gateway-enroll.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now remoteos-gateway-enroll
+#   curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8797/healthz     # 204
+#
+# It binds 127.0.0.1:8797 only (it refuses anything but loopback); dev1's named cloudflared tunnel
+# publishes it as https://enroll-dev1.newlevel.media. A box's registration waits in
+# ~/.local/state/remoteos-gateway/enroll/pending (0600 files, 24 h) until
+# `remoteos-gateway enroll-accept`; `remoteos-gateway-check` turns a waiting one into ONE owner notice.
+#
+# Logs: journalctl --user -u remoteos-gateway-enroll   (never a key, never a request body)
+
+[Unit]
+Description=remoteos permanent enrollment endpoint (loopback, behind cloudflared)
+Documentation=https://github.com/zbynekdrlik/remoteos-mcp#one-command-onboarding
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/remoteos-gateway/venv/bin/remoteos-gateway enroll-listen
+Restart=always
+RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=60
+StateDirectory=remoteos-gateway
+StateDirectoryMode=0700
+
+# Enforced for a --user unit on dev1 (see remoteos-gateway.service for the inert ones).
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# A body is at most 256 KiB, the rate limit bounds how many arrive.
+MemoryMax=128M
+TasksMax=32
+
+[Install]
+WantedBy=default.target

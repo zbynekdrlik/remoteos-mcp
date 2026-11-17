@@ -11,10 +11,10 @@ Package: `remoteos-mcp` (forked from dddabtc/winremote-mcp, MIT). GitHub: zbynek
 |---|---|
 | Install / upgrade / redeploy on any machine | `/remoteos-install` skill |
 | Per-box updater (rings, schedulers per OS), Windows rollback trap, ProgramData wheelhouse | `.claude/rules/installers.md` (auto-loads on its `paths:`) + README "The box updates itself" |
-| Installer code (generated parts, Linux venv layout + swap/rollback, the sudoers drop-in, the key never in a unit/argv/output, key precedence, macOS preflight/rollback, the fake-box tests) and `SelfUpgrade` | `.claude/rules/installers.md` (auto-loads on its `paths:`) |
+| Installer code (generated parts incl. the enroll wrappers + `installers/enroll-values.conf`, Linux venv layout + swap/rollback, the sudoers drop-in, the key never in a unit/argv/output, key precedence, macOS preflight/rollback, the fake-box tests) and `SelfUpgrade` | `.claude/rules/installers.md` (auto-loads on its `paths:`) |
 | `.mcp.json` setup, restore after clone, add new machine | `/remoteos-mcp-config` skill |
 | Linux X11 desktop provider (session detection, xdotool/scrot backends, deploy/test) | `.claude/skills/linux-desktop` |
-| One-command onboarding: `remoteos-gateway enroll`, the quick tunnel, `REMOTEOS_ENROLL` in the installers | `.claude/rules/gateway.md` + `.claude/rules/installers.md` + README "One-command onboarding" |
+| One-command onboarding: the README line (`enroll.ps1` / `enroll-linux.sh` / `enroll.sh`), `enroll-listen` + its queue + `enroll-accept` (#101), the older `remoteos-gateway enroll` quick tunnel, `REMOTEOS_ENROLL` in the installers | `.claude/rules/gateway.md` + `.claude/rules/installers.md` + README "One-command onboarding" |
 | MCP gateway on dev1 (`remoteos-gateway`, per-consumer tokens, streaming proxy, rollout; #51 key store, `projects.toml`, `sync-configs` + `sync-direct.json`, `machine remove`/`rename` (#109), `check` watchdog, the `fleet` server) | `.claude/rules/gateway.md` (auto-loads on its `paths:`) + README "MCP gateway (dev1)" |
 | Releases: the CI release job, stable/canary resolver (`release_channel.py`), the hold switch, version drift in `check` | `.claude/rules/gateway.md` + README "MCP gateway (dev1)" |
 | Script client `remoteos-call` (config resolution, Shell reply parsing, exit codes 125/126, HTTP status hook, the real-stack tests) | `.claude/rules/cli-call.md` (auto-loads on its `paths:`) + README "Scripts: `remoteos-call`" |

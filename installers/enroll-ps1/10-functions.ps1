@@ -1,0 +1,125 @@
+
+function Test-RemoteOSEnrollRef([string]$Ref) {
+    # A plain git ref name: it goes into a URL and into the elevated relaunch's command
+    return [bool]($Ref -and $Ref.Length -le 100 -and $Ref -cmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*\z' -and
+        $Ref -notmatch '\.\.')
+}
+
+function Get-RemoteOSEnrollHostName([string]$Name) {
+    # The log header's hostname: letters, digits and . _ - only, else 'unknown'
+    if ($Name -and $Name.Length -le 64 -and $Name -cmatch '^[A-Za-z0-9._-]+\z') { return $Name }
+    return 'unknown'
+}
+
+function Get-RemoteOSEnrollRelaunchCommand([string]$Raw, [string]$Ref) {
+    # What the elevated window runs: this script again at the same ref, then it waits for Enter so the
+    # person reads the result. $Ref passed Test-RemoteOSEnrollRef: no quote can be in it.
+    return "`$env:REMOTEOS_MCP_REF = '$Ref'; irm '$Raw/$Ref/enroll.ps1' | iex; " +
+        "try { Read-Host '  Press Enter to close' | Out-Null } catch {}"
+}
+
+function Get-RemoteOSLogTail([string]$Text, [int]$Chars) {
+    if ($Text.Length -le $Chars) { return $Text }
+    return $Text.Substring($Text.Length - $Chars)
+}
+
+function Send-RemoteOSInstallLog([string]$Url, [string]$Text, [string]$HostName, [int]$ExitCode) {
+    # The tail of the install log to dev1 (POST <endpoint>log), so a failure is readable there with no one
+    # typing anything here. -> $true when dev1 answered ok. Best effort: never throws.
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes((Get-RemoteOSLogTail -Text $Text -Chars $EnrollLogTailChars))
+        $headers = @{ 'X-Remoteos-Host' = (Get-RemoteOSEnrollHostName $HostName); 'X-Remoteos-Os' = 'windows';
+                      'X-Remoteos-Exit' = "$ExitCode" }
+        $reply = Invoke-WebRequest -Method Post -Uri ($Url + 'log') -Body $bytes -Headers $headers -UseBasicParsing `
+            -ContentType 'text/plain; charset=utf-8' -UserAgent 'remoteos-enroll' -TimeoutSec 30 -MaximumRedirection 0
+        $content = $reply.Content
+        # A reply with no text content type comes back as bytes
+        if ($content -is [byte[]]) { $content = [System.Text.Encoding]::UTF8.GetString($content) }
+        return ("$content".Trim() -ceq 'ok')
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-RemoteOSEnrolledInstall([string]$InstallerPath, [string]$LogPath, [string]$Ref) {
+    # The installer as a CHILD powershell (an `exit` in it must not end this script), with the enrollment
+    # values in its environment only for its start. Its output is shown and kept in $LogPath. -> its exit code.
+    $env:REMOTEOS_ENROLL = $EnrollUrl
+    $env:REMOTEOS_ENROLL_SSH_KEY = $EnrollSshKey
+    $env:REMOTEOS_MCP_REF = $Ref
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'  # 5.1 turns a native stderr line under 2>&1 into an error with Stop
+    try {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerPath 2>&1 |
+            ForEach-Object { "$_" } | Tee-Object -FilePath $LogPath | Out-Host
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+        Remove-Item Env:REMOTEOS_ENROLL -ErrorAction SilentlyContinue
+        Remove-Item Env:REMOTEOS_ENROLL_SSH_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:REMOTEOS_MCP_REF -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-RemoteOSEnroll([string]$Ref) {
+    # The whole run. -> the exit code; the caller decides whether to exit (an irm | iex console stays open).
+    Write-Host ""
+    Write-Host "  RemoteOS MCP - enrolling this box with dev1" -ForegroundColor Cyan
+    Write-Host ""
+    if (-not (Test-RemoteOSEnrollRef $Ref)) {
+        Write-Host "  [X] REMOTEOS_MCP_REF is not a plain branch, tag or commit name -- nothing was changed on this box" -ForegroundColor Red
+        return 1
+    }
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        # Nothing secret here, so the elevated window simply runs this script again
+        Write-Host "  Not elevated: the enrollment continues in an elevated PowerShell window - confirm the UAC prompt." -ForegroundColor Yellow
+        $command = Get-RemoteOSEnrollRelaunchCommand -Raw $EnrollRaw -Ref $Ref
+        $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($command))
+        try {
+            $process = Start-Process -FilePath powershell.exe -Verb RunAs -PassThru `
+                -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
+        } catch {
+            Write-Host "  [X] The elevation was refused: run PowerShell as Administrator and paste the line again -- nothing was changed on this box" -ForegroundColor Red
+            return 1
+        }
+        $process.WaitForExit()
+        Write-Host "  The elevated window finished with exit code $($process.ExitCode)." -ForegroundColor Gray
+        return $process.ExitCode
+    }
+    $work = Join-Path $env:TEMP ("remoteos-enroll-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    $installer = Join-Path $work 'install.ps1'
+    $log = Join-Path $work 'install.log'
+    try {
+        try {
+            Invoke-WebRequest -Uri "$EnrollRaw/$Ref/install.ps1" -OutFile $installer -UseBasicParsing -TimeoutSec 120
+        } catch {
+            $reason = "Could not download install.ps1 ($Ref): $($_.Exception.Message) -- nothing was changed on this box"
+            Write-Host "  [X] $reason" -ForegroundColor Red
+            if (Send-RemoteOSInstallLog -Url $EnrollUrl -Text $reason -HostName $env:COMPUTERNAME -ExitCode 1) {
+                Write-Host "  The error went to dev1." -ForegroundColor Gray
+            }
+            return 1
+        }
+        $code = Invoke-RemoteOSEnrolledInstall -InstallerPath $installer -LogPath $log -Ref $Ref
+        if ($code -ne 0) {
+            Write-Host "  [X] The install failed (exit $code)." -ForegroundColor Red
+            $text = ''
+            if (Test-Path -LiteralPath $log) { $text = (Get-Content -LiteralPath $log -Raw) }
+            if (Send-RemoteOSInstallLog -Url $EnrollUrl -Text "$text" -HostName $env:COMPUTERNAME -ExitCode $code) {
+                Write-Host "  The install log went to dev1." -ForegroundColor Gray
+            } else {
+                Write-Host "  [!] The install log could not be sent to dev1." -ForegroundColor Yellow
+            }
+            return $code
+        }
+        Write-Host ""
+        Write-Host "  Done: dev1 has this box's registration. It is enrolled once dev1 accepts it." -ForegroundColor Green
+        return 0
+    } finally {
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}

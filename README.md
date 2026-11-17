@@ -464,39 +464,87 @@ asks a locked keyring for a secret (git's credential helper, `secret-tool`) make
 show its unlock dialog on the screen. Run it with `env -u DBUS_SESSION_BUS_ADDRESS`, or with a
 short `timeout`.
 
-## One-command onboarding (`remoteos-gateway enroll`)
+## One-command onboarding
 
-A new box needs one command on dev1 and one on the box. Nobody carries the key.
+**Add a new computer: run ONE line on it.** Nothing to copy from dev1, no key, no token.
+
+Windows (PowerShell; it asks for Administrator itself):
+
+```powershell
+irm https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/enroll.ps1 | iex
+```
+
+Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/enroll-linux.sh | sudo bash
+```
+
+macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/main/enroll.sh | bash
+```
+
+The line runs the normal installer with dev1's permanent enrollment endpoint
+(`https://enroll-dev1.newlevel.media/enroll/`) and dev1's public SSH key baked in. On top of a normal
+install it:
+
+- installs Python 3.12 for all users when the box has none (Windows);
+- enables the OpenSSH server with dev1's public key (break-glass). On Windows the key goes to
+  `administrators_authorized_keys` for an administrator, else to the user's `authorized_keys`; on macOS a
+  run with no sudo leaves Remote Login off with a `[!]` line;
+- posts hostname, addresses, port, version, OS and the agent key to the endpoint;
+- when the install fails, posts the tail of its log too, so the failure is readable on dev1
+  (`remoteos-gateway enroll-log`) with nobody typing anything on the box.
+
+**Nothing is exposed until dev1 accepts it.** The URL is public, so anyone can post: a registration only
+waits in a queue (0600 files on dev1, deleted after 24 h), and `remoteos-gateway check` puts ONE item
+"Nový počítač čaká na prijatie" into the owner's footer U while one waits. Accept it with the name and
+the projects the owner gave:
+
+```bash
+remoteos-gateway enroll-list                      # what waits (never a key)
+remoteos-gateway enroll-accept predaj3 --name win-predaj3 --org slovnormal --projects pos
+remoteos-gateway enroll-reject <id>               # junk or an unknown box: deleted with its key
+remoteos-gateway enroll-log [<id>]                # install logs boxes posted
+```
+
+`enroll-accept <id|hostname>` (the hostname when only one registration has it) first asks the box's public
+`/health` on each posted PRIVATE address (tailscale / LAN only, never a public or loopback one) whether it is
+the host that posted; only then sends the key in one `initialize`, then stores it, adds the machine to the
+projects in `projects.toml`, runs `sync-configs` and `check`, exactly as `enroll` does. `--url` names the
+machine's `/mcp` url when the posted addresses cannot be reached from dev1 (a box behind a site's NAT), and
+`--replace` overwrites a machine already in the key store. A failed accept leaves the registration queued.
+
+The endpoint (`remoteos-gateway enroll-listen`, unit `deploy/remoteos-gateway-enroll.service`) binds
+127.0.0.1:8797 only; dev1's named cloudflared tunnel publishes it. It takes `POST /enroll/` (the
+registration, at most 16 KiB, validated), `POST /enroll/log` (at most 256 KiB) and `GET /healthz`, limits
+each address (Cloudflare's `CF-Connecting-IP`) to 10 posts per 10 minutes and everyone to 120, and keeps at
+most 50 registrations. It never logs a key or a body.
+
+The endpoint and the key live in `installers/enroll-values.conf`; `python3 scripts/build_installers.py`
+bakes them into `enroll.ps1`, `enroll-linux.sh` and `enroll.sh`.
+
+### The per-enrollment command (`remoteos-gateway enroll`, #26)
+
+The older flow still works when dev1's operator is at the box: one command on dev1, one on the box.
 
 ```bash
 remoteos-gateway enroll win-new-pc --org nlmedia --projects songplayer,camera-box
 ```
 
-`--org` (`nlmedia` / `slovnormal`) is the company the box belongs to and is required. A project already holding
+It opens a one-time public URL (a Cloudflare quick tunnel to airuleset's one-shot `secret request`
+endpoint: dev1 needs `cloudflared` and tailscale), prints the command for each OS (on Windows, run it in
+PowerShell as Administrator: the one-time URL does not cross a UAC prompt), waits up to an hour, and
+finishes like `enroll-accept`. `--org` (`nlmedia` / `slovnormal`) is required; a project already holding
 machines of the other company is refused before the box is touched (see "One company per project" below).
+If a step on dev1 fails, the registration stays in the vault for an hour and `enroll` prints the command
+that retries it. The public drop lane cannot be used, because Cloudflare Access answers a box with no login
+with a 302.
 
-It opens a one-time public URL, prints the command for Windows (run it in PowerShell as Administrator; the
-enrollment URL does not cross a UAC prompt), Linux and macOS, and waits up to an hour. Run the command once on
-the box. With `REMOTEOS_ENROLL` set the installer also:
-
-- installs Python 3.12 for all users when the box has none (Windows; a waiting installer, or the run ends);
-- does the normal install and its proof;
-- enables the OpenSSH server with dev1's public key (`--ssh-key`, default `~/.ssh/id_ed25519.pub`). On Windows
-  the key goes to `administrators_authorized_keys` for an administrator, else to the user's `authorized_keys`;
-  on macOS a run with no sudo leaves Remote Login off with a `[!]` line;
-- posts hostname, addresses, port, version, OS and the auth key to the URL.
-
-dev1 then verifies `initialize` 200 with that key, stores it, adds the machine to the projects in
-`projects.toml`, runs `sync-configs` and `check`. Without `REMOTEOS_ENROLL` an install does none of this.
-
-The key never reaches a screen, an argv, a log or a ticket. If a step on dev1 fails, the registration stays in
-the vault for an hour and `enroll` prints the command that retries it. `--url` names the machine's `/mcp` url
-when the addresses it posts cannot be reached from dev1, and `--replace` overwrites a machine already in the
-key store.
-
-The URL is a Cloudflare quick tunnel to airuleset's one-shot `secret request` endpoint: dev1 needs `cloudflared`
-and tailscale. The public drop lane cannot be used, because Cloudflare Access answers a box with no login with
-a 302.
+The key never reaches a screen, an argv, a log or a ticket, in either flow. Without `REMOTEOS_ENROLL` an
+install does none of this.
 
 ## MCP gateway (dev1)
 
