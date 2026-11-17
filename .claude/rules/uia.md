@@ -31,16 +31,22 @@ paths:
   `MAX_STUCK_WORKERS` bounds them. The thread never calls CoUninitialize: a control released
   after it crashes.
 - **UI Automation gives up on an app before we do (#114).** The client is `CUIAutomation8` as
-  `IUIAutomation2` (installed into the package's client: `IUIAutomation` + `ViewWalker`; it derives
-  from `IUIAutomation`). Before each job `UiaWorker(answer_within=Session.answer_within)` sets its
-  `TransactionTimeout` to what the call has left minus `ANSWER_MARGIN_S`. The default is 20 s,
-  longer than every budget, so before #114 an app that did not answer ALWAYS abandoned the worker
-  (measured on windows-latest: a busy UI thread → 15.0 s + a stuck thread; with the bound → a
-  COMError in about 1 s, worker alive). Its timeout HRESULTs (`_TIMED_OUT`: UIA_E_TIMEOUT
-  0x80131505, ERROR_TIMEOUT 0x800705B4) are `UiaTimeout` wherever the session reads the app, never
-  "vanished" (an element skipped silently) or "gone" (a ref ended for nothing); on Invoke/SetValue
-  "may have happened", never a fallback to the mouse or the keys. The abandon stays the backstop
-  for a job of many slow calls. The walk's deadline includes `ControlFromHandle`.
+  `IUIAutomation2` (installed into the package's client: `IUIAutomation` + `ViewWalker`, the only
+  client members the package reads besides `UIAutomationCore`; it derives from `IUIAutomation`).
+  Windows 8+ only, no fallback: the fleet is Win10/11 + Server 2019. The default
+  `TransactionTimeout` is 20 s, longer than every budget, so before #114 an app that did not answer
+  ALWAYS abandoned the worker (measured on windows-latest: a busy UI thread → 15.0 s + a stuck
+  thread; bounded → a COMError in about 1 s, worker alive).
+  - `UiaWorker(answer_within=Session.answer_within)` gives each job its call's remaining budget
+    minus `ANSWER_MARGIN_S`. The timeout applies to EACH call into the app, so `Session._bound()`
+    re-sets it to what the job has left before every read (a put on our own client, no call into
+    the app), never under `MIN_ANSWER_MS`. The walk's deadline includes `ControlFromHandle`.
+  - Its timeout HRESULTs (`_TIMED_OUT`: UIA_E_TIMEOUT 0x80131505, ERROR_TIMEOUT 0x800705B4) on a
+    READ are `UiaUnanswered` ("nothing was done to it"), never "vanished" (an element skipped
+    silently) or "gone" (a ref ended for nothing); ClickElement/TypeElement pass it through as it
+    is. On Invoke/SetValue they are a plain `UiaTimeout` "may have happened", never a fallback to
+    the mouse or the keys. The abandon stays the backstop.
+  - Tests: `tests/test_uia_timeouts.py` (one case per read site, a fake clock for the re-bound).
 - **Hanging a test window:** a busy loop on its UI thread (`while ((Get-Date) -lt $end) {}` in a
   forms timer tick). `Start-Sleep` does not hang it: a CLR wait on an STA thread pumps sent
   messages, WM_GETOBJECT included. `SendMessageTimeout(WM_NULL)` tells whether it answers.
@@ -84,9 +90,10 @@ paths:
 - **Never log a name's or a text's content:** counts and exception types only (#31).
 - **Tests:** `tests/test_element_tree.py` runs the real worker threads; only the package's controls
   and patterns are faked. `tests_windows/test_uia_windows.py` runs the real package against a
-  WinForms window in the `windows-powershell` CI job; its `tree_of` retries a `UiaTimeout` too (a
+  WinForms window in the `windows-powershell` CI job; its `tree_of` retries `UiaUnanswered` too (a
   window started a moment ago on a stalled runner may not answer yet: the #114 flake, where the
-  first contact of a fresh window took over 12 s while the same run's next test was 4x slow).
+  first contact of a fresh window took over 12 s while the same run's next test was 4x slow), never
+  a plain `UiaTimeout`: that is an abandoned worker, the bug itself.
 - **Live (supervisor, after deploy):** on a Windows box, `ElementTree` of a Chromium window lists
   its buttons (the very first walk can be short: Chromium builds its tree when a UIA client
   appears); `ClickElement` one and see its effect; `TypeElement` a field and read it back.

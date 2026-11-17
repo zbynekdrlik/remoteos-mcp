@@ -94,13 +94,14 @@ def tree_of(title: str):
     """The window's tree, once its controls are up and it answers.
 
     UI Automation's first start takes seconds, and a window started a moment ago on a stalled
-    runner may not answer yet (#114): that is a timeout, which leaves the worker running.
+    runner may not answer yet (#114): UI Automation gives up on it inside the budget and the
+    worker lives on. An abandoned worker (a plain UiaTimeout) is never retried: that is the bug.
     """
     deadline = time.monotonic() + 60
     while True:
         try:
             tree = desktop.element_tree(title)
-        except uia.UiaTimeout:  # UiaNotAsked included
+        except (uia.UiaNotAsked, uia.UiaUnanswered):
             tree = None
         if tree is not None and len(tree.items) >= 2:
             return tree
@@ -149,9 +150,8 @@ def test_a_window_that_does_not_answer_is_a_timeout_and_the_worker_lives_on(stal
         assert time.monotonic() < deadline, "the window's UI thread never stalled"
         time.sleep(0.2)
     started = time.monotonic()
-    with pytest.raises(uia.UiaTimeout, match="did not answer") as caught:
+    with pytest.raises(uia.UiaUnanswered, match="did not answer"):
         desktop.element_tree(title)
-    assert not isinstance(caught.value, uia.UiaNotAsked)
     assert time.monotonic() - started < uia.TREE_TIMEOUT_S, "UI Automation itself must give up inside the budget"
     assert (uia._worker._current, len(uia._worker._stuck)) == (worker, stuck), "the worker was abandoned"
     assert item(tree_of(title), "Save").role == "Button"  # the same worker, once the window answers again
