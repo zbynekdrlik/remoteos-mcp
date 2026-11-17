@@ -3,6 +3,8 @@ paths:
   - "src/remoteos/element_tree.py"
   - "src/remoteos/platform/win/uia.py"
   - "tests/test_element_tree.py"
+  - "tests/test_uia_timeouts.py"
+  - "tests/uia_fakes.py"
   - "tests_windows/test_uia_windows.py"
 ---
 
