@@ -620,6 +620,32 @@ def test_the_focus_on_an_inner_control_counts():
     assert session.set_text(ref, "x") == ("Box", False)
 
 
+def test_a_refused_pattern_lookup_is_no_pattern_and_the_mouse_clicks():
+    button = Control()
+    button.fails["pattern"] = FakeCom("refused")
+    session, ref = session_with(button)
+    assert session.activate(ref).point == (150, 120)
+
+
+def test_a_pattern_whose_interface_is_refused_is_no_pattern_and_the_mouse_clicks():
+    button = Control()
+    button.patterns["invoke"] = types.SimpleNamespace(refuses_interface=FakeCom("E_NOINTERFACE"))
+    session, ref = session_with(button)
+    assert session.activate(ref).point == (150, 120)
+
+
+def test_a_refused_set_focus_goes_on_to_the_focus_check():
+    field = Control(kind="EditControl")
+    field.fails["focus"] = FakeCom("refused")
+    session, ref = session_with(field, focused=field)
+    assert session.set_text(ref, "x") == ("OK", False)
+    other_field = Control(kind="EditControl")
+    other_field.fails["focus"] = FakeCom("refused")
+    session, ref = session_with(other_field, focused=None)
+    with pytest.raises(RuntimeError, match="did not take the keyboard focus"):
+        session.set_text(ref, "x")
+
+
 def test_a_focus_that_went_elsewhere_types_nothing():
     other = Control(name="other", rid=(8,))
     session, ref = session_with(Control(kind="EditControl"), focused=other)

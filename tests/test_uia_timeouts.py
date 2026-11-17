@@ -275,6 +275,7 @@ READS = {
     "window lookup": (_lookup, NOTHING),
     "element read": (_walk_read("rect"), NOTHING),
     "children": (_walk_read("kids"), NOTHING),
+    "control type of a child": (_walk_read("type"), NOTHING),
     "runtime id of a listed element": (_walk_read("rid"), NOTHING),
     "window title": (_title, NOTHING),
     "ref check": (_after_tree("rid"), NOTHING),

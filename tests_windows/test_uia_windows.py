@@ -179,6 +179,14 @@ def test_the_mouse_fallback_finds_the_centre_of_an_uncovered_control(window):
     assert left <= x < right and top <= y < bottom
 
 
+def test_the_real_focus_path_gives_the_button_the_focus(window):
+    # A Button has no Value pattern: set_text goes through the raw Element.SetFocus and
+    # GetFocusedElement (#114). Nothing is typed: typing is the caller's, after this answer.
+    title, _ = window
+    ref = item(tree_of(title), "Save").ref
+    assert uia._worker.call(lambda session: session.set_text(ref, "x"), 10) == ("Save", False)
+
+
 def test_a_ref_of_an_older_tree_is_refused(window):
     title, _ = window
     old = tree_of(title)

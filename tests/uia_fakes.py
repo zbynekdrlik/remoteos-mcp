@@ -62,13 +62,11 @@ class Element:
         self.control = control
 
     def GetCurrentPattern(self, pattern_id):
-        if "pattern" in self.control.fails:
-            raise self.control.fails["pattern"]
+        self.control._touch("pattern")
         return self.control.patterns.get(pattern_id)
 
     def SetFocus(self):
-        if "focus" in self.control.fails:
-            raise self.control.fails["focus"]
+        self.control._touch("focus")
         self.control.focus_sets += 1
         return 0
 
@@ -86,7 +84,7 @@ class Control:
         self.IsEnabled, self.IsKeyboardFocusable, self.IsOffscreen = True, False, False
         self.patterns: dict = {}
         self.dead = False
-        self.fails: dict = {}  # call -> the COM error it raises ("rect", "rid", "kids", "pattern", "focus")
+        self.fails: dict = {}  # call -> its COM error ("rect", "rid", "kids", "type", "pattern", "focus")
         self.next = None
         self.focus_sets = 0
         self.__dict__.update(state)
@@ -179,10 +177,26 @@ def make_auto(window_open=True):
     """A fake ``uiautomation`` module: what the session uses of it besides the client."""
     return types.SimpleNamespace(
         PatternId=types.SimpleNamespace(InvokePattern="invoke", ValuePattern="value"),
-        Control=types.SimpleNamespace(CreateControlFromElement=lambda element: element.control if element else None),
-        CreatePattern=lambda pattern_id, raw: raw,
+        Control=types.SimpleNamespace(CreateControlFromElement=_control_of),
+        CreatePattern=_pattern_of,
         IsWindowVisible=lambda hwnd: window_open,
     )
+
+
+def _control_of(element):
+    """The package reads the element's ``CurrentControlType``: a call into the app, which can fail."""
+    if not element:
+        return None
+    if "type" in element.control.fails:
+        raise element.control.fails["type"]
+    return element.control
+
+
+def _pattern_of(pattern_id, raw):
+    """The package's ``CreatePattern``: a QueryInterface of the raw pattern, which can be refused."""
+    if getattr(raw, "refuses_interface", None) is not None:
+        raise raw.refuses_interface
+    return raw
 
 
 def _at(control, x, y):

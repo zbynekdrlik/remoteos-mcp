@@ -394,11 +394,11 @@ class Session:
         """
         try:
             raw = self._ask(lambda: entry.control.Element.GetCurrentPattern(pattern_id))
+            return self.auto.CreatePattern(pattern_id, raw) if raw else None  # QueryInterface: in-process
         except self.com_error as e:
             self._unanswered(e)
             log.debug("the pattern lookup was refused (%s)", type(e).__name__)
             return None
-        return self.auto.CreatePattern(pattern_id, raw) if raw else None
 
     def _refused(self, error: Exception, ref: str, entry: _Entry) -> None:
         """Return when the app plainly refused ``ref``'s action, so that the mouse or keys may try.
