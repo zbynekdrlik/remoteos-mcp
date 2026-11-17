@@ -64,7 +64,7 @@ _SSH_DEST_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9][A-Za-z0-9.-]{0,25
 
 _REGISTRY_KEYS = frozenset({"exposed", "consumers"})
 _CONSUMER_KEYS = frozenset({"sha256", "machines", "added", "managed_by"})
-_KEYSTORE_ENTRY_KEYS = frozenset({"url", "key", "repair", "org"})
+_KEYSTORE_ENTRY_KEYS = frozenset({"url", "key", "repair", "org", "may_sleep"})
 _REPAIR_KEYS = frozenset({"ssh", "key_file", "sudo"})
 
 # The company a machine belongs to (#105, owner 2026-11-17: Slovnormal boxes kept apart from the
@@ -442,6 +442,7 @@ class MachineEntry:
     key: str = field(repr=False)
     repair: RepairRecipe | None = None
     org: str | None = None  # one of ORGS; None = not set yet (#105)
+    may_sleep: bool = False  # switched off after hours (#118): check reports it only if not up today
 
     @property
     def authorization(self) -> str:
@@ -451,6 +452,8 @@ class MachineEntry:
         data: dict = {"url": self.url, "key": self.key}
         if self.org is not None:
             data["org"] = self.org
+        if self.may_sleep:  # off is the key's absence: the shape every older reader knows
+            data["may_sleep"] = True
         if self.repair is not None:
             data["repair"] = self.repair.to_json()
         return data
@@ -504,7 +507,7 @@ def parse_repair(raw: object, name: str) -> RepairRecipe:
 
 
 def parse_keystore(data: object, source: object = "key store") -> dict[str, MachineEntry]:
-    """Strictly validate the key-store shape ``{name: {url, key[, org][, repair]}}``.
+    """Strictly validate the key-store shape ``{name: {url, key[, org][, may_sleep][, repair]}}``.
 
     Any problem raises ``MachineSourceError`` naming the machine, never the key.
     """
@@ -526,7 +529,10 @@ def parse_keystore(data: object, source: object = "key store") -> dict[str, Mach
         validate_key(key, what=f"{source}: machine {name!r} 'key'")
         repair = parse_repair(raw["repair"], name) if "repair" in raw else None
         org = validate_org(raw["org"], what=f"{source}: machine {name!r} 'org'") if "org" in raw else None
-        entries[name] = MachineEntry(url=url, key=key, repair=repair, org=org)
+        may_sleep = raw.get("may_sleep", False)
+        if not isinstance(may_sleep, bool):
+            raise MachineSourceError(f"{source}: machine {name!r} 'may_sleep' must be true or false")
+        entries[name] = MachineEntry(url=url, key=key, repair=repair, org=org, may_sleep=may_sleep)
     return entries
 
 

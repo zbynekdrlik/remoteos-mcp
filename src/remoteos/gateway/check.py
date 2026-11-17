@@ -20,6 +20,10 @@ A 401 is auto-repaired ONLY for a machine with an explicit ``repair`` recipe in 
 the key in it is probed, and only a key the machine ACCEPTS is stored. Nothing is ever guessed.
 No key is ever logged, printed, written to the status file or put in a notification.
 
+A box with ``may_sleep`` in the key store (``sleep_rule.py``, #118) is switched off after hours:
+while it is not ok it is left out of the owner notice (``asleep`` on its record), unless it has not
+been ok since local midnight and it is 10:00 or later. ``last_ok`` is kept on every record.
+
 Each machine's public ``/health`` gives its version and whether it has admin rights: ``drift.py``
 reports a box older than the stable release (#63), ``no_admin.py`` a box without admin (#57).
 
@@ -45,7 +49,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from remoteos.gateway import drift as drift_report
-from remoteos.gateway import fileops, fleet_notice, no_admin, owner_notice
+from remoteos.gateway import fileops, fleet_notice, no_admin, owner_notice, sleep_rule
 from remoteos.gateway.drift import DriftPolicy
 from remoteos.gateway.keystore import edit_keystore, load_keystore
 from remoteos.gateway.messages import KEY_HINT, STATE_LABELS, split_to_fit
@@ -77,6 +81,11 @@ GATEWAY_NOTICE = "gateway-health"
 CHECK_FAILED = "check-failed"
 
 _LABELS = STATE_LABELS
+
+
+def utc_now() -> _dt.datetime:
+    """The run's clock (aware UTC); tests replace it to stand at a given local hour (#118)."""
+    return _dt.datetime.now(_dt.timezone.utc)
 
 
 @dataclass
@@ -360,7 +369,7 @@ def run_check(
 ) -> CheckReport:
     """*enroll_pending*: the registrations waiting for ``enroll-accept`` (#101) as ``[[id, hostname]]``;
     None = the queue could not be read this run, so the last run's list is kept."""
-    moment = (now or (lambda: _dt.datetime.now(_dt.timezone.utc)))()
+    moment = (now or utc_now)()
     stamp = moment.isoformat(timespec="milliseconds")
     previous = load_status(status_path)
     try:
@@ -413,6 +422,11 @@ def _check_loaded(
     for name, record in status["machines"].items():  # the company, for the fleet-down grouping (#105)
         if entries[name].org is not None:
             record["org"] = entries[name].org
+    # boxes switched off after hours (#118): last_ok on every record, asleep = left out of the notice
+    sleep_rule.apply(
+        status["machines"], old_machines, {n: e.may_sleep for n, e in entries.items()}, moment, stamp,
+        previous.get("checked_at"),
+    )
     waiting = fleet_notice.pending_of(previous) if enroll_pending is None else enroll_pending
     if waiting:
         status[fleet_notice.PENDING_KEY] = waiting
@@ -420,7 +434,11 @@ def _check_loaded(
     status[fleet_notice.STATUS_KEY] = fleet_notice.delivered_before(previous)  # kept through a plain run
     per_kind = owner_notice.per_condition(notifier)
     pending = {GATEWAY_KEY: status["gateway"]} if not status["gateway"]["notified"] else {}
-    pending.update({n: r for n, r in status["machines"].items() if not r["notified"]})
+    # an excused sleeping box is not announced (it stays notified: false, so it goes out once it is not)
+    pending.update({n: r for n, r in status["machines"].items() if not r["notified"] and r.get("asleep") is not True})
+    for name, record in status["machines"].items():
+        if record.get("asleep") is True:
+            logger.info("check: %s is %s, asleep after hours (may_sleep) — not reported", name, record["state"])
     # The check could not run last time (or that recovery was not announced yet): say it is back.
     recovered = isinstance(previous.get("error"), dict) or previous.get("recovery_pending") is True
     for name, record in pending.items():

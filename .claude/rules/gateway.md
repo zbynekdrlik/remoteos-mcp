@@ -296,6 +296,24 @@ paths:
 - **No admin (`no_admin.py`, #57):** like drift, once per episode, by name, retried while
   undelivered, kept when this run read no value. An older server's `/health` has no `admin` key:
   `probe_version` gives `None`, never `False`, so the fleet is not "reported" before its upgrade.
+- **Boxes that sleep after hours (`sleep_rule.py`, #118, owner 2026-11-17):**
+  - `MachineEntry.may_sleep` (bool, key store `"may_sleep"`, written ONLY when true: off = the key's
+    absence, the shape older readers know). `machine set-sleep NAME on|off` (`keystore.set_sleep`, a
+    no-op writes nothing), `machine list` prints `sleep on|off`. A non-bool is refused at parse.
+  - Deploy order like `org`: install -> restart the gateway -> `set-sleep`. An older gateway refuses the
+    unknown key (keeps its last good copy at reload, refuses at a start).
+  - `check` (`sleep_rule.apply`, right after the org loop): `last_ok` on EVERY record (this run's stamp
+    when ok, else carried; a pre-#118 record that was ok carries the previous `checked_at`),
+    `may_sleep: true` on a flagged one, `asleep: true` while EXCUSED. Excused = not ok AND (local time <
+    10:00 OR `last_ok` >= local midnight). Local = `ZoneInfo("Europe/Bratislava")`; midnight from the
+    LOCAL date (`datetime.combine`), never UTC date or now-24h (DST days are tested).
+  - `fleet_notice._is_down` skips `asleep is True`, so `fleet-down` and `open_slugs` drop the box; the
+    plain path drops it from `pending` (its `notified` stays false, so it goes out the run it stops
+    being excused). The state itself is never changed: `check` output shows `asleep (may_sleep)`.
+  - Wake-up after an excused night (previous record `asleep` and not `notified`) is marked notified:
+    not news. A box reported at 10:00 announces its recovery normally.
+  - Tests inject the clock: `run_check(now=...)`, or `monkeypatch` `check.utc_now` for the CLI
+    (`tests/test_gateway_may_sleep.py`).
 - **Restart list (`live_sessions.py` + `session_scan.py`, #66; print-only since #109):**
   - Owner ROZHODNUTÉ 2026-11-17 (#60): `report_restarts` echoes + `logger.info`s ONE text and
     notifies nobody; `sync-configs` has no notify options (`--airuleset` etc. are a usage error);
