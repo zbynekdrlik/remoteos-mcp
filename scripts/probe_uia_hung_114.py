@@ -24,6 +24,25 @@ T0 = time.monotonic()
 HANG = "$form.Add_Shown({ $form.Activate(); $form.BeginInvoke([Action]{ Start-Sleep -Seconds 40 }) | Out-Null })"
 
 
+def pumps(hwnd: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.SendMessageTimeoutW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+        wintypes.UINT,
+        wintypes.UINT,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    user32.SendMessageTimeoutW.restype = wintypes.LPARAM
+    out = ctypes.c_size_t()
+    return bool(user32.SendMessageTimeoutW(hwnd, 0, 0, 0, 0x0002, 1000, ctypes.byref(out)))
+
+
 def say(text: str) -> None:
     print(f"[{time.monotonic() - T0:7.3f}] {text}", flush=True)
 
@@ -35,7 +54,15 @@ def main(transaction_ms: int, connection_ms: int, warm: bool) -> None:
         session = real_open(abandoned)
         client = session.auto._AutomationClient.instance()
         if transaction_ms:
-            two = client.IUIAutomation.QueryInterface(client.UIAutomationCore.IUIAutomation2)
+            import comtypes.client
+
+            core = client.UIAutomationCore
+            eight = comtypes.client.CreateObject(
+                "{e22ad333-b25f-460c-83d0-0581107395c9}", interface=core.IUIAutomation2
+            )
+            client.IUIAutomation = eight
+            client.ViewWalker = eight.RawViewWalker
+            two = eight
             say(f"defaults: transaction {two.TransactionTimeout} ms, connection {two.ConnectionTimeout} ms")
             two.TransactionTimeout = transaction_ms
             two.ConnectionTimeout = connection_ms
@@ -56,6 +83,8 @@ def main(transaction_ms: int, connection_ms: int, warm: bool) -> None:
             say(f"warm read: {len(tree.items)} items")
             return
         time.sleep(3)
+        hwnd = next(w.handle for w in desktop.enumerate_windows() if w.title == title)
+        say(f"window thread hung: {not pumps(hwnd)}")
         for attempt in range(3):
             start = time.monotonic()
             try:
