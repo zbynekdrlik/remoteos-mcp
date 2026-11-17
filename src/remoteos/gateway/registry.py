@@ -64,8 +64,15 @@ _SSH_DEST_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9][A-Za-z0-9.-]{0,25
 
 _REGISTRY_KEYS = frozenset({"exposed", "consumers"})
 _CONSUMER_KEYS = frozenset({"sha256", "machines", "added", "managed_by"})
-_KEYSTORE_ENTRY_KEYS = frozenset({"url", "key", "repair"})
+_KEYSTORE_ENTRY_KEYS = frozenset({"url", "key", "repair", "org"})
 _REPAIR_KEYS = frozenset({"ssh", "key_file", "sudo"})
+
+# The company a machine belongs to (#105, owner 2026-11-17: Slovnormal boxes kept apart from the
+# nlmedia ones). A closed set, so a typo is refused instead of becoming a third company. An entry
+# may lack it (it still serves, so the fleet does not go dark over a metadata field), but
+# sync-configs refuses to run and `machine list` shouts until `machine set-org` set it.
+ORGS = ("nlmedia", "slovnormal")
+ORG_MISSING_HINT = "set it with `remoteos-gateway machine set-org <nlmedia|slovnormal> <machine>...`"
 
 
 class RegistryError(Exception):
@@ -399,6 +406,7 @@ class MachineEntry:
     url: str
     key: str = field(repr=False)
     repair: RepairRecipe | None = None
+    org: str | None = None  # one of ORGS; None = not set yet (#105)
 
     @property
     def authorization(self) -> str:
@@ -406,9 +414,20 @@ class MachineEntry:
 
     def to_json(self) -> dict:
         data: dict = {"url": self.url, "key": self.key}
+        if self.org is not None:
+            data["org"] = self.org
         if self.repair is not None:
             data["repair"] = self.repair.to_json()
         return data
+
+
+def validate_org(org: object, *, what: str = "org") -> str:
+    """Return *org* when it is one of ORGS. The error never repeats the value (a key pasted into
+    the field by a hand edit would reach a log line or a notification): length only."""
+    if not isinstance(org, str) or org not in ORGS:
+        shown = f"{len(org)} characters" if isinstance(org, str) else type(org).__name__
+        raise MachineSourceError(f"{what} must be one of {', '.join(ORGS)} (got {shown})")
+    return org
 
 
 def validate_key(key: str, *, what: str = "key") -> str:
@@ -450,7 +469,7 @@ def parse_repair(raw: object, name: str) -> RepairRecipe:
 
 
 def parse_keystore(data: object, source: object = "key store") -> dict[str, MachineEntry]:
-    """Strictly validate the key-store shape ``{name: {url, key[, repair]}}``.
+    """Strictly validate the key-store shape ``{name: {url, key[, org][, repair]}}``.
 
     Any problem raises ``MachineSourceError`` naming the machine, never the key.
     """
@@ -471,7 +490,8 @@ def parse_keystore(data: object, source: object = "key store") -> dict[str, Mach
             raise MachineSourceError(f"{source}: machine {name!r} has no 'key' string")
         validate_key(key, what=f"{source}: machine {name!r} 'key'")
         repair = parse_repair(raw["repair"], name) if "repair" in raw else None
-        entries[name] = MachineEntry(url=url, key=key, repair=repair)
+        org = validate_org(raw["org"], what=f"{source}: machine {name!r} 'org'") if "org" in raw else None
+        entries[name] = MachineEntry(url=url, key=key, repair=repair, org=org)
     return entries
 
 

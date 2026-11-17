@@ -135,12 +135,14 @@ def test_set_key_adds_a_new_machine_only_with_url_and_exposes_it(tmp_path):
     key = fresh_secret("newkey")
     with FakeFleetMachine(accept_keys=(key,)) as box:
         unknown = _cli(tmp_path, "machine", "set-key", "linux-new", input=key + "\n")
-        added = _cli(tmp_path, "machine", "set-key", "linux-new", "--url", box.url, input=key + "\n")
+        added = _cli(
+            tmp_path, "machine", "set-key", "linux-new", "--url", box.url, "--org", "nlmedia", input=key + "\n"
+        )
 
     assert unknown.exit_code == 1 and "--url" in unknown.output
     assert added.exit_code == 0, added.output
     assert "linux-new: added" in added.output and "probe with the new key: ok" in added.output
-    assert _stored(tmp_path) == {"linux-new": {"url": box.url, "key": key}}
+    assert _stored(tmp_path) == {"linux-new": {"url": box.url, "key": key, "org": "nlmedia"}}
     assert "linux-new" in load_registry(tmp_path / "cfg" / "registry.json").exposed
     assert key not in added.output
 
@@ -158,7 +160,9 @@ def test_set_key_never_edits_a_legacy_mcp_config(tmp_path):
 
 def test_machine_list_masks_every_key_and_a_repair_recipe_is_validated_set_and_cleared(tmp_path):
     key = fresh_secret("listkey")
-    write_private_json(tmp_path / "cfg" / "machines.json", {MACHINE: {"url": "http://cam.lan:8092/mcp", "key": key}})
+    write_private_json(
+        tmp_path / "cfg" / "machines.json", {MACHINE: {"url": "http://cam.lan:8092/mcp", "key": key, "org": "nlmedia"}}
+    )
 
     recipe = _cli(tmp_path, "machine", "repair-recipe", MACHINE, "--ssh", "root@cam.lan", "--sudo")
     listing = _cli(tmp_path, "machine", "list")
@@ -167,12 +171,12 @@ def test_machine_list_masks_every_key_and_a_repair_recipe_is_validated_set_and_c
 
     assert recipe.exit_code == 0, recipe.output
     assert listing.exit_code == 0
-    assert f"{MACHINE}  http://cam.lan:8092/mcp  key <{len(key)} chars, sha256:" in listing.output
+    assert f"{MACHINE}  org nlmedia  http://cam.lan:8092/mcp  key <{len(key)} chars, sha256:" in listing.output
     assert "repair: ssh root@cam.lan sudo -n cat /etc/remoteos-mcp/config.json" in listing.output
     assert key not in listing.output
     assert injected.exit_code == 1 and "user@host" in injected.output
     assert cleared.exit_code == 0
-    assert _stored(tmp_path) == {MACHINE: {"url": "http://cam.lan:8092/mcp", "key": key}}
+    assert _stored(tmp_path) == {MACHINE: {"url": "http://cam.lan:8092/mcp", "key": key, "org": "nlmedia"}}
 
 
 # -- the running gateway and a broken key store (fail closed) --------------------------------

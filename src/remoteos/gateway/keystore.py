@@ -3,8 +3,8 @@
 ``~/.config/remoteos-gateway/machines.json`` on dev1, 0600 in a 0700 directory, never in git::
 
     {
-      "linux-cam1": {"url": "http://cam1.lan:8092/mcp", "key": "<key>"},
-      "linux-cam2": {"url": "http://cam2.lan:8092/mcp", "key": "<key>",
+      "linux-cam1": {"url": "http://cam1.lan:8092/mcp", "key": "<key>", "org": "nlmedia"},
+      "linux-cam2": {"url": "http://cam2.lan:8092/mcp", "key": "<key>", "org": "nlmedia",
                      "repair": {"ssh": "root@cam2.lan", "key_file": "/etc/remoteos-mcp/config.json"}}
     }
 
@@ -13,7 +13,8 @@ consumer on its next call, with no consumer-side change. It is edited only throu
 
 - ``machine set-key <name>`` — the key on stdin (never an argv), probed before it is stored;
 - ``machine import``         — the one-time build from today's per-project MCP configs;
-- ``machine repair-recipe``  — the explicit 401 auto-repair recipe ``check`` may use.
+- ``machine repair-recipe``  — the explicit 401 auto-repair recipe ``check`` may use;
+- ``machine set-org``        — the company a machine belongs to (#105): ``nlmedia`` / ``slovnormal``.
 
 Keys are never logged or printed: output shows ``mask_secret`` (length + a sha256 prefix).
 """
@@ -26,7 +27,7 @@ import json
 import logging
 import re
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from remoteos.gateway import fileops
@@ -49,6 +50,7 @@ from remoteos.gateway.registry import (
     read_json_file,
     validate_http_url,
     validate_key,
+    validate_org,
     warn_if_loose_permissions,
 )
 
@@ -133,18 +135,30 @@ def set_key(
     key: str,
     *,
     url: str | None = None,
+    org: str | None = None,
     force: bool = False,
     probe: Callable[[str, str | None], ProbeResult] = probe_one,
 ) -> SetKeyOutcome:
     """Store *key* for machine *name* after probing it. A key the machine REJECTS (401) is
     refused unless *force*: a typo must not cut every project off that machine. An unreachable
-    machine is stored anyway (a rotation may be staged before the box is up)."""
+    machine is stored anyway (a rotation may be staged before the box is up). A NEW machine needs
+    its *org* (#105); a known one keeps its org (*org* may only set a missing one: a change of
+    company is ``set_org``, whose CLI names the projects it would mix)."""
     if not is_valid_machine_name(name):
         raise KeystoreError(f"invalid machine name {name!r}: use letters, digits and . _ -")
     validate_key(key)
+    if org is not None:
+        validate_org(org, what="--org")
     current = load_keystore(path, missing_ok=True).get(name)
     if current is None and url is None:
         raise KeystoreError(f"machine {name!r} is not in the key store {path} — add it with --url <its /mcp url>")
+    if current is None and org is None:
+        raise KeystoreError(f"machine {name!r} is new: say which company it belongs to with --org nlmedia|slovnormal")
+    if current is not None and None not in (org, current.org) and org != current.org:
+        raise KeystoreError(
+            f"machine {name!r} is {current.org}, not {org} — nothing changed; a company change is"
+            " `remoteos-gateway machine set-org` (it says which projects it would mix)"
+        )
     target = validate_http_url(url, what="--url") if url is not None else current.url
     result = probe(target, f"Bearer {key}")
     if result.state == STATE_UNAUTHORIZED and not force:
@@ -154,9 +168,43 @@ def set_key(
         )
     with edit_keystore(path) as entries:
         existing = entries.get(name)
-        entries[name] = MachineEntry(url=target, key=key, repair=existing.repair if existing else None)
+        if existing is None:
+            entries[name] = MachineEntry(url=target, key=key, org=org)
+        else:  # the repair recipe stays; the org stays unless one was given
+            entries[name] = replace(existing, url=target, key=key, org=org or existing.org)
     logger.info("key store: %s %s (probe %s)", name, "added" if current is None else "key set", result.state)
     return SetKeyOutcome(name=name, created=current is None, url=target, probe=result)
+
+
+# -- set-org ------------------------------------------------------------------------------
+
+
+def set_org(path: Path, org: str, names: Iterable[str]) -> list[str]:
+    """Set the company of every machine in *names* to *org*, all or nothing: one name that is not
+    in the key store refuses the whole call. Returns the machines whose org CHANGED. Only the org
+    is touched: url, key and repair recipe are written back as they are (never read out)."""
+    validate_org(org)
+    wanted = list(dict.fromkeys(names))
+    if not wanted:
+        raise KeystoreError("name at least one machine")
+    changed: list[str] = []
+    with edit_keystore(path) as entries:
+        unknown = [name for name in wanted if name not in entries]
+        if unknown:
+            raise KeystoreError(f"not in the key store {path}: {', '.join(unknown)} — nothing changed")
+        for name in wanted:
+            if entries[name].org != org:
+                entries[name] = replace(entries[name], org=org)
+                changed.append(name)
+    for name in changed:
+        logger.info("key store: %s org set to %s", name, org)
+    return changed
+
+
+def missing_orgs(entries: dict[str, MachineEntry], names: Iterable[str] | None = None) -> list[str]:
+    """The machines (of *names*, else all) that have no org yet, sorted."""
+    pool = entries if names is None else [n for n in names if n in entries]
+    return sorted(n for n in pool if entries[n].org is None)
 
 
 # -- import from the per-project MCP configs ----------------------------------------------
@@ -338,9 +386,10 @@ def apply_import(
                     continue
                 if _pair(before) == (decision.chosen.url, decision.chosen.key):
                     continue
-            entries[decision.name] = MachineEntry(
-                url=decision.chosen.url, key=decision.chosen.key, repair=existing.repair if existing else None
-            )
+            if existing is not None:  # its repair recipe and org stay
+                entries[decision.name] = replace(existing, url=decision.chosen.url, key=decision.chosen.key)
+            else:  # no org yet: sync-configs refuses until `machine set-org` set it (#105)
+                entries[decision.name] = MachineEntry(url=decision.chosen.url, key=decision.chosen.key)
     return changed_meanwhile
 
 

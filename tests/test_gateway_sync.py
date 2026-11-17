@@ -64,7 +64,9 @@ class Fleet:
         self.david_token = fresh_secret("davidtoken")
         self.stale = {name: fresh_secret("stalekey") for name in FLEET}
         self.n8n_secret = fresh_secret("n8nsecret")
-        write_private_json(self.keystore, {n: {"url": self.urls[n], "key": self.keys[n]} for n in FLEET})
+        write_private_json(
+            self.keystore, {n: {"url": self.urls[n], "key": self.keys[n], "org": "nlmedia"} for n in FLEET}
+        )
         write_private_json(
             self.registry,
             {
@@ -302,7 +304,7 @@ def test_the_generated_config_reaches_exactly_the_manifest_machines_through_the_
     with FakeFleetMachine(accept_keys=(fleet.keys["linux-cam1"], fleet.keys["linux-cam2"])) as box:
         write_private_json(
             fleet.keystore,
-            {name: {"url": box.url, "key": fleet.keys[name]} for name in ("linux-cam1", "linux-cam2")},
+            {n: {"url": box.url, "key": fleet.keys[n], "org": "nlmedia"} for n in ("linux-cam1", "linux-cam2")},
         )
         path = fleet.write_config("restreamer", '{\n  "mcpServers": {}\n}\n')
         fleet.write_manifest(
@@ -425,8 +427,8 @@ def test_a_manifest_line_plus_sync_reaches_a_session_that_never_restarted(fleet,
         write_private_json(
             fleet.keystore,
             {
-                "linux-cam1": {"url": first.url, "key": fleet.keys["linux-cam1"]},
-                "linux-cam2": {"url": added.url, "key": fleet.keys["linux-cam2"]},
+                "linux-cam1": {"url": first.url, "key": fleet.keys["linux-cam1"], "org": "nlmedia"},
+                "linux-cam2": {"url": added.url, "key": fleet.keys["linux-cam2"], "org": "nlmedia"},
             },
         )
         path = fleet.write_config("restreamer", '{\n  "mcpServers": {}\n}\n')

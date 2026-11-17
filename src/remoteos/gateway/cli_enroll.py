@@ -1,6 +1,6 @@
 """``remoteos-gateway enroll`` (#26): one command on dev1, one on the new box.
 
-    remoteos-gateway enroll win-new-pc --projects songplayer,camera-box
+    remoteos-gateway enroll win-new-pc --org nlmedia --projects songplayer,camera-box
 
 prints the command for the box and waits. The installer enables SSH with dev1's key and posts its
 registration; ``enroll-finish``, run through ``secret exec --stdin`` so the key reaches it on stdin
@@ -41,7 +41,14 @@ from remoteos.gateway.enroll import (
 from remoteos.gateway.keystore import load_keystore, mask_secret, set_key
 from remoteos.gateway.manifest import ManifestError, add_machine, load_manifest
 from remoteos.gateway.probe import STATE_OK, probe_one
-from remoteos.gateway.registry import MachineSourceError, is_valid_machine_name, validate_http_url
+from remoteos.gateway.registry import (
+    ORG_MISSING_HINT,
+    ORGS,
+    MachineSourceError,
+    is_valid_machine_name,
+    validate_http_url,
+)
+from remoteos.gateway.sync import CROSS_ORG_PROJECTS
 from remoteos.release_channel import RELEASES_URL
 
 
@@ -54,7 +61,7 @@ def _project_list(projects: str) -> list[str]:
 MACHINE_PREFIXES = ("win-", "linux-", "mac-")
 
 
-def _check_request(paths, name: str, projects: list[str], replace: bool, url: str | None) -> None:
+def _check_request(paths, name: str, org: str, projects: list[str], replace: bool, url: str | None) -> None:
     """Everything dev1 can refuse before a box is touched."""
     if not is_valid_machine_name(name):
         raise click.ClickException(f"invalid machine name {name!r}: use letters, digits and . _ -")
@@ -72,6 +79,27 @@ def _check_request(paths, name: str, projects: list[str], replace: bool, url: st
         raise click.ClickException(f"not in the manifest: {', '.join(missing)}")
     if name in known and not replace:
         raise click.ClickException(f"{name} is in the key store already: --replace overwrites its url and key")
+    # #105: a project holds machines of ONE org (sync-configs would refuse the run after the box
+    # was set up); refused here, before any box is touched. A known machine keeps its org (a change
+    # is `machine set-org`), and every project already holding it is checked too.
+    current = known[name].org if name in known else None
+    if current is not None and current != org:
+        raise click.ClickException(
+            f"{name} is {current} in the key store, not {org}: change it with `remoteos-gateway machine set-org`"
+        )
+    holding = [p.name for p in manifest.projects.values() if name in p.machines]
+    for project in dict.fromkeys([*projects, *holding]):
+        if project in CROSS_ORG_PROJECTS:
+            continue
+        clash = [m for m in manifest.projects[project].machines if m != name and m in known and known[m].org != org]
+        if clash:
+            unset = all(known[m].org is None for m in clash)
+            raise click.ClickException(
+                f"{project} holds machines of another org than {org}: "
+                + ", ".join(f"{m} ({known[m].org or 'no org'})" for m in sorted(clash))
+                + " — a project may hold ONE org's machines (#105)"
+                + (f"; {ORG_MISSING_HINT}" if unset else "")
+            )
 
 
 @contextlib.contextmanager
@@ -89,13 +117,13 @@ def _exit_on_signals() -> Iterator[None]:
             signal.signal(number, handler)
 
 
-def _finish_command(paths, airuleset: Path, name: str, projects: list[str], url: str | None,
+def _finish_command(paths, airuleset: Path, name: str, org: str, projects: list[str], url: str | None,
                     replace: bool) -> list[str]:
     """``enroll-finish`` with this run's paths, for ``secret exec``."""
     command = [sys.executable, "-m", "remoteos.gateway.cli", "--registry", str(paths.registry),
                "--machines", str(paths.machines), "--access-log", str(paths.access_log),
-               "--manifest", str(paths.manifest), "enroll-finish", name, "--projects", ",".join(projects),
-               "--airuleset", str(airuleset)]
+               "--manifest", str(paths.manifest), "enroll-finish", name, "--org", org,
+               "--projects", ",".join(projects), "--airuleset", str(airuleset)]
     return command + (["--url", url] if url else []) + (["--replace"] if replace else [])
 
 
@@ -124,6 +152,7 @@ def _receive(airuleset: Airuleset, name: str, ssh_key: str, ref: str, timeout_s:
 
 @click.command("enroll")
 @click.argument("name")
+@click.option("--org", type=click.Choice(ORGS), required=True, help="The company the machine belongs to (#105).")
 @click.option("--projects", required=True, help="The projects to add the machine to, comma separated.")
 @click.option("--url", default=None, help="The machine's /mcp url, when the addresses it posts cannot be reached.")
 @click.option("--ref", default="main", show_default=True, help="The installer's source: a branch, tag or commit.")
@@ -135,16 +164,16 @@ def _receive(airuleset: Airuleset, name: str, ssh_key: str, ref: str, timeout_s:
 @click.option("--airuleset", "airuleset_path", type=click.Path(dir_okay=False, path_type=Path),
               envvar="REMOTEOS_GATEWAY_AIRULESET", default=cli_fleet.DEFAULT_AIRULESET_PATH, show_default=True)
 @click.pass_obj
-def enroll_command(paths, name: str, projects: str, url: str | None, ref: str, replace: bool,
+def enroll_command(paths, name: str, org: str, projects: str, url: str | None, ref: str, replace: bool,
                    ssh_key: Path | None, timeout: int, airuleset_path: Path) -> None:
     """Start a one-time enrollment of machine NAME and finish it when the box posts."""
     wanted = _project_list(projects)
-    _check_request(paths, name, wanted, replace, url)
+    _check_request(paths, name, org, wanted, replace, url)
     if not ref_ok(ref):
         raise click.ClickException("--ref must be a commit sha, a tag or a branch name")
     airuleset = Airuleset(airuleset_path.expanduser())
     secret = secret_name(name)
-    finish = _finish_command(paths, airuleset.path, name, wanted, url, replace)
+    finish = _finish_command(paths, airuleset.path, name, org, wanted, url, replace)
     try:
         key_line = read_ssh_key(ssh_key)
         _discard_earlier(airuleset, secret)
@@ -161,7 +190,7 @@ def enroll_command(paths, name: str, projects: str, url: str | None, ref: str, r
     click.echo(result.stdout, nl=False)
     click.echo(result.stderr, nl=False, err=True)
     if result.returncode != 0:
-        retry = _finish_command(paths, airuleset.path, name, wanted, url, True)  # the key may be stored already
+        retry = _finish_command(paths, airuleset.path, name, org, wanted, url, True)  # the key may be stored already
         raise click.ClickException(
             f"enroll-finish failed (exit {result.returncode}). The registration stays in the vault for an hour:"
             " fix the cause, then run: "
@@ -187,6 +216,7 @@ def _choose_url(registration: Registration, explicit: str | None) -> str:
 
 @click.command("enroll-finish")
 @click.argument("name")
+@click.option("--org", type=click.Choice(ORGS), required=True)
 @click.option("--projects", required=True)
 @click.option("--url", default=None)
 @click.option("--replace", is_flag=True)
@@ -194,19 +224,19 @@ def _choose_url(registration: Registration, explicit: str | None) -> str:
 @cli_fleet._notify_options
 @cli_fleet._status_file_option
 @click.pass_context
-def enroll_finish_command(ctx: click.Context, name: str, projects: str, url: str | None, replace: bool,
+def enroll_finish_command(ctx: click.Context, name: str, org: str, projects: str, url: str | None, replace: bool,
                           local_host: str, airuleset_path: Path, notify_owner: str | None, notify_project_dir: Path,
                           notices_file: Path, status_file: Path) -> None:
     """Internal, run by ``enroll``: the registration comes on STDIN."""
     paths = ctx.obj
     wanted = _project_list(projects)
-    _check_request(paths, name, wanted, replace, url)
+    _check_request(paths, name, org, wanted, replace, url)
     try:
         registration = parse_registration(sys.stdin.buffer.read())
         click.echo(f"registration: {registration.hostname} ({registration.os}), v{registration.version},"
                    f" ssh account {registration.account}")
         target = _choose_url(registration, url)
-        outcome = set_key(paths.machines, name, registration.key, url=target)
+        outcome = set_key(paths.machines, name, registration.key, url=target, org=org)
         if outcome.created:
             cli_fleet._expose_new(paths, [name])  # before the manifest: a retry finds the machine known
         for project in wanted:

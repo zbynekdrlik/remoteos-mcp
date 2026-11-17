@@ -35,7 +35,7 @@ def test_a_short_down_fleet_lists_every_box_with_state_and_since():
     assert "… a ďalších" not in notice.text
     assert "• linux-b: odmieta kľúč (401) (od 2026-11-15 07:30) — HTTP 401" in notice.text
     assert fleet_notice.KEY_HINT in notice.text
-    assert ["linux-b", "401"] in notice.fingerprint
+    assert ["linux-b", "401", ""] in notice.fingerprint
 
 
 def test_nothing_open_builds_no_notice_and_no_open_slug():
