@@ -84,7 +84,7 @@ class Control:
         self.IsEnabled, self.IsKeyboardFocusable, self.IsOffscreen = True, False, False
         self.patterns: dict = {}
         self.dead = False
-        self.fails: dict = {}  # call -> its COM error ("rect", "rid", "kids", "type", "pattern", "focus")
+        self.fails: dict = {}  # call -> its COM error: rect rid kids sibling parent type pattern focus
         self.next = None
         self.focus_sets = 0
         self.__dict__.update(state)
@@ -129,16 +129,25 @@ class Control:
 
 
 class Walker:
-    """The client's raw view walker: one call into the app each, an element or None."""
+    """The client's raw view walker: one call into the app each, an element or None.
+
+    ``fails["sibling"]`` / ``fails["parent"]`` on the element walked FROM make that step fail. A
+    ``dead`` element still navigates here (a known limit: the real walker may refuse it), which is
+    what lets a dead element be skipped while the walk goes on to its siblings.
+    """
 
     def GetFirstChildElement(self, element):
         child = element.control.first_child()
         return child.Element if child is not None else None
 
     def GetNextSiblingElement(self, element):
+        if "sibling" in element.control.fails:
+            raise element.control.fails["sibling"]
         return element.control.next.Element if element.control.next is not None else None
 
     def GetParentElement(self, element):
+        if "parent" in element.control.fails:
+            raise element.control.fails["parent"]
         return element.control.parent.Element if element.control.parent is not None else None
 
 

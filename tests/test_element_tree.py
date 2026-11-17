@@ -543,6 +543,21 @@ def test_a_part_of_the_element_at_its_centre_is_the_element():
     assert session.activate(ref).point == (150, 120)
 
 
+def test_a_sibling_that_cannot_be_reached_ends_its_branch():
+    first = Control(name="first", rid=(2,))
+    first.fails["sibling"] = FakeCom("element not available")
+    root = Control(name="App", kind="WindowControl", kids=[first, Control(name="after", rid=(3,))])
+    assert [i.name for i in new_session(root).tree(50).items] == ["first"]
+
+
+def test_a_parent_that_cannot_be_reached_in_a_hit_test_refuses():
+    label = Control(name="", kind="TextControl", rid=(9,))
+    session, ref = session_with(Control(kids=[label]))
+    label.fails["parent"] = FakeCom("element not available")
+    with pytest.raises(RuntimeError, match="Something else is on top"):
+        session.activate(ref)
+
+
 def test_a_hit_test_that_fails_refuses():
     session, ref = session_with(Control())
 

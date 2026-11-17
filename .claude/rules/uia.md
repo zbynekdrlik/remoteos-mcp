@@ -64,7 +64,8 @@ paths:
   - Any other COM error of the window lookup still reaches the tool raw (as before #114).
   - Tests: `tests/test_uia_timeouts.py` (one case per read site; a fake clock and a ledger that
     checks the limit in force at every call). The fakes are `tests/uia_fakes.py`: they behave like
-    the package (GetPattern/SetFocus swallow, navigation is element + type), never kinder.
+    the package (GetPattern/SetFocus swallow, navigation is element + type, CreatePattern's
+    QueryInterface can be refused). Known limit: a `dead` fake element still navigates.
 - **Hanging a test window:** a busy loop on its UI thread (`while ((Get-Date) -lt $end) {}` in a
   forms timer tick). `Start-Sleep` does not hang it: a CLR wait on an STA thread pumps sent
   messages, WM_GETOBJECT included. `SendMessageTimeout(WM_NULL)` tells whether it answers.

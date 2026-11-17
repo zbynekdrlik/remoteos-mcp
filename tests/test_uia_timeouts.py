@@ -247,6 +247,13 @@ def _hit_test(error):
     return lambda: session.activate(ref)
 
 
+def _parent_in_hit_test(error):
+    label = Control(name="", kind="TextControl", rid=(9,))  # the part of the button the hit test lands on
+    session, ref = session_with(Control(kids=[label]))
+    label.fails["parent"] = error
+    return lambda: session.activate(ref)
+
+
 def _read_only(error):
     class Asking:
         @property
@@ -276,6 +283,8 @@ READS = {
     "element read": (_walk_read("rect"), NOTHING),
     "children": (_walk_read("kids"), NOTHING),
     "control type of a child": (_walk_read("type"), NOTHING),
+    "next sibling": (_walk_read("sibling"), NOTHING),
+    "parent in a hit test": (_parent_in_hit_test, NOTHING),
     "runtime id of a listed element": (_walk_read("rid"), NOTHING),
     "window title": (_title, NOTHING),
     "ref check": (_after_tree("rid"), NOTHING),
