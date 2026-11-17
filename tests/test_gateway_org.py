@@ -114,8 +114,8 @@ def test_machine_list_shows_the_org_counts_and_warns_about_a_missing_one(tmp_pat
     listing = _cli(tmp_path, "machine", "list")
 
     assert listing.exit_code == 0
-    assert "win-pz-server  org slovnormal  http://pz.lan:8092/mcp" in listing.output
-    assert "linux-cam2  org MISSING  http://cam2.lan:8092/mcp" in listing.output
+    assert "win-pz-server  org slovnormal  sleep off  http://pz.lan:8092/mcp" in listing.output
+    assert "linux-cam2  org MISSING  sleep off  http://cam2.lan:8092/mcp" in listing.output
     assert "orgs: nlmedia 1, slovnormal 1" in listing.output
     assert "WARNING: 1 machine(s) have NO org: linux-cam2" in listing.output
     assert "machine set-org" in listing.output
