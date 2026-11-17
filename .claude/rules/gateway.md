@@ -390,8 +390,9 @@ paths:
   `Registry.rename_machine(fresh=False)` is a no-op when nothing carries OLD and never refuses (a sync
   between the runs may have put NEW into a managed allow-list); a FRESH rename always runs the
   stale-NEW check, even for an OLD that nothing carries (review rounds 2-3). When nothing carries
-  OLD the registry step is skipped (no save, no reload) and counted done, so a later failure points
-  to `sync-configs`. Known edge: a key-store write that LANDED but reported an error, for an OLD
+  OLD the registry step is counted done BEFORE it runs (it still rechecks under the lock and saves
+  only on a change), so any later failure points to `sync-configs`; `_retire_first` takes no lock
+  when there is no direct project to record. Known edge: a key-store write that LANDED but reported an error, for an OLD
   nothing carries and no direct project, leaves no evidence; the rerun is refused and the owner
   finishes with `sync-configs`.
 - `remove` = `Registry.forget_machine` (unexpose + out of EVERY allow-list, hand-made ones too:

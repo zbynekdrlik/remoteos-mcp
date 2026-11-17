@@ -78,11 +78,15 @@ def _recorded(paths, name: str, url: str) -> bool:
     return any(entries.get(name) == url for entries in record.values())
 
 
-def _retire_first(paths, manifest: Manifest, retired: dict[str, str]) -> None:
-    """Record the retired direct urls before anything else changes (under the registry lock)."""
+def _retire_first(paths, manifest: Manifest, retired: dict[str, str]) -> bool:
+    """Record the retired direct urls before anything else changes (under the registry lock).
+    False when there is nothing to record (no direct project)."""
     direct = [p.name for p in manifest.projects.values() if p.mode == MODE_DIRECT]
+    if not direct or not retired:
+        return False  # nothing to record: no lock taken either
     with registry_transaction(paths.registry):
         remember_retired(record_path(paths.registry), direct, retired)
+    return True
 
 
 def _edit_registry(paths, edit):
@@ -149,8 +153,8 @@ def machine_remove(paths, names: tuple[str, ...], local_host: str, dry_run: bool
             after = {name: entry for name, entry in keystore.items() if name not in wanted}
             _sync(paths, manifest, after, local_host=local_host, dry_run=True)
             return
-        _retire_first(paths, before, retired)
-        steps.done.append("direct record")
+        if _retire_first(paths, before, retired):
+            steps.done.append("direct record")
         manifest = manifest_remove(paths.manifest, wanted)
         steps.done.append("manifest")
         if in_store:
@@ -217,8 +221,8 @@ def machine_rename(paths, old: str, new: str, local_host: str, dry_run: bool) ->
             after = {(new if name == old else name): entry for name, entry in keystore.items()}
             _sync(paths, manifest, after, local_host=local_host, dry_run=True)
             return
-        _retire_first(paths, load_manifest(paths.manifest), retired)
-        steps.done.append("direct record")
+        if _retire_first(paths, load_manifest(paths.manifest), retired):
+            steps.done.append("direct record")
         manifest = manifest_rename(paths.manifest, old, new)
         steps.done.append("manifest")
         if fresh:
@@ -230,11 +234,11 @@ def machine_rename(paths, old: str, new: str, local_host: str, dry_run: bool) ->
             moved = r.rename_machine(old, new, fresh=fresh)
             return moved, was_exposed or new in r.exposed
 
+        if not carried:  # nothing to carry: a failure from here on needs only sync-configs
+            steps.done.append("registry")
+        touched, exposed = _edit_registry(paths, carry_over)  # rechecked under the lock (saved only on change)
         if carried:
-            touched, exposed = _edit_registry(paths, carry_over)
-        else:  # nothing carries OLD: no registry edit, and a later failure needs only sync-configs
-            touched = []
-        steps.done.append("registry")
+            steps.done.append("registry")
         _report_rename(old, new, retired[old], projects, touched, exposed, dry_run=False)
         logger.info("machine rename: %s -> %s (projects %s)", old, new, ", ".join(projects) or "-")
         _sync(paths, manifest, load_keystore(paths.machines), local_host=local_host, dry_run=False)

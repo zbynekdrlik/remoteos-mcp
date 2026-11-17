@@ -542,6 +542,24 @@ def test_a_typo_for_old_next_to_an_existing_new_is_refused_not_reported_as_a_ren
 # -- review round 3 -------------------------------------------------------------------------------
 
 
+def test_a_rename_of_a_box_nothing_carries_that_fails_at_the_registry_points_to_sync_configs(fleet):
+    """Nothing carries OLD, no direct project: nothing records the rename, so a rerun could not be
+    recognised. Every edit is in place once the key store moved, so the advice is sync-configs."""
+    camera = fleet.write_config("camera-box", fleet.camera_box_text())
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    assert fleet.run().exit_code == 0
+    registry = json.loads(fleet.registry.read_text(encoding="utf-8"))
+    registry["exposed"].remove("linux-presenter")  # key store only: no project, no consumer
+    fleet.registry.write_text(json.dumps(registry), encoding="utf-8")
+
+    with locked_out(fleet.registry.with_name("registry.json.lock")):
+        result = machine(fleet, "rename", "linux-presenter", "linux-presenter2")
+
+    assert result.exit_code == 1
+    assert "done: manifest, key store, registry — rerun `remoteos-gateway sync-configs`" in result.output
+    assert fleet.run().exit_code == 0 and "linux-presenter" in fleet.servers(camera)  # hand-made entry kept
+
+
 def test_renaming_a_box_nothing_in_the_registry_carries_leaves_the_registry_untouched(fleet):
     two_projects(fleet)
     registry = json.loads(fleet.registry.read_text(encoding="utf-8"))
