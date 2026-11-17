@@ -15,9 +15,10 @@ after the call that hung, an abandoned start leaves the client alone, and the cl
 in one assignment (no moment without one). An exception leaves the worker without its traceback,
 whose frames hold controls.
 
-UI Automation's own wait for an app (``IUIAutomation2.TransactionTimeout``, 20 s by default) is
-set before every job to what that call has left, so an app that does not answer is a timeout
-from UI Automation on a healthy worker, not an abandoned one (#114).
+UI Automation's own wait for an app (``IUIAutomation2.TransactionTimeout``, 20 s by default)
+applies to each call into the app, so ``Session._ask`` sets it to what the job has left before
+every single call. An app that does not answer is then a timeout from UI Automation on a
+healthy worker, not an abandoned one (#114).
 
 Mouse and keyboard input stay on the caller's thread, so a long text cannot overrun the
 worker's timeout. Nothing typed is ever logged.
@@ -78,7 +79,11 @@ class UiaNotAsked(UiaTimeout):
 
 
 class UiaUnanswered(UiaTimeout):
-    """UI Automation gave up on an app that did not answer a read: nothing was done, the worker lives on."""
+    """UI Automation gave up on an app that did not answer a read: the worker lives on, no action ran."""
+
+
+class UiaActionUnanswered(UiaTimeout):
+    """UI Automation gave up on an app during its action (Invoke, SetValue): it may have happened."""
 
 
 def _hresult(error: Exception) -> int:
@@ -242,36 +247,36 @@ class Session:
     def answer_within(self, seconds: float) -> None:
         """The next job may wait on the app for ``seconds`` in all; UI Automation then answers a timeout."""
         self.answer_by = time.monotonic() + seconds
-        self._bound()
 
     def _bound(self) -> None:
-        """Before a read of the app: UI Automation may wait only for what the job has left.
-
-        The timeout applies to EACH call into the app, so a job of many calls sets it again
-        before each read. A put on our own client, never a call into the app.
-        """
+        """UI Automation may wait on the app only for what the job has left (a put on our own client)."""
         if self.automation is None or self.answer_by is None:
             return
         left_ms = int((self.answer_by - time.monotonic()) * 1000)
         self.automation.TransactionTimeout = max(MIN_ANSWER_MS, left_ms)
 
-    def _unanswered(self, error: Exception) -> None:
+    def _ask(self, call: Callable[[], Any]) -> Any:
+        """ONE call into the app. UI Automation's timeout applies to each call, so each is bounded anew."""
+        self._bound()
+        return call()
+
+    def _unanswered(self, error: Exception, done: str = "nothing was done to it") -> None:
         """Raise when ``error`` is UI Automation giving up on the app: not a vanished element, a timeout."""
         if _hresult(error) in _TIMED_OUT:
             log.warning("the app did not answer UI Automation in time (%#x)", _hresult(error))
-            raise UiaUnanswered("the window did not answer UI Automation in time: nothing was done to it") from None
+            raise UiaUnanswered(f"the window did not answer UI Automation in time: {done}") from None
 
     def _facts(self, control: Any) -> Optional[ElementFacts]:
-        self._bound()
+        ask = self._ask
         try:
-            rect = control.BoundingRectangle
+            rect = ask(lambda: control.BoundingRectangle)
             return ElementFacts(
-                role=control.ControlTypeName.removesuffix("Control"),
-                name=control.Name or "",
-                enabled=bool(control.IsEnabled),
+                role=ask(lambda: control.ControlTypeName).removesuffix("Control"),
+                name=ask(lambda: control.Name) or "",
+                enabled=bool(ask(lambda: control.IsEnabled)),
                 rect=(rect.left, rect.top, rect.right, rect.bottom),
-                focusable=bool(control.IsKeyboardFocusable),
-                offscreen=bool(control.IsOffscreen),
+                focusable=bool(ask(lambda: control.IsKeyboardFocusable)),
+                offscreen=bool(ask(lambda: control.IsOffscreen)),
             )
         except self.com_error as e:
             self._unanswered(e)
@@ -280,21 +285,18 @@ class Session:
 
     def _children(self, control: Any):
         try:
-            self._bound()
-            child = control.GetFirstChildControl()
+            child = self._ask(control.GetFirstChildControl)
             while child is not None:
                 yield child
-                self._bound()
-                child = child.GetNextSiblingControl()
+                child = self._ask(child.GetNextSiblingControl)
         except self.com_error as e:
             self._unanswered(e)
             log.debug("a branch vanished during the walk (%s)", type(e).__name__)
 
     def _walk(self, hwnd: int, seconds: float, **bounds: int):
         deadline = time.monotonic() + seconds  # the walk's time includes finding the window
-        self._bound()
         try:
-            root = self.auto.ControlFromHandle(hwnd)
+            root = self._ask(lambda: self.auto.ControlFromHandle(hwnd))
         except self.com_error as e:
             self._unanswered(e)
             raise
@@ -305,9 +307,8 @@ class Session:
 
     def _entry(self, hwnd: int, control: Any, facts: ElementFacts) -> Optional[_Entry]:
         """What a ref keeps, or ``None``: without a RuntimeId nothing could prove later that it is the same element."""
-        self._bound()
         try:
-            runtime_id = list(control.GetRuntimeId())
+            runtime_id = list(self._ask(control.GetRuntimeId))
         except self.com_error as e:
             self._unanswered(e)
             log.debug("a listed element vanished (%s)", type(e).__name__)
@@ -317,9 +318,8 @@ class Session:
     def tree(self, hwnd: int) -> ElementTree:
         """Walk ``hwnd``'s window and start a new generation of refs."""
         root, result = self._walk(hwnd, TREE_WALK_S)
-        self._bound()
         try:
-            title = one_line(root.Name or "")
+            title = one_line(self._ask(lambda: root.Name) or "")
         except self.com_error as e:
             self._unanswered(e)
             title = ""
@@ -340,11 +340,10 @@ class Session:
         stale = gone(ref, entry.name)
         if not self.auto.IsWindowVisible(entry.hwnd):  # a closed window's element may still answer
             raise stale
-        self._bound()
         try:
-            if list(entry.control.GetRuntimeId()) != entry.runtime_id:
+            if list(self._ask(entry.control.GetRuntimeId)) != entry.runtime_id:
                 raise stale
-            enabled = entry.control.IsEnabled
+            enabled = self._ask(lambda: entry.control.IsEnabled)
         except self.com_error as e:
             self._unanswered(e)
             raise stale from None
@@ -354,19 +353,17 @@ class Session:
 
     def _center(self, ref: str, entry: _Entry) -> tuple[int, int]:
         """Where the mouse may click ``entry``, or a failure: a click never lands somewhere else."""
-        self._bound()
         try:
-            rect = entry.control.BoundingRectangle
-            offscreen = entry.control.IsOffscreen
+            rect = self._ask(lambda: entry.control.BoundingRectangle)
+            offscreen = self._ask(lambda: entry.control.IsOffscreen)
         except self.com_error as e:
             self._unanswered(e)
             raise gone(ref, entry.name) from None
         if offscreen or rect.isempty():
             raise RuntimeError(f"Element {ref} ({entry.name!r}) is off-screen: bring it into view first")
         x, y = rect.xcenter(), rect.ycenter()
-        self._bound()
         try:
-            hit = self._is_or_inside(self.auto.ControlFromPoint(x, y), entry)
+            hit = self._is_or_inside(self._ask(lambda: self.auto.ControlFromPoint(x, y)), entry)
         except self.com_error as e:
             self._unanswered(e)
             hit = False
@@ -379,9 +376,8 @@ class Session:
 
     def _pattern(self, entry: _Entry, pattern_id: Any) -> Any:
         """``entry``'s pattern, or ``None``; an app that does not answer is :class:`UiaUnanswered`."""
-        self._bound()
         try:
-            return entry.control.GetPattern(pattern_id)
+            return self._ask(lambda: entry.control.GetPattern(pattern_id))
         except self.com_error as e:
             self._unanswered(e)
             raise
@@ -395,7 +391,7 @@ class Session:
         if self.abandoned.is_set():
             raise UiaTimeout("abandoned during the action")
         if _hresult(error) in _TIMED_OUT:  # a modal dialog the action opened can hold its call: never act again
-            raise UiaTimeout(
+            raise UiaActionUnanswered(
                 f"Element {ref} ({entry.name!r}) did not answer the action in time. It may have happened: look before"
                 " repeating it, then call ElementTree again"
             ) from None
@@ -414,9 +410,8 @@ class Session:
         entry = self._live(ref)
         pattern = self._pattern(entry, self.auto.PatternId.InvokePattern)
         if pattern is not None:
-            self._bound()
             try:
-                pattern.Invoke(waitTime=0)
+                self._ask(lambda: pattern.Invoke(waitTime=0))
                 return Activation(entry.name)
             except self.com_error as e:
                 self._refused(e, ref, entry)
@@ -428,9 +423,9 @@ class Session:
         for _ in range(_PARENT_HOPS):
             if control is None:
                 return False
-            if list(control.GetRuntimeId()) == entry.runtime_id:
+            if list(self._ask(control.GetRuntimeId)) == entry.runtime_id:
                 return True
-            control = control.GetParentControl()
+            control = self._ask(control.GetParentControl)
         return False
 
     def set_text(self, ref: str, text: str) -> tuple[str, bool]:
@@ -441,32 +436,29 @@ class Session:
         entry = self._live(ref)
         pattern = self._pattern(entry, self.auto.PatternId.ValuePattern)
         if pattern is not None:
-            self._bound()
             try:
-                read_only = pattern.IsReadOnly
+                read_only = self._ask(lambda: pattern.IsReadOnly)
             except self.com_error as e:
                 self._unanswered(e)
                 raise gone(ref, entry.name) from None
             if read_only:
                 raise RuntimeError(f"Element {ref} ({entry.name!r}) is read-only")
-            self._bound()
             try:
-                pattern.SetValue(text, waitTime=0)
+                self._ask(lambda: pattern.SetValue(text, waitTime=0))
                 return entry.name, True
             except self.com_error as e:
                 self._refused(e, ref, entry)
                 log.debug("SetValue refused (%s): typing instead", type(e).__name__)
-        self._bound()
+        maybe_focused = "nothing was typed, the focus may have moved"
         try:
-            entry.control.SetFocus()
+            self._ask(entry.control.SetFocus)
         except self.com_error as e:
-            self._unanswered(e)
+            self._unanswered(e, maybe_focused)
             raise
-        self._bound()
         try:
-            focused = self._is_or_inside(self.auto.GetFocusedControl(), entry)
+            focused = self._is_or_inside(self._ask(self.auto.GetFocusedControl), entry)
         except self.com_error as e:
-            self._unanswered(e)
+            self._unanswered(e, maybe_focused)
             focused = False
         if not focused:
             raise RuntimeError(f"Element {ref} ({entry.name!r}) did not take the keyboard focus: nothing was typed")
@@ -533,7 +525,7 @@ def click_element(ref: str, click: Callable[[int, int], str]) -> str:
     """Invoke the element, or click its centre with ``click(x, y)``. A timeout never falls through to a click."""
     try:
         done = _worker.call(lambda session: session.activate(ref), ACTION_TIMEOUT_S, needs=ACTION_NEEDS_S)
-    except (UiaNotAsked, UiaUnanswered):  # nothing was asked, or nothing was done
+    except (UiaNotAsked, UiaUnanswered, UiaActionUnanswered):  # each already says what happened
         raise
     except UiaTimeout as e:
         raise _after_timeout(ref, "the click") from e
@@ -546,7 +538,7 @@ def type_element(ref: str, text: str, type_keys: Callable[[str], str]) -> str:
     """Set the element's value, or give it the focus and type with ``type_keys(text)``."""
     try:
         name, done = _worker.call(lambda session: session.set_text(ref, text), ACTION_TIMEOUT_S, needs=ACTION_NEEDS_S)
-    except (UiaNotAsked, UiaUnanswered):  # nothing was asked, or nothing typed
+    except (UiaNotAsked, UiaUnanswered, UiaActionUnanswered):  # each already says what happened
         raise
     except UiaTimeout as e:
         raise _after_timeout(ref, "the text") from e

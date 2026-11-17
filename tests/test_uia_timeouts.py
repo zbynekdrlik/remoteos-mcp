@@ -13,7 +13,7 @@ import threading
 import types
 
 import pytest
-from test_element_tree import Control, FakeCom, Invoke, Value, new_session, session_with
+from uia_fakes import Control, FakeCom, Invoke, Value, make_auto, new_session, session_with
 
 from remoteos.element_tree import StaleRef
 from remoteos.platform.win import uia
@@ -98,6 +98,117 @@ def test_a_session_with_no_bound_leaves_ui_automation_alone():
     assert automation.puts == []
 
 
+# -- every single call into the app is bounded anew --------------------------------------------
+
+PROPERTIES = {"BoundingRectangle", "ControlTypeName", "Name", "IsEnabled", "IsKeyboardFocusable", "IsOffscreen"}
+METHODS = {
+    "GetRuntimeId",
+    "GetFirstChildControl",
+    "GetNextSiblingControl",
+    "GetParentControl",
+    "GetPattern",
+    "SetFocus",
+}
+
+
+class Ledger:
+    """Each call into the app checks that the limit in force is what the job had left at that call."""
+
+    def __init__(self, monkeypatch):
+        self.clock = Clock()
+        monkeypatch.setattr(uia, "time", self.clock)
+        self.automation = Automation()
+        self.session = None
+        self.calls: list[str] = []
+
+    def call(self, name: str) -> None:
+        left = max(uia.MIN_ANSWER_MS, int((self.session.answer_by - self.clock.now) * 1000))
+        assert self.automation.puts[-1] == left, f"{name}: a stale limit, not re-set before this call"
+        self.calls.append(name)
+        self.clock.now += 0.25  # every call takes time
+
+
+def ticking(ledger: Ledger, base: type) -> type:
+    class Ticking(base):
+        def __getattribute__(self, name):
+            value = super().__getattribute__(name)
+            if name in PROPERTIES:
+                ledger.call(name)
+            elif name in METHODS or name in ("Invoke", "SetValue"):
+
+                def called(*args, **kwargs):
+                    ledger.call(name)
+                    return value(*args, **kwargs)
+
+                return called
+            elif name == "IsReadOnly":
+                ledger.call(name)
+            return value
+
+    return Ticking
+
+
+@pytest.fixture
+def ledger(monkeypatch):
+    return Ledger(monkeypatch)
+
+
+def _app(ledger, field_patterns=None, button_patterns=None, focused_field=False):
+    tick = ticking(ledger, Control)
+    label = tick(name="", kind="TextControl", rid=(9,))  # the part of the button a hit test lands on
+    button = tick(name="Save", rid=(2,), kids=[label])
+    field = tick(name="Name", kind="EditControl", rect=(100, 200, 300, 240), rid=(3,))
+    button.patterns.update(button_patterns or {})
+    field.patterns.update(field_patterns or {})
+    root = tick(name="App", kind="WindowControl", rect=(0, 0, 500, 500), rid=(100,), kids=[button, field])
+    auto = make_auto(root, focused=field if focused_field else None)
+    for name in ("ControlFromHandle", "ControlFromPoint", "GetFocusedControl"):
+        real = getattr(auto, name)
+        setattr(auto, name, lambda *a, _real=real, _name=name: ledger.call(_name) or _real(*a))
+    ledger.session = uia.Session(auto, FakeCom, threading.Event(), automation=ledger.automation)
+    ledger.session.answer_within(100)
+    refs = {item.name: item.ref for item in ledger.session.tree(50).items}
+    ledger.session.answer_within(100)
+    return refs
+
+
+def test_every_call_of_a_walk_is_bounded_anew(ledger):
+    _app(ledger)
+    assert {"ControlFromHandle", "BoundingRectangle", "IsOffscreen", "GetNextSiblingControl", "Name"} <= set(
+        ledger.calls
+    )
+    assert len(ledger.calls) > 20
+
+
+def test_every_call_of_an_invoke_is_bounded_anew(ledger):
+    refs = _app(ledger, button_patterns={"invoke": ticking(ledger, Invoke)()})
+    del ledger.calls[:]
+    ledger.session.activate(refs["Save"])
+    assert ledger.calls == ["GetRuntimeId", "IsEnabled", "GetPattern", "Invoke"]
+
+
+def test_every_call_of_a_click_s_hit_test_is_bounded_anew(ledger):
+    refs = _app(ledger)
+    del ledger.calls[:]
+    ledger.session.activate(refs["Save"])
+    hit_test = ["ControlFromPoint", "GetRuntimeId", "GetParentControl", "GetRuntimeId"]
+    assert ledger.calls[3:] == ["BoundingRectangle", "IsOffscreen", *hit_test]
+
+
+def test_every_call_of_a_value_set_is_bounded_anew(ledger):
+    refs = _app(ledger, field_patterns={"value": ticking(ledger, Value)()})
+    del ledger.calls[:]
+    ledger.session.set_text(refs["Name"], "x")
+    assert ledger.calls == ["GetRuntimeId", "IsEnabled", "GetPattern", "IsReadOnly", "SetValue"]
+
+
+def test_every_call_of_a_focus_is_bounded_anew(ledger):
+    refs = _app(ledger, focused_field=True)
+    del ledger.calls[:]
+    ledger.session.set_text(refs["Name"], "x")
+    assert ledger.calls[3:] == ["SetFocus", "GetFocusedControl", "GetRuntimeId"]
+
+
 # -- a timeout is a timeout wherever the session reads the app ----------------------------------
 
 
@@ -178,28 +289,29 @@ def _focus_check(error):
     return lambda: session.set_text(ref, "x")
 
 
+NOTHING, FOCUS = "nothing was done to it", "nothing was typed, the focus may have moved"
 READS = {
-    "window lookup": _lookup,
-    "element read": _walk_read("rect"),
-    "children": _walk_read("kids"),
-    "runtime id of a listed element": _walk_read("rid"),
-    "window title": _title,
-    "ref check": _after_tree("rid"),
-    "centre for the mouse": _after_tree("rect"),
-    "pattern lookup": _after_tree("pattern"),
-    "hit test": _hit_test,
-    "read-only check": _read_only,
-    "focus": _after_tree("focus", act="set_text"),
-    "focus check": _focus_check,
+    "window lookup": (_lookup, NOTHING),
+    "element read": (_walk_read("rect"), NOTHING),
+    "children": (_walk_read("kids"), NOTHING),
+    "runtime id of a listed element": (_walk_read("rid"), NOTHING),
+    "window title": (_title, NOTHING),
+    "ref check": (_after_tree("rid"), NOTHING),
+    "centre for the mouse": (_after_tree("rect"), NOTHING),
+    "pattern lookup": (_after_tree("pattern"), NOTHING),
+    "hit test": (_hit_test, NOTHING),
+    "read-only check": (_read_only, NOTHING),
+    "focus": (_after_tree("focus", act="set_text"), FOCUS),
+    "focus check": (_focus_check, FOCUS),
 }
 
 
 @pytest.mark.parametrize("hresult", TIMEOUTS)
 @pytest.mark.parametrize("read", READS)
-def test_a_read_the_app_did_not_answer_is_a_timeout_where_nothing_was_done(read, hresult):
-    run = READS[read](timed_out(hresult))
-    with pytest.raises(uia.UiaUnanswered, match="did not answer UI Automation in time: nothing was done") as caught:
-        run()
+def test_a_read_the_app_did_not_answer_is_a_timeout_that_says_what_was_done(read, hresult):
+    setup, done = READS[read]
+    with pytest.raises(uia.UiaUnanswered, match=f"did not answer UI Automation in time: {done}$") as caught:
+        setup(timed_out(hresult))()
     assert not isinstance(caught.value, StaleRef)
 
 
@@ -208,9 +320,8 @@ def test_an_invoke_the_app_did_not_answer_may_have_happened_and_is_never_clicked
     button = Control()
     button.patterns["invoke"] = pattern = Invoke(error=timed_out(hresult))
     session, ref = session_with(button)
-    with pytest.raises(uia.UiaTimeout, match="may have happened") as caught:
+    with pytest.raises(uia.UiaActionUnanswered, match="may have happened"):
         session.activate(ref)
-    assert not isinstance(caught.value, uia.UiaUnanswered)
     assert pattern.calls == 1
 
 
@@ -219,9 +330,8 @@ def test_a_value_set_the_app_did_not_answer_may_have_happened_and_is_never_typed
     field = Control(kind="EditControl")
     field.patterns["value"] = Value(error=timed_out(hresult))
     session, ref = session_with(field)
-    with pytest.raises(uia.UiaTimeout, match="may have happened") as caught:
+    with pytest.raises(uia.UiaActionUnanswered, match="may have happened"):
         session.set_text(ref, "x")
-    assert not isinstance(caught.value, uia.UiaUnanswered)
     assert field.focus_sets == 0
 
 
@@ -233,11 +343,12 @@ class Raises:
         raise self.error
 
 
-def test_a_click_on_an_app_that_did_not_answer_a_read_says_nothing_was_done(monkeypatch):
-    monkeypatch.setattr(uia, "_worker", Raises(uia.UiaUnanswered("the window did not answer: nothing was done")))
-    with pytest.raises(uia.UiaUnanswered, match="nothing was done"):
+@pytest.mark.parametrize("error", [uia.UiaUnanswered("nothing was done to it"), uia.UiaActionUnanswered("it may have")])
+def test_click_and_type_pass_on_what_the_session_said_happened(monkeypatch, error):
+    monkeypatch.setattr(uia, "_worker", Raises(error))
+    with pytest.raises(type(error), match=str(error)):
         uia.click_element("1.1", lambda x, y: pytest.fail("clicked"))
-    with pytest.raises(uia.UiaUnanswered, match="nothing was done"):
+    with pytest.raises(type(error), match=str(error)):
         uia.type_element("1.1", "x", lambda text: pytest.fail("typed"))
 
 
