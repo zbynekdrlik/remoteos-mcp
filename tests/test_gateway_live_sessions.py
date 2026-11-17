@@ -11,9 +11,11 @@ from __future__ import annotations
 import ast
 import json
 import os
+import select
 import subprocess
 import sys
-import time
+import tempfile
+from pathlib import Path
 
 import pytest
 from fleet_harness import install_fake_airuleset, install_fake_remote_tools, notify_calls, remote_calls
@@ -115,7 +117,7 @@ def test_a_dead_tmux_leaves_the_session_with_no_pane(tmp_path, fake_tmux, monkey
 
 
 def test_the_scanner_is_python_3_8_with_no_package_import():
-    source = open(session_scan.__file__, encoding="utf-8").read()
+    source = Path(session_scan.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source, feature_version=(3, 8))
     modules = [n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     modules += [alias.name for n in ast.walk(tree) if isinstance(n, ast.Import) for alias in n.names]
@@ -146,24 +148,30 @@ def test_nothing_live_composes_nothing():
 
 
 class LiveSession:
-    """A real process whose comm is ``claude`` (a shebang script keeps its file name as comm)."""
+    """A real process whose comm is ``claude`` (a shebang script keeps its file name as comm).
+
+    Each session has its OWN script: rewriting a shared one while an earlier shell had not read it
+    yet made that session run nothing and end (#108). The constructor returns once the script says
+    ``ready``, i.e. the shell runs it: the exec is over, so the environ the scan reads is in place
+    (comm is set at the start of the exec, the environ only at its end)."""
 
     def __init__(self, tmp_path, cwd, pane: str | None) -> None:
-        script = tmp_path / "session-bin" / "claude"
-        script.parent.mkdir(exist_ok=True)
-        script.write_text("#!/bin/sh\nread -r _\n", encoding="utf-8")
+        script = Path(tempfile.mkdtemp(prefix="session-bin-", dir=tmp_path)) / "claude"
+        script.write_text("#!/bin/sh\necho ready\nread -r _\n", encoding="utf-8")
         script.chmod(0o755)
         env = {k: v for k, v in os.environ.items() if not k.startswith("TMUX")}
         if pane:
             env.update(TMUX="/tmp/fake-tmux,1,0", TMUX_PANE=pane)
-        self.process = subprocess.Popen([str(script)], cwd=cwd, env=env, stdin=subprocess.PIPE)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            comm = open(f"/proc/{self.process.pid}/comm", encoding="utf-8").read().strip()
-            if comm == "claude":
-                return
-            time.sleep(0.01)
-        raise AssertionError(f"the process is named {comm!r}")
+        self.process = subprocess.Popen([str(script)], cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        ready, _, _ = select.select([self.process.stdout], [], [], 5)
+        line = self.process.stdout.readline() if ready else b""
+        if line != b"ready\n":
+            self.__exit__()
+            raise AssertionError(f"the fake session did not start its script: {line!r}")
+        comm = Path(f"/proc/{self.process.pid}/comm").read_text(encoding="utf-8").strip()
+        if comm != "claude":
+            self.__exit__()
+            raise AssertionError(f"the process is named {comm!r}")
 
     def __enter__(self):
         return self
@@ -171,6 +179,29 @@ class LiveSession:
     def __exit__(self, *exc):
         self.process.kill()
         self.process.wait()
+        self.process.stdin.close()
+        self.process.stdout.close()
+
+
+def script_of(pid: int) -> str:
+    """The script a fake session's ``/bin/sh`` runs: argv[1] of the live process."""
+    return Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[1].decode()
+
+
+def test_sessions_started_back_to_back_each_run_their_own_script_with_their_environment(tmp_path):
+    """#108: the second session rewrote the ONE shared script while the first shell had not read it
+    yet, so the first session ran nothing and ended (the scan then missed it); and comm is set at
+    exec, the environ only later. A started session must be running its own, untouched script, with
+    its environment in place: that is what the scan reads."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    for _ in range(50):
+        with LiveSession(tmp_path, cwd, "%7") as tmuxed, LiveSession(tmp_path, cwd, None) as outside:
+            assert b"PATH=" in session_scan._read(f"/proc/{outside.process.pid}/environ")  # not empty
+            assert session_scan.tmux_of(f"/proc/{tmuxed.process.pid}") == ("/tmp/fake-tmux", "%7")
+            assert script_of(tmuxed.process.pid) != script_of(outside.process.pid)
+            assert os.readlink(f"/proc/{tmuxed.process.pid}/cwd") == str(cwd)  # both still run
+            assert os.readlink(f"/proc/{outside.process.pid}/cwd") == str(cwd)
 
 
 class Run:
