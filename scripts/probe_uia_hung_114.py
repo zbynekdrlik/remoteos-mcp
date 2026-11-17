@@ -23,7 +23,8 @@ from remoteos.platform.win.psquote import ps_literal  # noqa: E402
 T0 = time.monotonic()
 HANG = (
     "$form.Add_Shown({ $form.Activate() }); $hang = New-Object Windows.Forms.Timer; $hang.Interval = 1000;"
-    " $hang.Add_Tick({ $hang.Stop(); Start-Sleep -Seconds 40 }); $hang.Start()"
+    " $hang.Add_Tick({ $hang.Stop(); $end = (Get-Date).AddSeconds(40); while ((Get-Date) -lt $end) {} });"
+    " $hang.Start()"
 )
 
 
