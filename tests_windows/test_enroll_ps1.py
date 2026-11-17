@@ -139,7 +139,7 @@ def test_the_installer_runs_as_a_child_with_the_values_then_they_leave_the_envir
 $EnrollUrl = 'https://enroll.example/enroll/'
 $code = Invoke-RemoteOSEnrolledInstall -InstallerPath {_q(installer)} -LogPath {_q(log)} -Ref 'dev'
 @{{ code = $code; left = [bool]($env:REMOTEOS_ENROLL -or $env:REMOTEOS_ENROLL_SSH_KEY -or $env:REMOTEOS_MCP_REF);
-   log = (Get-Content -LiteralPath {_q(log)} -Raw) }} | ConvertTo-Json -Compress
+   log = [string](Get-Content -LiteralPath {_q(log)} -Raw) }} | ConvertTo-Json -Compress
 """)
     assert got["code"] == 3
     assert got["left"] is False
