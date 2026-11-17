@@ -29,9 +29,8 @@ from fleet_harness import (
     remote_calls,
 )
 from test_gateway_check import Check
-from test_gateway_live_sessions import LiveSession, Run, fake_tmux  # noqa: F401 (fixture)
+from test_gateway_live_sessions import LiveSession
 
-from remoteos.gateway import check as check_module
 from remoteos.gateway.owner_notice import SLUG_RE, airuleset_notifier, slug
 
 OK_STATUS = {"gateway": {"state": "ok"}, "machines": {}}
@@ -349,84 +348,37 @@ def test_every_slug_fits_airuleset_and_two_names_never_share_one(name):
         assert made == "state-linux-cam2"
 
 
-# -- restart notices: recorded by sync-configs, cleared by check once the sessions are gone ---------
-
-
-def _notifier(run: Run, project, notices):
-    return airuleset_notifier(run.airuleset, "zbynek", project_dir=project, notices=notices)
+# -- restart notices: gone (#109, owner ROZHODNUTÉ 2026-11-17), the old ones are cleared once -------
 
 
 @pytest.mark.parametrize("host", ["dev1", "dev2"])
-def test_a_restart_notice_stays_until_its_sessions_are_gone(
-    tmp_path,
-    monkeypatch,
-    fake_tmux,  # noqa: F811 (the imported fixture)
-    project,
-    with_flag,
-    host,  # noqa: F811 (fixture)
+def test_check_clears_every_old_restart_notice_once_even_while_its_session_runs(
+    tmp_path, monkeypatch, project, with_flag, host
 ):
-    run = Run(tmp_path, monkeypatch)
+    """The live book held 7 ``restart-<project>`` slugs. They are never judged by their sessions any
+    more: the next check clears each one and forgets it, with no ssh to the session's host."""
     remote_log = install_fake_remote_tools(tmp_path / "bin", monkeypatch)
-    run.manifest(host=host)
-    notices = tmp_path / "state" / "owner-notices.json"
-    flags = ("--notify-project-dir", str(project), "--notices-file", str(notices))
-    session = LiveSession(run.tmp, run.project, "%7")
-    try:
-        result = run.sync(*flags)
-        assert result.exit_code == 0, result.output
-        [argv] = notify_calls(run.log)
-        assert _option(argv, "--owner-notice") == "restart-camera-box"
-        assert "main:2" in footer_u(run.airuleset.parent)[f"{project}|restart-camera-box"]
-        [recorded] = json.loads(notices.read_text(encoding="utf-8"))["notices"].values()
-        assert recorded["restart"]["host"] == host
-        [noted] = recorded["restart"]["sessions"]
-        assert noted["pid"] == session.process.pid and isinstance(noted["start"], int)
+    check = NoticeCheck(tmp_path, monkeypatch, project)
+    check.store({})
+    notifier = airuleset_notifier(check.airuleset, "zbynek", project_dir=project, notices=check.notices)
+    cwd = tmp_path / "session-cwd"
+    cwd.mkdir()
+    with LiveSession(tmp_path, cwd, "%7") as session:
+        record = {"restart": {"project": "camera-box", "host": host, "account": "newlevel",
+                              "sessions": [{"pid": session.process.pid, "start": None}]}}
+        for name in ("restart-camera-box", "restart-dsync"):
+            assert notifier("MCP konfigurácia sa zmenila", name, record)
+        assert set(check.u()) == {"restart-camera-box", "restart-dsync"}
 
-        check_module._settle(_notifier(run, project, notices), OK_STATUS, "dev1")
-        assert "--clear-owner-notice" not in json.dumps(notify_calls(run.log))  # still running
-    finally:
-        session.__exit__()
-
-    check_module._settle(_notifier(run, project, notices), OK_STATUS, "dev1")
-    assert footer_u(run.airuleset.parent) == {}
-    assert json.loads(notices.read_text(encoding="utf-8"))["notices"] == {}
-    went_over_ssh = any("--alive" in json.dumps(call) for call in remote_calls(remote_log))
-    assert went_over_ssh is (host == "dev2")
-
-
-def test_a_restart_that_cannot_be_checked_keeps_its_notice(tmp_path, monkeypatch, project, with_flag):
-    install_fake_remote_tools(tmp_path / "bin", monkeypatch)
-    monkeypatch.setenv("FAKE_SSH_DENY", "1")
-    script, _log = install_fake_airuleset(tmp_path / "airuleset", monkeypatch)
-    notifier = airuleset_notifier(script, "zbynek", project_dir=project, notices=tmp_path / "owner-notices.json")
-    entry = {"restart": {"host": "dev2", "account": "a", "sessions": [{"pid": 1, "start": 2}]}}
-    with notifier.book.locked():
-        notifier.book.add("restart-x", entry)
-    check_module._settle(notifier, OK_STATUS, "dev1")
-    assert set(notifier.book.read()) == {"restart-x"}  # unknown this run: kept, never cleared blind
-
-
-def test_a_dry_run_sync_records_nothing(tmp_path, monkeypatch, fake_tmux, project, with_flag):  # noqa: F811
-    run = Run(tmp_path, monkeypatch)
-    run.manifest()
-    notices = tmp_path / "state" / "owner-notices.json"
-    with LiveSession(run.tmp, run.project, "%7"):
-        result = run.sync("--dry-run", "--notify-project-dir", str(project), "--notices-file", str(notices))
-    assert result.exit_code == 0, result.output
-    assert notify_calls(run.log) == [] and not notices.exists()
-
-
-def test_only_the_same_claude_process_counts_as_still_running(tmp_path):
-    from test_gateway_live_sessions import FakeProc
-
-    from remoteos.gateway import session_scan
-
-    proc = FakeProc(tmp_path / "proc")
-    proc.add(100, "claude", tmp_path)  # start 1000
-    proc.add(101, "bash", tmp_path)  # the pid was reused by something else
-    pairs = ["100:1000", "100:999", "101:1010", "102:1020", "100:None", "x:1"]
-    assert session_scan.alive(pairs, proc_root=str(proc.root)) == [100, 100]
-    assert session_scan.alive(["100:999"], proc_root=str(proc.root)) == []  # same pid, another start: restarted
+        with FakeFleetMachine(healthz=True) as gateway:
+            assert check.run(gateway.base_url).exit_code == 0
+            assert check.u() == {} and check.book() == {}
+            clears = [argv for argv in check.calls() if "--clear-owner-notice" in argv]
+            assert sorted(_option(argv, "--clear-owner-notice") for argv in clears) == [
+                "restart-camera-box", "restart-dsync"]
+            assert check.run(gateway.base_url).exit_code == 0  # forgotten: never cleared again
+    assert len([argv for argv in check.calls() if "--clear-owner-notice" in argv]) == 2
+    assert remote_calls(remote_log) == []
 
 
 def test_conditions_announced_before_the_flag_existed_are_put_into_u_once(tmp_path, monkeypatch, project):
@@ -512,16 +464,6 @@ def test_settle_waits_for_a_send_that_holds_the_book(tmp_path, monkeypatch, proj
     settling.join(timeout=30)
     assert not settling.is_alive()
     assert notifier.book.read() == {}
-
-
-@pytest.mark.parametrize(("host", "account"), [("dev2", "-oProxyCommand=touch"), ("-oProxyCommand=x", "newlevel")])
-def test_a_hand_edited_restart_record_never_becomes_an_ssh_option(tmp_path, monkeypatch, host, account):
-    from remoteos.gateway import live_sessions
-
-    log = install_fake_remote_tools(tmp_path / "bin", monkeypatch)
-    entry = {"restart": {"host": host, "account": account, "sessions": [{"pid": 1, "start": 2}]}}
-    assert live_sessions.still_running(entry, "dev1") is False  # done: cleared, never run
-    assert remote_calls(log) == []
 
 
 def test_the_one_time_reannounce_survives_a_run_that_had_to_send_plain(tmp_path, monkeypatch, project, with_flag):

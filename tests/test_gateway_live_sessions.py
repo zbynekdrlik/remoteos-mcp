@@ -1,4 +1,7 @@
-"""``sync-configs`` tells the owner which live Claude sessions need a restart (#66).
+"""``sync-configs`` lists which live Claude sessions need a restart (#66), and notifies NOBODY (#109).
+
+Owner ROZHODNUTÉ 2026-11-17 (#60 comment): the "restart these sessions" notices never reach the
+owner — no ``restart-<project>`` U item, no notify; the list is printed and logged only.
 
 The scanner reads a fake ``/proc`` tree and a fake ``tmux``; the end-to-end tests start a REAL
 process named ``claude`` in a project directory and run the real sync through the real local,
@@ -68,9 +71,6 @@ class FakeProc:
         (directory / "cwd").symlink_to(cwd)
         body = "\0".join(f"{k}={v}" for k, v in (environ or {}).items())
         (directory / "environ").write_text(body, encoding="utf-8")
-        # field 22 of stat is the start time
-        stat = f"{pid} ({comm}) S 1 " + " ".join(["0"] * 17) + f" {pid * 10} 0 0\n"
-        (directory / "stat").write_text(stat, encoding="utf-8")
 
 
 def test_the_scan_finds_the_right_panes(tmp_path, fake_tmux):
@@ -95,9 +95,9 @@ def test_the_scan_finds_the_right_panes(tmp_path, fake_tmux):
     sessions = session_scan.scan(str(config), proc_root=str(proc.root), tmux=str(fake_tmux))
 
     assert sessions == [
-        {"pid": 100, "start": 1000, "tmux": True, "pane": "main:2"},
-        {"pid": 101, "start": 1010, "tmux": True, "pane": "main:3"},
-        {"pid": 102, "start": 1020, "tmux": False, "pane": None},
+        {"pid": 100, "tmux": True, "pane": "main:2"},
+        {"pid": 101, "tmux": True, "pane": "main:3"},
+        {"pid": 102, "tmux": False, "pane": None},
     ]
     assert "hunter2" not in json.dumps(sessions)
     [call] = [json.loads(line) for line in (tmp_path / "tmux.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -112,7 +112,7 @@ def test_a_dead_tmux_leaves_the_session_with_no_pane(tmp_path, fake_tmux, monkey
     proc.add(100, "claude", project_dir(tmp_path, "x", config), {"TMUX": "/s,1,0", "TMUX_PANE": "%7"})
 
     assert session_scan.scan(str(config), str(proc.root), str(fake_tmux)) == [
-        {"pid": 100, "start": 1000, "tmux": True, "pane": None}
+        {"pid": 100, "tmux": True, "pane": None}
     ]
 
 
@@ -127,21 +127,28 @@ def test_the_scanner_is_python_3_8_with_no_package_import():
 PROJECT = Project(name="camera-box", host="dev1", account="newlevel", config="/c", machines=())
 
 
-def test_a_long_list_stays_under_the_limit():
+def test_a_long_list_is_one_text_with_every_session():
     sessions = [Session(pid=i, pane=f"long-session-name-{i}:1") for i in range(100)]
-    texts = live_sessions.compose_messages([(PROJECT, sessions)])
-    assert len(texts) > 1 and all(len(text) <= 1700 for text in texts)
-    assert all(text.endswith(live_sessions.ACTION) for text in texts)
-    assert sum(text.count("•") for text in texts) == 100
+    text = live_sessions.compose([(PROJECT, sessions)])
+    assert text.startswith(live_sessions.TITLE) and text.endswith(live_sessions.ACTION)
+    assert text.count("•") == 100
 
 
 def test_a_tmux_session_with_no_known_pane_is_not_called_outside_tmux():
-    [text] = live_sessions.compose_messages([(PROJECT, [Session(pid=5, pane=None, in_tmux=True)])])
+    text = live_sessions.compose([(PROJECT, [Session(pid=5, pane=None, in_tmux=True)])])
     assert "proces 5 v tmux" in text and "mimo tmux" not in text
 
 
 def test_nothing_live_composes_nothing():
-    assert live_sessions.compose_messages([]) == []
+    assert live_sessions.compose([]) == ""
+
+
+def test_the_alive_check_and_the_notice_record_are_gone():
+    """#109: nothing tracks a session any more, so nothing may still look for one."""
+    assert not hasattr(live_sessions, "still_running")
+    assert not hasattr(live_sessions, "notify_restarts")
+    assert not hasattr(session_scan, "alive")
+    assert "--alive" not in Path(session_scan.__file__).read_text(encoding="utf-8")
 
 
 # -- end to end, with a real process named claude ----------------------------------------------
@@ -208,7 +215,11 @@ class Run:
     def __init__(self, tmp_path, monkeypatch) -> None:
         self.fleet = Fleet(tmp_path)
         self.tmp = tmp_path
+        # an airuleset IS installed (the env the units set): sync-configs must still not call it
         self.airuleset, self.log = install_fake_airuleset(tmp_path / "airuleset", monkeypatch)
+        monkeypatch.setenv("REMOTEOS_GATEWAY_AIRULESET", str(self.airuleset))
+        monkeypatch.setenv("FAKE_NOTIFY_OWNER_NOTICE", "1")
+        monkeypatch.setenv("FAKE_NOTIFY_STATUS", "suppressed")
         self.config = self.fleet.write_config("camera-box", self.fleet.camera_box_text())
         self.project = project_dir(tmp_path, "camera-box", self.config)
 
@@ -216,10 +227,7 @@ class Run:
         self.fleet.write_manifest({"camera-box": {**self.fleet.camera_box_project(), **overrides}})
 
     def sync(self, *args: str):
-        return self.fleet.run("--airuleset", str(self.airuleset), *args)
-
-    def bodies(self) -> list[str]:
-        return [argv[2] for argv in notify_calls(self.log)]
+        return self.fleet.run(*args)
 
 
 @pytest.fixture
@@ -227,38 +235,32 @@ def run(tmp_path, monkeypatch, fake_tmux) -> Run:
     return Run(tmp_path, monkeypatch)
 
 
-def test_a_written_config_with_a_live_session_sends_one_message_with_the_pane(run):
+def test_a_written_config_lists_its_live_sessions_and_notifies_nobody(run, caplog):
+    caplog.set_level("INFO", logger="remoteos.gateway.live_sessions")
     run.manifest()
     with LiveSession(run.tmp, run.project, "%7"), LiveSession(run.tmp, run.project, None) as outside:
         result = run.sync()
 
     assert result.exit_code == 0, result.output
-    [body] = run.bodies()
-    assert f"• camera-box ({ME}@dev1): main:2" in body
-    assert f"proces {outside.process.pid} mimo tmux" in body
-    assert "`/exit`" in body and "`claude -c`" in body
+    assert notify_calls(run.log) == [] and not (run.airuleset.parent / "footer-u.json").exists()
+    assert f"• camera-box ({ME}@dev1): main:2" in result.output
+    assert f"proces {outside.process.pid} mimo tmux" in result.output
+    assert "`/exit`" in result.output and "`claude -c`" in result.output
+    assert "main:2" in caplog.text  # logged too: the journal keeps it
     token = run.fleet.token_of(run.config, "linux-cam1")
     for secret in (*run.fleet.secrets(), token):
-        assert secret not in body
-        assert secret not in json.dumps(notify_calls(run.log))
-    assert body in result.output  # it may be suppressed by the owner's policy: the text stays visible
+        assert secret not in result.output
+        assert secret not in caplog.text
 
 
-def test_the_message_is_pinned_to_the_owner_and_an_explicit_one_wins(run, monkeypatch):
+def test_sync_configs_has_no_notify_options(run):
     run.manifest()
-    with LiveSession(run.tmp, run.project, "%7"):
-        assert run.sync().exit_code == 0
-    [argv] = notify_calls(run.log)
-    assert argv[argv.index("--owner-name") + 1] == "zbynek"  # a run with no tmux pane cannot be routed
-
-    run.fleet.write_config("camera-box", run.fleet.camera_box_text())
-    with LiveSession(run.tmp, run.project, "%7"):
-        assert run.sync("--notify-owner", "david").exit_code == 0
-    argv = notify_calls(run.log)[-1]
-    assert argv[argv.index("--owner-name") + 1] == "david"
+    for option in ("--airuleset", "--notify-owner", "--notify-project-dir", "--notices-file"):
+        result = run.sync(option, "x")
+        assert result.exit_code == 2 and "No such option" in result.output, (option, result.output)
 
 
-def test_a_failed_closing_registry_save_still_gives_the_notice(run, monkeypatch):
+def test_a_failed_closing_registry_save_still_lists_the_sessions(run, monkeypatch):
     run.manifest()
     real_commit = sync_module._Saver.commit
     calls = []
@@ -271,51 +273,33 @@ def test_a_failed_closing_registry_save_still_gives_the_notice(run, monkeypatch)
 
     monkeypatch.setattr(sync_module._Saver, "commit", fails_at_the_end)
     with LiveSession(run.tmp, run.project, "%7"):
-        run.sync()
-    assert any("main:2" in body for body in run.bodies())
+        result = run.sync()
+    assert "main:2" in result.output
 
 
-def test_no_live_session_sends_nothing(run):
+def test_no_live_session_lists_nothing(run):
     run.manifest()
     result = run.sync()
     assert result.exit_code == 0, result.output
-    assert run.bodies() == []
+    assert live_sessions.TITLE not in result.output
 
 
-def test_an_unchanged_config_sends_nothing_even_with_a_live_session(run):
+def test_an_unchanged_config_lists_nothing_even_with_a_live_session(run):
     run.manifest()
     assert run.sync().exit_code == 0
     with LiveSession(run.tmp, run.project, "%7"):
         result = run.sync()
     assert result.exit_code == 0, result.output
-    assert run.bodies() == []
+    assert live_sessions.TITLE not in result.output
 
 
-def test_a_dry_run_sends_nothing_and_prints_what_it_would_send(run):
+def test_a_dry_run_lists_the_sessions_it_would_affect(run):
     run.manifest()
     with LiveSession(run.tmp, run.project, "%7"):
         result = run.sync("--dry-run")
     assert result.exit_code == 0, result.output
-    assert run.bodies() == []
-    assert "the owner would get" in result.output and "main:2" in result.output
-
-
-def test_an_undelivered_notice_is_reported_and_fails_nothing(run, monkeypatch):
-    monkeypatch.setenv("FAKE_NOTIFY_STATUS", "error")
-    run.manifest()
-    with LiveSession(run.tmp, run.project, "%7"):
-        result = run.sync()
-    assert result.exit_code == 0, result.output
-    assert "restart notice NOT delivered" in result.output and "main:2" in result.output
-    assert run.fleet.token_of(run.config, "linux-cam1")
-
-
-def test_no_airuleset_prints_the_text_instead(run):
-    run.manifest()
-    with LiveSession(run.tmp, run.project, "%7"):
-        result = run.fleet.run("--airuleset", str(run.tmp / "missing.py"))
-    assert result.exit_code == 0, result.output
-    assert "no airuleset.py here" in result.output and "main:2" in result.output
+    assert notify_calls(run.log) == []
+    assert "dry run" in result.output and "main:2" in result.output
 
 
 def test_a_failed_scan_is_reported_and_fails_nothing(run, monkeypatch):
@@ -332,7 +316,7 @@ def test_a_failed_scan_is_reported_and_fails_nothing(run, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "cannot list the live sessions of camera-box" in result.output
-    assert run.bodies() == []
+    assert live_sessions.TITLE not in result.output
     assert any(call["tool"] == "sudo" for call in remote_calls(log))
 
 
@@ -344,8 +328,7 @@ def test_the_other_writers_scan_through_the_same_target_with_no_secret_in_an_arg
         result = run.sync()
 
     assert result.exit_code == 0, result.output
-    [body] = run.bodies()
-    assert "main:2" in body
+    assert "main:2" in result.output and notify_calls(run.log) == []
     calls = remote_calls(log)
     assert sum(1 for call in calls if call["tool"] == tool) == 3  # read, write, scan
     assert "list-panes" in json.dumps(calls[-1])  # the scanner's source
