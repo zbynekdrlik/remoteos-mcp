@@ -3,6 +3,8 @@ paths:
   - "src/remoteos/element_tree.py"
   - "src/remoteos/platform/win/uia.py"
   - "tests/test_element_tree.py"
+  - "tests/test_uia_timeouts.py"
+  - "tests/uia_fakes.py"
   - "tests_windows/test_uia_windows.py"
 ---
 
@@ -30,6 +32,45 @@ paths:
 - **A hung call cannot be cancelled.** It is abandoned, and its thread ends when the call returns.
   `MAX_STUCK_WORKERS` bounds them. The thread never calls CoUninitialize: a control released
   after it crashes.
+- **UI Automation gives up on an app before we do (#114).** The client is `CUIAutomation8` as
+  `IUIAutomation2` (installed into the package's client: `IUIAutomation` + `ViewWalker`, the only
+  client members the package reads besides `UIAutomationCore`; it derives from `IUIAutomation`).
+  Windows 8+ only, no fallback: the fleet is Win10/11 + Server 2019. The default
+  `TransactionTimeout` is 20 s, longer than every budget, so before #114 an app that did not answer
+  ALWAYS abandoned the worker (measured on windows-latest: a busy UI thread → 15.0 s + a stuck
+  thread; bounded → a COMError in about 1 s, worker alive).
+  - `UiaWorker(answer_within=Session.answer_within)` gives each job its call's remaining budget
+    minus `ANSWER_MARGIN_S`. The timeout applies to EACH call into the app, so every call goes
+    through `Session._ask(call)`, which first re-sets it to what the job has left (a put on our own
+    client, no call into the app), never under `MIN_ANSWER_MS`. The floor only lets a responsive
+    app answer at the end of a job; a hung app late in a job is left to the abandon backstop. A
+    new call into the app that skips `_ask` gets a stale limit: the ledger tests catch it. The
+    walk's deadline includes the window lookup.
+  - **Never the package's `Control` wrappers for navigation, patterns or focus.** Its
+    `GetFirstChildControl` / `GetNextSiblingControl` / `GetParentControl` / `ControlFromHandle` /
+    `ControlFromPoint` / `GetFocusedControl` are TWO calls into the app (the element, then
+    `CurrentControlType` in `CreateControlFromElement`) under one limit, and its `GetPattern` /
+    `SetFocus` SWALLOW every COM error (None / False): a timeout there would send ClickElement to
+    the mouse and TypeElement to the keys. The session uses its own `automation` (IUIAutomation2:
+    `ElementFromHandle`, `ElementFromPoint`, `GetFocusedElement`) and `walker` (`RawViewWalker`),
+    `Session._control(find)` = the element and its control, each in its own `_ask`, and the raw
+    `Element.GetCurrentPattern` + `auto.CreatePattern` / `Element.SetFocus`. A refused pattern
+    lookup is still `None` and a refused SetFocus still goes on to the focus check, as the
+    package did; only a timeout is `UiaUnanswered`. `IsWindowVisible` is user32, not UIA.
+  - Its timeout HRESULTs (`_TIMED_OUT`: UIA_E_TIMEOUT 0x80131505, ERROR_TIMEOUT 0x800705B4) on a
+    READ are `UiaUnanswered` (saying what was done: "nothing was done to it", or for TypeElement's
+    focus steps "nothing was typed, the focus may have moved"), never "vanished" (an element skipped
+    silently) or "gone" (a ref ended for nothing). On Invoke/SetValue they are
+    `UiaActionUnanswered` "may have happened", never a fallback to the mouse or the keys.
+    ClickElement/TypeElement pass both through as they are. The abandon stays the backstop.
+  - Any other COM error of the window lookup still reaches the tool raw (as before #114).
+  - Tests: `tests/test_uia_timeouts.py` (one case per read site; a fake clock and a ledger that
+    checks the limit in force at every call). The fakes are `tests/uia_fakes.py`: they behave like
+    the package (GetPattern/SetFocus swallow, navigation is element + type, CreatePattern's
+    QueryInterface can be refused). Known limit: a `dead` fake element still navigates.
+- **Hanging a test window:** a busy loop on its UI thread (`while ((Get-Date) -lt $end) {}` in a
+  forms timer tick). `Start-Sleep` does not hang it: a CLR wait on an STA thread pumps sent
+  messages, WM_GETOBJECT included. `SendMessageTimeout(WM_NULL)` tells whether it answers.
 - **`UiaNotAsked` (starting, busy, stuck) is not a hang: nothing was asked of any app.** The first
   start ever generates comtypes' wrappers, which takes seconds (into `comtypes/gen`, or
   `%APPDATA%\Python\…\comtypes_cache` when that is not writable). It keeps the starting worker. An
@@ -70,7 +111,10 @@ paths:
 - **Never log a name's or a text's content:** counts and exception types only (#31).
 - **Tests:** `tests/test_element_tree.py` runs the real worker threads; only the package's controls
   and patterns are faked. `tests_windows/test_uia_windows.py` runs the real package against a
-  WinForms window in the `windows-powershell` CI job.
+  WinForms window in the `windows-powershell` CI job; its `tree_of` retries `UiaUnanswered` too (a
+  window started a moment ago on a stalled runner may not answer yet: the #114 flake, where the
+  first contact of a fresh window took over 12 s while the same run's next test was 4x slow), never
+  a plain `UiaTimeout`: that is an abandoned worker, the bug itself.
 - **Live (supervisor, after deploy):** on a Windows box, `ElementTree` of a Chromium window lists
   its buttons (the very first walk can be short: Chromium builds its tree when a UIA client
   appears); `ClickElement` one and see its effect; `TypeElement` a field and read it back.

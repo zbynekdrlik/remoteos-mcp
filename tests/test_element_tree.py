@@ -14,6 +14,7 @@ import types
 import pytest
 from tool_surface import server
 from tool_test_support import tool_error
+from uia_fakes import Control, FakeCom, Invoke, Rect, Value, new_session, session_with
 
 from remoteos.coords import CaptureGeometry, frame_for
 from remoteos.element_tree import ElementFacts, RefTable, StaleRef, TreeItem, Walk, listed, walk
@@ -326,24 +327,17 @@ def test_a_late_walk_stops_at_its_next_element():
     abandoned = threading.Event()
     seen = []
 
-    class Late(Control):
-        def GetRuntimeId(self):
-            return self.rid
+    root = Control(name="App", kind="WindowControl", kids=[Control(name=str(i), rid=(i,)) for i in range(1, 6)])
+    session = new_session(root, abandoned=abandoned)
+    walker, original = session.walker, session.walker.GetNextSiblingElement
 
-    def noting(index):
-        control = Late(name=str(index), rid=(index,))
-        original = control.GetNextSiblingControl
+    def next_one(element):
+        seen.append(int(element.control.Name))
+        abandoned.set()  # the caller gave up while this call was in the app
+        return original(element)
 
-        def next_one():
-            seen.append(index)
-            abandoned.set()
-            return original()
-
-        control.GetNextSiblingControl = next_one
-        return control
-
-    root = Control(name="App", kind="WindowControl", kids=[noting(i) for i in range(1, 6)])
-    tree = uia.Session(make_auto(root), FakeCom, abandoned).tree(50)
+    walker.GetNextSiblingElement = next_one
+    tree = session.tree(50)
     assert seen == [1]
     assert "ran out of time" in tree.truncated
 
@@ -366,128 +360,6 @@ def test_a_start_that_never_ends_is_replaced():
 
 
 # -- the session, on fake controls --------------------------------------------------------------
-
-
-class FakeCom(Exception):
-    pass
-
-
-class Rect:
-    def __init__(self, left, top, right, bottom):
-        self.left, self.top, self.right, self.bottom = left, top, right, bottom
-
-    def isempty(self):
-        return self.right == self.left or self.bottom == self.top
-
-    def xcenter(self):
-        return (self.left + self.right) // 2
-
-    def ycenter(self):
-        return (self.top + self.bottom) // 2
-
-
-class Invoke:
-    """Real semantics: a failed HRESULT raises, so a False return (S_FALSE) was accepted."""
-
-    def __init__(self, returns=True, error=None):
-        self.returns, self.error, self.calls, self.waits = returns, error, 0, []
-
-    def Invoke(self, waitTime):
-        self.calls += 1
-        self.waits.append(waitTime)
-        if self.error:
-            raise self.error
-        return self.returns
-
-
-class Value:
-    def __init__(self, read_only=False, returns=True, error=None):
-        self.IsReadOnly, self.returns, self.error, self.value, self.waits = read_only, returns, error, None, []
-
-    def SetValue(self, value, waitTime):
-        self.waits.append(waitTime)
-        if self.error:
-            raise self.error
-        self.value = value
-        return self.returns
-
-
-class Control:
-    def __init__(self, name="OK", kind="ButtonControl", rect=(100, 100, 200, 140), rid=(1, 2), kids=(), **state):
-        self.Name, self.ControlTypeName, self.rect, self.rid = name, kind, Rect(*rect), rid
-        self.kids, self.parent = list(kids), None
-        for kid in self.kids:
-            kid.parent = self
-        self.IsEnabled, self.IsKeyboardFocusable, self.IsOffscreen = True, False, False
-        self.patterns: dict = {}
-        self.dead = False
-        self.next = None
-        self.focus_sets = 0
-        self.__dict__.update(state)
-
-    def _touch(self):
-        if self.dead:
-            raise FakeCom("element not available")
-
-    @property
-    def BoundingRectangle(self):
-        self._touch()
-        return self.rect
-
-    def GetRuntimeId(self):
-        self._touch()
-        return self.rid
-
-    def GetFirstChildControl(self):
-        for a, b in zip(self.kids, self.kids[1:]):
-            a.next = b
-        return self.kids[0] if self.kids else None
-
-    def GetNextSiblingControl(self):
-        return self.next
-
-    def GetParentControl(self):
-        return self.parent
-
-    def GetPattern(self, pattern_id):
-        return self.patterns.get(pattern_id)
-
-    def SetFocus(self):
-        self.focus_sets += 1
-        return True
-
-
-def make_auto(root, focused=None, at_point=None, window_open=True):
-    """A fake ``uiautomation`` module around ``root``, window handle 50.
-
-    ``ControlFromPoint`` answers ``at_point``, or the element itself when ``None``: pass the
-    covering control to model a dialog over it. It is what a hit test really returns.
-    """
-    return types.SimpleNamespace(
-        ControlFromHandle=lambda hwnd: root if hwnd == 50 else None,
-        PatternId=types.SimpleNamespace(InvokePattern="invoke", ValuePattern="value"),
-        GetFocusedControl=lambda: focused,
-        ControlFromPoint=lambda x, y: at_point if at_point is not None else _at(root, x, y),
-        IsWindowVisible=lambda hwnd: window_open,
-    )
-
-
-def _at(control, x, y):
-    for kid in control.kids:
-        rect = kid.rect
-        if rect.left <= x < rect.right and rect.top <= y < rect.bottom:
-            return _at(kid, x, y)
-    return control
-
-
-def new_session(root, **auto):
-    return uia.Session(make_auto(root, **auto), FakeCom, threading.Event())
-
-
-def session_with(button, **auto):
-    root = Control(name="App", kind="WindowControl", rect=(0, 0, 500, 500), rid=(100,), kids=[button])
-    session = new_session(root, **auto)
-    return session, session.tree(50).items[0].ref
 
 
 def test_the_tree_has_the_window_title_roles_and_screen_rects():
@@ -671,13 +543,28 @@ def test_a_part_of_the_element_at_its_centre_is_the_element():
     assert session.activate(ref).point == (150, 120)
 
 
+def test_a_sibling_that_cannot_be_reached_ends_its_branch():
+    first = Control(name="first", rid=(2,))
+    first.fails["sibling"] = FakeCom("element not available")
+    root = Control(name="App", kind="WindowControl", kids=[first, Control(name="after", rid=(3,))])
+    assert [i.name for i in new_session(root).tree(50).items] == ["first"]
+
+
+def test_a_parent_that_cannot_be_reached_in_a_hit_test_refuses():
+    label = Control(name="", kind="TextControl", rid=(9,))
+    session, ref = session_with(Control(kids=[label]))
+    label.fails["parent"] = FakeCom("element not available")
+    with pytest.raises(RuntimeError, match="Something else is on top"):
+        session.activate(ref)
+
+
 def test_a_hit_test_that_fails_refuses():
     session, ref = session_with(Control())
 
-    def down(x, y):
+    def down(point):
         raise FakeCom("no")
 
-    session.auto.ControlFromPoint = down
+    session.automation.ElementFromPoint = down
     with pytest.raises(RuntimeError, match="Something else is on top"):
         session.activate(ref)
 
@@ -748,6 +635,32 @@ def test_the_focus_on_an_inner_control_counts():
     assert session.set_text(ref, "x") == ("Box", False)
 
 
+def test_a_refused_pattern_lookup_is_no_pattern_and_the_mouse_clicks():
+    button = Control()
+    button.fails["pattern"] = FakeCom("refused")
+    session, ref = session_with(button)
+    assert session.activate(ref).point == (150, 120)
+
+
+def test_a_pattern_whose_interface_is_refused_is_no_pattern_and_the_mouse_clicks():
+    button = Control()
+    button.patterns["invoke"] = types.SimpleNamespace(refuses_interface=FakeCom("E_NOINTERFACE"))
+    session, ref = session_with(button)
+    assert session.activate(ref).point == (150, 120)
+
+
+def test_a_refused_set_focus_goes_on_to_the_focus_check():
+    field = Control(kind="EditControl")
+    field.fails["focus"] = FakeCom("refused")
+    session, ref = session_with(field, focused=field)
+    assert session.set_text(ref, "x") == ("OK", False)
+    other_field = Control(kind="EditControl")
+    other_field.fails["focus"] = FakeCom("refused")
+    session, ref = session_with(other_field, focused=None)
+    with pytest.raises(RuntimeError, match="did not take the keyboard focus"):
+        session.set_text(ref, "x")
+
+
 def test_a_focus_that_went_elsewhere_types_nothing():
     other = Control(name="other", rid=(8,))
     session, ref = session_with(Control(kind="EditControl"), focused=other)
@@ -796,49 +709,6 @@ def test_a_start_timeout_says_nothing_happened(monkeypatch):
         uia.click_element("1.1", lambda x, y: "clicked")
 
 
-# -- open_session against a fake package --------------------------------------------------------
-
-
-def test_a_session_gets_its_own_client_and_silences_the_package_s_logger(monkeypatch):
-    calls = []
-
-    class Client:
-        _instance = None
-
-    class Logger:
-        @staticmethod
-        def Write(*args, **kwargs):
-            raise AssertionError("the package's logger writes to sys.stdout, the JSON-RPC stream under stdio")
-
-    module = types.ModuleType("uiautomation.uiautomation")
-    module._AutomationClient, module.Logger = Client, Logger
-    module.InitializeUIAutomationInCurrentThread = lambda: calls.append("coinit")
-    package = types.ModuleType("uiautomation")
-    package.uiautomation = module
-    comtypes = types.ModuleType("comtypes")
-    comtypes.COMError = FakeCom
-    monkeypatch.setitem(sys.modules, "uiautomation", package)
-    monkeypatch.setitem(sys.modules, "uiautomation.uiautomation", module)
-    monkeypatch.setitem(sys.modules, "comtypes", comtypes)
-    monkeypatch.setattr(uia, "_retired_clients", [])
-    old = Client._instance = Client()
-
-    session = uia.open_session(threading.Event())
-
-    assert calls == ["coinit"]
-    assert isinstance(Client._instance, Client) and Client._instance is not old
-    assert uia._retired_clients == [old], "a hung apartment's client must never be released"
-    assert session.com_error is FakeCom
-    module.Logger.Write("a line", 1, writeToFile=True)
-
-    abandoned = threading.Event()
-    abandoned.set()
-    live = Client._instance
-    with pytest.raises(RuntimeError, match="abandoned"):
-        uia.open_session(abandoned)
-    assert Client._instance is live, "a start that was given up on must not take the client of the new worker"
-
-
 # -- the tools ----------------------------------------------------------------------------------
 
 
@@ -849,7 +719,7 @@ def tool_box(monkeypatch, win_session):
     button = Control(name="Save", rect=(40, 40, 140, 80))
     field = Control(name="Name", kind="EditControl", rect=(40, 100, 140, 140), rid=(5,))
     root = Control(name="Editor", kind="WindowControl", kids=[button, field])
-    worker = uia.UiaWorker(lambda abandoned: uia.Session(make_auto(root), FakeCom, abandoned))
+    worker = uia.UiaWorker(lambda abandoned: new_session(root, abandoned=abandoned))
     monkeypatch.setattr(uia, "_worker", worker)
     monkeypatch.setattr(sys.modules["win32gui"], "GetForegroundWindow", lambda: 50)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
@@ -912,7 +782,7 @@ def test_type_element_sets_the_value(tool_box):
 
 
 def test_type_element_types_when_there_is_no_value(tool_box, monkeypatch):
-    uia._worker.call(lambda s: setattr(s.auto, "GetFocusedControl", lambda: tool_box.field), 5)
+    uia._worker.call(lambda s: setattr(s.automation, "focused", tool_box.field), 5)
     typed = []
     monkeypatch.setattr(tool_box.mod, "type_text", lambda text: typed.append(text) or "Typed 1 chars")
     ref = ref_of(server.ElementTree(), "Name")
