@@ -1,7 +1,7 @@
 """Owner notices through ``airuleset.py notify`` (#51, #102): one footer-U item per open condition.
 
 Every gateway notice (a box changed state, fell behind stable, has no admin rights, the check
-cannot run, live sessions need a restart) goes out through airuleset's ``notify --body``. For owner
+cannot run) goes out through airuleset's ``notify --body``. For owner
 zbynek airuleset's owner policy posts nothing (it prints ``suppressed``), so since airuleset #1300 a
 send can carry ``--owner-notice <slug> --cwd <project dir>``: a suppressed send then becomes ONE
 item in the footer ``U`` of that project, the same slug replaces it, and
@@ -12,10 +12,11 @@ Whether the installed airuleset has the flag is read ONCE per run from ``notify 
 it (or without a usable project directory) every notice goes out as before: plain ``--body``,
 grouped. With it, each open condition has its own slug: the machine conditions ONE per kind
 (``fleet_notice``: ``fleet-down`` / ``fleet-stale`` / ``fleet-no-admin``, listing their boxes),
-plus ``gateway-health``, ``check-failed`` and ``restart-<project>`` (``slug``).
+plus ``gateway-health`` and ``check-failed`` (``slug``). ``restart-<project>`` is no longer sent
+(#109: sync-configs prints its restart list only); ``check`` clears one an older version left.
 
 The slugs recorded in U are kept in the notice BOOK (``owner-notices.json`` in the state dir),
-edited under a lock because ``check`` and ``sync-configs`` both write it. ``settle`` clears every
+edited under a lock (``check`` writes it; ``sync-configs`` did before #109). ``settle`` clears every
 recorded slug whose condition is gone; a clear that fails stays in the book and is retried on the
 next run. A notice that is not recorded (no flag, an undelivered send) never needs a clear.
 """

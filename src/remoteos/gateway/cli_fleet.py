@@ -6,6 +6,8 @@
     remoteos-gateway machine list                                # keys masked, org per machine
     remoteos-gateway machine import [--from <file.mcp.json> ... | --from-manifest] [--dry-run]
     remoteos-gateway machine repair-recipe linux-cam2 --ssh root@cam2.lan [--sudo]
+    remoteos-gateway machine remove mac-propresenter [--dry-run]  # sold (cli_machine_edit, #109)
+    remoteos-gateway machine rename win-old win-new [--dry-run]
     remoteos-gateway sync-configs [--dry-run]                    # every project's config, from projects.toml
     remoteos-gateway check                                       # the drift watchdog (timer, every 10 min)
 
