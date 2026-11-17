@@ -284,6 +284,28 @@ class Registry:
         self.exposed.remove(machine)
         return True
 
+    def forget_machine(self, machine: str) -> list[str]:
+        """A machine that left the fleet (#109): unexposed and out of EVERY consumer's allow-list
+        (only narrows). Returns the consumers that allowed it."""
+        self.unexpose(machine)
+        touched = [name for name, consumer in sorted(self.consumers.items()) if machine in consumer.machines]
+        for name in touched:
+            self.consumers[name].machines.remove(machine)
+        return touched
+
+    def rename_machine(self, old: str, new: str) -> list[str]:
+        """*old* is now called *new* (#109): exposure carries over (a kill-switched *old* stays
+        unexposed as *new*) and every consumer allowed *old* is allowed *new* in its place. Returns
+        those consumers. Not a widening: the same box under another name."""
+        validate_machine_name(new)
+        if self.unexpose(old):
+            self.expose(new)
+        touched = [name for name, consumer in sorted(self.consumers.items()) if old in consumer.machines]
+        for name in touched:
+            consumer = self.consumers[name]
+            consumer.machines = list(dict.fromkeys(new if m == old else m for m in consumer.machines))
+        return touched
+
     def _refuse_if_managed(self, name: str) -> None:
         """A hand edit must never widen a consumer sync-configs owns (its allow-list = the manifest)."""
         consumer = self.consumers.get(name)

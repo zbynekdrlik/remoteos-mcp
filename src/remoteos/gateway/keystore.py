@@ -201,6 +201,40 @@ def set_org(path: Path, org: str, names: Iterable[str]) -> list[str]:
     return changed
 
 
+# -- remove / rename (#109) ------------------------------------------------------------------
+
+
+def remove_machines(path: Path, names: Iterable[str]) -> dict[str, MachineEntry]:
+    """Take *names* out of the key store, all or nothing: one name that is not there refuses the
+    whole call. Returns the removed entries (their urls retire their direct config entries)."""
+    wanted = list(dict.fromkeys(names))
+    if not wanted:
+        raise KeystoreError("name at least one machine")
+    with edit_keystore(path) as entries:
+        unknown = [name for name in wanted if name not in entries]
+        if unknown:
+            raise KeystoreError(f"not in the key store {path}: {', '.join(unknown)} — nothing changed")
+        removed = {name: entries.pop(name) for name in wanted}
+    for name, entry in removed.items():
+        logger.info("key store: %s removed (url %s, org %s)", name, entry.url, entry.org)
+    return removed
+
+
+def rename_machine(path: Path, old: str, new: str) -> MachineEntry:
+    """Move *old*'s entry to *new* as it is (url, key, org, repair recipe). *new* must be a valid
+    name that is not in the key store. Returns the moved entry."""
+    if not is_valid_machine_name(new):
+        raise KeystoreError(f"invalid machine name {new!r}: use letters, digits and . _ -")
+    with edit_keystore(path) as entries:
+        if old not in entries:
+            raise KeystoreError(f"machine {old!r} is not in the key store {path} — nothing changed")
+        if new in entries:
+            raise KeystoreError(f"machine {new!r} is already in the key store {path} — nothing changed")
+        entries[new] = entry = entries.pop(old)
+    logger.info("key store: %s renamed to %s (url %s, org %s)", old, new, entry.url, entry.org)
+    return entry
+
+
 def missing_orgs(entries: dict[str, MachineEntry], names: Iterable[str] | None = None) -> list[str]:
     """The machines (of *names*, else all) that have no org yet, sorted."""
     pool = entries if names is None else [n for n in names if n in entries]
