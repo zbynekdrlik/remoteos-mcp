@@ -173,6 +173,27 @@ class LiveSession:
         self.process.wait()
 
 
+def script_of(pid: int) -> str:
+    """The script a fake session's ``/bin/sh`` runs: argv[1] of the live process."""
+    return open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[1].decode()
+
+
+def test_sessions_started_back_to_back_each_run_their_own_script_with_their_environment(tmp_path):
+    """#108: the second session rewrote the ONE shared script while the first shell had not read it
+    yet, so the first session ran nothing and ended (the scan then missed it); and comm is set at
+    exec, the environ only later. A started session must be running its own, untouched script, with
+    its environment in place: that is what the scan reads."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    for _ in range(50):
+        with LiveSession(tmp_path, cwd, "%7") as tmuxed, LiveSession(tmp_path, cwd, None) as outside:
+            assert b"PATH=" in session_scan._read(f"/proc/{outside.process.pid}/environ")  # not empty
+            assert session_scan.tmux_of(f"/proc/{tmuxed.process.pid}") == ("/tmp/fake-tmux", "%7")
+            assert script_of(tmuxed.process.pid) != script_of(outside.process.pid)
+            assert os.readlink(f"/proc/{tmuxed.process.pid}/cwd") == str(cwd)  # both still run
+            assert os.readlink(f"/proc/{outside.process.pid}/cwd") == str(cwd)
+
+
 class Run:
     def __init__(self, tmp_path, monkeypatch) -> None:
         self.fleet = Fleet(tmp_path)
