@@ -13,7 +13,7 @@ import threading
 import types
 
 import pytest
-from uia_fakes import Control, FakeCom, Invoke, Value, make_auto, new_session, session_with
+from uia_fakes import Control, FakeCom, Invoke, Value, new_session, session_with
 
 from remoteos.element_tree import StaleRef
 from remoteos.platform.win import uia
@@ -44,21 +44,6 @@ def test_each_job_lets_ui_automation_wait_only_for_what_its_call_has_left():
     assert 8 - uia.ANSWER_MARGIN_S - 1 < seconds <= 8 - uia.ANSWER_MARGIN_S
 
 
-class Automation:
-    """The client's IUIAutomation2: records each TransactionTimeout put."""
-
-    def __init__(self):
-        self.puts: list[int] = []
-
-    @property
-    def TransactionTimeout(self):
-        return self.puts[-1]
-
-    @TransactionTimeout.setter
-    def TransactionTimeout(self, ms):
-        self.puts.append(ms)
-
-
 class Clock:
     def __init__(self):
         self.now = 1000.0
@@ -70,7 +55,6 @@ class Clock:
 def test_every_read_gets_only_what_the_job_has_left_never_less_than_the_floor(monkeypatch):
     clock = Clock()
     monkeypatch.setattr(uia, "time", clock)
-    automation = Automation()
 
     class Slow(Control):
         @property
@@ -80,7 +64,8 @@ def test_every_read_gets_only_what_the_job_has_left_never_less_than_the_floor(mo
 
     kids = [Slow(name=f"b{i}", rid=(i + 1,)) for i in range(3)]
     root = Control(name="App", kind="WindowControl", kids=kids)
-    session = uia.Session(new_session(root).auto, FakeCom, threading.Event(), automation=automation)
+    session = new_session(root)
+    automation = session.automation
     session.answer_within(7.5)
     session.tree(50)
     assert automation.puts[0] == 7500, "the job's whole share before its first read"
@@ -90,25 +75,14 @@ def test_every_read_gets_only_what_the_job_has_left_never_less_than_the_floor(mo
 
 
 def test_a_session_with_no_bound_leaves_ui_automation_alone():
-    automation = Automation()
-    session = uia.Session(
-        new_session(Control(name="App", kids=[Control()])).auto, FakeCom, threading.Event(), automation=automation
-    )
+    session = new_session(Control(name="App", kids=[Control()]))
     session.tree(50)
-    assert automation.puts == []
+    assert session.automation.puts == []
 
 
 # -- every single call into the app is bounded anew --------------------------------------------
 
 PROPERTIES = {"BoundingRectangle", "ControlTypeName", "Name", "IsEnabled", "IsKeyboardFocusable", "IsOffscreen"}
-METHODS = {
-    "GetRuntimeId",
-    "GetFirstChildControl",
-    "GetNextSiblingControl",
-    "GetParentControl",
-    "GetPattern",
-    "SetFocus",
-}
 
 
 class Ledger:
@@ -117,32 +91,39 @@ class Ledger:
     def __init__(self, monkeypatch):
         self.clock = Clock()
         monkeypatch.setattr(uia, "time", self.clock)
-        self.automation = Automation()
         self.session = None
         self.calls: list[str] = []
 
     def call(self, name: str) -> None:
         left = max(uia.MIN_ANSWER_MS, int((self.session.answer_by - self.clock.now) * 1000))
-        assert self.automation.puts[-1] == left, f"{name}: a stale limit, not re-set before this call"
+        assert self.session.automation.puts[-1] == left, f"{name}: a stale limit, not re-set before this call"
         self.calls.append(name)
         self.clock.now += 0.25  # every call takes time
 
+    def records(self, obj, *names: str) -> None:
+        """Each of ``obj``'s methods ``names`` is a call into the app."""
+        for name in names:
+            real = getattr(obj, name)
+            setattr(obj, name, lambda *a, _real=real, _name=name, **k: self.call(_name) or _real(*a, **k))
+
 
 def ticking(ledger: Ledger, base: type) -> type:
+    """``base`` whose properties and methods that reach the app are calls in the ledger."""
+
     class Ticking(base):
         def __getattribute__(self, name):
             value = super().__getattribute__(name)
-            if name in PROPERTIES:
+            if name in PROPERTIES or name == "IsReadOnly":
                 ledger.call(name)
-            elif name in METHODS or name in ("Invoke", "SetValue"):
+            elif name in ("GetRuntimeId", "Invoke", "SetValue"):
 
                 def called(*args, **kwargs):
                     ledger.call(name)
                     return value(*args, **kwargs)
 
                 return called
-            elif name == "IsReadOnly":
-                ledger.call(name)
+            elif name == "Element":
+                ledger.records(value, "GetCurrentPattern", "SetFocus")
             return value
 
     return Ticking
@@ -161,22 +142,20 @@ def _app(ledger, field_patterns=None, button_patterns=None, focused_field=False)
     button.patterns.update(button_patterns or {})
     field.patterns.update(field_patterns or {})
     root = tick(name="App", kind="WindowControl", rect=(0, 0, 500, 500), rid=(100,), kids=[button, field])
-    auto = make_auto(root, focused=field if focused_field else None)
-    for name in ("ControlFromHandle", "ControlFromPoint", "GetFocusedControl"):
-        real = getattr(auto, name)
-        setattr(auto, name, lambda *a, _real=real, _name=name: ledger.call(_name) or _real(*a))
-    ledger.session = uia.Session(auto, FakeCom, threading.Event(), automation=ledger.automation)
-    ledger.session.answer_within(100)
-    refs = {item.name: item.ref for item in ledger.session.tree(50).items}
-    ledger.session.answer_within(100)
+    ledger.session = session = new_session(root, focused=field if focused_field else None)
+    ledger.records(session.automation, "ElementFromHandle", "ElementFromPoint", "GetFocusedElement")
+    ledger.records(session.walker, "GetFirstChildElement", "GetNextSiblingElement", "GetParentElement")
+    ledger.records(session.auto.Control, "CreateControlFromElement")
+    session.answer_within(100)
+    refs = {item.name: item.ref for item in session.tree(50).items}
+    session.answer_within(100)
     return refs
 
 
 def test_every_call_of_a_walk_is_bounded_anew(ledger):
     _app(ledger)
-    assert {"ControlFromHandle", "BoundingRectangle", "IsOffscreen", "GetNextSiblingControl", "Name"} <= set(
-        ledger.calls
-    )
+    navigation = {"ElementFromHandle", "GetFirstChildElement", "GetNextSiblingElement", "CreateControlFromElement"}
+    assert navigation | {"BoundingRectangle", "IsOffscreen", "Name"} <= set(ledger.calls)
     assert len(ledger.calls) > 20
 
 
@@ -184,14 +163,16 @@ def test_every_call_of_an_invoke_is_bounded_anew(ledger):
     refs = _app(ledger, button_patterns={"invoke": ticking(ledger, Invoke)()})
     del ledger.calls[:]
     ledger.session.activate(refs["Save"])
-    assert ledger.calls == ["GetRuntimeId", "IsEnabled", "GetPattern", "Invoke"]
+    assert ledger.calls == ["GetRuntimeId", "IsEnabled", "GetCurrentPattern", "Invoke"]
 
 
 def test_every_call_of_a_click_s_hit_test_is_bounded_anew(ledger):
     refs = _app(ledger)
     del ledger.calls[:]
     ledger.session.activate(refs["Save"])
-    hit_test = ["ControlFromPoint", "GetRuntimeId", "GetParentControl", "GetRuntimeId"]
+    # each navigation is two calls into the app: the element, then its control type
+    hit_test = ["ElementFromPoint", "CreateControlFromElement", "GetRuntimeId"]
+    hit_test += ["GetParentElement", "CreateControlFromElement", "GetRuntimeId"]
     assert ledger.calls[3:] == ["BoundingRectangle", "IsOffscreen", *hit_test]
 
 
@@ -199,14 +180,14 @@ def test_every_call_of_a_value_set_is_bounded_anew(ledger):
     refs = _app(ledger, field_patterns={"value": ticking(ledger, Value)()})
     del ledger.calls[:]
     ledger.session.set_text(refs["Name"], "x")
-    assert ledger.calls == ["GetRuntimeId", "IsEnabled", "GetPattern", "IsReadOnly", "SetValue"]
+    assert ledger.calls == ["GetRuntimeId", "IsEnabled", "GetCurrentPattern", "IsReadOnly", "SetValue"]
 
 
 def test_every_call_of_a_focus_is_bounded_anew(ledger):
     refs = _app(ledger, focused_field=True)
     del ledger.calls[:]
     ledger.session.set_text(refs["Name"], "x")
-    assert ledger.calls[3:] == ["SetFocus", "GetFocusedControl", "GetRuntimeId"]
+    assert ledger.calls[3:] == ["SetFocus", "GetFocusedElement", "CreateControlFromElement", "GetRuntimeId"]
 
 
 # -- a timeout is a timeout wherever the session reads the app ----------------------------------
@@ -218,7 +199,7 @@ def _lookup(error):
     def unanswered(hwnd):
         raise error
 
-    session.auto.ControlFromHandle = unanswered
+    session.automation.ElementFromHandle = unanswered
     return lambda: session.tree(50)
 
 
@@ -259,10 +240,10 @@ def _after_tree(what, act="activate"):
 def _hit_test(error):
     session, ref = session_with(Control())
 
-    def unanswered(x, y):
+    def unanswered(point):
         raise error
 
-    session.auto.ControlFromPoint = unanswered
+    session.automation.ElementFromPoint = unanswered
     return lambda: session.activate(ref)
 
 
@@ -285,7 +266,7 @@ def _focus_check(error):
     def unanswered():
         raise error
 
-    session.auto.GetFocusedControl = unanswered
+    session.automation.GetFocusedElement = unanswered
     return lambda: session.set_text(ref, "x")
 
 

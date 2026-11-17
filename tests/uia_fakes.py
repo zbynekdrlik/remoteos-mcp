@@ -55,7 +55,29 @@ class Value:
         return self.returns
 
 
+class Element:
+    """A control's ``IUIAutomationElement``: the raw calls the session makes itself (#114)."""
+
+    def __init__(self, control):
+        self.control = control
+
+    def GetCurrentPattern(self, pattern_id):
+        if "pattern" in self.control.fails:
+            raise self.control.fails["pattern"]
+        return self.control.patterns.get(pattern_id)
+
+    def SetFocus(self):
+        if "focus" in self.control.fails:
+            raise self.control.fails["focus"]
+        self.control.focus_sets += 1
+        return 0
+
+
 class Control:
+    """A control of the package. Its navigation and its GetPattern/SetFocus are the package's
+    wrappers: they SWALLOW a COM error (None / False), as uiautomation 2.0.29 does, so the session
+    goes to the raw ``Element`` and the client's walker for them instead."""
+
     def __init__(self, name="OK", kind="ButtonControl", rect=(100, 100, 200, 140), rid=(1, 2), kids=(), **state):
         self.Name, self.ControlTypeName, self.rect, self.rid = name, kind, Rect(*rect), rid
         self.kids, self.parent = list(kids), None
@@ -64,10 +86,14 @@ class Control:
         self.IsEnabled, self.IsKeyboardFocusable, self.IsOffscreen = True, False, False
         self.patterns: dict = {}
         self.dead = False
-        self.fails: dict = {}  # read -> the COM error it raises ("rect", "rid", "kids", "pattern", "focus")
+        self.fails: dict = {}  # call -> the COM error it raises ("rect", "rid", "kids", "pattern", "focus")
         self.next = None
         self.focus_sets = 0
         self.__dict__.update(state)
+
+    @property
+    def Element(self):
+        return Element(self)
 
     def _touch(self, what):
         if what in self.fails:
@@ -84,42 +110,77 @@ class Control:
         self._touch("rid")
         return self.rid
 
-    def GetFirstChildControl(self):
+    def first_child(self):
         if "kids" in self.fails:
             raise self.fails["kids"]
         for a, b in zip(self.kids, self.kids[1:]):
             a.next = b
         return self.kids[0] if self.kids else None
 
-    def GetNextSiblingControl(self):
-        return self.next
-
-    def GetParentControl(self):
-        return self.parent
-
     def GetPattern(self, pattern_id):
-        if "pattern" in self.fails:
-            raise self.fails["pattern"]
-        return self.patterns.get(pattern_id)
+        try:
+            return self.Element.GetCurrentPattern(pattern_id)
+        except FakeCom:
+            return None
 
     def SetFocus(self):
-        if "focus" in self.fails:
-            raise self.fails["focus"]
-        self.focus_sets += 1
-        return True
+        try:
+            return self.Element.SetFocus() == 0
+        except FakeCom:
+            return False
 
 
-def make_auto(root, focused=None, at_point=None, window_open=True):
-    """A fake ``uiautomation`` module around ``root``, window handle 50.
+class Walker:
+    """The client's raw view walker: one call into the app each, an element or None."""
 
-    ``ControlFromPoint`` answers ``at_point``, or the element itself when ``None``: pass the
+    def GetFirstChildElement(self, element):
+        child = element.control.first_child()
+        return child.Element if child is not None else None
+
+    def GetNextSiblingElement(self, element):
+        return element.control.next.Element if element.control.next is not None else None
+
+    def GetParentElement(self, element):
+        return element.control.parent.Element if element.control.parent is not None else None
+
+
+class Automation:
+    """The client's IUIAutomation2 around ``root``, window handle 50; records each TransactionTimeout put.
+
+    ``ElementFromPoint`` answers ``at_point``, or the element itself when ``None``: pass the
     covering control to model a dialog over it. It is what a hit test really returns.
     """
+
+    def __init__(self, root, focused=None, at_point=None):
+        self.root, self.focused, self.at_point = root, focused, at_point
+        self.RawViewWalker = Walker()
+        self.puts: list[int] = []
+
+    @property
+    def TransactionTimeout(self):
+        return self.puts[-1]
+
+    @TransactionTimeout.setter
+    def TransactionTimeout(self, ms):
+        self.puts.append(ms)
+
+    def ElementFromHandle(self, hwnd):
+        return self.root.Element if hwnd == 50 else None
+
+    def ElementFromPoint(self, point):
+        hit = self.at_point if self.at_point is not None else _at(self.root, point.x, point.y)
+        return hit.Element
+
+    def GetFocusedElement(self):
+        return self.focused.Element if self.focused is not None else None
+
+
+def make_auto(window_open=True):
+    """A fake ``uiautomation`` module: what the session uses of it besides the client."""
     return types.SimpleNamespace(
-        ControlFromHandle=lambda hwnd: root if hwnd == 50 else None,
         PatternId=types.SimpleNamespace(InvokePattern="invoke", ValuePattern="value"),
-        GetFocusedControl=lambda: focused,
-        ControlFromPoint=lambda x, y: at_point if at_point is not None else _at(root, x, y),
+        Control=types.SimpleNamespace(CreateControlFromElement=lambda element: element.control if element else None),
+        CreatePattern=lambda pattern_id, raw: raw,
         IsWindowVisible=lambda hwnd: window_open,
     )
 
@@ -132,8 +193,10 @@ def _at(control, x, y):
     return control
 
 
-def new_session(root, **auto):
-    return uia.Session(make_auto(root, **auto), FakeCom, threading.Event())
+def new_session(root, window_open=True, abandoned=None, **client):
+    """A session on ``root`` with its own fake client (``focused``, ``at_point``)."""
+    automation = Automation(root, **client)
+    return uia.Session(make_auto(window_open), FakeCom, abandoned or threading.Event(), automation)
 
 
 def session_with(button, **auto):

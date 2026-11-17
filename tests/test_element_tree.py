@@ -14,7 +14,7 @@ import types
 import pytest
 from tool_surface import server
 from tool_test_support import tool_error
-from uia_fakes import Control, FakeCom, Invoke, Rect, Value, make_auto, new_session, session_with
+from uia_fakes import Control, FakeCom, Invoke, Rect, Value, new_session, session_with
 
 from remoteos.coords import CaptureGeometry, frame_for
 from remoteos.element_tree import ElementFacts, RefTable, StaleRef, TreeItem, Walk, listed, walk
@@ -327,24 +327,17 @@ def test_a_late_walk_stops_at_its_next_element():
     abandoned = threading.Event()
     seen = []
 
-    class Late(Control):
-        def GetRuntimeId(self):
-            return self.rid
+    root = Control(name="App", kind="WindowControl", kids=[Control(name=str(i), rid=(i,)) for i in range(1, 6)])
+    session = new_session(root, abandoned=abandoned)
+    walker, original = session.walker, session.walker.GetNextSiblingElement
 
-    def noting(index):
-        control = Late(name=str(index), rid=(index,))
-        original = control.GetNextSiblingControl
+    def next_one(element):
+        seen.append(int(element.control.Name))
+        abandoned.set()  # the caller gave up while this call was in the app
+        return original(element)
 
-        def next_one():
-            seen.append(index)
-            abandoned.set()
-            return original()
-
-        control.GetNextSiblingControl = next_one
-        return control
-
-    root = Control(name="App", kind="WindowControl", kids=[noting(i) for i in range(1, 6)])
-    tree = uia.Session(make_auto(root), FakeCom, abandoned).tree(50)
+    walker.GetNextSiblingElement = next_one
+    tree = session.tree(50)
     assert seen == [1]
     assert "ran out of time" in tree.truncated
 
@@ -553,10 +546,10 @@ def test_a_part_of_the_element_at_its_centre_is_the_element():
 def test_a_hit_test_that_fails_refuses():
     session, ref = session_with(Control())
 
-    def down(x, y):
+    def down(point):
         raise FakeCom("no")
 
-    session.auto.ControlFromPoint = down
+    session.automation.ElementFromPoint = down
     with pytest.raises(RuntimeError, match="Something else is on top"):
         session.activate(ref)
 
@@ -685,7 +678,7 @@ def tool_box(monkeypatch, win_session):
     button = Control(name="Save", rect=(40, 40, 140, 80))
     field = Control(name="Name", kind="EditControl", rect=(40, 100, 140, 140), rid=(5,))
     root = Control(name="Editor", kind="WindowControl", kids=[button, field])
-    worker = uia.UiaWorker(lambda abandoned: uia.Session(make_auto(root), FakeCom, abandoned))
+    worker = uia.UiaWorker(lambda abandoned: new_session(root, abandoned=abandoned))
     monkeypatch.setattr(uia, "_worker", worker)
     monkeypatch.setattr(sys.modules["win32gui"], "GetForegroundWindow", lambda: 50)
     monkeypatch.setattr(server, "get_desktop", lambda: mod)
@@ -748,7 +741,7 @@ def test_type_element_sets_the_value(tool_box):
 
 
 def test_type_element_types_when_there_is_no_value(tool_box, monkeypatch):
-    uia._worker.call(lambda s: setattr(s.auto, "GetFocusedControl", lambda: tool_box.field), 5)
+    uia._worker.call(lambda s: setattr(s.automation, "focused", tool_box.field), 5)
     typed = []
     monkeypatch.setattr(tool_box.mod, "type_text", lambda text: typed.append(text) or "Typed 1 chars")
     ref = ref_of(server.ElementTree(), "Name")
