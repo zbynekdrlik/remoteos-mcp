@@ -30,6 +30,7 @@ import logging
 import queue
 import threading
 import time
+from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -234,13 +235,15 @@ class Activation:
 class Session:
     """UI Automation on its own thread: every method runs there, through :class:`UiaWorker`."""
 
-    def __init__(
-        self, auto: Any, com_error: type[Exception], abandoned: threading.Event, automation: Any = None
-    ) -> None:
+    def __init__(self, auto: Any, com_error: type[Exception], abandoned: threading.Event, automation: Any) -> None:
         self.auto = auto
         self.com_error = com_error
         self.abandoned = abandoned
-        self.automation = automation  # the client's IUIAutomation2; None = UI Automation's own default wait
+        # The client's own IUIAutomation2 and raw walker. Navigation and the pattern / focus calls go
+        # through them, never the package's Control wrappers: those make two calls into the app under
+        # one limit (the element, then its type), and GetPattern/SetFocus swallow every COM error.
+        self.automation = automation
+        self.walker = automation.RawViewWalker
         self.answer_by: Optional[float] = None
         self.refs = RefTable()
 
@@ -250,7 +253,7 @@ class Session:
 
     def _bound(self) -> None:
         """UI Automation may wait on the app only for what the job has left (a put on our own client)."""
-        if self.automation is None or self.answer_by is None:
+        if self.answer_by is None:
             return
         left_ms = int((self.answer_by - time.monotonic()) * 1000)
         self.automation.TransactionTimeout = max(MIN_ANSWER_MS, left_ms)
@@ -259,6 +262,13 @@ class Session:
         """ONE call into the app. UI Automation's timeout applies to each call, so each is bounded anew."""
         self._bound()
         return call()
+
+    def _control(self, find: Callable[[], Any]) -> Any:
+        """The control of the element ``find`` returns, or ``None``: two calls into the app, each bounded."""
+        element = self._ask(find)
+        if not element:  # a NULL element pointer
+            return None
+        return self._ask(lambda: self.auto.Control.CreateControlFromElement(element))
 
     def _unanswered(self, error: Exception, done: str = "nothing was done to it") -> None:
         """Raise when ``error`` is UI Automation giving up on the app: not a vanished element, a timeout."""
@@ -285,10 +295,11 @@ class Session:
 
     def _children(self, control: Any):
         try:
-            child = self._ask(control.GetFirstChildControl)
+            child = self._control(lambda: self.walker.GetFirstChildElement(control.Element))
             while child is not None:
                 yield child
-                child = self._ask(child.GetNextSiblingControl)
+                sibling = child
+                child = self._control(lambda: self.walker.GetNextSiblingElement(sibling.Element))
         except self.com_error as e:
             self._unanswered(e)
             log.debug("a branch vanished during the walk (%s)", type(e).__name__)
@@ -296,7 +307,7 @@ class Session:
     def _walk(self, hwnd: int, seconds: float, **bounds: int):
         deadline = time.monotonic() + seconds  # the walk's time includes finding the window
         try:
-            root = self._ask(lambda: self.auto.ControlFromHandle(hwnd))
+            root = self._control(lambda: self.automation.ElementFromHandle(hwnd)) if hwnd else None
         except self.com_error as e:
             self._unanswered(e)
             raise
@@ -363,7 +374,8 @@ class Session:
             raise RuntimeError(f"Element {ref} ({entry.name!r}) is off-screen: bring it into view first")
         x, y = rect.xcenter(), rect.ycenter()
         try:
-            hit = self._is_or_inside(self._ask(lambda: self.auto.ControlFromPoint(x, y)), entry)
+            at_point = self._control(lambda: self.automation.ElementFromPoint(wintypes.POINT(x, y)))
+            hit = self._is_or_inside(at_point, entry)
         except self.com_error as e:
             self._unanswered(e)
             hit = False
@@ -375,12 +387,18 @@ class Session:
         return x, y
 
     def _pattern(self, entry: _Entry, pattern_id: Any) -> Any:
-        """``entry``'s pattern, or ``None``; an app that does not answer is :class:`UiaUnanswered`."""
+        """``entry``'s pattern, or ``None`` when it has none or refused it (the package's GetPattern says the same).
+
+        An app that does not answer is :class:`UiaUnanswered`: never ``None``, which would send the
+        click to the mouse and the text to the keys.
+        """
         try:
-            return self._ask(lambda: entry.control.GetPattern(pattern_id))
+            raw = self._ask(lambda: entry.control.Element.GetCurrentPattern(pattern_id))
         except self.com_error as e:
             self._unanswered(e)
-            raise
+            log.debug("the pattern lookup was refused (%s)", type(e).__name__)
+            return None
+        return self.auto.CreatePattern(pattern_id, raw) if raw else None
 
     def _refused(self, error: Exception, ref: str, entry: _Entry) -> None:
         """Return when the app plainly refused ``ref``'s action, so that the mouse or keys may try.
@@ -425,7 +443,8 @@ class Session:
                 return False
             if list(self._ask(control.GetRuntimeId)) == entry.runtime_id:
                 return True
-            control = self._ask(control.GetParentControl)
+            current = control
+            control = self._control(lambda: self.walker.GetParentElement(current.Element))
         return False
 
     def set_text(self, ref: str, text: str) -> tuple[str, bool]:
@@ -451,12 +470,12 @@ class Session:
                 log.debug("SetValue refused (%s): typing instead", type(e).__name__)
         maybe_focused = "nothing was typed, the focus may have moved"
         try:
-            self._ask(entry.control.SetFocus)
-        except self.com_error as e:
+            self._ask(entry.control.Element.SetFocus)
+        except self.com_error as e:  # refused: the focus check below says what came of it
             self._unanswered(e, maybe_focused)
-            raise
+            log.debug("SetFocus refused (%s)", type(e).__name__)
         try:
-            focused = self._is_or_inside(self._ask(self.auto.GetFocusedControl), entry)
+            focused = self._is_or_inside(self._control(self.automation.GetFocusedElement), entry)
         except self.com_error as e:
             self._unanswered(e, maybe_focused)
             focused = False

@@ -40,19 +40,31 @@ paths:
   - `UiaWorker(answer_within=Session.answer_within)` gives each job its call's remaining budget
     minus `ANSWER_MARGIN_S`. The timeout applies to EACH call into the app, so every call goes
     through `Session._ask(call)`, which first re-sets it to what the job has left (a put on our own
-    client, no call into the app), never under `MIN_ANSWER_MS`. A new call into the app that skips
-    `_ask` gets a stale limit: the ledger tests catch it. The walk's deadline includes
-    `ControlFromHandle`.
+    client, no call into the app), never under `MIN_ANSWER_MS`. The floor only lets a responsive
+    app answer at the end of a job; a hung app late in a job is left to the abandon backstop. A
+    new call into the app that skips `_ask` gets a stale limit: the ledger tests catch it. The
+    walk's deadline includes the window lookup.
+  - **Never the package's `Control` wrappers for navigation, patterns or focus.** Its
+    `GetFirstChildControl` / `GetNextSiblingControl` / `GetParentControl` / `ControlFromHandle` /
+    `ControlFromPoint` / `GetFocusedControl` are TWO calls into the app (the element, then
+    `CurrentControlType` in `CreateControlFromElement`) under one limit, and its `GetPattern` /
+    `SetFocus` SWALLOW every COM error (None / False): a timeout there would send ClickElement to
+    the mouse and TypeElement to the keys. The session uses its own `automation` (IUIAutomation2:
+    `ElementFromHandle`, `ElementFromPoint`, `GetFocusedElement`) and `walker` (`RawViewWalker`),
+    `Session._control(find)` = the element and its control, each in its own `_ask`, and the raw
+    `Element.GetCurrentPattern` + `auto.CreatePattern` / `Element.SetFocus`. A refused pattern
+    lookup is still `None` and a refused SetFocus still goes on to the focus check, as the
+    package did; only a timeout is `UiaUnanswered`. `IsWindowVisible` is user32, not UIA.
   - Its timeout HRESULTs (`_TIMED_OUT`: UIA_E_TIMEOUT 0x80131505, ERROR_TIMEOUT 0x800705B4) on a
     READ are `UiaUnanswered` (saying what was done: "nothing was done to it", or for TypeElement's
     focus steps "nothing was typed, the focus may have moved"), never "vanished" (an element skipped
     silently) or "gone" (a ref ended for nothing). On Invoke/SetValue they are
     `UiaActionUnanswered` "may have happened", never a fallback to the mouse or the keys.
     ClickElement/TypeElement pass both through as they are. The abandon stays the backstop.
-  - Other COM errors of `ControlFromHandle`, `GetPattern` and `SetFocus` still reach the tool raw
-    (as before #114).
+  - Any other COM error of the window lookup still reaches the tool raw (as before #114).
   - Tests: `tests/test_uia_timeouts.py` (one case per read site; a fake clock and a ledger that
-    checks the limit in force at every call). The fakes are `tests/uia_fakes.py`.
+    checks the limit in force at every call). The fakes are `tests/uia_fakes.py`: they behave like
+    the package (GetPattern/SetFocus swallow, navigation is element + type), never kinder.
 - **Hanging a test window:** a busy loop on its UI thread (`while ((Get-Date) -lt $end) {}` in a
   forms timer tick). `Start-Sleep` does not hang it: a CLR wait on an STA thread pumps sent
   messages, WM_GETOBJECT included. `SendMessageTimeout(WM_NULL)` tells whether it answers.
