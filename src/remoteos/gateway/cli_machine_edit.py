@@ -3,16 +3,20 @@
     remoteos-gateway machine remove mac-propresenter [--dry-run]       # sold
     remoteos-gateway machine rename win-slovnormal-pc1 win-predaj2 [--dry-run]
 
-Both are all or nothing and edit, in this order: the manifest (TEXT, comments kept, written only
-when it parses to exactly the expected manifest), the key store, the registry, then the normal
-``sync-configs``. ``remove`` refuses when a project would be left with no machines (it names the
-project; the owner removes or edits it first). ``rename`` keeps org, key, repair recipe, exposure
-and every consumer's access. The sync drops the old direct entries (``sync-direct.json``, plus the
-``retired`` urls for a removal made before that record existed). ``check`` forgets the old name on
-its next run: its status file and fleet notices are built from the key store.
+Everything is validated before the first write (all or nothing up to there). Then, in this order:
+the retired urls go into ``sync-direct.json`` (so the old direct entries stay owned whatever fails
+later), the manifest (TEXT, comments kept, written only when it parses to exactly the expected
+manifest), the key store, the registry, and the normal ``sync-configs``, which drops the old entries.
+``remove`` refuses when a project would be left with no machines (it names the project; the owner
+removes or edits it first). ``rename`` keeps org, key, repair recipe, exposure and every consumer's
+access, and refuses a NEW name still left in the registry (a leftover would hand the box to it).
 
-A dry run edits nothing (the sync runs dry on the edited manifest and key store, in memory). Output
-holds names and urls only, never a key or token.
+A step that fails says which steps were done; rerunning the SAME command finishes the job (each step
+skips what is already done). ``check`` forgets the old name on its next run: its status file and
+fleet notices are built from the key store.
+
+A dry run writes nothing, not even a lock file (the sync runs dry on the edited manifest and key
+store, in memory). Output holds names and urls only, never a key or token.
 """
 
 from __future__ import annotations
@@ -25,11 +29,12 @@ import sys
 
 import click
 
-from remoteos.gateway.cli_fleet import _LOCAL_HOST_HELP, _RELOAD_NOTE, _fail, machine
+from remoteos.gateway.cli_fleet import LOCAL_HOST_HELP, RELOAD_NOTE, fail, machine
+from remoteos.gateway.direct_record import record_path, remember_retired
 from remoteos.gateway.keystore import KeystoreError, load_keystore
 from remoteos.gateway.keystore import remove_machines as keystore_remove
 from remoteos.gateway.keystore import rename_machine as keystore_rename
-from remoteos.gateway.manifest import Manifest, ManifestError, load_manifest
+from remoteos.gateway.manifest import MODE_DIRECT, Manifest, ManifestError, load_manifest
 from remoteos.gateway.manifest import remove_machines as manifest_remove
 from remoteos.gateway.manifest import rename_machine as manifest_rename
 from remoteos.gateway.registry import (
@@ -44,25 +49,47 @@ from remoteos.gateway.sync import SyncError, sync_configs
 
 logger = logging.getLogger("remoteos.gateway.machine_edit")
 
-_ERRORS = (ManifestError, MachineSourceError, RegistryError, SyncError)
+_ERRORS = (ManifestError, MachineSourceError, RegistryError, SyncError, OSError)
 
 
-def _projects_holding(manifest: Manifest, names: set[str]) -> list[str]:
-    return sorted(p.name for p in manifest.projects.values() if names & set(p.machines))
+class _Steps:
+    """The steps done so far, so a failure says where it stopped and that a rerun finishes it."""
+
+    def __init__(self, command: str) -> None:
+        self.command = command
+        self.done: list[str] = []
+
+    def fail(self, exc: Exception) -> click.ClickException:
+        if not self.done:
+            return fail(exc)
+        logger.error("%s stopped after %s: %s", self.command, ", ".join(self.done), exc)
+        return click.ClickException(
+            f"{exc}\n  done: {', '.join(self.done)} — rerun `remoteos-gateway {self.command}` to finish"
+        )
 
 
-def _edit_registry(paths, edit) -> list[str]:
+def _in_registry(registry: Registry, name: str) -> bool:
+    return name in registry.exposed or any(name in c.machines for c in registry.consumers.values())
+
+
+def _retire_first(paths, manifest: Manifest, retired: dict[str, str]) -> None:
+    """Record the retired direct urls before anything else changes (under the registry lock)."""
+    direct = [p.name for p in manifest.projects.values() if p.mode == MODE_DIRECT]
+    with registry_transaction(paths.registry):
+        remember_retired(record_path(paths.registry), direct, retired)
+
+
+def _edit_registry(paths, edit):
     """Apply *edit* to the locked registry; saved only when it changed (a save makes the gateway reload)."""
     with registry_transaction(paths.registry) as transaction:
         before = json.dumps(transaction.registry.to_json(), sort_keys=True)
-        touched = edit(transaction.registry)
+        result = edit(transaction.registry)
         if json.dumps(transaction.registry.to_json(), sort_keys=True) != before:
             transaction.save()
-    return touched
+    return result
 
 
-def _sync(paths, manifest: Manifest, keystore: dict[str, MachineEntry], *, local_host: str, dry_run: bool,
-          retired: dict[str, str]) -> None:
+def _sync(paths, manifest: Manifest, keystore: dict[str, MachineEntry], *, local_host: str, dry_run: bool) -> None:
     click.echo("sync-configs" + (" (dry run):" if dry_run else ":"))
     failures = sync_configs(
         manifest,
@@ -72,44 +99,65 @@ def _sync(paths, manifest: Manifest, keystore: dict[str, MachineEntry], *, local
         dry_run=dry_run,
         today=_dt.date.today().isoformat(),
         echo=click.echo,
-        retired=retired,
     )
     if failures:
         click.echo(f"{failures} project(s) FAILED — see above; rerun `remoteos-gateway sync-configs` once fixed.")
         sys.exit(1)
 
 
+def _projects_holding(manifest: Manifest, names: set[str]) -> list[str]:
+    return sorted(p.name for p in manifest.projects.values() if names & set(p.machines))
+
+
+# -- remove ---------------------------------------------------------------------------------------
+
+
 @machine.command("remove")
 @click.argument("names", nargs=-1, required=True)
-@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
+@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=LOCAL_HOST_HELP)
 @click.option("--dry-run", is_flag=True, help="Show what would change; write nothing.")
 @click.pass_obj
 def machine_remove(paths, names: tuple[str, ...], local_host: str, dry_run: bool) -> None:
     """Take machines NAMES out of the fleet: the manifest, the key store, the registry, every config."""
     wanted = list(dict.fromkeys(names))
+    steps = _Steps("machine remove " + " ".join(wanted))
     try:
         keystore = load_keystore(paths.machines)
-        unknown = [name for name in wanted if name not in keystore]
+        before = load_manifest(paths.manifest)
+        registry = load_registry(paths.registry)
+        # a name the key store already lost is a rerun after a failed step, if anything still holds it
+        unknown = [
+            n
+            for n in wanted
+            if n not in keystore and not _projects_holding(before, {n}) and not _in_registry(registry, n)
+        ]
         if unknown:
             raise KeystoreError(f"not in the key store {paths.machines}: {', '.join(unknown)} — nothing changed")
-        projects = _projects_holding(load_manifest(paths.manifest), set(wanted))
         manifest = manifest_remove(paths.manifest, wanted, dry_run=True)  # refuses before anything is written
-        retired = {name: keystore[name].url for name in wanted}
+        projects = _projects_holding(before, set(wanted))
+        retired = {name: keystore[name].url for name in wanted if name in keystore}
+        in_store = [name for name in wanted if name in keystore]
         if dry_run:
-            touched = {name: load_registry(paths.registry).forget_machine(name) for name in wanted}
+            touched = {name: registry.forget_machine(name) for name in wanted}
             _report_remove(wanted, retired, projects, touched, dry_run=True)
             after = {name: entry for name, entry in keystore.items() if name not in wanted}
-            _sync(paths, manifest, after, local_host=local_host, dry_run=True, retired=retired)
+            _sync(paths, manifest, after, local_host=local_host, dry_run=True)
             return
+        _retire_first(paths, before, retired)
+        steps.done.append("direct record")
         manifest = manifest_remove(paths.manifest, wanted)
-        keystore_remove(paths.machines, wanted)
-        touched = {name: _edit_registry(paths, lambda r, n=name: r.forget_machine(n)) for name in wanted}
+        steps.done.append("manifest")
+        if in_store:
+            keystore_remove(paths.machines, in_store)
+        steps.done.append("key store")
+        touched = _edit_registry(paths, lambda r: {name: r.forget_machine(name) for name in wanted})
+        steps.done.append("registry")
         _report_remove(wanted, retired, projects, touched, dry_run=False)
         logger.info("machine remove: %s (projects %s)", ", ".join(wanted), ", ".join(projects) or "-")
-        _sync(paths, manifest, load_keystore(paths.machines), local_host=local_host, dry_run=False, retired=retired)
+        _sync(paths, manifest, load_keystore(paths.machines), local_host=local_host, dry_run=False)
     except _ERRORS as exc:
-        raise _fail(exc) from exc
-    click.echo(_RELOAD_NOTE)
+        raise steps.fail(exc) from exc
+    click.echo(RELOAD_NOTE)
     click.echo("The next `remoteos-gateway check` forgets them (status file and fleet notices).")
 
 
@@ -117,46 +165,63 @@ def _report_remove(wanted, retired, projects, touched, *, dry_run: bool) -> None
     verb = "would remove" if dry_run else "removed"
     for name in wanted:
         consumers = ", ".join(touched[name]) or "none"
-        click.echo(f"{name}: {verb} — url {retired[name]}; consumers that allowed it: {consumers}")
+        url = retired.get(name, "(already out of the key store)")
+        click.echo(f"{name}: {verb} — url {url}; consumers that allowed it: {consumers}")
     click.echo(f"projects: {', '.join(projects) or 'none'}")
+
+
+# -- rename ---------------------------------------------------------------------------------------
 
 
 @machine.command("rename")
 @click.argument("old")
 @click.argument("new")
-@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
+@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=LOCAL_HOST_HELP)
 @click.option("--dry-run", is_flag=True, help="Show what would change; write nothing.")
 @click.pass_obj
 def machine_rename(paths, old: str, new: str, local_host: str, dry_run: bool) -> None:
     """Rename machine OLD to NEW everywhere: key store (url, key, org kept), manifest, exposure, every
     consumer's access, every config (the OLD entry goes, NEW comes)."""
+    steps = _Steps(f"machine rename {old} {new}")
     try:
         keystore = load_keystore(paths.machines)
-        if old not in keystore:
-            raise KeystoreError(f"machine {old!r} is not in the key store {paths.machines} — nothing changed")
-        if new in keystore:
-            raise KeystoreError(f"machine {new!r} is already in the key store {paths.machines} — nothing changed")
+        fresh = old in keystore and new not in keystore
+        resumed = new in keystore and old not in keystore  # a rerun: the key store step was done
+        if not (fresh or resumed):
+            state = "both are" if old in keystore else "neither is"
+            raise KeystoreError(f"{old!r} -> {new!r}: {state} in the key store {paths.machines} — nothing changed")
         manifest = manifest_rename(paths.manifest, old, new, dry_run=True)  # validates NEW, refuses before writing
+        registry = load_registry(paths.registry)
+        exposed = old in registry.exposed or (resumed and new in registry.exposed)
+        touched = registry.rename_machine(old, new)  # in memory: refuses a NEW left in the registry
         projects = _projects_holding(manifest, {new})
-        retired = {old: keystore[old].url}
+        retired = {old: keystore[old].url if fresh else keystore[new].url}
         if dry_run:
-            registry: Registry = load_registry(paths.registry)
-            exposed = old in registry.exposed
-            touched = registry.rename_machine(old, new)
             _report_rename(old, new, retired[old], projects, touched, exposed, dry_run=True)
             after = {(new if name == old else name): entry for name, entry in keystore.items()}
-            _sync(paths, manifest, after, local_host=local_host, dry_run=True, retired=retired)
+            _sync(paths, manifest, after, local_host=local_host, dry_run=True)
             return
+        _retire_first(paths, load_manifest(paths.manifest), retired)
+        steps.done.append("direct record")
         manifest = manifest_rename(paths.manifest, old, new)
-        keystore_rename(paths.machines, old, new)
-        exposed = old in load_registry(paths.registry).exposed
-        touched = _edit_registry(paths, lambda r: r.rename_machine(old, new))
+        steps.done.append("manifest")
+        if fresh:
+            keystore_rename(paths.machines, old, new)
+        steps.done.append("key store")
+
+        def carry_over(r: Registry) -> tuple[list[str], bool]:
+            was_exposed = old in r.exposed
+            moved = r.rename_machine(old, new)
+            return moved, was_exposed or new in r.exposed
+
+        touched, exposed = _edit_registry(paths, carry_over)
+        steps.done.append("registry")
         _report_rename(old, new, retired[old], projects, touched, exposed, dry_run=False)
         logger.info("machine rename: %s -> %s (projects %s)", old, new, ", ".join(projects) or "-")
-        _sync(paths, manifest, load_keystore(paths.machines), local_host=local_host, dry_run=False, retired=retired)
+        _sync(paths, manifest, load_keystore(paths.machines), local_host=local_host, dry_run=False)
     except _ERRORS as exc:
-        raise _fail(exc) from exc
-    click.echo(_RELOAD_NOTE)
+        raise steps.fail(exc) from exc
+    click.echo(RELOAD_NOTE)
     click.echo(f"The next `remoteos-gateway check` reports {new} and forgets {old}.")
 
 

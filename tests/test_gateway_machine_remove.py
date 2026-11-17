@@ -13,6 +13,7 @@ end-to-end check test probes real loopback HTTP servers (``FakeFleetMachine``).
 
 from __future__ import annotations
 
+import contextlib
 import json
 
 import pytest
@@ -21,7 +22,6 @@ from fleet_harness import FakeFleetMachine, closed_port_url, footer_u, install_f
 from test_gateway_sync import ME, Fleet
 
 from remoteos.gateway import cli as gateway_cli
-from remoteos.gateway import targets
 from remoteos.gateway.registry import load_registry
 
 DIRECT = {"host": "dev1", "mode": "direct"}
@@ -39,6 +39,26 @@ def direct_project(fleet: Fleet, path, machines) -> dict:
 def ledger(fleet: Fleet) -> dict:
     path = fleet.registry.with_name("sync-direct.json")
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+@contextlib.contextmanager
+def read_only(directory):
+    directory.chmod(0o500)
+    try:
+        yield
+    finally:
+        directory.chmod(0o700)
+
+
+@contextlib.contextmanager
+def locked_out(lock):
+    """A lock file nobody may open: the step that takes it fails for real (PermissionError)."""
+    lock.touch()
+    lock.chmod(0o000)
+    try:
+        yield
+    finally:
+        lock.chmod(0o600)
 
 
 def drop_from_keystore(fleet: Fleet, *names: str) -> None:
@@ -102,21 +122,16 @@ def test_the_first_run_seeds_the_record_from_entries_already_at_the_key_store_ur
     assert ledger(fleet) == {"remoteos-mcp": {m: fleet.urls[m] for m in ("linux-cam1", "linux-cam2")}}
 
 
-def test_a_failed_write_keeps_the_union_so_the_old_entry_stays_owned(fleet, monkeypatch):
+def test_a_failed_write_keeps_the_union_so_the_old_entry_stays_owned(fleet):
     path = fleet.write_config("remoteos-mcp", '{\n  "mcpServers": {}\n}\n')
     fleet.write_manifest({"remoteos-mcp": direct_project(fleet, path, ["linux-cam1"])})
     assert fleet.run().exit_code == 0
 
     fleet.write_manifest({"remoteos-mcp": direct_project(fleet, path, ["linux-cam2"])})
-
-    def fails(self, config, text, tag):
-        raise targets.TargetError("permission denied")
-
-    monkeypatch.setattr(targets.Target, "write", fails)
-    assert fleet.run().exit_code == 1
+    with read_only(path.parent):  # a real failed write: no backup dir, no temp file
+        assert fleet.run().exit_code == 1
     assert ledger(fleet) == {"remoteos-mcp": {m: fleet.urls[m] for m in ("linux-cam1", "linux-cam2")}}
 
-    monkeypatch.undo()
     drop_from_keystore(fleet, "linux-cam1")
     result = fleet.run()
     assert result.exit_code == 0, result.output
@@ -226,6 +241,7 @@ def test_a_remove_dry_run_writes_nothing_and_says_what_would_go(fleet):
     before = files(fleet, camera, direct, fleet.registry.with_name("sync-direct.json"))
     result = machine(fleet, "remove", "linux-cam2", "--dry-run")
     assert result.exit_code == 0, result.output
+    assert not (fleet.cfg / ".projects.lock").exists()  # not even a lock file
     assert "linux-cam2: would remove" in result.output and "- linux-cam2" in result.output
     assert files(fleet, camera, direct, fleet.registry.with_name("sync-direct.json")) == before
     for secret in fleet.secrets():
@@ -394,3 +410,83 @@ def test_rename_keeps_the_order_and_a_dry_run_writes_nothing(tmp_path):
     assert after.projects["one"].machines == ("linux-a", "linux-new", "linux-b")
     assert after.projects["two"].machines == ("linux-new", "linux-a", "linux-gone2")
     assert "# sold 2026-11-17" in path.read_text(encoding="utf-8")
+
+
+# -- review round 1: leftovers, failures half way, layouts --------------------------------------------
+
+
+def test_rename_refuses_a_new_name_left_in_the_registry_and_changes_nothing(fleet):
+    """A hand removal can leave the NEW name exposed or in an allow-list: carrying OLD over would
+    hand the box to that consumer."""
+    camera, direct = two_projects(fleet)
+    registry = json.loads(fleet.registry.read_text(encoding="utf-8"))
+    registry["consumers"]["david3@subdev"]["machines"] = ["linux-cam9"]
+    fleet.registry.write_text(json.dumps(registry), encoding="utf-8")
+    before = files(fleet, camera, direct)
+
+    result = machine(fleet, "rename", "linux-cam2", "linux-cam9")
+
+    assert result.exit_code == 1
+    assert "'linux-cam9' is still in the registry (allowed for david3@subdev)" in result.output
+    assert files(fleet, camera, direct) == before
+
+
+def test_a_remove_that_fails_half_way_says_what_was_done_and_a_rerun_finishes_it(fleet):
+    camera, direct = two_projects(fleet)
+    fleet.registry.with_name("sync-direct.json").unlink()  # the first removal after the upgrade
+    with locked_out(fleet.keystore.with_name("machines.json.lock")):
+        result = machine(fleet, "remove", "linux-cam2")
+    assert result.exit_code == 1
+    assert "done: direct record, manifest — rerun `remoteos-gateway machine remove linux-cam2`" in result.output
+    assert "Traceback" not in result.output
+
+    result = machine(fleet, "remove", "linux-cam2")
+
+    assert result.exit_code == 0, result.output
+    assert "linux-cam2" not in json.loads(fleet.keystore.read_text(encoding="utf-8"))
+    assert "linux-cam2" not in load_registry(fleet.registry).exposed
+    assert "linux-cam2" not in fleet.servers(direct) and "linux-cam2" not in fleet.servers(camera)
+
+
+def test_a_rename_that_fails_half_way_is_finished_by_a_rerun(fleet):
+    camera, direct = two_projects(fleet)
+    with locked_out(fleet.keystore.with_name("machines.json.lock")):
+        result = machine(fleet, "rename", "linux-cam2", "linux-cam9")
+    assert result.exit_code == 1 and "done: direct record, manifest" in result.output
+
+    result = machine(fleet, "rename", "linux-cam2", "linux-cam9")
+
+    assert result.exit_code == 0, result.output
+    assert "linux-cam9" in json.loads(fleet.keystore.read_text(encoding="utf-8"))
+    assert "linux-cam9" in fleet.servers(direct) and "linux-cam2" not in fleet.servers(direct)
+    assert "linux-cam9" in fleet.servers(camera) and "linux-cam2" not in fleet.servers(camera)
+
+
+def test_a_remove_whose_sync_write_fails_without_a_record_is_finished_by_a_plain_sync(fleet):
+    _, direct = two_projects(fleet)
+    fleet.registry.with_name("sync-direct.json").unlink()
+    with read_only(direct.parent):
+        assert machine(fleet, "remove", "linux-cam2").exit_code == 1
+    assert "linux-cam2" in fleet.servers(direct)  # the write failed
+
+    result = fleet.run()  # no retired urls passed: the record kept them
+
+    assert result.exit_code == 0, result.output
+    assert list(fleet.servers(direct)) == ["linux-cam1", "win-stream-snv"]
+
+
+def test_remove_handles_crlf_and_a_trailing_comma_without_leaving_blanks(tmp_path):
+    from remoteos.gateway.manifest import remove_machines
+
+    path = tmp_path / "projects.toml"
+    text = (
+        LAYOUTS.replace("[projects.three]", '[projects.four]\nhost = "dev1"\naccount = "a"\nconfig = "~/four.json"\n'
+                        'machines = ["linux-a", "linux-gone",\n]\n\n[projects.three]')
+    ).replace("\n", "\r\n")
+    path.write_bytes(text.encode("utf-8"))
+
+    after = remove_machines(path, ["linux-gone", "linux-gone2"])
+
+    assert after.projects["four"].machines == ("linux-a",) and after.projects["two"].machines == ("linux-a",)
+    written = path.read_bytes().decode("utf-8")
+    assert "linux-gone" not in written and ", \r\n" not in written and " \r\n" not in written

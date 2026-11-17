@@ -127,8 +127,9 @@ paths:
   deleting them would break those projects.
   - **Direct entries after their machine left the key store (#109):** `direct_record.py` keeps
     `sync-direct.json` next to the registry (`{project: {machine: url}}`, urls only). `owned()`
-    also owns a direct entry whose name + url is RECORDED, or is in `retired` (passed by
-    `machine remove` / `rename`, for a removal before any record exists). Never "any sync-shaped
+    also owns a direct entry whose name + url is RECORDED. `machine remove` / `rename` write the
+    urls they retire into it FIRST (`remember_retired`), so even a removal before any record existed,
+    or one whose later step / sync write failed, is finished by a plain sync (review round 1). Never "any sync-shaped
     entry not in the key store": that deletes hand-made entries. Record = exactly `direct_urls`
     after a confirmed write or an unchanged config; the UNION with the old record (or the seed)
     after a failed write; the old record for a project that failed before planning. No record /
@@ -182,8 +183,8 @@ paths:
     machines in `_check_request`, before any box or vault is touched.
   - `fleet-down` stays ONE text (the one-per-kind ruling), lines grouped under an org header
     (Slovnormal, nlmedia, bez organizácie); `check` writes `org` into each status record and the
-    fingerprint is `[name, state, org-or-""]`, so an org change replaces the U item (and the first run
-    after the upgrade re-sends it once). `_fit_grouped` cuts BOX lines only, never leaves a header
+    fingerprint is `[name, state, org-or-""]`, but only a changed BOX SET re-sends (#109, below): an
+    org change alone, or the fingerprint format change of an upgrade, is stored silently. `_fit_grouped` cuts BOX lines only, never leaves a header
     without a box, and the "… a ďalších N (Slovnormal 3, nlmedia 2)" line counts boxes per org.
   - A known machine's org is changed ONLY by `set-org` (set_key / enroll refuse a different org;
     `set-org` warns about every project it would mix). `enroll` checks the named projects AND every
@@ -230,8 +231,8 @@ paths:
     (`fleet_notice.fit`: what does not fit `CHUNK_LIMIT` becomes "… a ďalších N"; an unreachable
     box's boilerplate detail is left out so ~20 boxes fit). A FINGERPRINT per kind (down: name +
     state; stale: name + version + stable tag; no-admin: names) is kept in the status file
-    `fleet_notices` once delivered: a different one re-sends the same slug (replaces), an
-    undelivered send keeps the old one (retried). A text must hold nothing the fingerprint does not
+    `fleet_notices` once delivered: a different BOX SET re-sends the same slug (replaces; see the
+    #109 bullet below), an undelivered send keeps the old one (retried). A text must hold nothing the fingerprint does not
     (no day count: "pozadu od <date>"), or the unchanged U item goes stale. An empty kind is
     cleared by `_settle` from the book; one in U but NOT in the book (its book write failed) by
     `fleet_notice.clear_unbooked` before the status write (a failed clear stays `[]` = owed, retried).
@@ -375,20 +376,29 @@ paths:
 
 ## Remove / rename (#109): `cli_machine_edit.py`, `manifest.remove_machines` / `rename_machine`
 
-- Order: validate everything first (key store names, manifest edit computed with `dry_run=True`),
-  then manifest -> key store -> registry -> `sync_configs(retired={name: old url})`. The registry is
-  saved only when it changed (a save makes the gateway reload).
+- Order: validate everything first (key store names, manifest edit computed with `dry_run=True`,
+  the registry rename on a loaded copy), then direct record (`remember_retired`) -> manifest -> key
+  store -> registry -> `sync_configs`. The registry is saved only when it changed (a save makes the
+  gateway reload).
+- **Resumable, never half-silent:** `OSError` is caught too; a failure after the first write prints
+  `done: <steps> — rerun ...`, and the SAME command finishes it: `remove` accepts a name the key
+  store already lost while the manifest or registry still holds it; `manifest.rename_machine` is a
+  no-op when NEW is there and OLD gone; `rename` with NEW in the key store and OLD gone skips that
+  step; `Registry.rename_machine` is a no-op when nothing carries OLD.
 - `remove` = `Registry.forget_machine` (unexpose + out of EVERY allow-list, hand-made ones too:
   only narrows); refuses when a project would be left empty (the manifest forbids `[]`).
 - `rename` = `Registry.rename_machine`: exposure follows (a kill-switched OLD stays unexposed as
   NEW), every consumer's OLD becomes NEW in place (bypasses `allow()`'s managed refusal on purpose:
   same box, not a widening). The key-store entry moves as is; NEW must be valid (`fleet` is not)
-  and absent from key store AND manifest.
+  and absent from key store AND manifest AND registry: a NEW left exposed / allowed by a hand removal
+  is refused (carrying OLD over would hand the box to that consumer; review round 1).
 - `manifest._edit_machines` edits TEXT in reverse order: a value alone on its line (+ its comma and
-  trailing comment) loses the line; inline, the following comma, else the preceding one. Anything
+  trailing comment) loses the line; inline, the following comma (and the blank before a line end),
+  else the preceding one; CRLF files work. `add_machine` writes through the same `_commit_edit`. Anything
   odd is caught by `_commit_edit`'s parse-check (must equal the expected manifest), never written.
-- A dry run edits nothing: registry changes on a loaded copy, the sync dry on the edited in-memory
-  manifest + key store.
+- A dry run edits nothing, not even `.projects.lock` (`_manifest_lock` is a nullcontext): registry
+  changes on a loaded copy, the sync dry on the edited in-memory manifest + key store.
+- Fault tests use REAL failures: a lock file mode 000 (`locked_out`), a read-only config dir.
 - `check` needs nothing: its status and fleet notices come from the key store, so the next run
   forgets the box (`test_after_remove_check_forgets_the_box_in_the_status_and_the_fleet_down_item`).
 - Tests (`tests/test_gateway_machine_remove.py`) never touch a live machine: temp copies only.

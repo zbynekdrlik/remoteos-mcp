@@ -72,7 +72,7 @@ from remoteos.gateway.sync import CROSS_ORG_PROJECTS, SyncError, sync_configs
 from remoteos.gateway.targets import TargetError, target_for
 from remoteos.release_channel import RELEASES_URL, fetch_releases, soak_days
 
-_LOCAL_HOST_HELP = "This host's name as the manifest's `host` spells it (dev1); other hosts are reached over ssh."
+LOCAL_HOST_HELP = "This host's name as the manifest's `host` spells it (dev1); other hosts are reached over ssh."
 _GATEWAY_URL_HELP = f"The gateway (default: the manifest's [gateway] url, else {DEFAULT_GATEWAY_URL})."
 
 
@@ -139,16 +139,16 @@ def _gateway_url(paths, explicit: str | None, *, strict: bool) -> str:
         return load_manifest(paths.manifest).gateway_url
     except ManifestError as exc:
         if strict:
-            raise _fail(exc) from exc
+            raise fail(exc) from exc
         log = logging.getLogger("remoteos.gateway.check")
         log.warning("manifest unreadable (%s) — using %s", exc, DEFAULT_GATEWAY_URL)
         return DEFAULT_GATEWAY_URL
 
 
-_RELOAD_NOTE = "A running gateway applies this on its next request (or SIGHUP) — no restart needed."
+RELOAD_NOTE = "A running gateway applies this on its next request (or SIGHUP) — no restart needed."
 
 
-def _fail(exc: Exception) -> click.ClickException:
+def fail(exc: Exception) -> click.ClickException:
     return click.ClickException(str(exc))
 
 
@@ -174,7 +174,7 @@ def _expose_new(paths, machines: list[str], *, dry_run: bool = False) -> None:
                 for machine in to_expose:
                     registry.expose(machine)
     except RegistryError as exc:
-        raise _fail(exc) from exc
+        raise fail(exc) from exc
     if to_expose:
         click.echo(("would expose: " if dry_run else "exposed in the registry: ") + ", ".join(to_expose))
     for machine in held:
@@ -215,7 +215,7 @@ def machine_set_key(paths, name: str, url: str | None, org: str | None, force: b
     try:
         outcome = set_key(paths.machines, name, key, url=url, org=org, force=force)
     except MachineSourceError as exc:
-        raise _fail(exc) from exc
+        raise fail(exc) from exc
     click.echo(f"{name}: {'added' if outcome.created else 'key set'} — key {mask_secret(key)}, url {outcome.url}")
     click.echo(f"  probe with the new key: {outcome.probe.state} ({outcome.probe.detail})")
     if outcome.probe.state != STATE_OK:
@@ -225,7 +225,7 @@ def machine_set_key(paths, name: str, url: str | None, org: str | None, force: b
     if outcome.created:
         _expose_new(paths, [name])
         click.echo(f"  next: add {name} to a project's machines in projects.toml, then run sync-configs.")
-    click.echo(_RELOAD_NOTE)
+    click.echo(RELOAD_NOTE)
     click.echo(
         "Projects routed through the gateway use the new key on their next call — no config change, no reconnect."
         " A `direct` project (remoteos-mcp) holds its own copy: run `remoteos-gateway sync-configs` for it."
@@ -240,7 +240,7 @@ def machine_list(paths, status_file: Path) -> None:
     try:
         entries = load_keystore(paths.machines, missing_ok=True)
     except MachineSourceError as exc:
-        raise _fail(exc) from exc
+        raise fail(exc) from exc
     records = load_status(status_file.expanduser()).get("machines")
     records = records if isinstance(records, dict) else {}
     click.echo(f"key store: {paths.machines}  ({len(entries)} machine(s))")
@@ -277,14 +277,14 @@ def machine_set_org(paths, org: str, names: tuple[str, ...]) -> None:
     try:
         changed = set_org(paths.machines, org, names)
     except MachineSourceError as exc:
-        raise _fail(exc) from exc
+        raise fail(exc) from exc
     unchanged = [name for name in dict.fromkeys(names) if name not in changed]
     if changed:
         click.echo(f"org {org}: {', '.join(changed)}")
     if unchanged:
         click.echo(f"already {org}: {', '.join(unchanged)}")
     if changed:
-        click.echo(_RELOAD_NOTE)
+        click.echo(RELOAD_NOTE)
         _warn_mixed_projects(paths, changed)
 
 
@@ -324,7 +324,7 @@ def _warn_mixed_projects(paths, changed: list[str]) -> None:
     is_flag=True,
     help="Also read every project config of the manifest where it lives (dev2 over ssh, other accounts via sudo).",
 )
-@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
+@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=LOCAL_HOST_HELP)
 @click.option("--match", default=DEFAULT_IMPORT_MATCH, show_default=True, help="Only entries whose name fully matches.")
 @click.option("--gateway-url", default=None, help=_GATEWAY_URL_HELP + " Entries pointing there are skipped (tokens).")
 @click.option(
@@ -363,7 +363,7 @@ def machine_import(
         try:
             manifest = load_manifest(paths.manifest)
         except ManifestError as exc:
-            raise _fail(exc) from exc
+            raise fail(exc) from exc
         for project in manifest.projects.values():
             target = target_for(project.host, project.account, local_host=local_host)
             label = f"{project.name} ({target.label}) {project.config}"
@@ -386,7 +386,7 @@ def _import_and_report(
     try:
         existing = load_keystore(paths.machines, missing_ok=True)
     except MachineSourceError as exc:
-        raise _fail(exc) from exc
+        raise fail(exc) from exc
     decisions = resolve_import(scan, existing, accept_url_change=accept_url_change)
     click.echo(f"read {len(texts)} config(s); {len(decisions)} machine(s) found")
     for note in scan.notes:
@@ -411,7 +411,7 @@ def _import_and_report(
         click.echo(f"  {name}: its key-store entry changed while the import probed — left as it is now")
     click.echo(f"key store {paths.machines} up to date ({len(decisions)} machine(s) considered)")
     _expose_new(paths, new_machines)
-    click.echo(_RELOAD_NOTE)
+    click.echo(RELOAD_NOTE)
 
 
 @machine.command("repair-recipe")
@@ -438,7 +438,7 @@ def machine_repair_recipe(
                 raise MachineSourceError(f"machine {name!r} is not in the key store {paths.machines}")
             entries[name] = replace(entry, repair=recipe)
     except MachineSourceError as exc:
-        raise _fail(exc) from exc
+        raise fail(exc) from exc
     if recipe is None:
         click.echo(f"{name}: repair recipe removed — a 401 is only reported.")
     else:
@@ -454,7 +454,7 @@ def _describe_recipe(recipe: RepairRecipe) -> str:
 
 @click.command("sync-configs")
 @click.option("--dry-run", is_flag=True, help="Show what would change (every secret masked); write nothing.")
-@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
+@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=LOCAL_HOST_HELP)
 @click.option(
     "--prune",
     is_flag=True,
@@ -479,7 +479,7 @@ def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> 
             prune=prune,
         )
     except (ManifestError, MachineSourceError, RegistryError, SyncError) as exc:
-        raise _fail(exc) from exc
+        raise fail(exc) from exc
     if failures:
         click.echo(f"{failures} project(s) FAILED — see above; the others are in place.")
         sys.exit(1)
@@ -492,7 +492,7 @@ def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> 
 @_status_file_option
 @click.option("--gateway-url", default=None, help=_GATEWAY_URL_HELP + " Its /healthz is probed too.")
 @_notify_options
-@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=_LOCAL_HOST_HELP)
+@click.option("--local-host", envvar="REMOTEOS_GATEWAY_LOCAL_HOST", default=socket.gethostname, help=LOCAL_HOST_HELP)
 @click.option(
     "--releases-url",
     envvar="REMOTEOS_RELEASES_URL",
@@ -528,7 +528,7 @@ def check_command(
             drift=DriftPolicy(fetch=lambda: fetch_releases(releases_url), soak_days=soak_days()),
         )
     except (MachineSourceError, CheckError) as exc:
-        raise _fail(exc) from exc
+        raise fail(exc) from exc
     status = report.status
     gateway = status["gateway"]
     click.echo(f"checked {status['checked_at']}: gateway {gateway_url} {gateway['state']} since {gateway['since']}")

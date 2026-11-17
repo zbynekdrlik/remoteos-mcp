@@ -26,6 +26,7 @@ A project lists at least one machine; to take a project off, remove its table.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import os
 import posixpath
@@ -188,7 +189,7 @@ def remove_machines(path: Path, names: list[str], *, dry_run: bool = False) -> M
     Edits TEXT like ``add_machine`` (comments stay), written only when the result parses to exactly
     the expected manifest; a dry run only computes it."""
     gone = set(names)
-    with fileops.exclusive_lock(str(path.parent / ".projects.lock")):
+    with _manifest_lock(path, dry_run):
         manifest = load_manifest(path)
         emptied = sorted(n for n, p in manifest.projects.items() if p.machines and set(p.machines) <= gone)
         if emptied:
@@ -210,9 +211,11 @@ def rename_machine(path: Path, old: str, new: str, *, dry_run: bool = False) -> 
     Same text edit and parse-check as ``remove_machines``; returns the manifest after."""
     if not is_valid_machine_name(new):
         raise ManifestError(f"invalid machine name {new!r}: use letters, digits and . _ -")
-    with fileops.exclusive_lock(str(path.parent / ".projects.lock")):
+    with _manifest_lock(path, dry_run):
         manifest = load_manifest(path)
         clash = sorted(n for n, p in manifest.projects.items() if new in p.machines)
+        if clash and not any(old in p.machines for p in manifest.projects.values()):
+            return manifest  # already renamed (a rerun after a later step failed): nothing to do
         if clash:
             raise ManifestError(f"{path}: {new!r} is already in project(s) {', '.join(clash)}; nothing changed")
         text = path.read_bytes().decode("utf-8")
@@ -222,6 +225,11 @@ def rename_machine(path: Path, old: str, new: str, *, dry_run: bool = False) -> 
                 text = _edit_machines(text, name, lambda value: new if value == old else value)
                 expected[name] = replace(project, machines=tuple(new if m == old else m for m in project.machines))
         return _commit_edit(path, text, manifest, expected, f"rename {old} to {new}", dry_run)
+
+
+def _manifest_lock(path: Path, dry_run: bool):
+    """The manifest lock; none for a dry run, which must not even create the lock file."""
+    return contextlib.nullcontext() if dry_run else fileops.exclusive_lock(str(path.parent / ".projects.lock"))
 
 
 def _commit_edit(
@@ -256,17 +264,8 @@ def add_machine(path: Path, project: str, machine: str) -> bool:
         if machine in current.machines:
             return False
         edited = _insert_machine(path.read_bytes().decode("utf-8"), project, machine)
-        try:
-            after = parse_manifest(tomllib.loads(edited), path)
-        except (tomllib.TOMLDecodeError, ManifestError) as exc:
-            raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: {exc}") from exc
         expected = {**manifest.projects, project: replace(current, machines=(*current.machines, machine))}
-        if after.projects != expected or after.gateway_url != manifest.gateway_url:
-            raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: edit it by hand")
-        target = fileops.expand(str(path))
-        mode = stat.S_IMODE(os.stat(target).st_mode)
-        fileops.write_with_backup(target, edited.encode("utf-8"), _dt.date.today().isoformat())
-        os.chmod(target, mode)
+        _commit_edit(path, edited, manifest, expected, f"add {machine!r} to {project!r}", dry_run=False)
     return True
 
 
@@ -313,15 +312,18 @@ def _edit_machines(text: str, project: str, change) -> str:
             text = f'{text[:begin]}"{replacement}"{text[end:]}'
             continue
         line_start = text.rfind("\n", 0, begin) + 1
-        rest = re.compile(r"[ \t]*,?[ \t]*(?:#[^\n]*)?\n").match(text, end)
+        rest = re.compile(r"[ \t]*,?[ \t]*(?:#[^\r\n]*)?\r?\n").match(text, end)
         if not text[line_start:begin].strip() and rest:  # alone on its line: the line goes
             text = text[:line_start] + text[rest.end():]
             continue
         after = re.compile(r"[ \t]*,[ \t]*").match(text, end)
         if after:  # "a", "b"  ->  drop  "a",_
-            text = text[:begin] + text[after.end():]
+            head, tail = text[:begin], text[after.end():]
+            if tail[:1] in ("\n", "\r", "#", ""):  # the line ends here: no trailing blank left behind
+                head = head.rstrip(" \t")
+            text = head + tail
             continue
-        before = re.compile(r",[ \t\n]*$").search(text, 0, begin)
+        before = re.compile(r",[ \t\r\n]*$").search(text, 0, begin)
         if before is None:
             raise ManifestError(f"[projects.{project}]: cannot remove {value!r} from its array: edit it by hand")
         text = text[:before.start()] + text[end:]

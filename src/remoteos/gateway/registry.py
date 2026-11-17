@@ -298,6 +298,16 @@ class Registry:
         unexposed as *new*) and every consumer allowed *old* is allowed *new* in its place. Returns
         those consumers. Not a widening: the same box under another name."""
         validate_machine_name(new)
+        if old not in self.exposed and not any(old in c.machines for c in self.consumers.values()):
+            return []  # nothing carries OLD (renamed already, or never exposed nor allowed)
+        stale = (["exposed"] if new in self.exposed else []) + [
+            f"allowed for {name}" for name, consumer in sorted(self.consumers.items()) if new in consumer.machines
+        ]
+        if stale:  # a leftover of a hand removal: carrying OLD over would hand the box to those
+            raise RegistryError(
+                f"{new!r} is still in the registry ({', '.join(stale)}) — clear it first"
+                f" (`remoteos-gateway unexpose {new}`, `remoteos-gateway deny <consumer> {new}`); nothing changed"
+            )
         if self.unexpose(old):
             self.expose(new)
         touched = [name for name, consumer in sorted(self.consumers.items()) if old in consumer.machines]

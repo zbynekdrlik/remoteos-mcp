@@ -266,11 +266,10 @@ def plan_project(
     registry: Registry,
     mint: Callable[[], str] = mint_token,
     recorded: dict[str, str] | None = None,
-    retired: dict[str, str] | None = None,
 ) -> ProjectPlan:
-    """*recorded*: what ``sync-direct.json`` says sync wrote into this (direct) config, None when
-    there is no record yet. *retired*: ``{machine: url}`` of machines ``machine remove`` / ``rename``
-    just took out of the key store, so their direct entries go even before any record exists."""
+    """*recorded*: what ``sync-direct.json`` says sync wrote into this (direct) config (``machine
+    remove`` / ``rename`` add the urls they retire before their first change), None when there is
+    no record for it yet."""
     parsed = parse_config(old_text)
     plan = ProjectPlan(project=project, target=target, old_text=old_text, new_text="")
     consumer = registry.consumers.get(project.consumer) if project.mode == MODE_GATEWAY else None
@@ -286,9 +285,8 @@ def plan_project(
             return True
         if project.mode == MODE_DIRECT and name in keystore and url == keystore[name].url:
             return True
-        if project.mode == MODE_DIRECT and isinstance(url, str):
-            if (recorded or {}).get(name) == url or (retired or {}).get(name) == url:
-                return True  # sync wrote it; its machine left the key store or moved (#109)
+        if project.mode == MODE_DIRECT and isinstance(url, str) and (recorded or {}).get(name) == url:
+            return True  # recorded: sync wrote it; its machine left the key store or moved (#109)
         if not (isinstance(url, str) and url.endswith(f"/{name}/mcp")):
             return False
         token = bearer_value(authorization_header(value) or "")
@@ -487,25 +485,23 @@ def sync_configs(
     echo: Callable[[str], None],
     prune: bool = False,
     mint: Callable[[], str] = mint_token,
-    retired: dict[str, str] | None = None,
 ) -> int:
     """Run the sync; returns the number of FAILED projects (0 = everything is in place).
 
     *prune* removes managed consumers whose project left the manifest; without it they keep
     their token hash with an empty allow-list. The live sessions of the written configs are
     printed and logged (never notified, #109); a failed scan never counts as a failed project.
-    *retired* (``machine remove`` / ``rename``): ``{machine: old url}`` whose direct entries go.
     """
     validate_run(manifest, keystore, local_host=local_host)
     failures = 0
     ledger_path = record_path(registry_path)
-    record, record_usable = load_record(ledger_path)
     new_record: Record = {}
     changed_projects: list[str] = []
     to_restart: list[tuple[Project, Target]] = []  # the configs written (a dry run: would be)
     try:
         with registry_transaction(registry_path) as transaction:
             saver = _Saver(transaction, dry_run=dry_run)
+            record, record_usable = load_record(ledger_path)  # under the registry lock, like its write
             registry = transaction.registry
             for project in manifest.projects.values():
                 target = target_for(project.host, project.account, local_host=local_host)
@@ -520,7 +516,6 @@ def sync_configs(
                         registry=registry,
                         mint=mint,
                         recorded=record.get(project.name) if record_usable else None,
-                        retired=retired,
                     )
                 except (TargetError, SyncError) as exc:
                     failures += 1

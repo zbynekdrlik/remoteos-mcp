@@ -12,6 +12,9 @@ whose machine is gone while a hand-made one (never recorded) is kept, as gateway
   entries whose url is the key store's url for that name. Those are sync's anyway, so the first run
   removes nothing extra; it only makes today's entries owned for the next removal.
 - Read failures fall back to seeding: the safe direction (an entry is kept, never deleted wrongly).
+- ``machine remove`` / ``rename`` add the urls they retire (``remember_retired``) BEFORE their first
+  change, so the old direct entry stays owned whatever step fails later — even when there was no
+  record yet, and through a rerun after the key store already lost the machine.
 """
 
 from __future__ import annotations
@@ -56,3 +59,15 @@ def save_record(path: Path, record: Record) -> None:
     payload = json.dumps({p: dict(sorted(e.items())) for p, e in sorted(record.items())}, indent=2) + "\n"
     fileops.atomic_write(str(path), payload.encode("utf-8"))
     logger.info("direct record %s written: %d project(s)", path, len(record))
+
+
+def remember_retired(path: Path, projects: list[str], retired: dict[str, str]) -> None:
+    """Record *retired* ``{machine: url}`` for each direct project in *projects* (the caller holds the
+    registry lock). Raises ``OSError``."""
+    if not retired or not projects:
+        return
+    record, _ = load_record(path)
+    for project in projects:
+        record.setdefault(project, {}).update(retired)
+    save_record(path, record)
+    logger.info("direct record %s: retiring %s in %s", path, sorted(retired), ", ".join(sorted(projects)))
