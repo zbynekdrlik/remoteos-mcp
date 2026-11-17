@@ -203,6 +203,12 @@ def _lookup(error):
     return lambda: session.tree(50)
 
 
+def _window_type(error):
+    root = Control(name="App", kind="WindowControl", kids=[Control(rid=(3,))])
+    root.fails["type"] = error
+    return lambda: new_session(root).tree(50)
+
+
 def _walk_read(what):
     def setup(error):
         slow = Control(name="slow", rid=(2,))
@@ -280,6 +286,7 @@ def _focus_check(error):
 NOTHING, FOCUS = "nothing was done to it", "nothing was typed, the focus may have moved"
 READS = {
     "window lookup": (_lookup, NOTHING),
+    "window's control type": (_window_type, NOTHING),
     "element read": (_walk_read("rect"), NOTHING),
     "children": (_walk_read("kids"), NOTHING),
     "control type of a child": (_walk_read("type"), NOTHING),
@@ -397,6 +404,9 @@ def test_element_tree_reports_a_refused_window_lookup_as_a_clean_tool_error(step
     assert str(caught.value) == (
         f"ElementTree error: UI Automation failed while {step} (HRESULT 0x80070005): nothing was done to it"
     )
+    lookup_failed = caught.value.__cause__
+    assert isinstance(lookup_failed, uia.UiaLookupFailed)
+    assert lookup_failed.__context__ is None, "the raw COM error (its frames hold controls) is dropped at the worker"
 
 
 # -- open_session against a fake package --------------------------------------------------------
