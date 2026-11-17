@@ -23,6 +23,7 @@ from test_gateway_sync import Fleet as SyncFleet
 from remoteos.gateway import cli as gateway_cli
 from remoteos.gateway import fleet_notice
 from remoteos.gateway.registry import MachineSourceError, parse_keystore
+from remoteos.gateway.targets import current_account
 
 
 def _cli(tmp_path, *args, input=None):
@@ -305,3 +306,65 @@ def test_a_machine_changing_org_changes_the_fleet_down_fingerprint():
     before = fleet_notice.build({"linux-a": _record("unreachable", None)}, "dev1")[fleet_notice.DOWN]
     after = fleet_notice.build({"linux-a": _record("unreachable", "nlmedia")}, "dev1")[fleet_notice.DOWN]
     assert before.fingerprint != after.fingerprint
+
+
+def test_a_cut_grouped_fleet_down_counts_only_hidden_boxes_and_never_ends_on_a_header():
+    machines = {}
+    for index in range(30):
+        machines[f"win-sn-{index:02d}-" + "x" * 40] = {**_record("401", "slovnormal"), "detail": "y" * 200}
+        machines[f"linux-nl-{index:02d}-" + "x" * 40] = {**_record("401", "nlmedia"), "detail": "y" * 200}
+    for index in range(5):
+        machines[f"linux-no-{index}"] = _record("401", None)
+
+    text = fleet_notice.build(machines, "dev1")[fleet_notice.DOWN].text
+
+    lines = text.splitlines()
+    shown = sum(1 for line in lines if line.startswith("• "))
+    hidden = 65 - shown
+    assert 0 < shown < 65
+    more = next(line for line in lines if line.startswith("… a ďalších"))
+    assert more.startswith(f"… a ďalších {hidden} (")
+    assert "bez organizácie 5" in more
+    before_more = lines[lines.index(more) - 1]
+    assert before_more.startswith("• ")  # the last kept line is a box, never a bare header
+
+
+def test_set_key_never_changes_the_org_of_a_known_machine(tmp_path):
+    key = fresh_secret("k")
+    with FakeFleetMachine(accept_keys=(key,)) as box:
+        _store(tmp_path, {"linux-a": {"url": box.url, "key": key, "org": "nlmedia"}})
+        result = _cli(tmp_path, "machine", "set-key", "linux-a", "--org", "slovnormal", input=key + "\n")
+    assert result.exit_code == 1 and "machine set-org" in result.output
+    assert _stored(tmp_path)["linux-a"]["org"] == "nlmedia"
+
+
+def test_set_org_warns_about_a_project_it_makes_mixed(fleet):
+    fleet.write_manifest({"camera-box": fleet.camera_box_project()})
+    result = CliRunner().invoke(gateway_cli.main, [
+        "--registry", str(fleet.registry), "--machines", str(fleet.keystore), "--manifest", str(fleet.manifest),
+        "machine", "set-org", "slovnormal", "linux-cam2",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "WARNING: [projects.camera-box] now mixes orgs" in result.output
+
+
+def test_enroll_replace_with_another_org_is_refused_before_the_box_is_touched(enrolling):
+    result = CliRunner().invoke(gateway_cli.main, [
+        *enrolling.base(), "enroll", "linux-cam2", "--org", "slovnormal", "--projects", "song.player", "--replace",
+        "--ssh-key", str(enrolling.ssh_pub),
+    ])
+    assert result.exit_code == 1 and "machine set-org" in result.output
+    assert enrolling.calls() == []
+
+
+def test_enroll_into_remoteos_mcp_may_mix_orgs(enrolling, tmp_path):
+    manifest = enrolling.manifest.read_text()
+    enrolling.manifest.write_text(manifest + (
+        '\n[projects.remoteos-mcp]\nhost = "dev1"\naccount = "' + current_account() + '"\n'
+        f'config = "{tmp_path / "remoteos-mcp.mcp.json"}"\nmachines = ["linux-cam2"]\n'
+    ))
+    with FakeFleetMachine(accept_keys=(enrolling.key,), version="0.7.0.dev50") as machine:
+        enrolling.post(machine.url)
+        result = enrolling.enroll("--projects", "remoteos-mcp", "--url", machine.url, org="slovnormal")
+        assert result.exit_code == 0, result.output
+    assert json.loads(enrolling.machines.read_text())["win-new-pc"]["org"] == "slovnormal"

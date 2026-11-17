@@ -172,7 +172,12 @@ paths:
     machines in `_check_request`, before any box or vault is touched.
   - `fleet-down` stays ONE text (the one-per-kind ruling), lines grouped under an org header
     (Slovnormal, nlmedia, bez organizácie); `check` writes `org` into each status record and the
-    fingerprint is `[name, state, org-or-""]`, so an org change replaces the U item.
+    fingerprint is `[name, state, org-or-""]`, so an org change replaces the U item (and the first run
+    after the upgrade re-sends it once). `_fit_grouped` cuts BOX lines only, never leaves a header
+    without a box, and the "… a ďalších N (Slovnormal 3, nlmedia 2)" line counts boxes per org.
+  - A known machine's org is changed ONLY by `set-org` (set_key / enroll refuse a different org;
+    `set-org` warns about every project it would mix). `enroll` checks the named projects AND every
+    project already holding the machine.
   - Deploy order: install → restart the gateway → `set-org`. An OLDER gateway refuses a key store
     carrying `org` (unknown key): at reload it keeps the last good copy, at a start it refuses.
 - **`edit_keystore` saves only when the content changed:** every save makes the running

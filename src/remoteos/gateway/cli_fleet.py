@@ -66,7 +66,7 @@ from remoteos.gateway.registry import (
     load_registry,
     parse_repair,
 )
-from remoteos.gateway.sync import SyncError, sync_configs
+from remoteos.gateway.sync import CROSS_ORG_PROJECTS, SyncError, sync_configs
 from remoteos.gateway.targets import TargetError, target_for
 from remoteos.release_channel import RELEASES_URL, fetch_releases, soak_days
 
@@ -283,6 +283,30 @@ def machine_set_org(paths, org: str, names: tuple[str, ...]) -> None:
         click.echo(f"already {org}: {', '.join(unchanged)}")
     if changed:
         click.echo(_RELOAD_NOTE)
+        _warn_mixed_projects(paths, changed)
+
+
+def _warn_mixed_projects(paths, changed: list[str]) -> None:
+    """After an org change: the projects holding a changed machine that now mix orgs (sync-configs
+    will refuse until projects.toml is fixed). The key store is the truth; this only warns."""
+    if not paths.manifest.exists():
+        return
+    try:
+        manifest = load_manifest(paths.manifest)
+        entries = load_keystore(paths.machines)
+    except (ManifestError, MachineSourceError) as exc:
+        click.echo(f"  (could not check the projects: {exc})", err=True)
+        return
+    for project in manifest.projects.values():
+        if project.name in CROSS_ORG_PROJECTS or not set(changed) & set(project.machines):
+            continue
+        orgs = {entries[m].org for m in project.machines if m in entries}
+        if len(orgs) > 1:
+            click.echo(
+                f"WARNING: [projects.{project.name}] now mixes orgs — sync-configs refuses until projects.toml"
+                " holds ONE org's machines there",
+                err=True,
+            )
 
 
 @machine.command("import")

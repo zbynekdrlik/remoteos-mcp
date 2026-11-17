@@ -41,7 +41,13 @@ from remoteos.gateway.enroll import (
 from remoteos.gateway.keystore import load_keystore, mask_secret, set_key
 from remoteos.gateway.manifest import ManifestError, add_machine, load_manifest
 from remoteos.gateway.probe import STATE_OK, probe_one
-from remoteos.gateway.registry import ORGS, MachineSourceError, is_valid_machine_name, validate_http_url
+from remoteos.gateway.registry import (
+    ORG_MISSING_HINT,
+    ORGS,
+    MachineSourceError,
+    is_valid_machine_name,
+    validate_http_url,
+)
 from remoteos.gateway.sync import CROSS_ORG_PROJECTS
 from remoteos.release_channel import RELEASES_URL
 
@@ -74,19 +80,25 @@ def _check_request(paths, name: str, org: str, projects: list[str], replace: boo
     if name in known and not replace:
         raise click.ClickException(f"{name} is in the key store already: --replace overwrites its url and key")
     # #105: a project holds machines of ONE org (sync-configs would refuse the run after the box
-    # was set up); refused here, before any box is touched
-    for project in projects:
+    # was set up); refused here, before any box is touched. A known machine keeps its org (a change
+    # is `machine set-org`), and every project already holding it is checked too.
+    current = known[name].org if name in known else None
+    if current is not None and current != org:
+        raise click.ClickException(
+            f"{name} is {current} in the key store, not {org}: change it with `remoteos-gateway machine set-org`"
+        )
+    holding = [p.name for p in manifest.projects.values() if name in p.machines]
+    for project in dict.fromkeys([*projects, *holding]):
         if project in CROSS_ORG_PROJECTS:
             continue
-        others = sorted(
-            f"{m} ({known[m].org or 'no org'})"
-            for m in manifest.projects[project].machines
-            if m != name and m in known and known[m].org != org
-        )
-        if others:
+        clash = [m for m in manifest.projects[project].machines if m != name and m in known and known[m].org != org]
+        if clash:
+            unset = all(known[m].org is None for m in clash)
             raise click.ClickException(
-                f"{project} holds machines of another org than {org}: {', '.join(others)} — a project may hold"
-                " ONE org's machines (#105)"
+                f"{project} holds machines of another org than {org}: "
+                + ", ".join(f"{m} ({known[m].org or 'no org'})" for m in sorted(clash))
+                + " — a project may hold ONE org's machines (#105)"
+                + (f"; {ORG_MISSING_HINT}" if unset else "")
             )
 
 

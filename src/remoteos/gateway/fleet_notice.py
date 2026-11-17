@@ -99,22 +99,42 @@ def _down(machines: dict[str, dict], host: str) -> KindNotice | None:
     )
     if not names:
         return None
-    lines = []
-    group = None
-    for name in names:
-        record = machines[name]
-        if _org(record) != group:
-            group = _org(record)
-            lines.append(f"{group}:")
-        since = str(record.get("since") or "")[:16].replace("T", " ")
-        line = f"• {name}: {STATE_LABELS.get(record['state'], record['state'])} (od {since})"
-        if record["state"] != "unreachable":  # "All connection attempts failed" x17 says nothing
-            line += " — " + str(record.get("detail") or "")[:_DETAIL_LIMIT]
-        lines.append(line)
     tail = [KEY_HINT] if any(machines[n]["state"] == "401" for n in names) else []
     title = f"MCP brána ({host}): nefunkčné stroje ({len(names)})"
     fingerprint = [[n, machines[n]["state"], _org_key(machines[n])] for n in names]
-    return KindNotice(DOWN, fingerprint, names, fit(title, lines, tail))
+    return KindNotice(DOWN, fingerprint, names, _fit_grouped(title, names, machines, tail))
+
+
+def _down_line(name: str, record: dict) -> str:
+    since = str(record.get("since") or "")[:16].replace("T", " ")
+    line = f"• {name}: {STATE_LABELS.get(record['state'], record['state'])} (od {since})"
+    if record["state"] != "unreachable":  # "All connection attempts failed" x17 says nothing
+        line += " — " + str(record.get("detail") or "")[:_DETAIL_LIMIT]
+    return line
+
+
+def _fit_grouped(title: str, names: list[str], machines: dict[str, dict], tail: list[str],
+                 limit: int = CHUNK_LIMIT) -> str:
+    """Like ``fit``, for lines grouped under an org header: only BOX lines are counted and cut, a
+    header is written only above a box it keeps, and the "… a ďalších N" line says which orgs the
+    hidden boxes belong to."""
+    for keep in range(len(names), -1, -1):
+        lines: list[str] = []
+        group = None
+        for name in names[:keep]:
+            if _org(machines[name]) != group:
+                group = _org(machines[name])
+                lines.append(f"{group}:")
+            lines.append(_down_line(name, machines[name]))
+        hidden = names[keep:]
+        if hidden:
+            counts = {label: sum(1 for n in hidden if _org(machines[n]) == label) for label in _GROUP_ORDER}
+            per_org = ", ".join(f"{label} {count}" for label, count in counts.items() if count)
+            lines.append(f"… a ďalších {len(hidden)} ({per_org})")
+        text = "\n".join([title, *lines, *tail])
+        if len(text) <= limit:
+            return text
+    return title[:limit]
 
 
 def _stale(machines: dict[str, dict], host: str) -> KindNotice | None:

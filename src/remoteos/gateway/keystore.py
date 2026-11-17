@@ -142,7 +142,8 @@ def set_key(
     """Store *key* for machine *name* after probing it. A key the machine REJECTS (401) is
     refused unless *force*: a typo must not cut every project off that machine. An unreachable
     machine is stored anyway (a rotation may be staged before the box is up). A NEW machine needs
-    its *org* (#105); for a known one *org* changes it, None keeps it."""
+    its *org* (#105); a known one keeps its org (*org* may only set a missing one: a change of
+    company is ``set_org``, whose CLI names the projects it would mix)."""
     if not is_valid_machine_name(name):
         raise KeystoreError(f"invalid machine name {name!r}: use letters, digits and . _ -")
     validate_key(key)
@@ -153,6 +154,11 @@ def set_key(
         raise KeystoreError(f"machine {name!r} is not in the key store {path} — add it with --url <its /mcp url>")
     if current is None and org is None:
         raise KeystoreError(f"machine {name!r} is new: say which company it belongs to with --org nlmedia|slovnormal")
+    if current is not None and None not in (org, current.org) and org != current.org:
+        raise KeystoreError(
+            f"machine {name!r} is {current.org}, not {org} — nothing changed; a company change is"
+            " `remoteos-gateway machine set-org` (it says which projects it would mix)"
+        )
     target = validate_http_url(url, what="--url") if url is not None else current.url
     result = probe(target, f"Bearer {key}")
     if result.state == STATE_UNAUTHORIZED and not force:

@@ -627,9 +627,8 @@ owner reconnected it. Now:
 | See the machines | `remoteos-gateway machine list` (keys masked, org per machine, counts per org) and `~/.local/state/remoteos-gateway/machines-status.json`. |
 
 **One company per project (#105).** Every machine belongs to one company: `org` in the key store,
-`nlmedia` or `slovnormal` (the Slovnormal / Pekárova žena boxes: `win-pz-server`, the
-`win-pj*-pokladna` tills, `win-spisska-pc`, `win-holla-pc`, `mac-david-nb`). Any other value is
-refused.
+`nlmedia` or `slovnormal` (Slovnormal / Pekárova žena); `machine list` shows which box is which.
+Any other value is refused.
 
 - `sync-configs` refuses the whole run, changing nothing, when a project's machines belong to two
   companies. The fleet-ops project `remoteos-mcp` is the only exception (`sync.CROSS_ORG_PROJECTS`
@@ -637,7 +636,8 @@ refused.
 - A machine with no org still serves through the gateway, but `sync-configs` refuses to run while a
   manifest machine has none, and `machine list` prints `org MISSING` plus a warning. There is no
   default: a forgotten Slovnormal box must not pass as nlmedia.
-- `machine set-key --url` (a new machine) and `enroll` require `--org`; `machine import` adds a new
+- `machine set-key --url` (a new machine) and `enroll` require `--org`; neither changes the org of a
+  known machine (that is `machine set-org`, which warns about every project it would mix); `machine import` adds a new
   machine with no org (set it with `set-org` before the next `sync-configs`) and keeps the org of a
   known one.
 - The `fleet-down` owner notice stays one text, its boxes grouped under `Slovnormal:`, `nlmedia:`
@@ -830,7 +830,9 @@ journalctl --user -u remoteos-gateway-check          # each run's table
 **Adding the org to an existing key store (0.7.0.dev58, #105):** upgrade the venv, restart the
 gateway (an older gateway refuses a key store with `org`, an unknown key: at reload it keeps its last
 good copy), then `remoteos-gateway machine set-org slovnormal <boxes...>` and `machine set-org nlmedia
-<the rest...>`, check `machine list` shows no `org MISSING`, then `sync-configs`. Rolling back below
+<the rest...>`, check `machine list` shows no `org MISSING`, then `sync-configs`. The `fleet-down` U
+item is sent once more after the upgrade (its fingerprint now holds the org) and after each org change of
+a down box; it replaces the same item. Rolling back below
 0.7.0.dev58 needs the `org` fields removed from `machines.json` first.
 
 **Rolling back** to a gateway older than 0.7.0.dev33 after `sync-configs` has run: the old
