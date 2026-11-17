@@ -247,7 +247,7 @@ def enroll_finish_command(ctx: click.Context, name: str, org: str, projects: str
     click.echo(f"{name}: key {mask_secret(registration.key)}, url {outcome.url}")
     notify = {"airuleset_path": airuleset_path, "notify_owner": notify_owner,
               "notify_project_dir": notify_project_dir, "notices_file": notices_file}
-    ctx.invoke(cli_fleet.sync_configs_command, dry_run=False, local_host=local_host, prune=False, **notify)
+    ctx.invoke(cli_fleet.sync_configs_command, dry_run=False, local_host=local_host, prune=False)
     ctx.invoke(cli_fleet.check_command, status_file=status_file, gateway_url=None, **notify, local_host=local_host,
                releases_url=os.environ.get("REMOTEOS_RELEASES_URL", RELEASES_URL))
     machines = load_status(status_file.expanduser()).get("machines")

@@ -621,6 +621,8 @@ owner reconnected it. Now:
 | A machine's key changed | `remoteos-gateway machine set-key <machine>` with the key on stdin. Every project routed through the gateway gets it on its next call: no config change, no reconnect. The direct remoteos-mcp copy is refreshed by `remoteos-gateway sync-configs`. |
 | Add a machine to a project | Add it to the project's `machines` in `projects.toml`, then `remoteos-gateway sync-configs`. Running sessions reach it at once through the `fleet` server; its typed `mcp__<machine>__*` tools arrive with the next restart. |
 | Add a NEW machine | `remoteos-gateway machine set-key <machine> --url http://<box>:8092/mcp --org <nlmedia\|slovnormal>` (key on stdin), then the step above. |
+| Remove a machine (sold, gone) | `remoteos-gateway machine remove <machine> [<machine> ...] [--dry-run]`: out of `projects.toml` (comments kept), the key store, the registry (unexposed, out of every allow-list), then the normal `sync-configs`, which drops its entries from every config, the direct one included. All or nothing; it refuses when a project would be left with no machines (it names the project: remove or edit that project first). The next `check` forgets it (status file and `fleet-down`). |
+| Rename a machine | `remoteos-gateway machine rename <old> <new> [--dry-run]`: the key-store entry moves as it is (url, key, org, repair recipe), the manifest gets the new name in place, exposure and every consumer's access carry over (a kill-switched box stays unexposed), then `sync-configs` (the old entry goes, the new one comes). A NEW name still left in the registry (exposed or allowed after a hand removal) is refused. If either command stops half way it prints the steps done; rerun the same command to finish. |
 | Set a machine's company | `remoteos-gateway machine set-org <nlmedia\|slovnormal> <machine> [<machine> ...]` (all or nothing; keys are never shown). |
 | Add a project | One `[projects.<name>]` table in `projects.toml`, then `remoteos-gateway sync-configs`. |
 | See what would change | `remoteos-gateway sync-configs --dry-run` (every key and token masked). |
@@ -685,6 +687,12 @@ machines = ["win-stream-snv", "linux-cam1", "linux-cam2"]
 - **What it leaves alone.** An entry it did not generate stays as it is, even when its name
   is in the key store, and it is reported (`! … not in the manifest`). For example, a direct
   entry for a machine that dev1 cannot reach.
+- **Direct entries it wrote (#109).** `~/.config/remoteos-gateway/sync-direct.json` (next to the
+  registry, urls only, never a key) records which entries sync wrote into each `direct` config.
+  A recorded entry whose machine left the key store is removed on the next run; a hand-made
+  entry is never recorded, so it stays. The first run after the upgrade seeds the record from
+  the entries already at the key store's urls (`--dry-run` says it would) and removes nothing
+  extra; a failed write keeps both the old and the new entries recorded.
 - **Where it writes.**
   - dev2 configs: over `ssh -o BatchMode=yes <account>@dev2`.
   - Another account's configs: over `sudo -n -u <account>`.
@@ -743,14 +751,14 @@ after all test jobs passed (`scripts/create-release.sh`, a no-op when it exists)
 - **Hold a bad release:** mark it "pre-release" in the GitHub UI. Everything ignores it from then on.
 - `remoteos.release_channel` is the resolver; `check` uses it, the per-box updater (#65) will too.
 
-**Restart notice:** after a real `sync-configs`, every project whose config was written is scanned
+**Restart list:** after a real `sync-configs`, every project whose config was written is scanned
 where it lives (local, `sudo -n`, ssh) for live Claude sessions: `claude` processes whose cwd's
-`.mcp.json` resolves to that config, with their tmux pane. ONE owner message names them with
-"spusti `/exit` a `claude -c`" (with airuleset's `--owner-notice`: one notice
-`restart-<project>` per project, cleared by `check` once those sessions have ended). No live
-session, no message. `--dry-run` prints what it would send.
-The text is always printed, because the owner's airuleset policy may post nothing. A failed scan
-or notify is reported in the output and never fails the sync.
+`.mcp.json` resolves to that config, with their tmux pane. ONE text names them with
+"spusti `/exit` a `claude -c`". It is printed and logged ONLY: owner ROZHODNUTÉ 2026-11-17
+(#109) — no notify, no `restart-<project>` U item, and `sync-configs` has no notify options. No
+live session, no text. `--dry-run` prints which sessions a real run would affect. A failed scan
+is reported in the output and never fails the sync. `check` clears any `restart-<project>`
+notice an older version left in U, once.
 
 **`check` (the watchdog):**
 
@@ -777,11 +785,13 @@ or notify is reported in the output and never fails the sync.
   and replaces the item; when the set is empty the slug is cleared. What each kind's last
   delivered text said (a fingerprint: the boxes with their state, version or stable tag) is kept
   in the status file (`fleet_notices`), so a run that had to send plain does not re-send it. The
-  texts carry no day counts ("pozadu od <dátum>"), so an unchanged item stays true. The other slugs are `gateway-health`, `check-failed` and `restart-<project>`
-  (from `sync-configs`). A suppressed notice becomes one item in the footer `U` of the
+  texts carry no day counts ("pozadu od <dátum>"), so an unchanged item stays true. Only a
+  changed SET of boxes is news (#109): the same boxes with another state, version or org, or a
+  fingerprint written by an older release, are not re-sent, so an item the owner acknowledged
+  does not come back after a deploy. The other slugs are `gateway-health` and `check-failed`. A suppressed notice becomes one item in the footer `U` of the
   remoteos-mcp checkout, and `notify --clear-owner-notice <slug>` drops it once the condition is
-  gone (no box down, behind or without admin; the gateway answers; the check runs; every noted
-  session of a restart has ended). A box going back to ok is plain news, not a U item. The
+  gone (no box down, behind or without admin; the gateway answers; the check runs; an
+  old `restart-<project>` left by an earlier version is cleared once). A box going back to ok is plain news, not a U item. The
   recorded slugs live in `~/.local/state/remoteos-gateway/owner-notices.json`; a clear that fails
   stays there and is retried on the next run, and an old per-box slug (`state-<box>`,
   `stale-<box>`, `no-admin-<box>`) still in that file is cleared once and forgotten. A notice

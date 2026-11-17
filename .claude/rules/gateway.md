@@ -125,6 +125,17 @@ paths:
   machine left the manifest is removed. ANY other entry is kept, even when its name is in the
   key store: dev2's `linux-presenter` / `win-marek-nb` may not be reachable from dev1, and
   deleting them would break those projects.
+  - **Direct entries after their machine left the key store (#109):** `direct_record.py` keeps
+    `sync-direct.json` next to the registry (`{project: {machine: url}}`, urls only). `owned()`
+    also owns a direct entry whose name + url is RECORDED. `machine remove` / `rename` write the
+    urls they retire into it FIRST (`remember_retired`), so even a removal before any record existed,
+    or one whose later step / sync write failed, is finished by a plain sync (review round 1). Never "any sync-shaped
+    entry not in the key store": that deletes hand-made entries. Record = exactly `direct_urls`
+    after a confirmed write or an unchanged config; the UNION with the old record (or the seed)
+    after a failed write; the old record for a project that failed before planning. No record /
+    unreadable = SEED from entries at the key-store url (removes nothing extra), and an unusable
+    record falls back to seeding (keeps, never deletes wrongly). Written under the registry lock,
+    never in a dry run (which says it would); a failed record write fails the run (exit 1).
 - **A lone surrogate escape (`\ud800`) anywhere in a config** fails that project in
   `parse_config` (it would break hashing, output and the UTF-8 write-back), before any token.
 - **Byte-equal non-fleet entries:** `sync.parse_config` walks `mcpServers` with
@@ -172,8 +183,8 @@ paths:
     machines in `_check_request`, before any box or vault is touched.
   - `fleet-down` stays ONE text (the one-per-kind ruling), lines grouped under an org header
     (Slovnormal, nlmedia, bez organizácie); `check` writes `org` into each status record and the
-    fingerprint is `[name, state, org-or-""]`, so an org change replaces the U item (and the first run
-    after the upgrade re-sends it once). `_fit_grouped` cuts BOX lines only, never leaves a header
+    fingerprint is `[name, state, org-or-""]`, but only a changed BOX SET re-sends (#109, below): an
+    org change alone, or the fingerprint format change of an upgrade, is stored silently. `_fit_grouped` cuts BOX lines only, never leaves a header
     without a box, and the "… a ďalších N (Slovnormal 3, nlmedia 2)" line counts boxes per org.
   - A known machine's org is changed ONLY by `set-org` (set_key / enroll refuse a different org;
     `set-org` warns about every project it would mix). `enroll` checks the named projects AND every
@@ -220,34 +231,37 @@ paths:
     (`fleet_notice.fit`: what does not fit `CHUNK_LIMIT` becomes "… a ďalších N"; an unreachable
     box's boilerplate detail is left out so ~20 boxes fit). A FINGERPRINT per kind (down: name +
     state; stale: name + version + stable tag; no-admin: names) is kept in the status file
-    `fleet_notices` once delivered: a different one re-sends the same slug (replaces), an
-    undelivered send keeps the old one (retried). A text must hold nothing the fingerprint does not
+    `fleet_notices` once delivered: a different BOX SET re-sends the same slug (replaces; see the
+    #109 bullet below), an undelivered send keeps the old one (retried). A text must hold nothing the fingerprint does not
     (no day count: "pozadu od <date>"), or the unchanged U item goes stale. An empty kind is
     cleared by `_settle` from the book; one in U but NOT in the book (its book write failed) by
     `fleet_notice.clear_unbooked` before the status write (a failed clear stays `[]` = owed, retried).
     Each kind is built on its own in `reconcile`: one that raises never blocks the others. In per-kind mode
     `check` sends no per-box message for a box going down (`fleet-down` marks it notified), and
-    `drift.update` / `no_admin.update` run with `announce=False`. `gateway-health`, `check-failed`,
-    `restart-<project>` stay their own slugs (`owner_notice.slug`; an upper-case or too long name
+    `drift.update` / `no_admin.update` run with `announce=False`.
+  - **Only a changed BOX SET re-sends a kind (#109, owner 2026-11-17):** `reconcile` compares
+    `_box_set(delivered fingerprint)` (item[0] of each item, any format) with `notice.names`. The
+    same set with another state / version / org, or an older fingerprint format after an upgrade,
+    stores the new fingerprint silently: an acknowledged item never comes back for the same boxes.
+    `[]` (an owed clear) or a hand-edited value has no box set and is sent again. Accepted cost:
+    the U text keeps its old per-box detail while the set holds.
+  - `gateway-health`, `check-failed` stay their own slugs (`owner_notice.slug`; an upper-case or too long name
     gets a sha1 tail). A change TO `ok` goes out plain: it is news, not an open condition. The
     recovery title ("opäť beží") goes out plain too.
   - Migration: an old per-box slug (`state-`/`stale-`/`no-admin-<box>`) left in the book is never
     in `open_notices`, so `settle` clears it once and removes it (clearing a slug U no longer
     has is harmless).
   - Exit 1 with `--owner-notice` = not recorded = NOT delivered (retried like any other).
-  - The book `owner-notices.json` (state dir) holds what is in U. `sync-configs` (restart) and
-    `check` both write it, so every send-with-slug + add and every clear + remove holds
+  - The book `owner-notices.json` (state dir) holds what is in U. `check` writes it (several
+    check runs can overlap), so every send-with-slug + add and every clear + remove holds
     `NoticeBook.locked()`; `settle` re-reads the entry under the lock and skips one re-sent
     meanwhile. A failed clear stays in the book (retried); `settle` runs after drift/no-admin and
     never costs the run its status write.
   - `check._settle` judges what is open from the FINAL status (`open_notices`): a box gone from the
     key store has no open condition, so its notices are cleared. It runs AFTER the status write
-    (clears and ssh `--alive` can be slow; the unit has `TimeoutStartSec=300`), never on the
-    failure path. A restart record's host/account are re-validated (manifest regexes) before ssh.
-  - Restart: `session_scan` records `start` (stat field 22) per session; `still_running` reads
-    `/proc/<pid>/stat` directly for this host (world-readable: the check unit has
-    `NoNewPrivileges`, so `sudo` would fail) and runs `session_scan --alive` over ssh for another
-    host. Same pid + another start time = restarted. A failed ssh = None = kept, never cleared blind.
+    (clears can be slow; the unit has `TimeoutStartSec=300`), never on the failure path.
+  - `restart-<project>` is never sent any more (#109) and is never in `open_notices`, so an old one
+    in the book is cleared once and forgotten, like the old per-box slugs.
   - The fake `airuleset.py` in `fleet_harness` keeps a fake U (`footer_u`) only with
     `FAKE_NOTIFY_OWNER_NOTICE=1`; without it the flags are an argparse error, like the real one
     before #1300. `--help` is not written to the notify log.
@@ -275,18 +289,25 @@ paths:
 - **No admin (`no_admin.py`, #57):** like drift, once per episode, by name, retried while
   undelivered, kept when this run read no value. An older server's `/health` has no `admin` key:
   `probe_version` gives `None`, never `False`, so the fleet is not "reported" before its upgrade.
-- **Restart notice (`live_sessions.py` + `session_scan.py`, #66):**
+- **Restart list (`live_sessions.py` + `session_scan.py`, #66; print-only since #109):**
+  - Owner ROZHODNUTÉ 2026-11-17 (#60): `report_restarts` echoes + `logger.info`s ONE text and
+    notifies nobody; `sync-configs` has no notify options (`--airuleset` etc. are a usage error);
+    `enroll-finish` keeps them for its `check` only. No session tracking (`start`, `--alive`,
+    `still_running` are gone): never re-add a notice for this without a new owner ruling.
   - `session_scan.py` is like `fileops.py`: stdlib only, py3.8+, no package imports, its SOURCE runs
     through `Target.run_helper` as the project's account. Only that account can read
     `/proc/<pid>/cwd` and `environ`. Of `environ` it takes `TMUX` + `TMUX_PANE` only.
   - A session = comm `claude` + a `.mcp.json` in its cwd or a parent resolving to the config.
-  - It runs AFTER the registry lock is released (notify can take a minute), in a `finally`: a file
-    already written needs its notice even if the closing registry save raised.
-  - `--notify-owner` defaults to `zbynek` (`DEFAULT_NOTIFY_OWNER`): sync can run with no tmux pane.
+  - It runs AFTER the registry lock is released, in a `finally`: a file already written needs its
+    list even if the closing registry save raised.
   - It runs only for a file really written (a dry run: would be), never for a registry-only change.
-  - A failed scan or notify is echoed and never counts as a failed project.
+  - A failed scan is echoed and never counts as a failed project.
   - Real-process test: a shebang script named `claude` has comm `claude`
     (`tests/test_gateway_live_sessions.py`).
+    Each `LiveSession` writes its OWN script (mkdtemp) and returns only after the script prints
+    `ready` (#108): a shared script rewritten by the next session made the earlier shell run nothing
+    and end (comm still `claude`, cwd gone, so the scan skipped it), and comm is set at exec start
+    while `/proc/<pid>/environ` is filled only at its end. Never wait on comm alone.
 - **Fleet server (`fleet.py`, #51 Phase 2):** `/fleet/mcp`, tools `ListMachines` / `MachineTools` /
   `Call`, FastMCP mounted by `Route(FLEET_MCP_PATH, FleetEndpoint)` before the machine route.
   - `FLEET_SERVER` is reserved: `is_valid_machine_name("fleet")` is False, so a key store or
@@ -352,6 +373,45 @@ paths:
     argvs: that is the "contents on stdin only" proof.
   - A CLI call from inside a running loop (the live-reload test) goes through
     `asyncio.to_thread`.
+
+## Remove / rename (#109): `cli_machine_edit.py`, `manifest.remove_machines` / `rename_machine`
+
+- Order: validate everything first (key store names, manifest edit computed with `dry_run=True`,
+  the registry rename on a loaded copy), then direct record (`remember_retired`) -> manifest -> key
+  store -> registry -> `sync_configs`. The registry is saved only when it changed (a save makes the
+  gateway reload).
+- **Resumable, never half-silent:** `OSError` is caught too; a failure after the first write prints
+  `done: <steps> — rerun ...`. Before the registry step is done the SAME command finishes it; after
+  it, every edit is in place and the advice is `sync-configs` (the record holds the retired urls).
+  `remove` accepts a name the key store already lost while the manifest or registry still holds it;
+  `manifest.rename_machine` is a no-op when NEW is there and OLD gone; `rename` counts as RESUMED
+  (NEW in the key store, OLD gone) only with evidence of the earlier run — OLD still in the registry,
+  or the url `_retire_first` recorded — so a typo for OLD next to an existing NEW is refused.
+  `Registry.rename_machine(fresh=False)` is a no-op when nothing carries OLD and never refuses (a sync
+  between the runs may have put NEW into a managed allow-list); a FRESH rename always runs the
+  stale-NEW check, even for an OLD that nothing carries (review rounds 2-3). When nothing carries
+  OLD the registry step is counted done BEFORE it runs (it still rechecks under the lock and saves
+  only on a change), so any later failure points to `sync-configs`; `_retire_first` takes no lock
+  when there is no direct project to record. Known edge: a key-store write that LANDED but reported an error, for an OLD
+  nothing carries and no direct project, leaves no evidence; the rerun is refused and the owner
+  finishes with `sync-configs`.
+- `remove` = `Registry.forget_machine` (unexpose + out of EVERY allow-list, hand-made ones too:
+  only narrows); refuses when a project would be left empty (the manifest forbids `[]`).
+- `rename` = `Registry.rename_machine`: exposure follows (a kill-switched OLD stays unexposed as
+  NEW), every consumer's OLD becomes NEW in place (bypasses `allow()`'s managed refusal on purpose:
+  same box, not a widening). The key-store entry moves as is; NEW must be valid (`fleet` is not)
+  and absent from key store AND manifest AND registry: a NEW left exposed / allowed by a hand removal
+  is refused (carrying OLD over would hand the box to that consumer; review round 1).
+- `manifest._edit_machines` edits TEXT in reverse order: a value alone on its line (+ its comma and
+  trailing comment) loses the line; inline, the following comma (and the blank before a line end),
+  else the preceding one; CRLF files work. `add_machine` writes through the same `_commit_edit`. Anything
+  odd is caught by `_commit_edit`'s parse-check (must equal the expected manifest), never written.
+- A dry run edits nothing, not even `.projects.lock` (`_manifest_lock` is a nullcontext): registry
+  changes on a loaded copy, the sync dry on the edited in-memory manifest + key store.
+- Fault tests use REAL failures: a lock file mode 000 (`locked_out`), a read-only config dir.
+- `check` needs nothing: its status and fleet notices come from the key store, so the next run
+  forgets the box (`test_after_remove_check_forgets_the_box_in_the_status_and_the_fleet_down_item`).
+- Tests (`tests/test_gateway_machine_remove.py`) never touch a live machine: temp copies only.
 
 ## Enrollment (#26): `enroll.py`, `cli_enroll.py`, `manifest.add_machine`
 

@@ -13,15 +13,17 @@ For each ``[projects.<name>]`` of ``projects.toml``:
   carry the key store's url + key, so the project can debug a machine when the gateway is down.
 
 Only fleet entries change. An entry is the sync's own when its url is one sync writes (a
-gateway url, or — in direct mode — the key store's url) or it has sync's shape
+gateway url, or — in direct mode — the key store's url, or the url ``sync-direct.json`` records
+for that name: ``direct_record``, #109) or it has sync's shape
 (``.../<name>/mcp``) at another url with this project's registered token (an entry left at the
 gateway's OLD url): such an entry whose machine left the manifest is removed. Every other entry
 keeps its ORIGINAL member text (key as written, the colon's spacing, value) byte for byte, and
 so does everything outside ``mcpServers``; only the
 whitespace BETWEEN entries is rendered on a rewrite (a file with no ``mcpServers`` at all is
 re-serialised as JSON). A config whose entries do not change is not written at all.
-Writes are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``). The owner is then
-told which live Claude sessions of the written configs need a restart (``live_sessions``).
+Writes are atomic, 0600, after a backup into ``.backup-<date>/`` (``fileops``). The live Claude
+sessions of the written configs that need a restart are then printed and logged
+(``live_sessions``; never sent to the owner, #109).
 
 A managed consumer whose project left the manifest keeps its token hash with an EMPTY
 allow-list (``--prune`` removes it), so undoing a mistaken manifest edit needs no new token.
@@ -45,8 +47,9 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from remoteos.gateway.direct_record import Record, load_record, record_path, save_record
 from remoteos.gateway.keystore import bearer_value, mask_secret, missing_orgs
-from remoteos.gateway.live_sessions import notify_restarts
+from remoteos.gateway.live_sessions import report_restarts
 from remoteos.gateway.manifest import MODE_DIRECT, MODE_GATEWAY, Manifest, Project
 from remoteos.gateway.registry import (
     FLEET_SERVER,
@@ -245,6 +248,8 @@ class ProjectPlan:
     held_hashes: frozenset[str] = frozenset()  # sha256 of every bearer token the file holds NOW
     lines: list[str] = field(default_factory=list)  # what changes in the file (masked)
     notes: list[str] = field(default_factory=list)  # warnings (masked)
+    direct_urls: dict[str, str] = field(default_factory=dict)  # direct mode: what the file holds after
+    seed: dict[str, str] = field(default_factory=dict)  # direct mode, no record yet: entries already sync's
 
     @property
     def file_changes(self) -> bool:
@@ -260,7 +265,11 @@ def plan_project(
     keystore: dict[str, MachineEntry],
     registry: Registry,
     mint: Callable[[], str] = mint_token,
+    recorded: dict[str, str] | None = None,
 ) -> ProjectPlan:
+    """*recorded*: what ``sync-direct.json`` says sync wrote into this (direct) config (``machine
+    remove`` / ``rename`` add the urls they retire before their first change), None when there is
+    no record for it yet."""
     parsed = parse_config(old_text)
     plan = ProjectPlan(project=project, target=target, old_text=old_text, new_text="")
     consumer = registry.consumers.get(project.consumer) if project.mode == MODE_GATEWAY else None
@@ -276,6 +285,8 @@ def plan_project(
             return True
         if project.mode == MODE_DIRECT and name in keystore and url == keystore[name].url:
             return True
+        if project.mode == MODE_DIRECT and isinstance(url, str) and (recorded or {}).get(name) == url:
+            return True  # recorded: sync wrote it; its machine left the key store or moved (#109)
         if not (isinstance(url, str) and url.endswith(f"/{name}/mcp")):
             return False
         token = bearer_value(authorization_header(value) or "")
@@ -308,6 +319,13 @@ def plan_project(
             )
     else:
         desired = {m: direct_entry(keystore[m]) for m in project.machines}
+        plan.direct_urls = {m: keystore[m].url for m in project.machines}
+        if recorded is None:  # first run: today's entries at the key store's urls become owned
+            plan.seed = {
+                e.name: url
+                for e in parsed.entries
+                if e.name in keystore and (url := _url(e.value)) == keystore[e.name].url
+            }
 
     indent = entry_indent(parsed)
     out: list[tuple[str, str]] = []
@@ -467,21 +485,23 @@ def sync_configs(
     echo: Callable[[str], None],
     prune: bool = False,
     mint: Callable[[], str] = mint_token,
-    notifier: Callable[[str], bool] | None = None,
 ) -> int:
     """Run the sync; returns the number of FAILED projects (0 = everything is in place).
 
     *prune* removes managed consumers whose project left the manifest; without it they keep
-    their token hash with an empty allow-list. *notifier* tells the owner which live sessions
-    need a restart; a failure of that never counts as a failed project.
+    their token hash with an empty allow-list. The live sessions of the written configs are
+    printed and logged (never notified, #109); a failed scan never counts as a failed project.
     """
     validate_run(manifest, keystore, local_host=local_host)
     failures = 0
+    ledger_path = record_path(registry_path)
+    new_record: Record = {}
     changed_projects: list[str] = []
     to_restart: list[tuple[Project, Target]] = []  # the configs written (a dry run: would be)
     try:
         with registry_transaction(registry_path) as transaction:
             saver = _Saver(transaction, dry_run=dry_run)
+            record, record_usable = load_record(ledger_path)  # under the registry lock, like its write
             registry = transaction.registry
             for project in manifest.projects.values():
                 target = target_for(project.host, project.account, local_host=local_host)
@@ -495,15 +515,20 @@ def sync_configs(
                         keystore=keystore,
                         registry=registry,
                         mint=mint,
+                        recorded=record.get(project.name) if record_usable else None,
                     )
                 except (TargetError, SyncError) as exc:
                     failures += 1
+                    if project.name in record:  # nothing known changed: keep what was recorded
+                        new_record[project.name] = record[project.name]
                     echo(f"{head}\n  FAILED: {exc}")
                     _narrow_allow_list(registry, project)
                     saver.commit()
                     logger.warning("sync-configs: project %s FAILED: %s", project.name, exc)
                     continue
                 consumer_line = _consumer_change(registry, plan)
+                if project.mode == MODE_DIRECT:  # confirmed below unless the write fails
+                    new_record[project.name] = plan.direct_urls
                 if not plan.file_changes and consumer_line is None:
                     echo(f"{project.name}: unchanged")
                     for note in plan.notes:
@@ -523,6 +548,9 @@ def sync_configs(
                     written = _apply(plan, registry, saver, today)
                 except TargetError as exc:
                     failures += 1
+                    if project.mode == MODE_DIRECT:  # the file may hold either: both stay owned
+                        before = record.get(project.name, plan.seed) if record_usable else plan.seed
+                        new_record[project.name] = {**before, **plan.direct_urls}
                     echo(f"  FAILED: {exc}")
                     logger.warning("sync-configs: project %s write FAILED: %s", project.name, exc)
                     continue
@@ -549,8 +577,9 @@ def sync_configs(
                      " `sync-configs --prune` removes the consumer.")
                 consumer.machines = []
             saver.commit()  # a no-op in a dry run
-    finally:  # a file already written needs its notice even when the closing registry save failed
-        notify_restarts(to_restart, notifier=notifier, echo=echo, dry_run=dry_run)
+            failures += _save_direct_record(ledger_path, record, record_usable, new_record, dry_run, echo)
+    finally:  # a file already written needs its restart list even when the closing registry save failed
+        report_restarts(to_restart, echo=echo, dry_run=dry_run)
     if dry_run:
         echo("dry run — nothing was written")
     elif changed_projects:
@@ -559,6 +588,27 @@ def sync_configs(
             " each needs ONE restart (or /mcp Reconnect). After that, a key change never reaches a session."
         )
     return failures
+
+
+def _save_direct_record(
+    path, record: Record, usable: bool, new_record: Record, dry_run: bool, echo: Callable[[str], None]
+) -> int:
+    """Write ``sync-direct.json`` when it changed (never in a dry run). 1 = it could not be written:
+    the run fails, so the owner sees that the next removal may leave an entry behind."""
+    if usable and new_record == record:
+        return 0
+    if dry_run:
+        echo(f"{path.name}: would record {sum(len(e) for e in new_record.values())} direct entr(y/ies)"
+             f" of {len(new_record)} project(s) (dry run)")
+        return 0
+    try:
+        save_record(path, new_record)
+    except OSError as exc:
+        echo(f"{path.name}: FAILED to record the direct entries ({exc.__class__.__name__}: {exc})")
+        logger.warning("sync-configs: direct record %s not written: %s", path, exc)
+        return 1
+    logger.info("sync-configs: direct record %s: %s", path, {p: sorted(e) for p, e in new_record.items()})
+    return 0
 
 
 def _consumer_change(registry: Registry, plan: ProjectPlan) -> str | None:

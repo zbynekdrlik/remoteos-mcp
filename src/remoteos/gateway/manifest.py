@@ -26,6 +26,7 @@ A project lists at least one machine; to take a project off, remove its table.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import os
 import posixpath
@@ -180,6 +181,75 @@ def _parse_project(name: str, raw: object, source: object) -> Project:
     return project
 
 
+def remove_machines(path: Path, names: list[str], *, dry_run: bool = False) -> Manifest:
+    """Take *names* out of every project's ``machines`` (#109); returns the manifest after.
+
+    Refuses (``ManifestError``, nothing written) when a project would be left with no machines: the
+    manifest forbids an empty list, and the owner decides whether that project goes or changes.
+    Edits TEXT like ``add_machine`` (comments stay), written only when the result parses to exactly
+    the expected manifest; a dry run only computes it."""
+    gone = set(names)
+    with _manifest_lock(path, dry_run):
+        manifest = load_manifest(path)
+        emptied = sorted(n for n, p in manifest.projects.items() if p.machines and set(p.machines) <= gone)
+        if emptied:
+            raise ManifestError(
+                f"{path}: project(s) {', '.join(emptied)} would be left with no machines — remove or edit"
+                " those projects in projects.toml first; nothing changed"
+            )
+        text = path.read_bytes().decode("utf-8")
+        expected = dict(manifest.projects)
+        for name, project in manifest.projects.items():
+            if gone & set(project.machines):
+                text = _edit_machines(text, name, lambda value: None if value in gone else value)
+                expected[name] = replace(project, machines=tuple(m for m in project.machines if m not in gone))
+        return _commit_edit(path, text, manifest, expected, f"remove {', '.join(sorted(gone))}", dry_run)
+
+
+def rename_machine(path: Path, old: str, new: str, *, dry_run: bool = False) -> Manifest:
+    """Replace *old* by *new* in every project's ``machines`` (#109), in place (the order stays).
+    Same text edit and parse-check as ``remove_machines``; returns the manifest after."""
+    if not is_valid_machine_name(new):
+        raise ManifestError(f"invalid machine name {new!r}: use letters, digits and . _ -")
+    with _manifest_lock(path, dry_run):
+        manifest = load_manifest(path)
+        clash = sorted(n for n, p in manifest.projects.items() if new in p.machines)
+        if clash and not any(old in p.machines for p in manifest.projects.values()):
+            return manifest  # already renamed (a rerun after a later step failed): nothing to do
+        if clash:
+            raise ManifestError(f"{path}: {new!r} is already in project(s) {', '.join(clash)}; nothing changed")
+        text = path.read_bytes().decode("utf-8")
+        expected = dict(manifest.projects)
+        for name, project in manifest.projects.items():
+            if old in project.machines:
+                text = _edit_machines(text, name, lambda value: new if value == old else value)
+                expected[name] = replace(project, machines=tuple(new if m == old else m for m in project.machines))
+        return _commit_edit(path, text, manifest, expected, f"rename {old} to {new}", dry_run)
+
+
+def _manifest_lock(path: Path, dry_run: bool):
+    """The manifest lock; none for a dry run, which must not even create the lock file."""
+    return contextlib.nullcontext() if dry_run else fileops.exclusive_lock(str(path.parent / ".projects.lock"))
+
+
+def _commit_edit(
+    path: Path, edited: str, manifest: Manifest, expected: dict[str, Project], what: str, dry_run: bool
+) -> Manifest:
+    """Write *edited* (backup, atomic, mode kept) only when it parses to exactly *expected*."""
+    try:
+        after = parse_manifest(tomllib.loads(edited), path)
+    except (tomllib.TOMLDecodeError, ManifestError) as exc:
+        raise ManifestError(f"{path}: could not {what}: {exc} — edit it by hand") from exc
+    if after.projects != expected or after.gateway_url != manifest.gateway_url:
+        raise ManifestError(f"{path}: could not {what}: edit it by hand")
+    if not dry_run and after != manifest:
+        target = fileops.expand(str(path))
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+        fileops.write_with_backup(target, edited.encode("utf-8"), _dt.date.today().isoformat())
+        os.chmod(target, mode)
+    return after
+
+
 def add_machine(path: Path, project: str, machine: str) -> bool:
     """Add *machine* to *project*'s ``machines`` in the manifest file; False when it is listed.
 
@@ -194,22 +264,13 @@ def add_machine(path: Path, project: str, machine: str) -> bool:
         if machine in current.machines:
             return False
         edited = _insert_machine(path.read_bytes().decode("utf-8"), project, machine)
-        try:
-            after = parse_manifest(tomllib.loads(edited), path)
-        except (tomllib.TOMLDecodeError, ManifestError) as exc:
-            raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: {exc}") from exc
         expected = {**manifest.projects, project: replace(current, machines=(*current.machines, machine))}
-        if after.projects != expected or after.gateway_url != manifest.gateway_url:
-            raise ManifestError(f"{path}: could not add {machine!r} to {project!r}: edit it by hand")
-        target = fileops.expand(str(path))
-        mode = stat.S_IMODE(os.stat(target).st_mode)
-        fileops.write_with_backup(target, edited.encode("utf-8"), _dt.date.today().isoformat())
-        os.chmod(target, mode)
+        _commit_edit(path, edited, manifest, expected, f"add {machine!r} to {project!r}", dry_run=False)
     return True
 
 
-def _insert_machine(text: str, project: str, machine: str) -> str:
-    """*text* with ``"machine"`` after the last value of the project's ``machines`` array."""
+def _machines_key(text: str, project: str) -> int:
+    """The index just after the ``[`` of the project's ``machines = [`` (ManifestError if none)."""
     name = re.escape(project)
     header = re.search(rf"""^[ \t]*\[projects\.(?:{name}|"{name}"|'{name}')\][ \t]*(?:#.*)?\r?$""", text, re.MULTILINE)
     if header is None:
@@ -219,7 +280,59 @@ def _insert_machine(text: str, project: str, machine: str) -> str:
     key = re.compile(r"^[ \t]*machines[ \t]*=[ \t]*\[", re.MULTILINE).search(text, header.end(), end)
     if key is None:
         raise ManifestError(f"no machines array found in [projects.{project}]: edit the manifest by hand")
-    last_value, trailing_comma, i = -1, False, key.end()
+    return key.end()
+
+
+def _array_strings(text: str, start: int) -> list[tuple[int, int]]:
+    """``(start, end)`` of every string value of the array opening at *start* (comments skipped)."""
+    found, i = [], start
+    while i < len(text) and text[i] != "]":
+        char = text[i]
+        if char == "#":
+            i = text.index("\n", i) if "\n" in text[i:] else len(text)
+        elif char in "\"'":
+            end = text.index(char, i + 1) + 1
+            found.append((i, end))
+            i = end
+        else:
+            i += 1
+    return found
+
+
+def _edit_machines(text: str, project: str, change) -> str:
+    """*text* with each machine name of the project's array replaced by ``change(name)``; None
+    removes it with its comma (or its whole line when it stands alone on one). The caller
+    parse-checks the result, so a layout this cannot handle is refused, never written wrong."""
+    for begin, end in reversed(_array_strings(text, _machines_key(text, project))):
+        value = text[begin + 1 : end - 1]
+        replacement = change(value)
+        if replacement == value:
+            continue
+        if replacement is not None:
+            text = f'{text[:begin]}"{replacement}"{text[end:]}'
+            continue
+        line_start = text.rfind("\n", 0, begin) + 1
+        rest = re.compile(r"[ \t]*,?[ \t]*(?:#[^\r\n]*)?\r?\n").match(text, end)
+        if not text[line_start:begin].strip() and rest:  # alone on its line: the line goes
+            text = text[:line_start] + text[rest.end():]
+            continue
+        after = re.compile(r"[ \t]*,[ \t]*").match(text, end)
+        if after:  # "a", "b"  ->  drop  "a",_
+            head, tail = text[:begin], text[after.end():]
+            if tail[:1] in ("\n", "\r", "#", ""):  # the line ends here: no trailing blank left behind
+                head = head.rstrip(" \t")
+            text = head + tail
+            continue
+        before = re.compile(r",[ \t\r\n]*$").search(text, 0, begin)
+        if before is None:
+            raise ManifestError(f"[projects.{project}]: cannot remove {value!r} from its array: edit it by hand")
+        text = text[:before.start()] + text[end:]
+    return text
+
+
+def _insert_machine(text: str, project: str, machine: str) -> str:
+    """*text* with ``"machine"`` after the last value of the project's ``machines`` array."""
+    last_value, trailing_comma, i = -1, False, _machines_key(text, project)
     while i < len(text) and text[i] != "]":
         char = text[i]
         if char == "#":

@@ -284,6 +284,41 @@ class Registry:
         self.exposed.remove(machine)
         return True
 
+    def forget_machine(self, machine: str) -> list[str]:
+        """A machine that left the fleet (#109): unexposed and out of EVERY consumer's allow-list
+        (only narrows). Returns the consumers that allowed it."""
+        self.unexpose(machine)
+        touched = [name for name, consumer in sorted(self.consumers.items()) if machine in consumer.machines]
+        for name in touched:
+            self.consumers[name].machines.remove(machine)
+        return touched
+
+    def rename_machine(self, old: str, new: str, *, fresh: bool = True) -> list[str]:
+        """*old* is now called *new* (#109): exposure carries over (a kill-switched *old* stays
+        unexposed as *new*) and every consumer allowed *old* is allowed *new* in its place. Returns
+        those consumers. Not a widening: the same box under another name."""
+        validate_machine_name(new)
+        stale = (["exposed"] if new in self.exposed else []) + [
+            f"allowed for {name}" for name, consumer in sorted(self.consumers.items()) if new in consumer.machines
+        ]
+        carried = old in self.exposed or any(old in c.machines for c in self.consumers.values())
+        if not fresh and not carried:
+            return []  # a rerun: this step was done already
+        if stale and fresh:  # a leftover of a hand removal: carrying OLD over would hand the box to those
+            # (a rerun is never refused: the fresh run checked, and a sync in between may have put NEW
+            # into a managed consumer's allow-list on purpose)
+            raise RegistryError(
+                f"{new!r} is still in the registry ({', '.join(stale)}) — clear it first"
+                f" (`remoteos-gateway unexpose {new}`, `remoteos-gateway deny <consumer> {new}`); nothing changed"
+            )
+        if self.unexpose(old):
+            self.expose(new)
+        touched = [name for name, consumer in sorted(self.consumers.items()) if old in consumer.machines]
+        for name in touched:
+            consumer = self.consumers[name]
+            consumer.machines = list(dict.fromkeys(new if m == old else m for m in consumer.machines))
+        return touched
+
     def _refuse_if_managed(self, name: str) -> None:
         """A hand edit must never widen a consumer sync-configs owns (its allow-list = the manifest)."""
         consumer = self.consumers.get(name)
