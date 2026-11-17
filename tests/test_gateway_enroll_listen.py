@@ -36,9 +36,9 @@ def body(key: str, **overrides: object) -> dict:
 
 
 class Endpoint:
-    def __init__(self, root: Path, limiter: RateLimiter | None = None) -> None:
+    def __init__(self, root: Path, limiter: RateLimiter | None = None, log_limiter: RateLimiter | None = None) -> None:
         self.queue = EnrollQueue(root)
-        self.server = LoopbackServer(create_app(self.queue, limiter=limiter))
+        self.server = LoopbackServer(create_app(self.queue, limiter=limiter, log_limiter=log_limiter))
         self.client = httpx.Client(base_url=self.server.base_url, headers=UA, timeout=10, trust_env=False)
 
     def post(self, payload: object, *, ip: str = "203.0.113.7", path: str = "/enroll/", **kwargs) -> httpx.Response:
@@ -270,3 +270,68 @@ def test_the_listener_has_no_debug_level_that_would_print_bodies():
     result = _invoke("enroll-listen", "--log-level", "debug")
     assert result.exit_code == 2
     assert enroll_listen.DEFAULT_LISTEN_HOST == "127.0.0.1"
+
+
+def test_one_address_can_hold_only_a_few_registrations(endpoint, monkeypatch):
+    monkeypatch.setattr(enroll_queue, "MAX_PER_SOURCE", 2)
+    codes = [endpoint.post(body(fresh_secret("Box"), hostname=f"pc{i}"), ip="198.51.100.20").status_code
+             for i in range(3)]
+    assert codes == [200, 200, 503]
+    assert endpoint.post(body(fresh_secret("Box"), hostname="pc9"), ip="198.51.100.21").status_code == 200
+
+
+def test_an_ipv6_poster_counts_per_64(tmp_path):
+    world = Endpoint(tmp_path / "enroll", RateLimiter(per_ip=2, overall=100))
+    with world.server:
+        codes = [world.post(body(fresh_secret("A"), hostname=f"pc{i}"), ip=f"2001:db8:1:2::{i + 1}").status_code
+                 for i in range(3)]
+        assert codes == [200, 200, 429]  # three addresses of ONE /64 = one poster
+        assert world.post(body(fresh_secret("B")), ip="2001:db8:1:3::1").status_code == 200
+    world.client.close()
+    assert enroll_queue.source_group("2001:db8:1:2::99") == "2001:db8:1:2::/64"
+    assert enroll_queue.source_group("::ffff:192.0.2.1") == "192.0.2.1"
+
+
+def test_a_log_flood_never_costs_a_registration_its_budget(tmp_path):
+    world = Endpoint(tmp_path / "enroll", RateLimiter(per_ip=2, overall=2), RateLimiter(per_ip=1, overall=1))
+    with world.server:
+        assert world.client.post("/enroll/log", content=b"x").status_code == 200
+        assert world.client.post("/enroll/log", content=b"x").status_code == 429
+        assert world.post(body(fresh_secret("A"))).status_code == 200
+    world.client.close()
+
+
+def test_enroll_log_never_prints_a_terminal_escape(tmp_path):
+    queue = EnrollQueue(tmp_path)
+    log_id = queue.add_log("ok line\n\x1b]0;owned\x07\x1b[2Jtail\tx\n", hostname="pc", os_name="linux",
+                           exit_code="1", source="::1")
+    shown = _invoke("enroll-log", log_id, "--enroll-dir", str(tmp_path))
+    assert "\x1b" not in shown.output and "\x07" not in shown.output
+    assert shown.output == "ok line\n?]0;owned??[2Jtail\tx\n"
+
+
+def test_reject_by_source_or_all_and_only_one_selector(endpoint):
+    for index, ip in enumerate(("198.51.100.30", "198.51.100.30", "198.51.100.31")):
+        endpoint.post(body(fresh_secret("Box"), hostname=f"pc{index}"), ip=ip)
+    root = str(endpoint.queue.root)
+    assert _invoke("enroll-reject", "--enroll-dir", root).exit_code == 2
+    assert _invoke("enroll-reject", "--all", "--source", "198.51.100.30", "--enroll-dir", root).exit_code == 2
+    result = _invoke("enroll-reject", "--source", "198.51.100.30", "--enroll-dir", root)
+    assert "2 registration(s)" in result.output
+    assert [entry.source for entry in endpoint.queue.pending()] == ["198.51.100.31"]
+    assert "1 registration(s)" in _invoke("enroll-reject", "--all", "--enroll-dir", root).output
+    assert endpoint.queue.pending() == []
+
+
+def test_an_unreadable_queue_raises_and_check_keeps_the_last_list(tmp_path):
+    from remoteos.gateway.cli_fleet import _enroll_pending
+
+    queue = EnrollQueue(tmp_path)
+    queue.add(enroll_queue.parse_registration(json.dumps(body(fresh_secret("K"))).encode()), "::1")
+    queue.pending_dir.chmod(0)
+    try:
+        with pytest.raises(OSError):
+            queue.pending()
+        assert _enroll_pending(tmp_path) is None  # None = keep the last list, never "empty"
+    finally:
+        queue.pending_dir.chmod(0o700)

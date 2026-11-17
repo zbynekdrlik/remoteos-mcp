@@ -45,8 +45,9 @@ NO_ADMIN = "fleet-no-admin"
 ENROLL = "enroll-pending"
 STATUS_KEY = "fleet_notices"
 PENDING_KEY = "enroll_pending"
-ENROLL_HINT = ("Prijať: remoteos-gateway enroll-accept <id|hostname> --name win-… --org … --projects …"
-               " · odmietnuť: remoteos-gateway enroll-reject <id>")
+ENROLL_HINT = ("Prijať len počítač, ktorý vlastník potvrdil (porovnaj adresu odosielateľa v"
+               " remoteos-gateway enroll-list): enroll-accept <id|hostname> --name win-… --org … --projects …"
+               " · odmietnuť: enroll-reject <id> / --source <adresa> / --all")
 
 KINDS = (DOWN, STALE, NO_ADMIN, ENROLL)
 _DETAIL_LIMIT = 80

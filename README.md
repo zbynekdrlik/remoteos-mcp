@@ -468,6 +468,10 @@ short `timeout`.
 
 **Add a new computer: run ONE line on it.** Nothing to copy from dev1, no key, no token.
 
+> **Status (#101):** the public name `enroll-dev1.newlevel.media` needs dev1's named cloudflared tunnel + its
+> DNS record (an airuleset infrastructure change). Until it resolves, the line installs the agent but its
+> registration POST fails; use `remoteos-gateway enroll` (below) meanwhile.
+
 Windows (PowerShell; it asks for Administrator itself):
 
 ```powershell
@@ -507,6 +511,7 @@ the projects the owner gave:
 remoteos-gateway enroll-list                      # what waits (never a key)
 remoteos-gateway enroll-accept predaj3 --name win-predaj3 --org slovnormal --projects pos
 remoteos-gateway enroll-reject <id>               # junk or an unknown box: deleted with its key
+remoteos-gateway enroll-reject --source <ip>      # everything one address posted (or --all)
 remoteos-gateway enroll-log [<id>]                # install logs boxes posted
 ```
 
@@ -520,8 +525,11 @@ machine's `/mcp` url when the posted addresses cannot be reached from dev1 (a bo
 The endpoint (`remoteos-gateway enroll-listen`, unit `deploy/remoteos-gateway-enroll.service`) binds
 127.0.0.1:8797 only; dev1's named cloudflared tunnel publishes it. It takes `POST /enroll/` (the
 registration, at most 16 KiB, validated), `POST /enroll/log` (at most 256 KiB) and `GET /healthz`, limits
-each address (Cloudflare's `CF-Connecting-IP`) to 10 posts per 10 minutes and everyone to 120, and keeps at
-most 50 registrations. It never logs a key or a body.
+each address (Cloudflare's `CF-Connecting-IP`; an IPv6 /64 counts as one) to 10 posts per 10 minutes and
+everyone to 120 (registrations and logs on separate budgets), and keeps at most 50 registrations, 5 per
+address. It never logs a key or a body. A registration expires after 24 h (`check`'s 10-minute timer prunes
+the queue); `enroll-log` prints control characters as `?`. Compare the source address in `enroll-list`
+before accepting by hostname.
 
 The endpoint and the key live in `installers/enroll-values.conf`; `python3 scripts/build_installers.py`
 bakes them into `enroll.ps1`, `enroll-linux.sh` and `enroll.sh`.

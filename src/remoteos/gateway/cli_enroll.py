@@ -17,7 +17,7 @@ import shlex
 import signal
 import socket
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import click
@@ -39,6 +39,7 @@ from remoteos.gateway.enroll import (
     secret_name,
     wait_for_registration,
 )
+from remoteos.gateway.enroll_queue import DEFAULT_ENROLL_DIR
 from remoteos.gateway.keystore import load_keystore, mask_secret, set_key
 from remoteos.gateway.manifest import ManifestError, add_machine, load_manifest
 from remoteos.gateway.probe import STATE_OK, new_client, probe_one, probe_version
@@ -237,10 +238,13 @@ def _choose_url(registration: Registration, explicit: str | None, *, check_hostn
 
 def finish_registration(ctx: click.Context, registration: Registration, *, name: str, org: str, projects: list[str],
                         url: str | None, local_host: str, notify: dict, status_file: Path,
-                        check_hostname: bool = False) -> None:
+                        check_hostname: bool = False, enroll_dir: Path | None = None,
+                        after_store: Callable[[], None] | None = None) -> None:
     """What a person did by hand once a box posted: verify the key, store it, expose a new machine,
     add it to the projects, ``sync-configs``, ``check``. Shared by ``enroll-finish`` and
-    ``enroll-accept``. Raises ``click.ClickException``; the key never reaches the output."""
+    ``enroll-accept``; *after_store* runs once the key store and the manifest hold the machine,
+    before the sync (the accept drops the queued registration there). Raises
+    ``click.ClickException``; the key never reaches the output."""
     paths = ctx.obj
     try:
         click.echo(f"registration: {registration.hostname} ({registration.os}), v{registration.version},"
@@ -255,9 +259,13 @@ def finish_registration(ctx: click.Context, registration: Registration, *, name:
     except (EnrollError, MachineSourceError, ManifestError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"{name}: key {mask_secret(registration.key)}, url {outcome.url}")
+    if after_store is not None:
+        after_store()
     ctx.invoke(cli_fleet.sync_configs_command, dry_run=False, local_host=local_host, prune=False)
+    # ctx.invoke fills a parameter's DEFAULT, never its envvar: pass what the command line would read
     ctx.invoke(cli_fleet.check_command, status_file=status_file, gateway_url=None, **notify, local_host=local_host,
-               releases_url=os.environ.get("REMOTEOS_RELEASES_URL", RELEASES_URL))
+               releases_url=os.environ.get("REMOTEOS_RELEASES_URL", RELEASES_URL),
+               enroll_dir=enroll_dir or Path(os.environ.get("REMOTEOS_GATEWAY_ENROLL_DIR") or DEFAULT_ENROLL_DIR))
     machines = load_status(status_file.expanduser()).get("machines")
     record = machines.get(name) if isinstance(machines, dict) else None
     if not isinstance(record, dict) or record.get("state") != STATE_OK:

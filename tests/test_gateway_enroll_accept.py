@@ -141,3 +141,14 @@ def test_check_records_the_queue_and_keeps_the_last_list_when_it_cannot_be_read(
     empty = check.run_check(keystore, status_path, gateway_url="http://127.0.0.1:9/", notifier=None,
                             enroll_pending=[])
     assert fleet_notice.PENDING_KEY not in empty.status
+
+
+def test_the_check_inside_accept_reads_this_queue_and_no_longer_lists_the_accepted_box(fleet):
+    accepted = _queue(fleet)
+    other = _queue(fleet, hostname="dsg", key=fresh_secret("Dsg"))
+    with FakeFleetMachine(accept_keys=(fleet.key,), version="0.7.0.dev61", hostname="predaj3") as machine:
+        result = _accept(fleet, accepted, "--projects", "camera-box", "--url", machine.url)
+        assert result.exit_code == 0, result.output
+    status = json.loads(fleet.status.read_text())
+    assert status[fleet_notice.PENDING_KEY] == [[other, "dsg"]]  # --enroll-dir reached check
+    assert "posted from 203.0.113.7" in result.output

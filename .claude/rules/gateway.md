@@ -465,16 +465,29 @@ paths:
   `MAX_LOGS`. `enroll-log` reads them. PowerShell: a reply with no text content type is `byte[]`.
 - **The listener** binds loopback only (`_loopback_only`), `proxy_headers=False`; the poster is
   `CF-Connecting-IP` only when the peer is loopback (cloudflared). Caps: 16 KiB registration / 256 KiB
-  log, enforced while streaming (a missing or lying Content-Length too), per-address + global sliding
-  window, `MAX_PENDING` queue. No `--log-level debug` (uvicorn would log bodies). Errors name the field
+  log, enforced while streaming (a missing or lying Content-Length too; `isascii()` before `isdigit()`),
+  per-poster + global sliding window keyed by `source_group` (IPv4 address, IPv6 /64: one host holds a
+  /64), registrations and logs on SEPARATE limiters, `MAX_PENDING` + `MAX_PER_SOURCE` in the queue
+  (review round 1: 5 addresses filled the queue for 24 h). `enroll-reject --source <ip>` / `--all` clean
+  a flood. No `--log-level debug` (uvicorn would log bodies). Errors name the field
   (`parse_registration`), never the value.
 - **The queue:** one 0600 file per registration (temp + rename), 0700 dirs, 24 h expiry (the key goes
   with the file), a repost of the same hostname + key is the same entry, ids are 8 hex checked before
-  any path, every file is re-validated on read (a tampered one is skipped).
+  any path, every file is re-validated on read (a tampered one is skipped). The folders are listed
+  with `os.scandir`, never `Path.glob` (it answers "none" for a mode-000 folder): an unreadable queue
+  RAISES, so `check` keeps the last list instead of clearing the notice. Expiry runs inside `pending()`,
+  so `check`'s 10-minute timer is the expiry clock. `enroll-log` prints control characters as `?`
+  (`printable`): the text is anyone's, an ESC sequence could rewrite the operator's screen.
 - **`enroll-accept`** = `finish_registration` (shared with `enroll-finish`) with `check_hostname`: the
   public `/health` of each candidate must report the posted hostname (short names compared,
   case-insensitive; a server that reports none does NOT match) BEFORE the key is sent there. Candidates
-  are private/tailscale only (`candidate_urls`), `--url` the override. A failure keeps the entry.
+  are private/tailscale only (`candidate_urls`), `--url` the override. A failure BEFORE the key is
+  stored keeps the entry; `after_store` drops it once the key store + manifest hold the machine (the
+  retry is then `sync-configs`/`check`), so the closing `check` no longer lists it. **`ctx.invoke`
+  fills a parameter's DEFAULT, never its envvar**: `finish_registration` passes `enroll_dir` (and
+  `releases_url`) itself, else the check read dev1's real queue from the tests.
+- The PowerShell relaunch command ends `$enrollCode = $LASTEXITCODE; try { Read-Host } catch {}; exit
+  $enrollCode`: a window's exit code is its LAST statement's, and the Read-Host made every failure a 0.
 - **The owner notice** is a fourth fleet kind, `enroll-pending`, built from `status["enroll_pending"]`
   (`[[id, hostname]]`, written by `check` from the queue; an unreadable queue keeps the last list, never
   clears). Like the other kinds: ONE item, only a changed id set re-sends, an empty queue clears it.

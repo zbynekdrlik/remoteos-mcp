@@ -14,7 +14,8 @@ Routes, nothing else (Starlette answers 404 / 405):
 - ``GET /healthz`` — 204, for the tunnel check.
 
 Anyone can post (the URL is public): a per-address rate limit (``RATE_PER_IP`` per
-``RATE_WINDOW_S``) and a global one bound the work, and the queue has its own size cap. The
+``RATE_WINDOW_S``; an IPv6 poster counts per /64) and a global one bound the work, registrations
+and logs each on their own budget, and the queue has its own size cap and a cap per address. The
 address is Cloudflare's ``CF-Connecting-IP``, trusted only when the peer is loopback (cloudflared
 on this box). Nothing the box sent is ever logged but the validated hostname / OS / version, and
 error answers name the field, never its value: the key never reaches a log line or a reply.
@@ -34,7 +35,7 @@ from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
 
 from remoteos.gateway.enroll import EnrollError, parse_registration
-from remoteos.gateway.enroll_queue import EnrollQueue, QueueFull, log_meta, source_text
+from remoteos.gateway.enroll_queue import EnrollQueue, QueueFull, log_meta, source_group, source_text
 
 logger = logging.getLogger("remoteos.gateway.enroll_listen")
 
@@ -99,7 +100,7 @@ def client_address(request: Request) -> str:
 async def read_capped(request: Request, limit: int) -> bytes:
     """The body, refused (``_TooLarge``) as soon as it passes *limit*, whatever Content-Length said."""
     declared = request.headers.get("content-length")
-    if declared is not None and (not declared.isdigit() or int(declared) > limit):
+    if declared is not None and (not (declared.isascii() and declared.isdigit()) or int(declared) > limit):
         raise _TooLarge
     body = bytearray()
     async for chunk in request.stream():
@@ -113,12 +114,14 @@ def _text(code: int, message: str) -> PlainTextResponse:
     return PlainTextResponse(message + "\n" if code != 200 else message, status_code=code)
 
 
-def create_app(queue: EnrollQueue, *, limiter: RateLimiter | None = None) -> Starlette:
-    rate = limiter or RateLimiter()
+def create_app(queue: EnrollQueue, *, limiter: RateLimiter | None = None,
+               log_limiter: RateLimiter | None = None) -> Starlette:
+    """Registrations and logs have their own budgets: a flood of logs never costs a box its slot."""
+    rates = {REGISTRATION_LIMIT: limiter or RateLimiter(), LOG_LIMIT: log_limiter or RateLimiter()}
 
     async def guarded_body(request: Request, limit: int) -> tuple[str, bytes | Response]:
         address = client_address(request)
-        if not rate.allow(address):
+        if not rates[limit].allow(source_group(address)):
             logger.warning("enroll: %s %s refused from %s: rate limit", request.method, request.url.path, address)
             return address, _text(429, "too many requests")
         try:

@@ -35,6 +35,7 @@ DEFAULT_ENROLL_DIR = Path.home() / ".local" / "state" / "remoteos-gateway" / "en
 PENDING_TTL_S = 24 * 3600
 LOG_TTL_S = 14 * 24 * 3600
 MAX_PENDING = 50
+MAX_PER_SOURCE = 5  # a site's new boxes share its public address; a flooder needs many addresses
 MAX_LOGS = 100
 _ID = re.compile(r"[0-9a-f]{8}")
 _LOG_HOST = re.compile(r"[A-Za-z0-9._-]{1,64}")
@@ -75,6 +76,20 @@ def source_text(value: object) -> str:
         return str(ipaddress.ip_address(str(value)))
     except ValueError:
         return "unknown"
+
+
+def source_group(address: str) -> str:
+    """Who a poster is for the limits: the IPv4 address, or the IPv6 /64 (one host holds a whole /64,
+    so a per-address limit alone would not hold)."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return "unknown"
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
 
 
 def log_meta(hostname: object, os_name: object, exit_code: object) -> tuple[str, str, str]:
@@ -126,9 +141,15 @@ class EnrollQueue:
     def _read_pending(self, path: Path) -> Pending | None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+        except PermissionError:
+            raise  # the queue cannot be read: never "empty" (check would clear the owner notice)
+        except (OSError, ValueError) as exc:
+            logger.warning("enroll queue: %s cannot be read (%s) — skipped", path.name, type(exc).__name__)
+            return None
+        try:
             entry = Pending(data["id"], float(data["received_at"]), source_text(data["source"]),
                             parse_registration(json.dumps(data["registration"]).encode()))
-        except (OSError, ValueError, KeyError, TypeError, EnrollError) as exc:
+        except (ValueError, KeyError, TypeError, EnrollError) as exc:
             logger.warning("enroll queue: %s is not a pending registration (%s) — skipped", path.name,
                            type(exc).__name__)
             return None
@@ -137,12 +158,21 @@ class EnrollQueue:
             return None
         return entry
 
-    def pending(self) -> list[Pending]:
-        """Every registration younger than ``PENDING_TTL_S``, oldest first; an expired one is deleted."""
-        if not self.pending_dir.is_dir():
+    def _files(self, folder: Path) -> list[Path]:
+        """The ``*.json`` files of *folder*; a folder that cannot be listed RAISES (``Path.glob``
+        would answer "none", and an unreadable queue must never read as an empty one)."""
+        if not folder.exists():
             return []
+        with os.scandir(folder) as entries:
+            return sorted(folder / entry.name for entry in entries
+                          if entry.name.endswith(".json") and not entry.name.startswith("."))
+
+    def pending(self) -> list[Pending]:
+        """Every registration younger than ``PENDING_TTL_S``, oldest first; an expired one is deleted
+        (``check`` calls this every run: the timer is the expiry clock). Raises ``OSError`` when the
+        queue cannot be read."""
         now, kept = self._clock(), []
-        for path in sorted(self.pending_dir.glob("*.json")):
+        for path in self._files(self.pending_dir):
             entry = self._read_pending(path)
             if entry is None:
                 continue
@@ -165,6 +195,9 @@ class EnrollQueue:
                 return entry, False
         if len(current) >= MAX_PENDING:
             raise QueueFull(f"the enrollment queue is full ({MAX_PENDING}): decide the pending ones first")
+        group = source_group(source_text(source))
+        if sum(1 for entry in current if source_group(entry.source) == group) >= MAX_PER_SOURCE:
+            raise QueueFull(f"{MAX_PER_SOURCE} registrations from this address wait already")
         entry = Pending(secrets.token_hex(4), self._clock(), source_text(source), registration)
         _write_private(self.pending_dir / f"{entry.id}.json", {
             "id": entry.id, "received_at": entry.received_at, "source": entry.source,
@@ -222,10 +255,8 @@ class EnrollQueue:
         return data
 
     def _log_records(self) -> list[tuple[Path, dict]]:
-        if not self.logs_dir.is_dir():
-            return []
         records = []
-        for path in self.logs_dir.glob("*.json"):
+        for path in self._files(self.logs_dir):
             data = self._read_log(path)
             if data is not None:
                 records.append((path, data))

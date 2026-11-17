@@ -25,9 +25,10 @@ function Get-RemoteOSEnrollHostName([string]$Name) {
 
 function Get-RemoteOSEnrollRelaunchCommand([string]$Raw, [string]$Ref) {
     # What the elevated window runs: this script again at the same ref, then it waits for Enter so the
-    # person reads the result. $Ref passed Test-RemoteOSEnrollRef: no quote can be in it.
-    return "`$env:REMOTEOS_MCP_REF = '$Ref'; irm '$Raw/$Ref/enroll.ps1' | iex; " +
-        "try { Read-Host '  Press Enter to close' | Out-Null } catch {}"
+    # person reads the result, and exits with the run's code (the piped run leaves it in $LASTEXITCODE).
+    # $Ref passed Test-RemoteOSEnrollRef: no quote can be in it.
+    return "`$env:REMOTEOS_MCP_REF = '$Ref'; irm '$Raw/$Ref/enroll.ps1' | iex; `$enrollCode = `$LASTEXITCODE; " +
+        "try { Read-Host '  Press Enter to close' | Out-Null } catch {}; exit `$enrollCode"
 }
 
 function Get-RemoteOSLogTail([string]$Text, [int]$Chars) {

@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as _dt
 import ipaddress
 import logging
+import re
 import socket
 import sys
 from pathlib import Path
@@ -27,7 +28,7 @@ from remoteos.gateway import cli_fleet
 from remoteos.gateway.cli_enroll import _check_request, _project_list, finish_registration
 from remoteos.gateway.enroll import EnrollError
 from remoteos.gateway.enroll_listen import DEFAULT_LISTEN_HOST, DEFAULT_LISTEN_PORT, create_app
-from remoteos.gateway.enroll_queue import DEFAULT_ENROLL_DIR, EnrollQueue
+from remoteos.gateway.enroll_queue import DEFAULT_ENROLL_DIR, EnrollQueue, source_text
 from remoteos.gateway.registry import ORGS
 
 
@@ -37,6 +38,15 @@ def _enroll_dir_option(function):
         default=DEFAULT_ENROLL_DIR, show_default=True,
         help="The pending enrollments and install logs (0700).",
     )(function)
+
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def printable(text: str) -> str:
+    """Text a box posted, safe for the operator's terminal: control characters (an ESC sequence could
+    rewrite the screen) become ``?``; newlines and tabs stay."""
+    return _CONTROL.sub("?", text)
 
 
 def _when(stamp: float) -> str:
@@ -123,27 +133,49 @@ def enroll_accept_command(ctx: click.Context, ref: str, name: str, org: str, pro
         entry = queue.get(ref)
     except EnrollError as exc:
         raise click.ClickException(str(exc)) from exc
+    click.echo(f"registration {entry.id}: posted from {entry.source} at {_when(entry.received_at)}")
     notify = {"airuleset_path": airuleset_path, "notify_owner": notify_owner,
               "notify_project_dir": notify_project_dir, "notices_file": notices_file}
+    stored = []
+
+    def drop_registration() -> None:  # the key store holds the key now: the queued copy goes
+        queue.remove(entry.id)
+        stored.append(True)
+        click.echo(f"registration {entry.id} done: removed from the queue")
+
     try:
         finish_registration(ctx, entry.registration, name=name, org=org, projects=wanted, url=url,
-                            local_host=local_host, notify=notify, status_file=status_file, check_hostname=True)
+                            local_host=local_host, notify=notify, status_file=status_file, check_hostname=True,
+                            enroll_dir=enroll_dir, after_store=drop_registration)
     except click.ClickException as exc:
-        exc.message += (f" — the registration {entry.id} stays queued: fix the cause and run enroll-accept again"
-                        " (with --replace once the key is stored)")
+        if stored:
+            exc.message += f" — {name} is stored and in the projects: fix the cause, then run sync-configs / check"
+        else:
+            exc.message += (f" — the registration {entry.id} stays queued: fix the cause and run enroll-accept"
+                            " again (with --replace once the key is stored)")
         raise
-    queue.remove(entry.id)
-    click.echo(f"{name} is enrolled (registration {entry.id} done)")
+    click.echo(f"{name} is enrolled")
 
 
 @click.command("enroll-reject")
-@click.argument("entry_id")
+@click.argument("entry_id", required=False)
+@click.option("--source", default=None, help="Reject every registration posted from this address.")
+@click.option("--all", "reject_all", is_flag=True, help="Reject every pending registration.")
 @_enroll_dir_option
-def enroll_reject_command(entry_id: str, enroll_dir: Path) -> None:
-    """Delete the pending registration ENTRY_ID (its key goes with it)."""
-    if not EnrollQueue(enroll_dir).remove(entry_id):
-        raise click.ClickException("no pending registration with that id: see `remoteos-gateway enroll-list`")
-    click.echo(f"registration {entry_id} rejected and deleted")
+def enroll_reject_command(entry_id: str | None, source: str | None, reject_all: bool, enroll_dir: Path) -> None:
+    """Delete the pending registration ENTRY_ID, or all from --source, or --all (their keys go with them)."""
+    if sum((entry_id is not None, source is not None, reject_all)) != 1:
+        raise click.UsageError("name ONE of: an id, --source <address>, --all")
+    queue = EnrollQueue(enroll_dir)
+    if entry_id is not None:
+        if not queue.remove(entry_id):
+            raise click.ClickException("no pending registration with that id: see `remoteos-gateway enroll-list`")
+        click.echo(f"registration {entry_id} rejected and deleted")
+        return
+    chosen = [entry for entry in queue.pending() if reject_all or entry.source == source_text(source)]
+    for entry in chosen:
+        queue.remove(entry.id)
+    click.echo(f"{len(chosen)} registration(s) rejected and deleted")
 
 
 @click.command("enroll-log")
@@ -161,6 +193,6 @@ def enroll_log_command(log_id: str | None, enroll_dir: Path) -> None:
                        f"  exit {entry.exit_code or '?'}  {entry.size} chars  from {entry.source}")
         return
     try:
-        click.echo(queue.read_log(log_id), nl=False)
+        click.echo(printable(queue.read_log(log_id)), nl=False)
     except EnrollError as exc:
         raise click.ClickException(str(exc)) from exc

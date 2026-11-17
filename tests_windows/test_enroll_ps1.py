@@ -146,3 +146,33 @@ $code = Invoke-RemoteOSEnrolledInstall -InstallerPath {_q(installer)} -LogPath {
     assert "enroll=https://enroll.example/enroll/" in got["log"]
     assert "sshkey=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake dev1" in got["log"]
     assert "ref=dev" in got["log"] and "pip failed" in got["log"]
+
+
+def test_the_elevated_window_exits_with_the_run_s_code(tmp_path):
+    served = b"$global:LASTEXITCODE = 7\n"
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+            return
+
+        def do_GET(self):  # noqa: N802 - stdlib naming
+            ok = self.path == "/dev/enroll.ps1"
+            self.send_response(200 if ok else 404)
+            self.send_header("content-type", "text/plain")
+            self.send_header("content-length", str(len(served) if ok else 0))
+            self.end_headers()
+            if ok:
+                self.wfile.write(served)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        raw = f"http://127.0.0.1:{server.server_address[1]}"
+        command = _ps(tmp_path, f"@{{ c = Get-RemoteOSEnrollRelaunchCommand -Raw {_q(raw)} -Ref 'dev' }}"
+                                " | ConvertTo-Json -Compress")["c"]
+        result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                                capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result.returncode == 7, result.stdout + result.stderr
