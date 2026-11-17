@@ -15,7 +15,7 @@ A step that fails says which steps were done; rerunning the SAME command finishe
 skips what is already done). ``check`` forgets the old name on its next run: its status file and
 fleet notices are built from the key store.
 
-A dry run writes nothing, not even a lock file (the sync runs dry on the edited manifest and key
+A dry run writes nothing, not even the manifest lock (the sync runs dry on the edited manifest and key
 store, in memory). Output holds names and urls only, never a key or token.
 """
 
@@ -30,7 +30,7 @@ import sys
 import click
 
 from remoteos.gateway.cli_fleet import LOCAL_HOST_HELP, RELOAD_NOTE, fail, machine
-from remoteos.gateway.direct_record import record_path, remember_retired
+from remoteos.gateway.direct_record import load_record, record_path, remember_retired
 from remoteos.gateway.keystore import KeystoreError, load_keystore
 from remoteos.gateway.keystore import remove_machines as keystore_remove
 from remoteos.gateway.keystore import rename_machine as keystore_rename
@@ -63,13 +63,19 @@ class _Steps:
         if not self.done:
             return fail(exc)
         logger.error("%s stopped after %s: %s", self.command, ", ".join(self.done), exc)
-        return click.ClickException(
-            f"{exc}\n  done: {', '.join(self.done)} — rerun `remoteos-gateway {self.command}` to finish"
-        )
+        # every edit is in place once the registry step is done: only the sync is left to repeat
+        rerun = "sync-configs" if "registry" in self.done else self.command
+        done = ", ".join(self.done)
+        return click.ClickException(f"{exc}\n  done: {done} — rerun `remoteos-gateway {rerun}` to finish")
 
 
 def _in_registry(registry: Registry, name: str) -> bool:
     return name in registry.exposed or any(name in c.machines for c in registry.consumers.values())
+
+
+def _recorded(paths, name: str, url: str) -> bool:
+    record, _ = load_record(record_path(paths.registry))
+    return any(entries.get(name) == url for entries in record.values())
 
 
 def _retire_first(paths, manifest: Manifest, retired: dict[str, str]) -> None:
@@ -185,15 +191,24 @@ def machine_rename(paths, old: str, new: str, local_host: str, dry_run: bool) ->
     steps = _Steps(f"machine rename {old} {new}")
     try:
         keystore = load_keystore(paths.machines)
-        fresh = old in keystore and new not in keystore
-        resumed = new in keystore and old not in keystore  # a rerun: the key store step was done
-        if not (fresh or resumed):
-            state = "both are" if old in keystore else "neither is"
-            raise KeystoreError(f"{old!r} -> {new!r}: {state} in the key store {paths.machines} — nothing changed")
-        manifest = manifest_rename(paths.manifest, old, new, dry_run=True)  # validates NEW, refuses before writing
         registry = load_registry(paths.registry)
+        fresh = old in keystore and new not in keystore
+        # a rerun after the key store step: only with evidence of the earlier run (OLD still in the
+        # registry, or the url the first step recorded) — never a typo for OLD next to an existing NEW
+        resumed = new in keystore and old not in keystore and (
+            _in_registry(registry, old) or _recorded(paths, old, keystore[new].url)
+        )
+        if not (fresh or resumed):
+            if old in keystore:
+                problem = f"{new!r} is already in the key store"
+            elif new in keystore:
+                problem = f"{old!r} is not in the key store and no earlier rename of it is in progress"
+            else:
+                problem = f"neither {old!r} nor {new!r} is in the key store"
+            raise KeystoreError(f"{problem} ({paths.machines}) — nothing changed")
+        manifest = manifest_rename(paths.manifest, old, new, dry_run=True)  # validates NEW, refuses before writing
         exposed = old in registry.exposed or (resumed and new in registry.exposed)
-        touched = registry.rename_machine(old, new)  # in memory: refuses a NEW left in the registry
+        touched = registry.rename_machine(old, new, fresh=fresh)  # in memory: refuses a NEW left in the registry
         projects = _projects_holding(manifest, {new})
         retired = {old: keystore[old].url if fresh else keystore[new].url}
         if dry_run:
@@ -211,7 +226,7 @@ def machine_rename(paths, old: str, new: str, local_host: str, dry_run: bool) ->
 
         def carry_over(r: Registry) -> tuple[list[str], bool]:
             was_exposed = old in r.exposed
-            moved = r.rename_machine(old, new)
+            moved = r.rename_machine(old, new, fresh=fresh)
             return moved, was_exposed or new in r.exposed
 
         touched, exposed = _edit_registry(paths, carry_over)

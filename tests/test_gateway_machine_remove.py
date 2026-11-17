@@ -490,3 +490,50 @@ def test_remove_handles_crlf_and_a_trailing_comma_without_leaving_blanks(tmp_pat
     assert after.projects["four"].machines == ("linux-a",) and after.projects["two"].machines == ("linux-a",)
     written = path.read_bytes().decode("utf-8")
     assert "linux-gone" not in written and ", \r\n" not in written and " \r\n" not in written
+
+
+# -- review round 2 -------------------------------------------------------------------------------
+
+
+def test_rename_of_an_unexposed_unallowed_box_still_refuses_a_new_name_left_in_the_registry(fleet):
+    """The stale check must run even when nothing carries OLD (a kill-switched box only a direct
+    project uses): otherwise the leftover consumer gets the renamed box."""
+    camera, direct = two_projects(fleet)
+    registry = json.loads(fleet.registry.read_text(encoding="utf-8"))
+    registry["exposed"] = [m for m in registry["exposed"] if m != "linux-cam2"] + ["linux-cam9"]
+    for consumer in registry["consumers"].values():
+        consumer["machines"] = [m for m in consumer["machines"] if m != "linux-cam2"]
+    registry["consumers"]["david3@subdev"]["machines"] = ["linux-cam9"]
+    fleet.registry.write_text(json.dumps(registry), encoding="utf-8")
+    before = files(fleet, camera, direct)
+
+    result = machine(fleet, "rename", "linux-cam2", "linux-cam9")
+
+    assert result.exit_code == 1 and "'linux-cam9' is still in the registry" in result.output
+    assert files(fleet, camera, direct) == before
+
+
+def test_a_remove_whose_sync_cannot_run_points_to_sync_configs_which_finishes_it(fleet):
+    _, direct = two_projects(fleet)
+    other = fleet.write_config("other", '{\n  "mcpServers": {}\n}\n')
+    text = fleet.manifest.read_text(encoding="utf-8")
+    # sync refuses the whole run (direct mode for another account), only after every edit step
+    bad = '\n[projects.other]\nhost = "dev1"\naccount = "someone-else"\nconfig = "%s"\nmode = "direct"\n' % other
+    fleet.manifest.write_text(text + bad + 'machines = ["linux-cam1"]\n', encoding="utf-8")
+
+    result = machine(fleet, "remove", "linux-cam2")
+
+    assert result.exit_code == 1
+    assert "done: direct record, manifest, key store, registry — rerun `remoteos-gateway sync-configs`" in result.output
+    fleet.manifest.write_text(fleet.manifest.read_text(encoding="utf-8").split("\n[projects.other]")[0] + "\n",
+                              encoding="utf-8")
+    assert fleet.run().exit_code == 0
+    assert "linux-cam2" not in fleet.servers(direct)
+
+
+def test_a_typo_for_old_next_to_an_existing_new_is_refused_not_reported_as_a_rename(fleet):
+    camera, direct = two_projects(fleet)
+    before = files(fleet, camera, direct, fleet.registry.with_name("sync-direct.json"))
+    result = machine(fleet, "rename", "linux-typo", "linux-cam1")
+    assert result.exit_code == 1 and "no earlier rename of it is in progress" in result.output
+    assert files(fleet, camera, direct, fleet.registry.with_name("sync-direct.json")) == before

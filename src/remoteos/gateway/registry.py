@@ -293,16 +293,17 @@ class Registry:
             self.consumers[name].machines.remove(machine)
         return touched
 
-    def rename_machine(self, old: str, new: str) -> list[str]:
+    def rename_machine(self, old: str, new: str, *, fresh: bool = True) -> list[str]:
         """*old* is now called *new* (#109): exposure carries over (a kill-switched *old* stays
         unexposed as *new*) and every consumer allowed *old* is allowed *new* in its place. Returns
         those consumers. Not a widening: the same box under another name."""
         validate_machine_name(new)
-        if old not in self.exposed and not any(old in c.machines for c in self.consumers.values()):
-            return []  # nothing carries OLD (renamed already, or never exposed nor allowed)
         stale = (["exposed"] if new in self.exposed else []) + [
             f"allowed for {name}" for name, consumer in sorted(self.consumers.items()) if new in consumer.machines
         ]
+        carried = old in self.exposed or any(old in c.machines for c in self.consumers.values())
+        if not fresh and not carried:
+            return []  # a rerun: this step was done already
         if stale:  # a leftover of a hand removal: carrying OLD over would hand the box to those
             raise RegistryError(
                 f"{new!r} is still in the registry ({', '.join(stale)}) — clear it first"

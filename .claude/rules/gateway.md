@@ -381,10 +381,14 @@ paths:
   store -> registry -> `sync_configs`. The registry is saved only when it changed (a save makes the
   gateway reload).
 - **Resumable, never half-silent:** `OSError` is caught too; a failure after the first write prints
-  `done: <steps> — rerun ...`, and the SAME command finishes it: `remove` accepts a name the key
-  store already lost while the manifest or registry still holds it; `manifest.rename_machine` is a
-  no-op when NEW is there and OLD gone; `rename` with NEW in the key store and OLD gone skips that
-  step; `Registry.rename_machine` is a no-op when nothing carries OLD.
+  `done: <steps> — rerun ...`. Before the registry step is done the SAME command finishes it; after
+  it, every edit is in place and the advice is `sync-configs` (the record holds the retired urls).
+  `remove` accepts a name the key store already lost while the manifest or registry still holds it;
+  `manifest.rename_machine` is a no-op when NEW is there and OLD gone; `rename` counts as RESUMED
+  (NEW in the key store, OLD gone) only with evidence of the earlier run — OLD still in the registry,
+  or the url `_retire_first` recorded — so a typo for OLD next to an existing NEW is refused.
+  `Registry.rename_machine(fresh=False)` is a no-op when nothing carries OLD; a FRESH rename always
+  runs the stale-NEW check, even for an OLD that nothing carries (review round 2).
 - `remove` = `Registry.forget_machine` (unexpose + out of EVERY allow-list, hand-made ones too:
   only narrows); refuses when a project would be left empty (the manifest forbids `[]`).
 - `rename` = `Registry.rename_machine`: exposure follows (a kill-switched OLD stays unexposed as
