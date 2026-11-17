@@ -211,6 +211,26 @@ def stick_one(worker: uia.UiaWorker, release: threading.Event) -> None:
     assert not isinstance(caught.value, uia.UiaNotAsked)
 
 
+def test_each_job_lets_ui_automation_wait_only_for_what_its_call_has_left():
+    seen: list = []
+
+    def answer_within(session, seconds):
+        seen.append(("bound", session, seconds, threading.current_thread()))
+
+    worker = uia.UiaWorker(lambda abandoned: "session", answer_within=answer_within)
+    assert worker.call(lambda s: seen.append(("job", threading.current_thread())) or "done", 8) == "done"
+    (_, session, seconds, bound_on), (_, job_on) = seen
+    assert session == "session" and bound_on is job_on is not threading.current_thread()
+    assert 8 - uia.ANSWER_MARGIN_S - 1 < seconds <= 8 - uia.ANSWER_MARGIN_S
+
+
+def test_the_session_sets_ui_automation_s_own_wait_for_an_app():
+    automation = types.SimpleNamespace(TransactionTimeout=20000)
+    session = uia.Session(make_auto(Control()), FakeCom, threading.Event(), automation=automation)
+    session.answer_within(12.3456)
+    assert automation.TransactionTimeout == 12345
+
+
 def test_stuck_workers_are_bounded_and_the_error_says_nothing_was_asked(monkeypatch):
     monkeypatch.setattr(uia, "MAX_STUCK_WORKERS", 2)
     worker = worker_of()
@@ -421,11 +441,14 @@ class Control:
         self.IsEnabled, self.IsKeyboardFocusable, self.IsOffscreen = True, False, False
         self.patterns: dict = {}
         self.dead = False
+        self.fails = None  # a COM error every read raises, e.g. UI Automation's timeout
         self.next = None
         self.focus_sets = 0
         self.__dict__.update(state)
 
     def _touch(self):
+        if self.fails is not None:
+            raise self.fails
         if self.dead:
             raise FakeCom("element not available")
 
@@ -506,6 +529,64 @@ def test_an_element_that_dies_during_the_walk_is_left_out():
     dead, alive = Control(name="dead", dead=True), Control(name="alive", rid=(3,))
     root = Control(name="App", kind="WindowControl", kids=[dead, alive])
     assert [i.name for i in new_session(root).tree(50).items] == ["alive"]
+
+
+# UI Automation gave up waiting for the app: UIA_E_TIMEOUT, HRESULT_FROM_WIN32(ERROR_TIMEOUT), signed (comtypes).
+TIMEOUTS = [v - 2**32 for v in (0x80131505, 0x800705B4)]
+
+
+def timed_out(hresult: int) -> FakeCom:
+    error = FakeCom("the app did not answer")
+    error.hresult = hresult
+    return error
+
+
+@pytest.mark.parametrize("hresult", TIMEOUTS)
+def test_a_window_that_does_not_answer_its_lookup_is_a_timeout(hresult):
+    session = new_session(Control())
+
+    def unanswered(hwnd):
+        raise timed_out(hresult)
+
+    session.auto.ControlFromHandle = unanswered
+    with pytest.raises(uia.UiaTimeout, match="did not answer"):
+        session.tree(50)
+
+
+@pytest.mark.parametrize("hresult", TIMEOUTS)
+def test_an_element_that_does_not_answer_ends_the_walk_as_a_timeout_not_as_a_vanished_element(hresult):
+    slow = Control(name="slow", fails=timed_out(hresult))
+    root = Control(name="App", kind="WindowControl", kids=[slow, Control(name="alive", rid=(3,))])
+    with pytest.raises(uia.UiaTimeout, match="did not answer"):
+        new_session(root).tree(50)
+
+
+@pytest.mark.parametrize("hresult", TIMEOUTS)
+def test_a_ref_whose_app_does_not_answer_is_a_timeout_not_gone(hresult):
+    button = Control()
+    session, ref = session_with(button)
+    button.fails = timed_out(hresult)
+    with pytest.raises(uia.UiaTimeout, match="did not answer") as caught:
+        session.activate(ref)
+    assert not isinstance(caught.value, StaleRef)
+
+
+@pytest.mark.parametrize("hresult", TIMEOUTS)
+def test_an_invoke_the_app_did_not_answer_may_have_happened_and_is_never_clicked(hresult):
+    button = Control()
+    button.patterns["invoke"] = Invoke(error=timed_out(hresult))
+    session, ref = session_with(button)
+    with pytest.raises(uia.UiaTimeout, match="may have happened"):
+        session.activate(ref)
+
+
+@pytest.mark.parametrize("hresult", TIMEOUTS)
+def test_a_value_set_the_app_did_not_answer_may_have_happened_and_is_never_typed(hresult):
+    field = Control(kind="EditControl")
+    field.patterns["value"] = Value(error=timed_out(hresult))
+    session, ref = session_with(field)
+    with pytest.raises(uia.UiaTimeout, match="may have happened"):
+        session.set_text(ref, "x")
 
 
 def test_an_element_with_no_runtime_id_gets_no_ref():
@@ -817,16 +898,30 @@ def test_a_session_gets_its_own_client_and_silences_the_package_s_logger(monkeyp
     package.uiautomation = module
     comtypes = types.ModuleType("comtypes")
     comtypes.COMError = FakeCom
+    client_module = types.ModuleType("comtypes.client")
+    eight = types.SimpleNamespace(RawViewWalker="raw walker of the IUIAutomation2 object")
+
+    def create_object(clsid, interface):
+        calls.append(("create", clsid, interface))
+        return eight
+
+    client_module.CreateObject = create_object
+    comtypes.client = client_module
+    Client.UIAutomationCore = types.SimpleNamespace(IUIAutomation2="IUIAutomation2")
     monkeypatch.setitem(sys.modules, "uiautomation", package)
     monkeypatch.setitem(sys.modules, "uiautomation.uiautomation", module)
     monkeypatch.setitem(sys.modules, "comtypes", comtypes)
+    monkeypatch.setitem(sys.modules, "comtypes.client", client_module)
     monkeypatch.setattr(uia, "_retired_clients", [])
     old = Client._instance = Client()
 
     session = uia.open_session(threading.Event())
 
-    assert calls == ["coinit"]
+    # CUIAutomation8 as IUIAutomation2: the client whose own wait for an app can be set (#114)
+    assert calls == ["coinit", ("create", "{e22ad333-b25f-460c-83d0-0581107395c9}", "IUIAutomation2")]
     assert isinstance(Client._instance, Client) and Client._instance is not old
+    assert Client._instance.IUIAutomation is eight and Client._instance.ViewWalker == eight.RawViewWalker
+    assert session.automation is eight
     assert uia._retired_clients == [old], "a hung apartment's client must never be released"
     assert session.com_error is FakeCom
     module.Logger.Write("a line", 1, writeToFile=True)

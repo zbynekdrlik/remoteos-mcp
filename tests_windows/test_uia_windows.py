@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+import pywintypes
+import win32gui
 
 from remoteos.element_tree import StaleRef
 from remoteos.platform.command import kill_process_tree, own_console, powershell_argv
@@ -45,16 +47,37 @@ $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 120000
 $timer.Add_Tick({{ $form.Close() }})
 $timer.Start()
+{stall}
 [Windows.Forms.Application]::Run($form)
+"""
+
+STALL_S = 25
+# The window's UI thread computes for STALL_S seconds from its first second: it answers no message,
+# as on a stalled runner (#114). A busy loop, because a CLR wait on an STA thread pumps sent messages.
+STALL = f"""
+$stall = New-Object Windows.Forms.Timer
+$stall.Interval = 1000
+$stall.Add_Tick({{ $stall.Stop(); $end = (Get-Date).AddSeconds({STALL_S}); while ((Get-Date) -lt $end) {{}} }})
+$stall.Start()
 """
 
 
 @pytest.fixture
 def window(tmp_path):
     """A live window: yields ``(title, marker file)``."""
+    yield from live_window(tmp_path, "")
+
+
+@pytest.fixture
+def stalling_window(tmp_path):
+    """A live window whose UI thread stops answering after its first second, for STALL_S."""
+    yield from live_window(tmp_path, STALL)
+
+
+def live_window(tmp_path, stall: str):
     title = f"remoteos-uia-{uuid.uuid4().hex[:8]}"
     marker = tmp_path / "saved.txt"
-    script = FORM.format(title=ps_literal(title), marker=ps_literal(str(marker)))
+    script = FORM.format(title=ps_literal(title), marker=ps_literal(str(marker)), stall=stall)
     child = subprocess.Popen(powershell_argv(script), stdin=subprocess.DEVNULL, **own_console())
     try:
         deadline = time.monotonic() + 60
@@ -68,12 +91,16 @@ def window(tmp_path):
 
 
 def tree_of(title: str):
-    """The window's tree, once its controls are up; UI Automation's first start takes seconds."""
+    """The window's tree, once its controls are up and it answers.
+
+    UI Automation's first start takes seconds, and a window started a moment ago on a stalled
+    runner may not answer yet (#114): that is a timeout, which leaves the worker running.
+    """
     deadline = time.monotonic() + 60
     while True:
         try:
             tree = desktop.element_tree(title)
-        except uia.UiaNotAsked:
+        except uia.UiaTimeout:  # UiaNotAsked included
             tree = None
         if tree is not None and len(tree.items) >= 2:
             return tree
@@ -102,6 +129,33 @@ def test_a_real_window_lists_its_controls_with_roles_and_bounds(window):
     assert field.role == "Edit"
     assert field.rect[2] > field.rect[0] and field.rect[3] > field.rect[1]
     assert button.rect[1] > field.rect[1], "the button sits below the field"
+
+
+def not_answering(hwnd: int) -> bool:
+    try:
+        win32gui.SendMessageTimeout(hwnd, 0, 0, 0, 0x0002, 500)  # WM_NULL, SMTO_ABORTIFHUNG
+    except pywintypes.error:
+        return True
+    return False
+
+
+def test_a_window_that_does_not_answer_is_a_timeout_and_the_worker_lives_on(stalling_window):
+    title, _ = stalling_window
+    hwnd = next(w.handle for w in desktop.enumerate_windows() if w.title == title)
+    uia._worker.call(lambda session: None, 60)  # a started worker: the timeout below is the window's
+    worker, stuck = uia._worker._current, len(uia._worker._stuck)
+    deadline = time.monotonic() + 15
+    while not not_answering(hwnd):
+        assert time.monotonic() < deadline, "the window's UI thread never stalled"
+        time.sleep(0.2)
+    started = time.monotonic()
+    with pytest.raises(uia.UiaTimeout, match="did not answer") as caught:
+        desktop.element_tree(title)
+    assert not isinstance(caught.value, uia.UiaNotAsked)
+    assert time.monotonic() - started < uia.TREE_TIMEOUT_S, "UI Automation itself must give up inside the budget"
+    assert (uia._worker._current, len(uia._worker._stuck)) == (worker, stuck), "the worker was abandoned"
+    assert item(tree_of(title), "Save").role == "Button"  # the same worker, once the window answers again
+    assert uia._worker._current is worker
 
 
 def test_type_then_click_reach_the_real_controls(window):
