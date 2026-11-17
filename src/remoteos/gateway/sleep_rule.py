@@ -61,7 +61,9 @@ def excused(record: dict, moment: _dt.datetime) -> bool:
 
 def _carried_last_ok(previous: object, previous_checked_at: object) -> str | None:
     """The last-ok stamp a record keeps while the box is not ok. A record from before #118 has
-    none: if it was ok, the run that wrote it (``checked_at``) is when it was last seen ok."""
+    none: if it was ok, the run that wrote it (``checked_at``) is when it was last seen ok. The
+    caller passes None for a previous run that FAILED (``_report_failure`` rewrote ``checked_at``
+    over the older records)."""
     if not isinstance(previous, dict):
         return None
     if _stamp(previous.get(LAST_OK)) is not None:
@@ -86,12 +88,13 @@ def apply(
         last_ok = stamp if record["state"] == "ok" else _carried_last_ok(previous, previous_checked_at)
         if last_ok is not None:
             record[LAST_OK] = last_ok
+        # back after a night nobody was told about: not news. Keyed on the PREVIOUS record, so it
+        # holds even when the flag was turned off meanwhile.
+        was_silent = isinstance(previous, dict) and previous.get(ASLEEP) is True
+        if record["state"] == "ok" and not record["notified"] and was_silent and previous.get("notified") is not True:
+            record["notified"] = True
         if not may_sleep.get(name, False):
             continue
         record[MAY_SLEEP] = True
         if excused(record, moment):
             record[ASLEEP] = True
-        was_silent = isinstance(previous, dict) and previous.get(ASLEEP) is True
-        was_silent = was_silent and previous.get("notified") is not True
-        if record["state"] == "ok" and not record["notified"] and was_silent:
-            record["notified"] = True  # back after a night nobody was told about: not news

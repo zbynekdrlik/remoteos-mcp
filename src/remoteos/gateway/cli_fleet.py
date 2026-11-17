@@ -580,12 +580,12 @@ def check_command(
     gateway = status["gateway"]
     click.echo(f"checked {status['checked_at']}: gateway {gateway_url} {gateway['state']} since {gateway['since']}")
     for name, record in status["machines"].items():
-        asleep = "  asleep (may_sleep)" if record.get("asleep") is True else ""
-        click.echo(f"  {name:24} {record['state']:12} since {record['since']}  {record['detail']}{asleep}")
+        mark = "  asleep (may_sleep)" if record.get("asleep") is True else ""
+        click.echo(f"  {name:24} {record['state']:12} since {record['since']}  {record['detail']}{mark}")
     bad = [n for n, r in status["machines"].items() if r["state"] != STATE_OK]
     click.echo(f"{len(status['machines']) - len(bad)} ok, {len(bad)} not ok" + (f": {', '.join(bad)}" if bad else ""))
-    asleep = [n for n, r in status["machines"].items() if r.get("asleep") is True]
-    if asleep:
-        click.echo(f"asleep after hours (not in the owner notice): {', '.join(asleep)}")
+    sleeping = [n for n, r in status["machines"].items() if r.get("asleep") is True]
+    if sleeping:
+        click.echo(f"asleep after hours (not in the owner notice): {', '.join(sleeping)}")
     if report.sent is False:
         click.echo("a notification did NOT go out — it is retried on the next run")

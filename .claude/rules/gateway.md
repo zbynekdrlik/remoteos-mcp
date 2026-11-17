@@ -303,7 +303,8 @@ paths:
   - Deploy order like `org`: install -> restart the gateway -> `set-sleep`. An older gateway refuses the
     unknown key (keeps its last good copy at reload, refuses at a start).
   - `check` (`sleep_rule.apply`, right after the org loop): `last_ok` on EVERY record (this run's stamp
-    when ok, else carried; a pre-#118 record that was ok carries the previous `checked_at`),
+    when ok, else carried; a pre-#118 record that was ok carries the previous `checked_at`, unless that
+    run FAILED: `_report_failure` rewrites `checked_at` over old records, so it is passed as None),
     `may_sleep: true` on a flagged one, `asleep: true` while EXCUSED. Excused = not ok AND (local time <
     10:00 OR `last_ok` >= local midnight). Local = `ZoneInfo("Europe/Bratislava")`; midnight from the
     LOCAL date (`datetime.combine`), never UTC date or now-24h (DST days are tested).
@@ -311,7 +312,9 @@ paths:
     plain path drops it from `pending` (its `notified` stays false, so it goes out the run it stops
     being excused). The state itself is never changed: `check` output shows `asleep (may_sleep)`.
   - Wake-up after an excused night (previous record `asleep` and not `notified`) is marked notified:
-    not news. A box reported at 10:00 announces its recovery normally.
+    not news, keyed on the PREVIOUS record so it holds after `set-sleep off` too. A box reported at
+    10:00 announces its recovery normally. A box that stays dead leaves `fleet-down` at midnight and is
+    re-sent at 10:00 (the rule is per local day; the owner's wording, a known daily churn).
   - Tests inject the clock: `run_check(now=...)`, or `monkeypatch` `check.utc_now` for the CLI
     (`tests/test_gateway_may_sleep.py`).
 - **Restart list (`live_sessions.py` + `session_scan.py`, #66; print-only since #109):**

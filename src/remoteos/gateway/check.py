@@ -423,10 +423,10 @@ def _check_loaded(
         if entries[name].org is not None:
             record["org"] = entries[name].org
     # boxes switched off after hours (#118): last_ok on every record, asleep = left out of the notice
-    sleep_rule.apply(
-        status["machines"], old_machines, {n: e.may_sleep for n, e in entries.items()}, moment, stamp,
-        previous.get("checked_at"),
-    )
+    # a failed run rewrote checked_at over older records: it never saw a box ok
+    seen_at = None if isinstance(previous.get("error"), dict) else previous.get("checked_at")
+    flags = {name: entry.may_sleep for name, entry in entries.items()}
+    sleep_rule.apply(status["machines"], old_machines, flags, moment, stamp, seen_at)
     waiting = fleet_notice.pending_of(previous) if enroll_pending is None else enroll_pending
     if waiting:
         status[fleet_notice.PENDING_KEY] = waiting
