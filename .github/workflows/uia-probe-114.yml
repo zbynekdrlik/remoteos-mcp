@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [1, 2, 3, 4, 5, 6]
+        runner: [1, 2]
     defaults:
       run:
         shell: cmd
@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -c constraints.txt -e .[test]
-      - name: probe under 8 busy processes
-        run: for /L %%i in (1,1,6) do python scripts\probe_uia_114.py 8
-      - name: probe under 24 busy processes
-        run: for /L %%i in (1,1,6) do python scripts\probe_uia_114.py 24
+      - name: hung window, default client timeouts
+        run: for /L %%i in (1,1,2) do python scripts\probe_uia_hung_114.py 0 0
+      - name: hung window, transaction 3 s, connection 1 s
+        run: for /L %%i in (1,1,2) do python scripts\probe_uia_hung_114.py 3000 1000
