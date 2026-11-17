@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -c constraints.txt -e .[test]
-      - name: probe, a fresh process each time
-        run: for /L %%i in (1,1,12) do python scripts\probe_uia_114.py
-      - name: the UIA test file, a fresh pytest each time
-        run: for /L %%i in (1,1,4) do python -m pytest tests_windows\test_uia_windows.py -p no:cacheprovider --durations=0 -q
+      - name: probe under 8 busy processes
+        run: for /L %%i in (1,1,6) do python scripts\probe_uia_114.py 8
+      - name: probe under 24 busy processes
+        run: for /L %%i in (1,1,6) do python scripts\probe_uia_114.py 24

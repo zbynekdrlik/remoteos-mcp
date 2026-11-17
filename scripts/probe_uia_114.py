@@ -18,10 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests_windows"))
 
+from test_uia_windows import FORM  # noqa: E402
+
 from remoteos.platform.command import kill_process_tree, own_console, powershell_argv  # noqa: E402
 from remoteos.platform.win import desktop, uia  # noqa: E402
 from remoteos.platform.win.psquote import ps_literal  # noqa: E402
-from test_uia_windows import FORM  # noqa: E402
 
 T0 = time.monotonic()
 SLOW = 0.3
@@ -33,7 +34,12 @@ def say(text: str) -> None:
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.SendMessageTimeoutW.argtypes = [
-    wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM, wintypes.UINT, wintypes.UINT,
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+    wintypes.UINT,
+    wintypes.UINT,
     ctypes.POINTER(ctypes.c_size_t),
 ]
 _user32.SendMessageTimeoutW.restype = wintypes.LPARAM
@@ -55,6 +61,7 @@ def timed(name, fn, slow=SLOW):
             took = time.monotonic() - start
             if took >= slow:
                 say(f"SLOW {name} {took:.3f}s")
+
     return wrapper
 
 
@@ -139,6 +146,18 @@ def run_once() -> None:
         kill_process_tree(child)
 
 
+def stress(n: int) -> list:
+    """``n`` busy processes: a starved runner, as a shared CI host can be."""
+    burn = "while True: pass"
+    return [subprocess.Popen([sys.executable, "-c", burn], **own_console()) for _ in range(n)]
+
+
 if __name__ == "__main__":
+    load = stress(int(sys.argv[1]) if len(sys.argv) > 1 else 0)
+    say(f"{len(load)} busy processes")
     instrument()
-    run_once()
+    try:
+        run_once()
+    finally:
+        for p in load:
+            p.kill()
