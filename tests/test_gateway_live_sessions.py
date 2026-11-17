@@ -169,7 +169,9 @@ class LiveSession:
             self.__exit__()
             raise AssertionError(f"the fake session did not start its script: {line!r}")
         comm = Path(f"/proc/{self.process.pid}/comm").read_text(encoding="utf-8").strip()
-        assert comm == "claude", f"the process is named {comm!r}"
+        if comm != "claude":
+            self.__exit__()
+            raise AssertionError(f"the process is named {comm!r}")
 
     def __enter__(self):
         return self
