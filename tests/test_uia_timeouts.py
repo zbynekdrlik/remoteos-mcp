@@ -343,6 +343,62 @@ def test_click_and_type_pass_on_what_the_session_said_happened(monkeypatch, erro
         uia.type_element("1.1", "x", lambda text: pytest.fail("typed"))
 
 
+# -- any other COM error of the window lookup names its step (#116) -----------------------------
+
+# Not a timeout: E_ACCESSDENIED, UIA_E_ELEMENTNOTAVAILABLE, E_FAIL (signed, as comtypes gives them).
+REFUSALS = {0x80070005: -2147024891, 0x80040201: -2147220991, 0x80004005: -2147467259}
+LOOKUP_STEPS = {"finding the window": "lookup", "reading the window's control type": "type"}
+
+
+def _failing_lookup(step, error):
+    root = Control(name="App", kind="WindowControl", kids=[Control(rid=(3,))])
+    session = new_session(root)
+    if LOOKUP_STEPS[step] == "type":
+        root.fails["type"] = error
+    else:
+
+        def refused(hwnd):
+            raise error
+
+        session.automation.ElementFromHandle = refused
+    return session
+
+
+@pytest.mark.parametrize("hresult", REFUSALS)
+@pytest.mark.parametrize("step", LOOKUP_STEPS)
+def test_a_window_lookup_the_app_refused_says_which_step_and_its_hresult(step, hresult):
+    error = FakeCom("raw COM text")
+    error.hresult = REFUSALS[hresult]
+    session = _failing_lookup(step, error)
+    for read in (lambda: session.tree(50), lambda: session.elements(50, 10), lambda: session.marked(50, 10)):
+        with pytest.raises(uia.UiaLookupFailed) as caught:
+            read()
+        expected = f"UI Automation failed while {step} (HRESULT {hresult:#010x}): nothing was done to it"
+        assert str(caught.value) == expected
+        assert not isinstance(caught.value, (FakeCom, uia.UiaTimeout))
+        assert caught.value.__suppress_context__, "the raw COM error's frames hold controls of the worker"
+
+
+@pytest.mark.parametrize("step", LOOKUP_STEPS)
+def test_element_tree_reports_a_refused_window_lookup_as_a_clean_tool_error(step):
+    from remoteos.errors import ToolError, reports_errors
+
+    error = FakeCom("raw COM text")
+    error.hresult = REFUSALS[0x80070005]
+    session = _failing_lookup(step, error)
+    worker = uia.UiaWorker(lambda abandoned: session, answer_within=uia.Session.answer_within)
+
+    @reports_errors
+    def ElementTree():
+        return worker.call(lambda s: s.tree(50), uia.TREE_TIMEOUT_S)
+
+    with pytest.raises(ToolError) as caught:
+        ElementTree()
+    assert str(caught.value) == (
+        f"ElementTree error: UI Automation failed while {step} (HRESULT 0x80070005): nothing was done to it"
+    )
+
+
 # -- open_session against a fake package --------------------------------------------------------
 
 
