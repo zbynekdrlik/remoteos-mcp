@@ -1,0 +1,25 @@
+# TEMPORARY (#114): loops the first UIA walk of a new window on the windows runner. Removed before merge.
+name: uia-probe-114
+on:
+  push:
+    branches: [dev]
+jobs:
+  probe:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [1, 2, 3, 4, 5, 6]
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -c constraints.txt -e .[test]
+      - name: probe, a fresh process each time
+        run: for /L %%i in (1,1,12) do python scripts\probe_uia_114.py
+      - name: the UIA test file, a fresh pytest each time
+        run: for /L %%i in (1,1,4) do python -m pytest tests_windows\test_uia_windows.py -p no:cacheprovider --durations=0 -q
