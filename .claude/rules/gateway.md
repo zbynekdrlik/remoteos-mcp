@@ -287,6 +287,10 @@ paths:
   - A failed scan or notify is echoed and never counts as a failed project.
   - Real-process test: a shebang script named `claude` has comm `claude`
     (`tests/test_gateway_live_sessions.py`).
+    Each `LiveSession` writes its OWN script (mkdtemp) and returns only after the script prints
+    `ready` (#108): a shared script rewritten by the next session made the earlier shell run nothing
+    and end (comm still `claude`, cwd gone, so the scan skipped it), and comm is set at exec start
+    while `/proc/<pid>/environ` is filled only at its end. Never wait on comm alone.
 - **Fleet server (`fleet.py`, #51 Phase 2):** `/fleet/mcp`, tools `ListMachines` / `MachineTools` /
   `Call`, FastMCP mounted by `Route(FLEET_MCP_PATH, FleetEndpoint)` before the machine route.
   - `FLEET_SERVER` is reserved: `is_valid_machine_name("fleet")` is False, so a key store or
