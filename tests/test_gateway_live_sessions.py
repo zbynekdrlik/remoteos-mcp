@@ -117,7 +117,7 @@ def test_a_dead_tmux_leaves_the_session_with_no_pane(tmp_path, fake_tmux, monkey
 
 
 def test_the_scanner_is_python_3_8_with_no_package_import():
-    source = open(session_scan.__file__, encoding="utf-8").read()
+    source = Path(session_scan.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source, feature_version=(3, 8))
     modules = [n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     modules += [alias.name for n in ast.walk(tree) if isinstance(n, ast.Import) for alias in n.names]
@@ -183,7 +183,7 @@ class LiveSession:
 
 def script_of(pid: int) -> str:
     """The script a fake session's ``/bin/sh`` runs: argv[1] of the live process."""
-    return open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")[1].decode()
+    return Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[1].decode()
 
 
 def test_sessions_started_back_to_back_each_run_their_own_script_with_their_environment(tmp_path):
