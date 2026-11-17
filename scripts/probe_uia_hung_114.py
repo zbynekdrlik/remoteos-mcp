@@ -21,7 +21,10 @@ from remoteos.platform.win import desktop, uia  # noqa: E402
 from remoteos.platform.win.psquote import ps_literal  # noqa: E402
 
 T0 = time.monotonic()
-HANG = "$form.Add_Shown({ $form.Activate(); $form.BeginInvoke([Action]{ Start-Sleep -Seconds 40 }) | Out-Null })"
+HANG = (
+    "$form.Add_Shown({ $form.Activate() }); $hang = New-Object Windows.Forms.Timer; $hang.Interval = 1000;"
+    " $hang.Add_Tick({ $hang.Stop(); Start-Sleep -Seconds 40 }); $hang.Start()"
+)
 
 
 def pumps(hwnd: int) -> bool:
