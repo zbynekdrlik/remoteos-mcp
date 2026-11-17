@@ -30,7 +30,12 @@ from pathlib import Path
 import click
 
 from remoteos import __version__
-from remoteos.gateway import cli_enroll, cli_enroll_queue, cli_fleet, cli_machine_edit  # noqa: F401 (registers machine remove/rename)
+from remoteos.gateway import (  # noqa: F401 (registers machine remove/rename)
+    cli_enroll,
+    cli_enroll_queue,
+    cli_fleet,
+    cli_machine_edit,
+)
 from remoteos.gateway.accesslog import DEFAULT_ACCESS_LOG_PATH, read_access_log
 from remoteos.gateway.manifest import DEFAULT_MANIFEST_PATH
 from remoteos.gateway.registry import (
