@@ -26,8 +26,9 @@ reports a box older than the stable release (#63), ``no_admin.py`` a box without
 With an airuleset that has ``--owner-notice`` (#102, ``owner_notice.py``) every open condition is
 a footer-U notice: ONE per machine condition KIND listing its boxes (``fleet-down``,
 ``fleet-stale``, ``fleet-no-admin``, ``fleet_notice.py``, owner ruling 2026-11-16), plus
-``gateway-health`` and ``check-failed`` (``restart-<project>`` from sync-configs); ``_settle``
-clears each one whose condition is gone at the end of every run, and any old per-box slug.
+``gateway-health`` and ``check-failed``; ``_settle`` clears each one whose condition is gone at the
+end of every run, and any slug that is never open any more: an old per-box slug, or a
+``restart-<project>`` an older sync-configs sent (#109: those are printed only now).
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from remoteos.gateway import drift as drift_report
-from remoteos.gateway import fileops, fleet_notice, live_sessions, no_admin, owner_notice
+from remoteos.gateway import fileops, fleet_notice, no_admin, owner_notice
 from remoteos.gateway.drift import DriftPolicy
 from remoteos.gateway.keystore import edit_keystore, load_keystore
 from remoteos.gateway.messages import KEY_HINT, STATE_LABELS, split_to_fit
@@ -313,21 +314,16 @@ def _reopen_gateway(status: dict, previous: dict, notifier: Notify | None) -> No
         gateway["notified"] = False
 
 
-def _settle(notifier: Notify | None, status: dict, host: str) -> None:
-    """Clear the owner notices whose condition is gone (#102). A restart notice is open while one of
-    its sessions still runs. Never costs the run its status write: a failure is logged, and what
-    was not cleared is retried next run."""
+def _settle(notifier: Notify | None, status: dict) -> None:
+    """Clear the owner notices whose condition is gone (#102): every recorded slug that is not in
+    ``open_notices`` — an old per-box slug and an old ``restart-<project>`` (#109) included, so each
+    is cleared once and forgotten. Never costs the run its status write: a failure is logged, and
+    what was not cleared is retried next run."""
     if not isinstance(notifier, Notifier):
         return
     open_now = open_notices(status)
-
-    def still_open(name: str, entry: dict) -> bool | None:
-        if name.startswith(live_sessions.RESTART + "-"):
-            return live_sessions.still_running(entry, host)
-        return name in open_now
-
     try:
-        notifier.settle(still_open)
+        notifier.settle(lambda name, entry: name in open_now)
     except Exception:
         logger.exception("check: clearing owner notices failed — retried next run")
 
@@ -450,7 +446,7 @@ def _check_loaded(
         reason = f"cannot write the status file {status_path} ({exc.strerror or type(exc).__name__})"
         _report_failure(status_path, previous, reason, stamp, notifier, host)
         raise CheckError(reason) from exc
-    _settle(notifier, status, host)  # after the write: slow clears must never cost the run its status
+    _settle(notifier, status)  # after the write: slow clears must never cost the run its status
     return CheckReport(status=status, sent=sent)
 
 

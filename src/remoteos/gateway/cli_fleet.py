@@ -458,21 +458,11 @@ def _describe_recipe(recipe: RepairRecipe) -> str:
     is_flag=True,
     help="Remove the consumers of projects that left the manifest (by default they only lose their machines).",
 )
-@_notify_options
 @click.pass_obj
-def sync_configs_command(
-    paths,
-    dry_run: bool,
-    local_host: str,
-    prune: bool,
-    airuleset_path: Path,
-    notify_owner: str | None,
-    notify_project_dir: Path,
-    notices_file: Path,
-) -> None:
+def sync_configs_command(paths, dry_run: bool, local_host: str, prune: bool) -> None:
     """Generate every project's MCP config from the manifest: fleet entries through the gateway
     (one token per project, allow-list = the manifest); every other entry is left byte-equal.
-    The owner is told which live Claude sessions of the written configs need a restart."""
+    The live Claude sessions of the written configs that need a restart are printed (never sent)."""
     try:
         manifest = load_manifest(paths.manifest)
         keystore = load_keystore(paths.machines)
@@ -485,7 +475,6 @@ def sync_configs_command(
             today=_dt.date.today().isoformat(),
             echo=click.echo,
             prune=prune,
-            notifier=_notifier(airuleset_path, notify_owner, notify_project_dir, notices_file),
         )
     except (ManifestError, MachineSourceError, RegistryError, SyncError) as exc:
         raise _fail(exc) from exc
