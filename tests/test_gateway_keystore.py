@@ -171,7 +171,8 @@ def test_machine_list_masks_every_key_and_a_repair_recipe_is_validated_set_and_c
 
     assert recipe.exit_code == 0, recipe.output
     assert listing.exit_code == 0
-    assert f"{MACHINE}  org nlmedia  http://cam.lan:8092/mcp  key <{len(key)} chars, sha256:" in listing.output
+    shown = f"{MACHINE}  org nlmedia  sleep off  http://cam.lan:8092/mcp  key <{len(key)} chars, sha256:"
+    assert shown in listing.output
     assert "repair: ssh root@cam.lan sudo -n cat /etc/remoteos-mcp/config.json" in listing.output
     assert key not in listing.output
     assert injected.exit_code == 1 and "user@host" in injected.output

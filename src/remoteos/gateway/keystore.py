@@ -14,7 +14,9 @@ consumer on its next call, with no consumer-side change. It is edited only throu
 - ``machine set-key <name>`` — the key on stdin (never an argv), probed before it is stored;
 - ``machine import``         — the one-time build from today's per-project MCP configs;
 - ``machine repair-recipe``  — the explicit 401 auto-repair recipe ``check`` may use;
-- ``machine set-org``        — the company a machine belongs to (#105): ``nlmedia`` / ``slovnormal``.
+- ``machine set-org``        — the company a machine belongs to (#105): ``nlmedia`` / ``slovnormal``;
+- ``machine set-sleep``      — a box switched off after hours (#118): ``check`` reports it only when
+                               it has not been up today by 10:00 (``sleep_rule.py``).
 
 Keys are never logged or printed: output shows ``mask_secret`` (length + a sha256 prefix).
 """
@@ -199,6 +201,23 @@ def set_org(path: Path, org: str, names: Iterable[str]) -> list[str]:
     for name in changed:
         logger.info("key store: %s org set to %s", name, org)
     return changed
+
+
+# -- set-sleep (#118) ----------------------------------------------------------------------
+
+
+def set_sleep(path: Path, name: str, may_sleep: bool) -> bool:
+    """Set whether machine *name* may sleep after hours. Returns whether the flag CHANGED (an
+    unchanged flag writes nothing, so the gateway does not reload). Only the flag is touched."""
+    with edit_keystore(path) as entries:
+        current = entries.get(name)
+        if current is None:
+            raise KeystoreError(f"not in the key store {path}: {name} — nothing changed")
+        if current.may_sleep == may_sleep:
+            return False
+        entries[name] = replace(current, may_sleep=may_sleep)
+    logger.info("key store: %s may_sleep set to %s", name, may_sleep)
+    return True
 
 
 # -- remove / rename (#109) ------------------------------------------------------------------

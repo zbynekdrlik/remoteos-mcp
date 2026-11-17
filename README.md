@@ -680,9 +680,10 @@ owner reconnected it. Now:
 | Remove a machine (sold, gone) | `remoteos-gateway machine remove <machine> [<machine> ...] [--dry-run]`: out of `projects.toml` (comments kept), the key store, the registry (unexposed, out of every allow-list), then the normal `sync-configs`, which drops its entries from every config, the direct one included. All or nothing; it refuses when a project would be left with no machines (it names the project: remove or edit that project first). The next `check` forgets it (status file and `fleet-down`). |
 | Rename a machine | `remoteos-gateway machine rename <old> <new> [--dry-run]`: the key-store entry moves as it is (url, key, org, repair recipe), the manifest gets the new name in place, exposure and every consumer's access carry over (a kill-switched box stays unexposed), then `sync-configs` (the old entry goes, the new one comes). A NEW name still left in the registry (exposed or allowed after a hand removal) is refused. If either command stops half way it prints the steps done; rerun the same command to finish. |
 | Set a machine's company | `remoteos-gateway machine set-org <nlmedia\|slovnormal> <machine> [<machine> ...]` (all or nothing; keys are never shown). |
+| A box switched off after hours (a pokladna, a notebook) | `remoteos-gateway machine set-sleep <machine> on` (`off` undoes it). `check` then reports it only when it has not come up today, see "Boxes that sleep after hours" below. |
 | Add a project | One `[projects.<name>]` table in `projects.toml`, then `remoteos-gateway sync-configs`. |
 | See what would change | `remoteos-gateway sync-configs --dry-run` (every key and token masked). |
-| See the machines | `remoteos-gateway machine list` (keys masked, org per machine, counts per org) and `~/.local/state/remoteos-gateway/machines-status.json`. |
+| See the machines | `remoteos-gateway machine list` (keys masked, org and `sleep on/off` per machine, counts per org) and `~/.local/state/remoteos-gateway/machines-status.json`. |
 
 **One company per project (#105).** Every machine belongs to one company: `org` in the key store,
 `nlmedia` or `slovnormal` (Slovnormal / Pekárova žena); `machine list` shows which box is which.
@@ -836,6 +837,16 @@ notice an older version left in U, once.
   per box (owner ruling 2026-11-16: 17 unreachable boxes must not be 17 U items):
   - `fleet-down` lists every box that is not ok (unreachable / 401 / error) with its state,
   - `fleet-stale` every box behind the stable release, `fleet-no-admin` every box without admin.
+  - **Boxes that sleep after hours (#118, owner 2026-11-17).** A machine with `may_sleep`
+    (`machine set-sleep <machine> on`) is left out of `fleet-down` while it is not ok, unless it
+    has not been ok at any moment since local midnight (Europe/Bratislava) and it is 10:00 local or
+    later; then it is reported like any other box. So a pokladna closed at 18:00 raises nothing
+    overnight, and one that did not come up by 10:00 is reported. A box without the flag is reported
+    at once, as before. `check`'s output and the status file still show its real state
+    (`unreachable`, marked `asleep (may_sleep)`); each record keeps `last_ok` (the last run that saw
+    it ok). Waking up after an unreported night is not news; a box that WAS reported announces its
+    recovery as usual. The rule applies to the plain messages too. A box still down after a reported
+    day drops out of the item at midnight and comes back at 10:00 (the rule is per day).
 
   When the set of boxes (or a box's state) changes, the same slug is sent again with the new text
   and replaces the item; when the set is empty the slug is cleared. What each kind's last
@@ -900,6 +911,11 @@ good copy), then `remoteos-gateway machine set-org slovnormal <boxes...>` and `m
 item is sent once more after the upgrade (its fingerprint now holds the org) and after each org change of
 a down box; it replaces the same item. Rolling back below
 0.7.0.dev58 needs the `org` fields removed from `machines.json` first.
+
+**Turning on `may_sleep` (0.7.0.dev64, #118):** upgrade the venv and restart the gateway FIRST, then
+`machine set-sleep <machine> on` for each after-hours box. An older gateway refuses a key store with
+`may_sleep` (an unknown key): at reload it keeps its last good copy, at a start it refuses. Rolling back
+below 0.7.0.dev64 needs `machine set-sleep <machine> off` for each one first (off removes the key).
 
 **Rolling back** to a gateway older than 0.7.0.dev33 after `sync-configs` has run: the old
 version rejects the registry's `managed_by` field (an unknown key) and refuses to start. Drop

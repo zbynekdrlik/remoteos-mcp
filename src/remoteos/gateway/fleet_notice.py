@@ -5,7 +5,8 @@ machine conditions are not one U item per box (17 boxes down were 17 items) but 
 each listing its boxes:
 
 - ``fleet-down``     — every box that is not ``ok`` (``401`` / ``unreachable`` / ``error``), with its state,
-                       grouped under its company (``org`` on its record, #105: Slovnormal apart from nlmedia)
+                       grouped under its company (``org`` on its record, #105: Slovnormal apart from nlmedia);
+                       a ``may_sleep`` box excused after hours (``asleep``, ``sleep_rule``, #118) is left out
 - ``fleet-stale``    — every box behind the stable release (``drift`` on its record)
 - ``fleet-no-admin`` — every box without admin rights (``no_admin`` on its record)
 - ``enroll-pending`` — every registration waiting for ``enroll-accept`` (#101), from
@@ -57,7 +58,8 @@ _GROUP_ORDER = (ORG_TITLES["slovnormal"], ORG_TITLES["nlmedia"], _NO_ORG)
 
 
 def _is_down(record: dict) -> bool:
-    return record["state"] != "ok"
+    """Not ok, and not a box excused for sleeping after hours (``sleep_rule``, #118)."""
+    return record["state"] != "ok" and record.get("asleep") is not True
 
 
 def _is_stale(record: dict) -> bool:
