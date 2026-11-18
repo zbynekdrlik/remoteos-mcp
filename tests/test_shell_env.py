@@ -620,8 +620,10 @@ def test_a_plain_background_program_dies_with_the_shell_call(tree, tmp_path):
     pidfile = tmp_path / "pid"
     out = tool_error(lambda: server.Shell(f'sleep 60 & echo $! > "{pidfile}"', timeout=2))
     assert out == (
-        "Command timed out after 2s and was stopped: anything it had not done by then did not run. "
-        "Pass a larger timeout (Shell has no upper limit), or start long work with TaskCreate."
+        "Command timed out after 2s and was stopped: the rest of the command did not run "
+        "(work it had already handed to a service or a detached process may still be running). "
+        "Pass a larger timeout (Shell has no upper limit). For work longer than a call can wait, "
+        "start it detached or with TaskCreate and check its result with a later call."
     )
     pid = _pid_written_to(pidfile)
     try:

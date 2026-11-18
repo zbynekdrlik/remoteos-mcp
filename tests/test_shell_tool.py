@@ -146,8 +146,10 @@ def test_a_command_that_outlives_its_timeout_is_stopped_and_the_error_says_what_
     before, after = tmp_path / "before", tmp_path / "after"
     out = tool_error(lambda: server.Shell(f"touch '{before}'; sleep 30; touch '{after}'", timeout=1))
     assert out == (
-        "Command timed out after 1s and was stopped: anything it had not done by then did not run. "
-        "Pass a larger timeout (Shell has no upper limit), or start long work with TaskCreate."
+        "Command timed out after 1s and was stopped: the rest of the command did not run "
+        "(work it had already handed to a service or a detached process may still be running). "
+        "Pass a larger timeout (Shell has no upper limit). For work longer than a call can wait, "
+        "start it detached or with TaskCreate and check its result with a later call."
     )
     assert before.exists()
     assert not after.exists()  # the part after the timeout really never ran
@@ -166,9 +168,11 @@ def test_without_a_timeout_the_command_gets_the_default_of_120_seconds(monkeypat
 def test_the_description_states_the_default_the_missing_maximum_and_taskcreate():
     # what an agent reads before it picks a value (tools/list); the golden file pins the exact text
     doc = " ".join(server.Shell.__doc__.split())
-    assert "default 120" in doc
-    assert "no upper limit" in doc
-    assert "TaskCreate" in doc
+    timeout_arg = doc.split("timeout:", 1)[1].split("cwd:", 1)[0]  # the parameter's own description
+    assert "default 120" in timeout_arg
+    assert "no upper limit" in timeout_arg
+    assert "TaskCreate" in timeout_arg
+    assert "detached" in timeout_arg  # review round 1: TaskCreate has no real run-once mode yet
 
 
 def test_the_cli_default_is_the_tools_default():
