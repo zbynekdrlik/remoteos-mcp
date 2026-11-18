@@ -619,7 +619,10 @@ def test_a_plain_background_program_dies_with_the_shell_call(tree, tmp_path):
     # the call runs to its timeout and the process-group kill takes the program with it
     pidfile = tmp_path / "pid"
     out = tool_error(lambda: server.Shell(f'sleep 60 & echo $! > "{pidfile}"', timeout=2))
-    assert out == "Command timed out after 2s"
+    assert out == (
+        "Command timed out after 2s and was stopped: anything it had not done by then did not run. "
+        "Pass a larger timeout (Shell has no upper limit), or start long work with TaskCreate."
+    )
     pid = _pid_written_to(pidfile)
     try:
         assert _gone(pid)

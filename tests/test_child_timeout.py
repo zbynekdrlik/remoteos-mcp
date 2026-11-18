@@ -86,7 +86,10 @@ def test_a_timed_out_shell_command_is_an_error_and_its_children_are_killed(grand
     started = time.monotonic()
     with pytest.raises(Exception) as exc:
         server.Shell(f"'{sys.executable}' '{script}' '{grandchild_pid_file}'", timeout=2)
-    assert str(exc.value) == "Command timed out after 2s"
+    assert str(exc.value) == (
+        "Command timed out after 2s and was stopped: anything it had not done by then did not run. "
+        "Pass a larger timeout (Shell has no upper limit), or start long work with TaskCreate."
+    )
     assert time.monotonic() - started < 15
     assert _gone_within(int(grandchild_pid_file.read_text()), 5), "the grandchild survived the timeout"
 

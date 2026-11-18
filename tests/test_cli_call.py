@@ -331,7 +331,10 @@ def test_shell_timeout_goes_to_the_remote_command_and_a_timeout_is_a_tool_error_
     ran = run(MACHINE, "Shell", "sleep 20", "--timeout", "1")
     assert time.monotonic() - started < 15
     assert ran.code == 125
-    assert ran.stderr == "remoteos-call: Command timed out after 1s\n"
+    assert ran.stderr == (
+        "remoteos-call: Command timed out after 1s and was stopped: anything it had not done by then did not run. "
+        "Pass a larger timeout (Shell has no upper limit), or start long work with TaskCreate.\n"
+    )
 
 
 def test_a_direct_machine_entry_works_without_the_gateway(run):

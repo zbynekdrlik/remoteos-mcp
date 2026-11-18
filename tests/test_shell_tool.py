@@ -80,6 +80,7 @@ def popen(monkeypatch):
             self.kwargs = kwargs
 
         def communicate(self, timeout=None):
+            calls[-1][1]["communicate_timeout"] = timeout  # what the child is given to finish in (#125)
             # the type subprocess returns: text in text mode, else bytes (#48)
             return (returned(self.kwargs, "ok\n"), returned(self.kwargs, ""))
 
@@ -132,3 +133,49 @@ def test_output_that_is_not_utf8_is_still_the_commands_answer():
 
 # The Windows output encoding (#32 rounds 4-5: its own console; #48: UTF-8, exact) is tested in
 # tests/test_output_encoding.py.
+
+
+# --------------------------------------------------------------------------- the timeout (#125)
+
+
+def test_a_command_that_outlives_its_timeout_is_stopped_and_the_error_says_what_to_do(tmp_path):
+    # #125: a caller guessed timeout=120 for a firewall install; Shell stopped it half done and the
+    # bare "Command timed out after 120s" read like a server limit. The reply must say the command
+    # was stopped, that the rest never ran, and that a larger timeout (no maximum) or TaskCreate is
+    # the way, so the next attempt is not another guess.
+    before, after = tmp_path / "before", tmp_path / "after"
+    out = tool_error(lambda: server.Shell(f"touch '{before}'; sleep 30; touch '{after}'", timeout=1))
+    assert out == (
+        "Command timed out after 1s and was stopped: anything it had not done by then did not run. "
+        "Pass a larger timeout (Shell has no upper limit), or start long work with TaskCreate."
+    )
+    assert before.exists()
+    assert not after.exists()  # the part after the timeout really never ran
+
+
+def test_without_a_timeout_the_command_gets_the_default_of_120_seconds(monkeypatch, popen):
+    # #125: the default is chosen from the gateway journal (p99 of real Shell calls = 89 s; the
+    # old 30 s sat at the p95 and a visible cluster of calls was killed there)
+    monkeypatch.setattr(server, "is_windows", lambda: False)
+    monkeypatch.setattr(server, "is_macos", lambda: False)
+    assert server.Shell("true") == "ok"
+    [(_, kwargs)] = popen
+    assert kwargs["communicate_timeout"] == 120
+
+
+def test_the_description_states_the_default_the_missing_maximum_and_taskcreate():
+    # what an agent reads before it picks a value (tools/list); the golden file pins the exact text
+    doc = " ".join(server.Shell.__doc__.split())
+    assert "default 120" in doc
+    assert "no upper limit" in doc
+    assert "TaskCreate" in doc
+
+
+def test_the_cli_default_is_the_tools_default():
+    # remoteos-call sends Shell's timeout explicitly; it must not quietly keep the old 30 s
+    import inspect
+
+    from remoteos import cli_call
+
+    default = inspect.signature(server.Shell).parameters["timeout"].default
+    assert cli_call.SHELL_DEFAULT_TIMEOUT_S == default == 120
