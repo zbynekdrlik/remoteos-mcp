@@ -1083,8 +1083,8 @@
      "type": "string"
     },
     "timeout": {
-     "default": 30,
-     "description": "Timeout in seconds (default 30).",
+     "default": 120,
+     "description": "Timeout in seconds (default 120). Shell has no upper limit: pass what the\ncommand really needs (an installer, a driver query, many firewall rules). When it\nruns out the command is stopped part-way and the rest never runs, so a change that\nis not idempotent stays half done. A gateway or client in between may end a call\nearlier (the dev1 gateway after about an hour): start such long work with TaskCreate.",
      "type": "integer"
     }
    },

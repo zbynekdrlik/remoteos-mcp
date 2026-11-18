@@ -73,7 +73,7 @@ _DOWNLOAD_RE = re.compile(r"\Abase64:(\d+)bytes:", re.ASCII)
 _UPLOAD_RE = re.compile(r"\AWritten (\d+) bytes to ", re.ASCII)
 _HASH_RE = re.compile(r"\Asha256:([0-9a-f]{64}) (\d+) bytes\Z", re.ASCII)
 
-SHELL_DEFAULT_TIMEOUT_S = 30  # Shell's own default
+SHELL_DEFAULT_TIMEOUT_S = 120  # Shell's own default (#125; tools/shell.py, pinned equal by a test)
 DEFAULT_WAIT_S = 300.0  # put/get/--json: how long the client waits for the reply
 CONNECT_TIMEOUT_S = 30.0
 # One FileUpload call of a put: 2.5 MB is 3.34 MB of base64, under a machine's 4 MiB per request.
@@ -631,7 +631,7 @@ def _check_options(machine, tool, project, list_machines, timeout, cwd, json_arg
 @click.option(
     "--timeout",
     type=click.IntRange(min=1),
-    help="Shell: the command's timeout in seconds (default 30). put/get/--json: how long to wait (default 300).",
+    help="Shell: the command's timeout in seconds (default 120). put/get/--json: how long to wait (default 300).",
 )
 @click.option("--cwd", help="Shell: the remote working directory.")
 @click.option("--json", "json_args", help="The tool's arguments as a JSON object (any tool).")
