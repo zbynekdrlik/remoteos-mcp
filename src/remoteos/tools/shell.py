@@ -29,8 +29,10 @@ def timeout_message(timeout: int) -> str:
     half-done, non-idempotent changes on the box. So it says what happened and what to do.
     """
     return (
-        f"Command timed out after {timeout}s and was stopped: anything it had not done by then did not run. "
-        "Pass a larger timeout (Shell has no upper limit), or start long work with TaskCreate."
+        f"Command timed out after {timeout}s and was stopped: the rest of the command did not run "
+        "(work it had already handed to a service or a detached process may still be running). "
+        "Pass a larger timeout (Shell has no upper limit). For work longer than a call can wait, "
+        "start it detached or with TaskCreate and check its result with a later call."
     )
 
 
@@ -75,7 +77,9 @@ def Shell(command: str, timeout: int = SHELL_DEFAULT_TIMEOUT_S, cwd: str = "") -
             command really needs (an installer, a driver query, many firewall rules). When it
             runs out the command is stopped part-way and the rest never runs, so a change that
             is not idempotent stays half done. A gateway or client in between may end a call
-            earlier (the dev1 gateway after about an hour): start such long work with TaskCreate.
+            earlier (the dev1 gateway after about an hour): start such long work detached
+            (``Start-Process`` on Windows, ``setsid -f cmd >log 2>&1`` elsewhere) or with
+            TaskCreate, and check its result with a later call.
         cwd: Working directory (spaces and quotes are fine; ~ and $VAR, or %VAR%
             on Windows, are expanded). If provided, the command runs inside that
             directory; a path that is not an existing directory is an error and

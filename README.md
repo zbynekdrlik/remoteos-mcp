@@ -466,10 +466,14 @@ short `timeout`.
 
 **Shell's `timeout` (#125).** The default is 120 s, and the server sets no upper limit: pass what
 the command really needs (an installer, a driver query, a batch of firewall rules). A command that
-outlives its timeout is stopped part-way and the rest of it never runs, so a change that is not
-idempotent stays half done; the error says so ("Command timed out after N s and was stopped: …
-Pass a larger timeout …, or start long work with TaskCreate"). A gateway or client in between can
-end a call earlier (the dev1 gateway after about an hour); start such work as a task (TaskCreate).
+outlives its timeout is stopped part-way (with everything it started) and the rest of it never
+runs, so a change that is not idempotent stays half done; work it had already handed to a service
+(an `msiexec` install) or a detached process may go on. The error says so ("Command timed out
+after Ns and was stopped: … Pass a larger timeout …"). A gateway or client in between can end a
+call earlier (the dev1 gateway after about an hour): start such work detached (`Start-Process` on
+Windows, `setsid -f cmd >log 2>&1` elsewhere) or with TaskCreate, and read its result with a later
+call. The default also bounds how long a stuck call (a prompt, a plain `prog &`) holds one of the
+3 Shell slots a machine runs at once.
 
 ## One-command onboarding
 
@@ -959,7 +963,7 @@ straight to the url: `HTTP(S)_PROXY`, `~/.netrc` and `SSL_CERT_FILE`/`SSL_CERT_D
 |---|---|
 | Shell: N | the remote command's exit code. A code outside 0..255 is 255 (a POSIX signal `-S` is 128+S), and one stderr line names the real code. |
 | 0 | put/get/any other tool succeeded |
-| 125 | the tool failed (the MCP result is an error: `Command timed out after 30s`, `File not found: …`, `Unknown tool: …`, invalid arguments), or a put/get size or sha256 check failed |
+| 125 | the tool failed (the MCP result is an error: `Command timed out after 120s and was stopped: …`, `File not found: …`, `Unknown tool: …`, invalid arguments), or a put/get size or sha256 check failed |
 | 126 | the CLI got no result: no or broken config, an unknown machine, connection refused, 401/403/404, 413 (request too large), no reply in time, a dropped connection, a local file it cannot read or write. After a timeout or a dropped connection the remote command MAY have run, or may still run: do not blindly retry a command that is not idempotent. |
 | 130 | interrupted (Ctrl-C); the remote command may still run |
 | 141 | stdout was closed (a broken pipe, e.g. `\| head`) |
