@@ -16,6 +16,25 @@ from remoteos.platform.command import powershell_argv, run_child
 from remoteos.platform.linux.shell_env import shell_env
 from remoteos.taskmanager import StructuredText
 
+# Shell's default timeout (#125), from the dev1 gateway journal: the p99 of real Shell calls was
+# 89 s, and the old 30 s (the p95) visibly killed calls. remoteos-call keeps the same value
+# (``cli_call.SHELL_DEFAULT_TIMEOUT_S``, pinned equal by a test).
+SHELL_DEFAULT_TIMEOUT_S = 120
+
+
+def timeout_message(timeout: int) -> str:
+    """What a caller is told when its command outlived ``timeout`` and was stopped (#125).
+
+    A bare "timed out" read like a server limit: callers guessed small values and left
+    half-done, non-idempotent changes on the box. So it says what happened and what to do.
+    """
+    return (
+        f"Command timed out after {timeout}s and was stopped: the rest of the command did not run "
+        "(work it had already handed to a service or a detached process may still be running). "
+        "Pass a larger timeout (Shell has no upper limit). For work longer than a call can wait, "
+        "start it detached or with TaskCreate and check its result with a later call."
+    )
+
 
 @mcp.tool(
     annotations=ToolAnnotations(
@@ -35,7 +54,7 @@ from remoteos.taskmanager import StructuredText
     },
 )
 @reports_errors
-def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
+def Shell(command: str, timeout: int = SHELL_DEFAULT_TIMEOUT_S, cwd: str = "") -> str:
     """Execute a shell command (PowerShell on Windows, zsh on macOS, bash on Linux).
 
     On Windows the command runs unchanged in a console switched to UTF-8 before PowerShell
@@ -54,7 +73,13 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
 
     Args:
         command: Command to execute.
-        timeout: Timeout in seconds (default 30).
+        timeout: Timeout in seconds (default 120). Shell has no upper limit: pass what the
+            command really needs (an installer, a driver query, many firewall rules). When it
+            runs out the command is stopped part-way and the rest never runs, so a change that
+            is not idempotent stays half done. A gateway or client in between may end a call
+            earlier (the dev1 gateway after about an hour): start such long work detached
+            (``Start-Process`` on Windows, ``setsid -f cmd >log 2>&1`` elsewhere) or with
+            TaskCreate, and check its result with a later call.
         cwd: Working directory (spaces and quotes are fine; ~ and $VAR, or %VAR%
             on Windows, are expanded). If provided, the command runs inside that
             directory; a path that is not an existing directory is an error and
@@ -88,7 +113,7 @@ def Shell(command: str, timeout: int = 30, cwd: str = "") -> str:
     try:
         result = run_child(shell_cmd, timeout, windows, cwd=workdir, env=env)
     except subprocess.TimeoutExpired:
-        raise failure(f"Command timed out after {timeout}s") from None  # run_child logged it
+        raise failure(timeout_message(timeout)) from None  # run_child logged it
     # A non-zero exit is the command's own answer (it ran), not a tool failure.
     return StructuredText(
         result.reply(), {"stdout": result.stdout, "stderr": result.stderr, "exit_code": result.returncode}

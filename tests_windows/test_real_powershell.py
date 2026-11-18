@@ -142,7 +142,8 @@ def test_a_timed_out_powershell_child_is_killed_with_its_tree(tmp_path):
 def test_a_timed_out_shell_command_is_an_error_and_powershell_is_killed(tmp_path):
     pid_file = tmp_path / "powershell.pid"
     started = time.monotonic()
-    with pytest.raises(Exception, match=r"^Command timed out after 15s$"):
+    stopped = r"^Command timed out after 15s and was stopped: .* check its result with a later call\.$"
+    with pytest.raises(Exception, match=stopped):
         server.Shell(_sleeps_after_writing_its_pid(pid_file), timeout=15)
     assert time.monotonic() - started < 60
     assert _gone_within(int(pid_file.read_text().strip()), 10), "PowerShell survived the timeout"

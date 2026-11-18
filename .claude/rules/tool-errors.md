@@ -90,6 +90,14 @@ paths:
   console trampoline, `run_child` and its timeout tree kill, `decode_output`, the own console,
   the Windows system language) is in
   `.claude/rules/child-output.md` (#48).
+- **Shell's timeout (#125).** Default `SHELL_DEFAULT_TIMEOUT_S` = 120 s in `tools/shell.py`, chosen
+  from the dev1 gateway journal (p99 of real Shell calls 89 s; the old 30 s killed a visible cluster).
+  `cli_call.SHELL_DEFAULT_TIMEOUT_S` is the same number (the CLI does not import the server);
+  `test_the_cli_default_is_the_tools_default` pins them equal. Keep it below `STALE_AFTER_S` (300):
+  an omitted `timeout` is not a declared runtime, so the sweep's own limit applies. The timeout
+  reply (`timeout_message`) is a contract agents act on: it says the command was stopped, the rest
+  did not run (work handed to a service or a detached process may go on), and to pass a larger
+  timeout (no server maximum) or start long work detached / with TaskCreate. Never call it a limit.
 - **The stale-task sweep** (`_cleanup_old`, `STALE_AFTER_S` = 300) cancels a RUNNING task, and
   a cancelled task's reply is an error. A call that declares its runtime through a numeric
   argument in `taskmanager._RUNTIME_ARGS` (Shell's `timeout`, Wait's `seconds`) extends its
