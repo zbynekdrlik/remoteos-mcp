@@ -20,6 +20,7 @@ from test_gateway_owner_notice import _option
 
 from remoteos.gateway import check as check_module
 from remoteos.gateway import sleep_rule
+from remoteos.gateway.keystore import KeystoreError, set_sleep
 from remoteos.gateway.registry import MachineSourceError, parse_keystore
 
 URL = "http://n.lan:8092/mcp"
@@ -231,3 +232,30 @@ def test_a_box_reported_before_it_was_made_occasional_comes_back_without_news(
             check.run_at(gateway.base_url, _at("2026-12-03T11:00:00"))  # switched on weeks later
     plain = [argv for argv in check.calls() if "--owner-notice" not in argv and "--clear-owner-notice" not in argv]
     assert plain == []  # no "running again" for a box the owner said may be off
+
+
+def test_an_occasional_box_that_is_on_but_refuses_its_key_is_reported(tmp_path, monkeypatch, project, with_flag):
+    """Only OFF (unreachable) is excused: a notebook that answers 401 is on and broken, which is news."""
+    check = SleepCheck(tmp_path, monkeypatch, project)
+    key, rotated = fresh_secret("k"), fresh_secret("k")
+    with FakeFleetMachine(healthz=True) as gateway, FakeFleetMachine(accept_keys=(rotated,)) as notebook:
+        check.store({"mac-david-nb": {"url": notebook.url, "key": key, "may_sleep": True, "occasional": True}})
+        report = check.run_at(gateway.base_url, _at("2026-11-19T11:00:00"))
+    record = report.status["machines"]["mac-david-nb"]
+    assert record["state"] == "401" and "asleep" not in record and record["occasional"] is True
+    assert "mac-david-nb: odmieta kľúč (401)" in check.down_item()
+
+
+def test_an_occasional_box_in_error_follows_the_after_hours_rule():
+    error = {"state": "error", "last_ok": "2026-10-21T15:00:00+00:00"}
+    assert sleep_rule.excused(error, _at("2026-11-19T07:00:00"), occasional=True)  # 08:00 local: before ten
+    assert not sleep_rule.excused(error, _at("2026-11-19T11:00:00"), occasional=True)
+
+
+def test_set_sleep_refuses_a_mode_that_is_not_off_on_or_occasional(tmp_path):
+    write_private_json(tmp_path / "cfg" / "machines.json", {"mac-david-nb": {"url": URL, "key": "k1"}})
+    before = _stored(tmp_path)
+    for bad in (True, "yes"):
+        with pytest.raises(KeystoreError, match="sleep mode"):
+            set_sleep(tmp_path / "cfg" / "machines.json", "mac-david-nb", bad)
+    assert _stored(tmp_path) == before
