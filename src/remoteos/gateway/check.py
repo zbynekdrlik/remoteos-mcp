@@ -22,7 +22,8 @@ No key is ever logged, printed, written to the status file or put in a notificat
 
 A box with ``may_sleep`` in the key store (``sleep_rule.py``, #118) is switched off after hours:
 while it is not ok it is left out of the owner notice (``asleep`` on its record), unless it has not
-been ok since local midnight and it is 10:00 or later. ``last_ok`` is kept on every record.
+been ok since local midnight and it is 10:00 or later. ``last_ok`` is kept on every record. One
+also marked ``occasional`` (#130, a notebook off for weeks) is left out whenever it is not ok.
 
 Each machine's public ``/health`` gives its version and whether it has admin rights: ``drift.py``
 reports a box older than the stable release (#63), ``no_admin.py`` a box without admin (#57).
@@ -425,8 +426,8 @@ def _check_loaded(
     # boxes switched off after hours (#118): last_ok on every record, asleep = left out of the notice
     # a failed run rewrote checked_at over older records: it never saw a box ok
     seen_at = None if isinstance(previous.get("error"), dict) else previous.get("checked_at")
-    flags = {name: entry.may_sleep for name, entry in entries.items()}
-    sleep_rule.apply(status["machines"], old_machines, flags, moment, stamp, seen_at)
+    modes = {name: entry.sleep for name, entry in entries.items()}  # off / on / occasional (#130)
+    sleep_rule.apply(status["machines"], old_machines, modes, moment, stamp, seen_at)
     waiting = fleet_notice.pending_of(previous) if enroll_pending is None else enroll_pending
     if waiting:
         status[fleet_notice.PENDING_KEY] = waiting
@@ -438,7 +439,8 @@ def _check_loaded(
     pending.update({n: r for n, r in status["machines"].items() if not r["notified"] and r.get("asleep") is not True})
     for name, record in status["machines"].items():
         if record.get("asleep") is True:
-            logger.info("check: %s is %s, asleep after hours (may_sleep) — not reported", name, record["state"])
+            why = "switched on only occasionally" if record.get("occasional") is True else "asleep after hours"
+            logger.info("check: %s is %s, %s (may_sleep) — not reported", name, record["state"], why)
     # The check could not run last time (or that recovery was not announced yet): say it is back.
     recovered = isinstance(previous.get("error"), dict) or previous.get("recovery_pending") is True
     for name, record in pending.items():

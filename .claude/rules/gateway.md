@@ -317,6 +317,15 @@ paths:
     re-sent at 10:00 (the rule is per local day; the owner's wording, a known daily churn).
   - Tests inject the clock: `run_check(now=...)`, or `monkeypatch` `check.utc_now` for the CLI
     (`tests/test_gateway_may_sleep.py`).
+  - **`occasional` (#130, owner 2026-11-19, notebooks off for weeks):** `MachineEntry.occasional` (bool,
+    key store `"occasional"`, written ONLY when true, and refused at parse without `may_sleep: true`);
+    `MachineEntry.sleep` = `off|on|occasional` (`registry.SLEEP_MODES`) is what `set-sleep`,
+    `machine list` and `check` use. `keystore.set_sleep(path, name, mode)` writes both keys through
+    `replace`. `sleep_rule.excused(..., occasional=True)` = excused whenever not ok; `apply` takes the
+    mode per machine and writes `occasional: true` on the record. Wake-up of a box whose previous record
+    was asleep AND occasional is never news, even if it was `notified` (reported before the switch).
+    `check` output: `asleep (occasional)`. Same deploy order and older-gateway refusal as `may_sleep`.
+    Tests: `tests/test_gateway_occasional_sleep.py`.
 - **Restart list (`live_sessions.py` + `session_scan.py`, #66; print-only since #109):**
   - Owner ROZHODNUTÉ 2026-11-17 (#60): `report_restarts` echoes + `logger.info`s ONE text and
     notifies nobody; `sync-configs` has no notify options (`--airuleset` etc. are a usage error);

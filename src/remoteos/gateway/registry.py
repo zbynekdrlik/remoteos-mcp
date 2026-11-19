@@ -64,7 +64,10 @@ _SSH_DEST_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}@[A-Za-z0-9][A-Za-z0-9.-]{0,25
 
 _REGISTRY_KEYS = frozenset({"exposed", "consumers"})
 _CONSUMER_KEYS = frozenset({"sha256", "machines", "added", "managed_by"})
-_KEYSTORE_ENTRY_KEYS = frozenset({"url", "key", "repair", "org", "may_sleep"})
+_KEYSTORE_ENTRY_KEYS = frozenset({"url", "key", "repair", "org", "may_sleep", "occasional"})
+# How a machine may be off (#118, #130): `machine set-sleep NAME <mode>`, `machine list` `sleep <mode>`.
+SLEEP_OFF, SLEEP_ON, SLEEP_OCCASIONAL = "off", "on", "occasional"
+SLEEP_MODES = (SLEEP_OFF, SLEEP_ON, SLEEP_OCCASIONAL)
 _REPAIR_KEYS = frozenset({"ssh", "key_file", "sudo"})
 
 # The company a machine belongs to (#105, owner 2026-11-17: Slovnormal boxes kept apart from the
@@ -443,10 +446,18 @@ class MachineEntry:
     repair: RepairRecipe | None = None
     org: str | None = None  # one of ORGS; None = not set yet (#105)
     may_sleep: bool = False  # switched off after hours (#118): check reports it only if not up today
+    occasional: bool = False  # off for any length of time (#130): never in the owner notice; needs may_sleep
 
     @property
     def authorization(self) -> str:
         return f"Bearer {self.key}"
+
+    @property
+    def sleep(self) -> str:
+        """One of SLEEP_MODES: ``off`` (up around the clock), ``on`` (after hours, #118), ``occasional`` (#130)."""
+        if not self.may_sleep:
+            return SLEEP_OFF
+        return SLEEP_OCCASIONAL if self.occasional else SLEEP_ON
 
     def to_json(self) -> dict:
         data: dict = {"url": self.url, "key": self.key}
@@ -454,6 +465,8 @@ class MachineEntry:
             data["org"] = self.org
         if self.may_sleep:  # off is the key's absence: the shape every older reader knows
             data["may_sleep"] = True
+        if self.occasional:  # likewise: a key store that never used it is written exactly as before
+            data["occasional"] = True
         if self.repair is not None:
             data["repair"] = self.repair.to_json()
         return data
@@ -507,7 +520,7 @@ def parse_repair(raw: object, name: str) -> RepairRecipe:
 
 
 def parse_keystore(data: object, source: object = "key store") -> dict[str, MachineEntry]:
-    """Strictly validate the key-store shape ``{name: {url, key[, org][, may_sleep][, repair]}}``.
+    """Strictly validate the key-store shape ``{name: {url, key[, org][, may_sleep[, occasional]][, repair]}}``.
 
     Any problem raises ``MachineSourceError`` naming the machine, never the key.
     """
@@ -532,7 +545,14 @@ def parse_keystore(data: object, source: object = "key store") -> dict[str, Mach
         may_sleep = raw.get("may_sleep", False)
         if not isinstance(may_sleep, bool):
             raise MachineSourceError(f"{source}: machine {name!r} 'may_sleep' must be true or false")
-        entries[name] = MachineEntry(url=url, key=key, repair=repair, org=org, may_sleep=may_sleep)
+        occasional = raw.get("occasional", False)
+        if not isinstance(occasional, bool):
+            raise MachineSourceError(f"{source}: machine {name!r} 'occasional' must be true or false")
+        if occasional and not may_sleep:  # a hand edit: an occasional box is a sleeping box
+            raise MachineSourceError(f"{source}: machine {name!r} 'occasional' needs 'may_sleep': true")
+        entries[name] = MachineEntry(
+            url=url, key=key, repair=repair, org=org, may_sleep=may_sleep, occasional=occasional
+        )
     return entries
 
 

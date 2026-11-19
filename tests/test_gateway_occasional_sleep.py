@@ -212,3 +212,22 @@ def test_check_output_marks_an_occasional_box(tmp_path, monkeypatch, project, wi
     line = next(line for line in result.output.splitlines() if line.startswith("  mac-david-nb"))
     assert "unreachable" in line and "asleep (occasional)" in line
     assert "asleep (not in the owner notice): mac-david-nb" in result.output
+
+
+def test_a_box_reported_before_it_was_made_occasional_comes_back_without_news(
+    tmp_path, monkeypatch, project, with_flag
+):
+    check = SleepCheck(tmp_path, monkeypatch, project)
+    key = fresh_secret("k")
+    with FakeFleetMachine(healthz=True) as gateway:
+        check.store({"win-alex-nb": {"url": closed_port_url(), "key": key, "may_sleep": True}})
+        check.run_at(gateway.base_url, _at("2026-11-19T11:00:00"))  # reported in fleet-down
+        assert "win-alex-nb" in check.down_item()
+        entry = {"key": key, "may_sleep": True, "occasional": True}
+        check.store({"win-alex-nb": {"url": closed_port_url(), **entry}})
+        check.run_at(gateway.base_url, _at("2026-11-19T11:10:00"))  # made occasional: item cleared
+        with FakeFleetMachine(accept_keys=(key,)) as notebook:
+            check.store({"win-alex-nb": {"url": notebook.url, **entry}})
+            check.run_at(gateway.base_url, _at("2026-12-03T11:00:00"))  # switched on weeks later
+    plain = [argv for argv in check.calls() if "--owner-notice" not in argv and "--clear-owner-notice" not in argv]
+    assert plain == []  # no "running again" for a box the owner said may be off

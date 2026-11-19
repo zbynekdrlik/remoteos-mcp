@@ -16,7 +16,8 @@ consumer on its next call, with no consumer-side change. It is edited only throu
 - ``machine repair-recipe``  — the explicit 401 auto-repair recipe ``check`` may use;
 - ``machine set-org``        — the company a machine belongs to (#105): ``nlmedia`` / ``slovnormal``;
 - ``machine set-sleep``      — a box switched off after hours (#118): ``check`` reports it only when
-                               it has not been up today by 10:00 (``sleep_rule.py``).
+                               it has not been up today by 10:00 (``sleep_rule.py``); ``occasional``
+                               (#130): a box off for any length of time, never in the owner notice.
 
 Keys are never logged or printed: output shows ``mask_secret`` (length + a sha256 prefix).
 """
@@ -43,6 +44,9 @@ from remoteos.gateway.probe import (
 )
 from remoteos.gateway.registry import (
     DEFAULT_MACHINES_PATH,
+    SLEEP_MODES,
+    SLEEP_OCCASIONAL,
+    SLEEP_ON,
     MachineEntry,
     MachineSourceError,
     authorization_header,
@@ -206,17 +210,22 @@ def set_org(path: Path, org: str, names: Iterable[str]) -> list[str]:
 # -- set-sleep (#118) ----------------------------------------------------------------------
 
 
-def set_sleep(path: Path, name: str, may_sleep: bool) -> bool:
-    """Set whether machine *name* may sleep after hours. Returns whether the flag CHANGED (an
-    unchanged flag writes nothing, so the gateway does not reload). Only the flag is touched."""
+def set_sleep(path: Path, name: str, mode: str) -> bool:
+    """Set machine *name*'s sleep mode, one of ``SLEEP_MODES`` (``off`` / ``on`` / ``occasional``).
+    Returns whether it CHANGED (an unchanged mode writes nothing, so the gateway does not reload).
+    Only ``may_sleep`` and ``occasional`` are touched."""
+    if mode not in SLEEP_MODES:
+        raise KeystoreError(f"sleep mode must be one of {', '.join(SLEEP_MODES)} — nothing changed")
     with edit_keystore(path) as entries:
         current = entries.get(name)
         if current is None:
             raise KeystoreError(f"not in the key store {path}: {name} — nothing changed")
-        if current.may_sleep == may_sleep:
+        if current.sleep == mode:
             return False
-        entries[name] = replace(current, may_sleep=may_sleep)
-    logger.info("key store: %s may_sleep set to %s", name, may_sleep)
+        entries[name] = replace(
+            current, may_sleep=mode in (SLEEP_ON, SLEEP_OCCASIONAL), occasional=mode == SLEEP_OCCASIONAL
+        )
+    logger.info("key store: %s sleep set to %s", name, mode)
     return True
 
 

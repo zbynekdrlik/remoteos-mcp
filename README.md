@@ -691,10 +691,11 @@ owner reconnected it. Now:
 | Remove a machine (sold, gone) | `remoteos-gateway machine remove <machine> [<machine> ...] [--dry-run]`: out of `projects.toml` (comments kept), the key store, the registry (unexposed, out of every allow-list), then the normal `sync-configs`, which drops its entries from every config, the direct one included. All or nothing; it refuses when a project would be left with no machines (it names the project: remove or edit that project first). The next `check` forgets it (status file and `fleet-down`). |
 | Rename a machine | `remoteos-gateway machine rename <old> <new> [--dry-run]`: the key-store entry moves as it is (url, key, org, repair recipe), the manifest gets the new name in place, exposure and every consumer's access carry over (a kill-switched box stays unexposed), then `sync-configs` (the old entry goes, the new one comes). A NEW name still left in the registry (exposed or allowed after a hand removal) is refused. If either command stops half way it prints the steps done; rerun the same command to finish. |
 | Set a machine's company | `remoteos-gateway machine set-org <nlmedia\|slovnormal> <machine> [<machine> ...]` (all or nothing; keys are never shown). |
-| A box switched off after hours (a pokladna, a notebook) | `remoteos-gateway machine set-sleep <machine> on` (`off` undoes it). `check` then reports it only when it has not come up today, see "Boxes that sleep after hours" below. |
+| A box switched off after hours (a pokladna) | `remoteos-gateway machine set-sleep <machine> on` (`off` undoes it). `check` then reports it only when it has not come up today, see "Boxes that sleep after hours" below. |
+| A box switched on only now and then (a notebook) | `remoteos-gateway machine set-sleep <machine> occasional` (`on` / `off` change it back). `check` then never puts it in the owner notice while it is down, however long; its real state stays in `check`'s output and the `fleet` server. |
 | Add a project | One `[projects.<name>]` table in `projects.toml`, then `remoteos-gateway sync-configs`. |
 | See what would change | `remoteos-gateway sync-configs --dry-run` (every key and token masked). |
-| See the machines | `remoteos-gateway machine list` (keys masked, org and `sleep on/off` per machine, counts per org) and `~/.local/state/remoteos-gateway/machines-status.json`. |
+| See the machines | `remoteos-gateway machine list` (keys masked, org and `sleep on/off/occasional` per machine, counts per org) and `~/.local/state/remoteos-gateway/machines-status.json`. |
 
 **One company per project (#105).** Every machine belongs to one company: `org` in the key store,
 `nlmedia` or `slovnormal` (Slovnormal / Pekárova žena); `machine list` shows which box is which.
@@ -858,6 +859,14 @@ notice an older version left in U, once.
     it ok). Waking up after an unreported night is not news; a box that WAS reported announces its
     recovery as usual. The rule applies to the plain messages too. A box still down after a reported
     day drops out of the item at midnight and comes back at 10:00 (the rule is per day).
+  - **Boxes switched on only occasionally (#130, owner 2026-11-19).** `machine set-sleep <machine>
+    occasional` (key store `"occasional": true` next to `"may_sleep": true`; `occasional` without
+    `may_sleep` is refused) is for a notebook that is off for days or weeks: it is left out of
+    `fleet-down` and the plain messages whenever it is not ok, at any hour, however long. `check`'s
+    output marks it `asleep (occasional)`, the status record carries `occasional: true`, and the
+    `fleet` server shows its real state. Coming back up is not news, even after it was reported
+    before it was made occasional. Switching a reported box to occasional re-sends `fleet-down`
+    without it (or clears the item when it was the only box).
 
   When the set of boxes (or a box's state) changes, the same slug is sent again with the new text
   and replaces the item; when the set is empty the slug is cleared. What each kind's last
@@ -927,6 +936,11 @@ a down box; it replaces the same item. Rolling back below
 `machine set-sleep <machine> on` for each after-hours box. An older gateway refuses a key store with
 `may_sleep` (an unknown key): at reload it keeps its last good copy, at a start it refuses. Rolling back
 below 0.7.0.dev64 needs `machine set-sleep <machine> off` for each one first (off removes the key).
+
+**Turning on `occasional` (0.7.0.dev66, #130):** the same order: upgrade the venv and restart the
+gateway FIRST, then `machine set-sleep <machine> occasional`. An older gateway refuses the `occasional`
+key the same way. Rolling back below 0.7.0.dev66 needs `machine set-sleep <machine> on` (or `off`) for
+each one first. A key store without the key reads exactly as before.
 
 **Rolling back** to a gateway older than 0.7.0.dev33 after `sync-configs` has run: the old
 version rejects the registry's `managed_by` field (an unknown key) and refuses to start. Drop

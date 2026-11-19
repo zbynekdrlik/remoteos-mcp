@@ -4,6 +4,7 @@
     remoteos-gateway machine set-key new-box --url http://new-box.lan:8092/mcp --org nlmedia < key-file
     remoteos-gateway machine set-org slovnormal win-pz-server win-spisska-pc   # the company (#105)
     remoteos-gateway machine set-sleep win-pjzav-pokladna on     # off after hours: alert only if not up by 10:00 (#118)
+    remoteos-gateway machine set-sleep mac-david-nb occasional   # off for days: never in the owner notice (#130)
     remoteos-gateway machine list                                # keys masked, org + sleep per machine
     remoteos-gateway machine import [--from <file.mcp.json> ... | --from-manifest] [--dry-run]
     remoteos-gateway machine repair-recipe linux-cam2 --ssh root@cam2.lan [--sudo]
@@ -64,6 +65,10 @@ from remoteos.gateway.registry import (
     LEGACY_MACHINES_PATH,
     ORG_MISSING_HINT,
     ORGS,
+    SLEEP_MODES,
+    SLEEP_OCCASIONAL,
+    SLEEP_OFF,
+    SLEEP_ON,
     MachineSourceError,
     RegistryError,
     RepairRecipe,
@@ -255,9 +260,8 @@ def machine_list(paths, status_file: Path) -> None:
         version = record.get("version") if isinstance(record, dict) else None
         shown = version if isinstance(version, str) else "?"
         org = entry.org or "MISSING"
-        sleep = "on" if entry.may_sleep else "off"
         click.echo(
-            f"  {name}  org {org}  sleep {sleep}  {entry.url}  key {mask_secret(entry.key)}  version {shown}"
+            f"  {name}  org {org}  sleep {entry.sleep}  {entry.url}  key {mask_secret(entry.key)}  version {shown}"
             f"  repair: {repair}"
         )
     if not entries:
@@ -297,22 +301,28 @@ def machine_set_org(paths, org: str, names: tuple[str, ...]) -> None:
 
 @machine.command("set-sleep")
 @click.argument("name")
-@click.argument("value", type=click.Choice(("on", "off")))
+@click.argument("value", type=click.Choice(SLEEP_MODES))
 @click.pass_obj
 def machine_set_sleep(paths, name: str, value: str) -> None:
-    """Say whether machine NAME is switched off after hours (#118, a pokladna that closes at 18:00).
-    With ``on``, `check` leaves it out of the fleet-down owner notice while it is down, unless it
-    has not been up at any moment since local midnight and it is 10:00 or later. Its real state
-    stays in `check`'s output."""
-    may_sleep = value == "on"
+    """Say how machine NAME may be off. ``on`` (#118, a pokladna that closes at 18:00): `check`
+    leaves it out of the fleet-down owner notice while it is down, unless it has not been up at any
+    moment since local midnight and it is 10:00 or later. ``occasional`` (#130, a notebook switched
+    on now and then): left out of the owner notice however long it is down. ``off``: reported at
+    once. Its real state always stays in `check`'s output."""
     try:
-        changed = set_sleep(paths.machines, name, may_sleep)
+        changed = set_sleep(paths.machines, name, value)
     except MachineSourceError as exc:
         raise fail(exc) from exc
-    what = "may sleep after hours" if may_sleep else "is expected up around the clock"
-    click.echo(f"{name}: {what}" if changed else f"{name}: already {value}")
+    click.echo(f"{name}: {_SLEEP_SAYS[value]}" if changed else f"{name}: already {value}")
     if changed:
         click.echo(RELOAD_NOTE)
+
+
+_SLEEP_SAYS = {
+    SLEEP_OFF: "is expected up around the clock",
+    SLEEP_ON: "may sleep after hours",
+    SLEEP_OCCASIONAL: "may be off for any length of time (never in the owner notice)",
+}
 
 
 def _warn_mixed_projects(paths, changed: list[str]) -> None:
@@ -580,12 +590,14 @@ def check_command(
     gateway = status["gateway"]
     click.echo(f"checked {status['checked_at']}: gateway {gateway_url} {gateway['state']} since {gateway['since']}")
     for name, record in status["machines"].items():
-        mark = "  asleep (may_sleep)" if record.get("asleep") is True else ""
+        mark = ""
+        if record.get("asleep") is True:
+            mark = "  asleep (occasional)" if record.get("occasional") is True else "  asleep (may_sleep)"
         click.echo(f"  {name:24} {record['state']:12} since {record['since']}  {record['detail']}{mark}")
     bad = [n for n, r in status["machines"].items() if r["state"] != STATE_OK]
     click.echo(f"{len(status['machines']) - len(bad)} ok, {len(bad)} not ok" + (f": {', '.join(bad)}" if bad else ""))
     sleeping = [n for n, r in status["machines"].items() if r.get("asleep") is True]
     if sleeping:
-        click.echo(f"asleep after hours (not in the owner notice): {', '.join(sleeping)}")
+        click.echo(f"asleep (not in the owner notice): {', '.join(sleeping)}")
     if report.sent is False:
         click.echo("a notification did NOT go out — it is retried on the next run")
