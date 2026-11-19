@@ -64,6 +64,11 @@ paths:
   the first POST status >= 400; 401/403/404/413 get their own one-line reason from it. That
   client sets `trust_env=False`, like the gateway's own clients: `HTTP(S)_PROXY` would otherwise
   carry the bearer to a proxy, and `~/.netrc` could add credentials.
+- **The 126 reason is read from ANY link of the cause chain (`_links`), never the deepest alone:**
+  exceptiongroup 1.3.2 (CI's unconstrained install, 2026-11-19) made httpcore2's `ConnectError` the
+  `__cause__` of httpx2's, so the deepest link became httpcore2's class and "cannot connect" turned into
+  a bare `ConnectError: ...`. Connect and timeout checks know httpcore2's classes too. Bisect a CI-only
+  test failure in an UNCONSTRAINED venv (`pip install -e .[test]`, what CI's test job runs).
 - **125 vs 126 after the session is up:** an `MCPError` with no HTTP error status is the server's
   own JSON-RPC answer (125), except `REQUEST_TIMEOUT` (-32001, the client's wait ran out) and
   `CONNECTION_CLOSED` (-32000, "connection closed before the reply (the command may have run)":
