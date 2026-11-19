@@ -821,6 +821,41 @@ def test_a_handshake_timeout_reads_as_a_timeout_not_a_bare_type():
     assert "timed out waiting for the reply" in failure.message
 
 
+def _chained(*layers: BaseException) -> BaseException:
+    """Raise *layers* innermost-last as a ``raise ... from`` chain; return the outermost."""
+    inner = None
+    for layer in reversed(layers):
+        try:
+            if inner is None:
+                raise layer
+            raise layer from inner
+        except BaseException as exc:  # noqa: BLE001 - the test builds the chain on purpose
+            inner = exc
+    return inner
+
+
+@pytest.mark.parametrize(
+    ("transport", "reason"),
+    [
+        ("ConnectError", "cannot connect (connection refused or host unreachable)"),
+        ("ConnectTimeout", "timed out waiting for the reply"),
+        ("ReadTimeout", "timed out waiting for the reply"),
+    ],
+)
+def test_the_reason_holds_when_httpx2_chains_the_httpcore2_error_as_its_cause(transport, reason):
+    """exceptiongroup 1.3.2 (CI's unconstrained install, 2026-11-19) makes httpcore2's error the
+    ``__cause__`` of httpx2's: the deepest cause is then httpcore2's class, and the reason must not
+    fall back to a bare type name."""
+    import httpcore2
+    import httpx2
+
+    outer = getattr(httpx2, transport)("All connection attempts failed")
+    exc = _chained(RuntimeError("Client failed to connect"), outer, getattr(httpcore2, transport)("x"))
+    failure = cli_call._transport_failure(exc, _M)
+    assert failure.code == 126
+    assert failure.message.startswith(f"linux-x: {reason}"), failure.message
+
+
 @pytest.mark.parametrize(
     ("status", "reason"),
     [
