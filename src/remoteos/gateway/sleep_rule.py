@@ -7,7 +7,9 @@ is 10:00 or later; then it is reported like any other box. A box without the fla
 
 A box switched on only OCCASIONALLY (#130, owner 2026-11-19: notebooks off for days or weeks,
 ``machine set-sleep NAME occasional``, key store ``occasional`` next to ``may_sleep``) is excused
-whenever it is not ok, at any hour, however long it has been down. Its state stays the real one.
+whenever it is OFF (``unreachable``), at any hour, however long it has been down. One that answers
+``401`` or ``error`` is on and broken, which is news: the after-hours rule above applies to it. Its
+state stays the real one.
 
 ``check`` keeps, per machine record of the status file:
 
@@ -30,6 +32,7 @@ from __future__ import annotations
 import datetime as _dt
 from zoneinfo import ZoneInfo
 
+from remoteos.gateway.probe import STATE_UNREACHABLE
 from remoteos.gateway.registry import SLEEP_OCCASIONAL, SLEEP_OFF
 
 LOCAL_ZONE = ZoneInfo("Europe/Bratislava")
@@ -59,10 +62,11 @@ def _stamp(value: object) -> _dt.datetime | None:
 def excused(record: dict, moment: _dt.datetime, *, occasional: bool = False) -> bool:
     """Whether a may_sleep box's not-ok *record* stays out of the owner notice at *moment*: before
     10:00 local always, from 10:00 only if it was ok at some moment since local midnight. An
-    *occasional* box (#130) is excused whenever it is not ok."""
+    *occasional* box (#130) is excused whenever it is unreachable (off); on but broken (401 /
+    error) it follows the same after-hours rule."""
     if record.get("state") == "ok":
         return False
-    if occasional:
+    if occasional and record.get("state") == STATE_UNREACHABLE:
         return True
     if moment.astimezone(LOCAL_ZONE).time() < REPORT_FROM:
         return True

@@ -692,7 +692,7 @@ owner reconnected it. Now:
 | Rename a machine | `remoteos-gateway machine rename <old> <new> [--dry-run]`: the key-store entry moves as it is (url, key, org, repair recipe), the manifest gets the new name in place, exposure and every consumer's access carry over (a kill-switched box stays unexposed), then `sync-configs` (the old entry goes, the new one comes). A NEW name still left in the registry (exposed or allowed after a hand removal) is refused. If either command stops half way it prints the steps done; rerun the same command to finish. |
 | Set a machine's company | `remoteos-gateway machine set-org <nlmedia\|slovnormal> <machine> [<machine> ...]` (all or nothing; keys are never shown). |
 | A box switched off after hours (a pokladna) | `remoteos-gateway machine set-sleep <machine> on` (`off` undoes it). `check` then reports it only when it has not come up today, see "Boxes that sleep after hours" below. |
-| A box switched on only now and then (a notebook) | `remoteos-gateway machine set-sleep <machine> occasional` (`on` / `off` change it back). `check` then never puts it in the owner notice while it is down, however long; its real state stays in `check`'s output and the `fleet` server. |
+| A box switched on only now and then (a notebook) | `remoteos-gateway machine set-sleep <machine> occasional` (`on` / `off` change it back). `check` then never puts it in the owner notice while it is off (unreachable), however long (a `401` or `error` is still reported, it means the box is on and broken); its real state stays in `check`'s output and the `fleet` server. |
 | Add a project | One `[projects.<name>]` table in `projects.toml`, then `remoteos-gateway sync-configs`. |
 | See what would change | `remoteos-gateway sync-configs --dry-run` (every key and token masked). |
 | See the machines | `remoteos-gateway machine list` (keys masked, org and `sleep on/off/occasional` per machine, counts per org) and `~/.local/state/remoteos-gateway/machines-status.json`. |
@@ -862,7 +862,8 @@ notice an older version left in U, once.
   - **Boxes switched on only occasionally (#130, owner 2026-11-19).** `machine set-sleep <machine>
     occasional` (key store `"occasional": true` next to `"may_sleep": true`; `occasional` without
     `may_sleep` is refused) is for a notebook that is off for days or weeks: it is left out of
-    `fleet-down` and the plain messages whenever it is not ok, at any hour, however long. `check`'s
+    `fleet-down` and the plain messages whenever it is off (`unreachable`), at any hour, however
+    long. One that answers `401` or `error` is on and broken: the after-hours rule above applies. `check`'s
     output marks it `asleep (occasional)`, the status record carries `occasional: true`, and the
     `fleet` server shows its real state. Coming back up is not news, even after it was reported
     before it was made occasional. Switching a reported box to occasional re-sends `fleet-down`

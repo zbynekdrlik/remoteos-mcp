@@ -439,8 +439,10 @@ def _check_loaded(
     pending.update({n: r for n, r in status["machines"].items() if not r["notified"] and r.get("asleep") is not True})
     for name, record in status["machines"].items():
         if record.get("asleep") is True:
-            why = "switched on only occasionally" if record.get("occasional") is True else "asleep after hours"
-            logger.info("check: %s is %s, %s (may_sleep) — not reported", name, record["state"], why)
+            why = "off, switched on only occasionally (occasional)" if record.get("occasional") is True else (
+                "asleep after hours (may_sleep)"
+            )
+            logger.info("check: %s is %s, %s — not reported", name, record["state"], why)
     # The check could not run last time (or that recovery was not announced yet): say it is back.
     recovered = isinstance(previous.get("error"), dict) or previous.get("recovery_pending") is True
     for name, record in pending.items():

@@ -321,7 +321,8 @@ paths:
     key store `"occasional"`, written ONLY when true, and refused at parse without `may_sleep: true`);
     `MachineEntry.sleep` = `off|on|occasional` (`registry.SLEEP_MODES`) is what `set-sleep`,
     `machine list` and `check` use. `keystore.set_sleep(path, name, mode)` writes both keys through
-    `replace`. `sleep_rule.excused(..., occasional=True)` = excused whenever not ok; `apply` takes the
+    `replace`. `sleep_rule.excused(..., occasional=True)` = excused whenever `unreachable` (off); `401`/`error`
+    (on but broken, news) fall through to the #118 rule; `apply` takes the
     mode per machine and writes `occasional: true` on the record. Wake-up of a box whose previous record
     was asleep AND occasional is never news, even if it was `notified` (reported before the switch).
     `check` output: `asleep (occasional)`. Same deploy order and older-gateway refusal as `may_sleep`.
