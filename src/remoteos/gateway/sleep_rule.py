@@ -5,10 +5,17 @@ The pokladne close at 17-18:30 and are switched off overnight. A key-store machi
 unless it has not been ok at any moment since local midnight (Europe/Bratislava) AND the local time
 is 10:00 or later; then it is reported like any other box. A box without the flag is never excused.
 
+A box switched on only OCCASIONALLY (#130, owner 2026-11-19: notebooks off for days or weeks,
+``machine set-sleep NAME occasional``, key store ``occasional`` next to ``may_sleep``) is excused
+whenever it is OFF (``unreachable``), at any hour, however long it has been down. One that answers
+``401`` or ``error`` is on and broken, which is news: the after-hours rule above applies to it. Its
+state stays the real one.
+
 ``check`` keeps, per machine record of the status file:
 
 - ``last_ok``   — the stamp of the last run that saw the box ok (every box, flagged or not);
 - ``may_sleep`` — ``true`` while the key store says so;
+- ``occasional`` — ``true`` while the key store says so (#130);
 - ``asleep``    — ``true`` while the box is excused: ``fleet_notice`` leaves it out of ``fleet-down``
                   and ``check`` sends no per-box message for it. Its ``state`` stays the real one.
 
@@ -25,11 +32,15 @@ from __future__ import annotations
 import datetime as _dt
 from zoneinfo import ZoneInfo
 
+from remoteos.gateway.probe import STATE_UNREACHABLE
+from remoteos.gateway.registry import SLEEP_OCCASIONAL, SLEEP_OFF
+
 LOCAL_ZONE = ZoneInfo("Europe/Bratislava")
 REPORT_FROM = _dt.time(10, 0)  # a sleeping box not up today is reported from this local time on
 LAST_OK = "last_ok"
 MAY_SLEEP = "may_sleep"
 ASLEEP = "asleep"
+OCCASIONAL = "occasional"
 
 
 def local_midnight(moment: _dt.datetime) -> _dt.datetime:
@@ -48,11 +59,15 @@ def _stamp(value: object) -> _dt.datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
-def excused(record: dict, moment: _dt.datetime) -> bool:
+def excused(record: dict, moment: _dt.datetime, *, occasional: bool = False) -> bool:
     """Whether a may_sleep box's not-ok *record* stays out of the owner notice at *moment*: before
-    10:00 local always, from 10:00 only if it was ok at some moment since local midnight."""
+    10:00 local always, from 10:00 only if it was ok at some moment since local midnight. An
+    *occasional* box (#130) is excused whenever it is unreachable (off); on but broken (401 /
+    error) it follows the same after-hours rule."""
     if record.get("state") == "ok":
         return False
+    if occasional and record.get("state") == STATE_UNREACHABLE:
+        return True
     if moment.astimezone(LOCAL_ZONE).time() < REPORT_FROM:
         return True
     last_ok = _stamp(record.get(LAST_OK))
@@ -76,25 +91,31 @@ def _carried_last_ok(previous: object, previous_checked_at: object) -> str | Non
 def apply(
     machines: dict[str, dict],
     old_machines: dict,
-    may_sleep: dict[str, bool],
+    modes: dict[str, str],
     moment: _dt.datetime,
     stamp: str,
     previous_checked_at: object,
 ) -> None:
-    """Write ``last_ok`` / ``may_sleep`` / ``asleep`` into this run's *machines* records (built by
-    ``check._advance`` from *old_machines*), and mark a wake-up after an excused night notified."""
+    """Write ``last_ok`` / ``may_sleep`` / ``occasional`` / ``asleep`` into this run's *machines*
+    records (built by ``check._advance`` from *old_machines*), and mark a wake-up after an excused
+    stretch notified. *modes* maps a machine to its key-store sleep mode (``MachineEntry.sleep``)."""
     for name, record in machines.items():
         previous = old_machines.get(name)
         last_ok = stamp if record["state"] == "ok" else _carried_last_ok(previous, previous_checked_at)
         if last_ok is not None:
             record[LAST_OK] = last_ok
         # back after a night nobody was told about: not news. Keyed on the PREVIOUS record, so it
-        # holds even when the flag was turned off meanwhile.
+        # holds even when the flag was turned off meanwhile. An occasional box (#130) coming back is
+        # never news, even one reported before it was made occasional.
         was_silent = isinstance(previous, dict) and previous.get(ASLEEP) is True
-        if record["state"] == "ok" and not record["notified"] and was_silent and previous.get("notified") is not True:
+        untold = was_silent and (previous.get("notified") is not True or previous.get(OCCASIONAL) is True)
+        if record["state"] == "ok" and not record["notified"] and untold:
             record["notified"] = True
-        if not may_sleep.get(name, False):
+        mode = modes.get(name, SLEEP_OFF)
+        if mode == SLEEP_OFF:
             continue
         record[MAY_SLEEP] = True
-        if excused(record, moment):
+        if mode == SLEEP_OCCASIONAL:
+            record[OCCASIONAL] = True
+        if excused(record, moment, occasional=mode == SLEEP_OCCASIONAL):
             record[ASLEEP] = True

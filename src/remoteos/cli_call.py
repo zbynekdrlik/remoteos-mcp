@@ -253,6 +253,25 @@ def _innermost(exc: BaseException) -> BaseException:
     return exc
 
 
+def _links(exc: BaseException) -> list[BaseException]:
+    """Every link from *exc* down to ``_innermost(exc)`` (a group = its first member), outermost first.
+
+    The reason is read from ANY link, not only the deepest: which library's class ends the chain is
+    not stable (exceptiongroup 1.3.2 made httpcore2's error the ``__cause__`` of httpx2's, #130 CI).
+    """
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        if isinstance(current, BaseExceptionGroup) and current.exceptions:
+            current = current.exceptions[0]
+        else:
+            current = current.__cause__
+    return chain
+
+
 _HTTP_REASONS = {
     401: "authentication refused (401): the token in the config is not accepted",
     403: "not allowed (403): this project's token may not reach this machine",
@@ -280,23 +299,31 @@ class _HttpErrors:
 
 def _transport_failure(exc: BaseException, machine: Machine, status: int | None = None) -> CallFailed:
     """One stderr line for a call that produced no tool result (exit 126)."""
+    import httpcore2
     import httpx2
     from mcp.shared.exceptions import MCPError
     from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
 
     leaf = _innermost(exc)
-    if isinstance(leaf, httpx2.HTTPStatusError):
-        status = leaf.response.status_code
+    links = _links(exc)
+
+    def first(kinds) -> BaseException | None:
+        return next((link for link in links if isinstance(link, kinds)), None)
+
+    mcp_error = first(MCPError)
+    http_error = first(httpx2.HTTPStatusError)
+    if http_error is not None:  # the raised status wins over the hook's record, as before
+        status = http_error.response.status_code
     if status is not None:
         reason = _HTTP_REASONS.get(status, f"HTTP {status}")
-    elif isinstance(leaf, (httpx2.TimeoutException, TimeoutError)) or (
-        isinstance(leaf, MCPError) and leaf.code == REQUEST_TIMEOUT
+    elif first((httpx2.TimeoutException, httpcore2.TimeoutException, TimeoutError)) is not None or (
+        mcp_error is not None and mcp_error.code == REQUEST_TIMEOUT
     ):
         reason = "timed out waiting for the reply (the command may still run)"
-    elif isinstance(leaf, MCPError) and leaf.code == CONNECTION_CLOSED:
+    elif mcp_error is not None and mcp_error.code == CONNECTION_CLOSED:
         # a dropped stream, the gateway's upstream read timeout, a reply over MAX_REPLY_EVENT_BYTES
-        reason = f"connection closed before the reply (the command may have run): {leaf.message}"
-    elif isinstance(leaf, httpx2.ConnectError):
+        reason = f"connection closed before the reply (the command may have run): {mcp_error.message}"
+    elif first((httpx2.ConnectError, httpcore2.ConnectError)) is not None:
         reason = "cannot connect (connection refused or host unreachable)"
     else:
         detail = str(leaf).splitlines()[0] if str(leaf) else ""
