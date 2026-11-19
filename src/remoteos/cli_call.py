@@ -312,7 +312,7 @@ def _transport_failure(exc: BaseException, machine: Machine, status: int | None 
 
     mcp_error = first(MCPError)
     http_error = first(httpx2.HTTPStatusError)
-    if status is None and http_error is not None:
+    if http_error is not None:  # the raised status wins over the hook's record, as before
         status = http_error.response.status_code
     if status is not None:
         reason = _HTTP_REASONS.get(status, f"HTTP {status}")
