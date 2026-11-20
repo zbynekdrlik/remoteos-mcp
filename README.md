@@ -479,10 +479,6 @@ call. The default also bounds how long a stuck call (a prompt, a plain `prog &`)
 
 **Add a new computer: run ONE line on it.** Nothing to copy from dev1, no key, no token.
 
-> **Status (#101):** the public name `enroll-dev1.newlevel.media` needs dev1's named cloudflared tunnel + its
-> DNS record (an airuleset infrastructure change). Until it resolves, the line installs the agent but its
-> registration POST fails; use `remoteos-gateway enroll` (below) meanwhile.
-
 Windows (PowerShell; it asks for Administrator itself):
 
 ```powershell
